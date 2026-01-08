@@ -13,12 +13,52 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
 });
 
+// ---------------------------
+// Auth middleware (JWT)
+// ---------------------------
+function requireAuth(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+
+  if (!token) return res.status(401).send("Missing token.");
+  if (!process.env.JWT_SECRET) return res.status(500).send("JWT_SECRET not set.");
+
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    // payload: { userId, email, username, iat, exp }
+    req.user = payload;
+    next();
+  } catch (err) {
+    return res.status(401).send("Invalid token.");
+  }
+}
+
 // test endpoint
 app.get("/", (req, res) => {
   res.send("Outly backend OK");
 });
 
+// ---------------------------
+// ME (protected)
+// ---------------------------
+app.get("/me", requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, email, username, created_at FROM users WHERE id=$1",
+      [req.user.userId]
+    );
+
+    if (result.rows.length === 0) return res.status(404).send("User not found.");
+    return res.status(200).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// ---------------------------
 // REGISTER (email + username + password)
+// ---------------------------
 app.post("/auth/register", async (req, res) => {
   try {
     const { email, password, username } = req.body;
@@ -82,7 +122,9 @@ app.post("/auth/register", async (req, res) => {
   }
 });
 
+// ---------------------------
 // LOGIN
+// ---------------------------
 app.post("/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
