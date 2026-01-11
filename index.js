@@ -4,6 +4,7 @@ const bcrypt = require("bcrypt");
 const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const { Resend } = require("resend");
 
 const app = express();
 app.use(cors());
@@ -13,6 +14,47 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
 });
+
+// Resend init
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+
+// ---------------------------
+// Helpers (verification)
+// ---------------------------
+function generate6DigitCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function hashCode(code) {
+  return crypto.createHash("sha256").update(code).digest("hex");
+}
+
+async function sendVerificationEmail(toEmail, code) {
+  if (!resend) {
+    console.warn("⚠️ RESEND_API_KEY not set -> skipping email send");
+    return;
+  }
+  const from = process.env.EMAIL_FROM || "onboarding@resend.dev";
+  const appName = process.env.APP_NAME || "Outly";
+
+  const subject = `${appName} verification code`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height:1.5">
+      <h2>${appName} – Email verification</h2>
+      <p>Your verification code is:</p>
+      <div style="font-size:28px; font-weight:700; letter-spacing:4px; padding:12px 0">${code}</div>
+      <p>This code expires in <b>10 minutes</b>.</p>
+      <p>If you didn’t request this, you can ignore this email.</p>
+    </div>
+  `;
+
+  await resend.emails.send({
+    from,
+    to: toEmail,
+    subject,
+    html,
+  });
+}
 
 // ---------------------------
 // Auth middleware (JWT)
@@ -26,8 +68,7 @@ function requireAuth(req, res, next) {
 
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    // payload: { userId, email, username, role, iat, exp }
-    req.user = payload;
+    req.user = payload; // { userId, email, username, role, iat, exp }
     next();
   } catch (err) {
     return res.status(401).send("Invalid token.");
@@ -56,7 +97,7 @@ app.get("/", (req, res) => {
 app.get("/me", requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, email, username, role, avatar_url, created_at FROM users WHERE id=$1",
+      "SELECT id, email, username, role, avatar_url, email_verified, created_at FROM users WHERE id=$1",
       [req.user.userId]
     );
 
@@ -68,29 +109,8 @@ app.get("/me", requireAuth, async (req, res) => {
   }
 });
 
-app.patch("/me/avatar", requireAuth, async (req, res) => {
-  try {
-    const { avatarUrl } = req.body;
-    if (!avatarUrl || typeof avatarUrl !== "string") {
-      return res.status(400).send("Missing avatarUrl.");
-    }
-
-    const r = await pool.query(
-      "UPDATE users SET avatar_url=$1 WHERE id=$2 RETURNING id, email, username, role, avatar_url, created_at",
-      [avatarUrl, req.user.userId]
-    );
-
-    if (r.rows.length === 0) return res.status(404).send("User not found.");
-    return res.status(200).json(r.rows[0]);
-  } catch (e) {
-    console.error(e);
-    return res.status(500).send("Server error.");
-  }
-});
-
-
 // ---------------------------
-// REGISTER (email + username + password)
+// REGISTER
 // ---------------------------
 app.post("/auth/register", async (req, res) => {
   try {
@@ -123,13 +143,33 @@ app.post("/auth/register", async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 12);
 
-    // role default je v DB: 'user' (ker si dodal DEFAULT)
-    await pool.query(
-      "INSERT INTO users (email, password_hash, username) VALUES ($1, $2, $3)",
+    // ustvarimo userja z email_verified=false
+    const created = await pool.query(
+      "INSERT INTO users (email, password_hash, username, email_verified) VALUES ($1,$2,$3,false) RETURNING id, email",
       [cleanEmail, passwordHash, cleanUsername]
     );
 
-    return res.status(201).send("User created.");
+    const userId = created.rows[0].id;
+
+    // generiraj in shrani kodo
+    const code = generate6DigitCode();
+    const codeHash = hashCode(code);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+
+    await pool.query(
+      `INSERT INTO email_verification_codes (user_id, code_hash, expires_at)
+       VALUES ($1,$2,$3)`,
+      [userId, codeHash, expiresAt]
+    );
+
+    // pošlji mail
+    await sendVerificationEmail(cleanEmail, code);
+
+    // vrnemo, da mora user verificirati
+    return res.status(201).json({
+      message: "User created. Verification code sent to email.",
+      email: cleanEmail
+    });
   } catch (err) {
     console.error(err);
     return res.status(500).send("Server error.");
@@ -137,7 +177,120 @@ app.post("/auth/register", async (req, res) => {
 });
 
 // ---------------------------
-// LOGIN
+// VERIFY EMAIL (code)
+// ---------------------------
+app.post("/auth/verify-email", async (req, res) => {
+  try {
+    const { email, code } = req.body;
+
+    if (!email || !code) return res.status(400).send("Missing email or code.");
+    if (typeof email !== "string" || typeof code !== "string") return res.status(400).send("Invalid types.");
+
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanCode = code.trim();
+
+    if (cleanCode.length !== 6) return res.status(400).send("Code must be 6 digits.");
+
+    const userR = await pool.query("SELECT id, email_verified FROM users WHERE email=$1", [cleanEmail]);
+    if (userR.rows.length === 0) return res.status(404).send("User not found.");
+
+    const user = userR.rows[0];
+
+    if (user.email_verified) {
+      return res.status(200).json({ message: "Email already verified." });
+    }
+
+    const codeR = await pool.query(
+      `SELECT id, code_hash, expires_at, used_at
+       FROM email_verification_codes
+       WHERE user_id=$1 AND used_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [user.id]
+    );
+
+    if (codeR.rows.length === 0) return res.status(400).send("No active code. Please resend.");
+
+    const row = codeR.rows[0];
+
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      return res.status(400).send("Code expired. Please resend.");
+    }
+
+    const incomingHash = hashCode(cleanCode);
+    if (incomingHash !== row.code_hash) {
+      return res.status(400).send("Invalid code.");
+    }
+
+    await pool.query("UPDATE users SET email_verified=true WHERE id=$1", [user.id]);
+    await pool.query("UPDATE email_verification_codes SET used_at=NOW() WHERE id=$1", [row.id]);
+
+    return res.status(200).json({ message: "Email verified." });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// ---------------------------
+// RESEND CODE
+// ---------------------------
+app.post("/auth/resend-verification", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).send("Missing email.");
+    if (typeof email !== "string") return res.status(400).send("Invalid types.");
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    const userR = await pool.query("SELECT id, email_verified FROM users WHERE email=$1", [cleanEmail]);
+    if (userR.rows.length === 0) return res.status(404).send("User not found.");
+
+    const user = userR.rows[0];
+    if (user.email_verified) return res.status(200).json({ message: "Email already verified." });
+
+    // anti-spam: če je zadnja koda še veljavna, ne pošiljaj nove (lahko pošlješ isto idejo)
+    const lastR = await pool.query(
+      `SELECT id, expires_at, created_at, used_at
+       FROM email_verification_codes
+       WHERE user_id=$1 AND used_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [user.id]
+    );
+
+    if (lastR.rows.length > 0) {
+      const last = lastR.rows[0];
+      const createdAt = new Date(last.created_at).getTime();
+      const tooSoon = (Date.now() - createdAt) < 60 * 1000; // 60s
+      const notExpired = new Date(last.expires_at).getTime() > Date.now();
+
+      if (tooSoon && notExpired) {
+        return res.status(429).send("Please wait a bit before requesting another code.");
+      }
+    }
+
+    const code = generate6DigitCode();
+    const codeHash = hashCode(code);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await pool.query(
+      `INSERT INTO email_verification_codes (user_id, code_hash, expires_at)
+       VALUES ($1,$2,$3)`,
+      [user.id, codeHash, expiresAt]
+    );
+
+    await sendVerificationEmail(cleanEmail, code);
+
+    return res.status(200).json({ message: "Verification code resent." });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// ---------------------------
+// LOGIN (blocked if not verified)
 // ---------------------------
 app.post("/auth/login", async (req, res) => {
   try {
@@ -150,22 +303,24 @@ app.post("/auth/login", async (req, res) => {
 
     const cleanEmail = email.trim().toLowerCase();
 
-    // ✅ dodamo role v SELECT
     const result = await pool.query(
-      "SELECT id, email, username, role, password_hash FROM users WHERE email=$1",
+      "SELECT id, email, username, role, password_hash, email_verified FROM users WHERE email=$1",
       [cleanEmail]
     );
 
     if (result.rows.length === 0) return res.status(401).send("Invalid credentials.");
-
     const user = result.rows[0];
 
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).send("Invalid credentials.");
 
+    // ✅ BLOKADA: če email ni verified
+    if (!user.email_verified) {
+      return res.status(403).send("Email not verified.");
+    }
+
     if (!process.env.JWT_SECRET) return res.status(500).send("JWT_SECRET not set.");
 
-    // ✅ role v token
     const token = jwt.sign(
       { userId: user.id, email: user.email, username: user.username, role: user.role },
       process.env.JWT_SECRET,
@@ -180,10 +335,8 @@ app.post("/auth/login", async (req, res) => {
 });
 
 // ---------------------------
-// CLUBS
+// CLUBS (public + business create)
 // ---------------------------
-
-// Public: list clubs
 app.get("/clubs", async (req, res) => {
   try {
     const r = await pool.query("SELECT * FROM clubs ORDER BY created_at DESC LIMIT 100");
@@ -194,7 +347,6 @@ app.get("/clubs", async (req, res) => {
   }
 });
 
-// Public: get single club
 app.get("/clubs/:id", async (req, res) => {
   try {
     const r = await pool.query("SELECT * FROM clubs WHERE id=$1", [req.params.id]);
@@ -206,7 +358,6 @@ app.get("/clubs/:id", async (req, res) => {
   }
 });
 
-// Business/Admin: create club profile
 app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, res) => {
   try {
     const {
@@ -267,8 +418,6 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
 // ---------------------------
 // EVENTS
 // ---------------------------
-
-// Public: list events (upcoming by default)
 app.get("/events", async (req, res) => {
   try {
     const { clubId, upcoming = "true" } = req.query;
@@ -297,7 +446,6 @@ app.get("/events", async (req, res) => {
   }
 });
 
-// Public: get single event
 app.get("/events/:id", async (req, res) => {
   try {
     const r = await pool.query("SELECT * FROM events WHERE id=$1", [req.params.id]);
@@ -309,20 +457,17 @@ app.get("/events/:id", async (req, res) => {
   }
 });
 
-// Business/Admin: create event (only for own club if business)
 app.post("/events", requireAuth, requireRole("business", "admin"), async (req, res) => {
   try {
     const { clubId, title, description, posterUrl, startAt, endAt, minAge, genres, status } = req.body;
 
     if (!clubId || !title || !startAt) return res.status(400).send("Missing clubId, title or startAt.");
 
-    // najprej dobimo club, da preverimo ownerja
     const clubR = await pool.query("SELECT id, owner_user_id, min_age, genres FROM clubs WHERE id=$1", [clubId]);
     if (clubR.rows.length === 0) return res.status(404).send("Club not found.");
 
     const club = clubR.rows[0];
 
-    // business user lahko objavlja samo za svoj klub
     if (req.user.role === "business" && Number(club.owner_user_id) !== Number(req.user.userId)) {
       return res.status(403).send("You can only create events for your own club.");
     }
@@ -338,7 +483,7 @@ app.post("/events", requireAuth, requireRole("business", "admin"), async (req, r
         title,
         description || "",
         posterUrl || "",
-        startAt,                 // pošlji ISO string iz appa
+        startAt,
         endAt || null,
         minAge ?? club.min_age ?? 18,
         Array.isArray(genres) ? genres : (club.genres || []),
@@ -347,37 +492,6 @@ app.post("/events", requireAuth, requireRole("business", "admin"), async (req, r
     );
 
     res.status(201).json(r.rows[0]);
-  } catch (e) {
-    console.error(e);
-    res.status(500).send("Server error.");
-  }
-});
-
-app.post("/uploads/cloudinary-signature", requireAuth, async (req, res) => {
-  try {
-    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-    const apiKey = process.env.CLOUDINARY_API_KEY;
-    const apiSecret = process.env.CLOUDINARY_API_SECRET;
-
-    if (!cloudName || !apiKey || !apiSecret) {
-      return res.status(500).send("Cloudinary env vars not set.");
-    }
-
-    // folder lahko loči user/business (optional)
-    const folder = req.user.role === "business" ? "outly/business_avatars" : "outly/user_avatars";
-    const timestamp = Math.floor(Date.now() / 1000);
-
-    // Cloudinary signature string: params sorted + apiSecret
-    const signatureBase = `folder=${folder}&timestamp=${timestamp}${apiSecret}`;
-    const signature = crypto.createHash("sha1").update(signatureBase).digest("hex");
-
-    res.json({
-      cloudName,
-      apiKey,
-      timestamp,
-      folder,
-      signature
-    });
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
