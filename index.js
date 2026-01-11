@@ -3,6 +3,7 @@ const cors = require("cors");
 const bcrypt = require("bcrypt");
 const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 
 const app = express();
 app.use(cors());
@@ -55,7 +56,7 @@ app.get("/", (req, res) => {
 app.get("/me", requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, email, username, role, created_at FROM users WHERE id=$1",
+      "SELECT id, email, username, role, avatar_url, created_at FROM users WHERE id=$1",
       [req.user.userId]
     );
 
@@ -66,6 +67,27 @@ app.get("/me", requireAuth, async (req, res) => {
     return res.status(500).send("Server error.");
   }
 });
+
+app.patch("/me/avatar", requireAuth, async (req, res) => {
+  try {
+    const { avatarUrl } = req.body;
+    if (!avatarUrl || typeof avatarUrl !== "string") {
+      return res.status(400).send("Missing avatarUrl.");
+    }
+
+    const r = await pool.query(
+      "UPDATE users SET avatar_url=$1 WHERE id=$2 RETURNING id, email, username, role, avatar_url, created_at",
+      [avatarUrl, req.user.userId]
+    );
+
+    if (r.rows.length === 0) return res.status(404).send("User not found.");
+    return res.status(200).json(r.rows[0]);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
 
 // ---------------------------
 // REGISTER (email + username + password)
@@ -325,6 +347,37 @@ app.post("/events", requireAuth, requireRole("business", "admin"), async (req, r
     );
 
     res.status(201).json(r.rows[0]);
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("Server error.");
+  }
+});
+
+app.post("/uploads/cloudinary-signature", requireAuth, async (req, res) => {
+  try {
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    const apiKey = process.env.CLOUDINARY_API_KEY;
+    const apiSecret = process.env.CLOUDINARY_API_SECRET;
+
+    if (!cloudName || !apiKey || !apiSecret) {
+      return res.status(500).send("Cloudinary env vars not set.");
+    }
+
+    // folder lahko loči user/business (optional)
+    const folder = req.user.role === "business" ? "outly/business_avatars" : "outly/user_avatars";
+    const timestamp = Math.floor(Date.now() / 1000);
+
+    // Cloudinary signature string: params sorted + apiSecret
+    const signatureBase = `folder=${folder}&timestamp=${timestamp}${apiSecret}`;
+    const signature = crypto.createHash("sha1").update(signatureBase).digest("hex");
+
+    res.json({
+      cloudName,
+      apiKey,
+      timestamp,
+      folder,
+      signature
+    });
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
