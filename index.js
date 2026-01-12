@@ -128,6 +128,9 @@ app.get("/events", async (req, res) => {
         genres,
         status,
         created_at,
+        ticket_price_cents,
+        currency,
+        ticket_url,
         CASE
           WHEN start_at > NOW() THEN 'coming_soon'
           ELSE 'popular'
@@ -251,16 +254,20 @@ app.post("/events", requireAuth, requireRole("business"), async (req, res) => {
     const userId = req.user.userId;
 
     const {
-      club_id,
-      title,
-      description = "",
-      poster_url = "",
-      start_at,
-      end_at = null,
-      min_age = 18,
-      genres = [],
-      status = "published",
-    } = req.body || {};
+    club_id,
+    title,
+    description = "",
+    poster_url = "",
+    start_at,
+    end_at = null,
+    min_age = 18,
+    genres = [],
+    status = "published",
+    ticket_price_cents = null,
+    currency = "EUR",
+    ticket_url = ""
+  } = req.body || {};
+
 
     if (!club_id) return res.status(400).send("Missing club_id.");
     if (!title || String(title).trim().length < 2) {
@@ -287,9 +294,12 @@ app.post("/events", requireAuth, requireRole("business"), async (req, res) => {
         end_at,
         min_age,
         genres,
-        status
+        status,
+        ticket_price_cents,
+        currency,
+        ticket_url
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
       RETURNING *
     `;
 
@@ -303,6 +313,9 @@ app.post("/events", requireAuth, requireRole("business"), async (req, res) => {
       min_age,
       Array.isArray(genres) ? genres : [],
       status,
+      ticket_price_cents,
+      currency,
+      ticket_url,
     ];
 
     const r = await pool.query(sql, params);
