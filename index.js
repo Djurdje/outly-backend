@@ -302,7 +302,7 @@ app.post("/auth/login", async (req, res) => {
       [cleanEmail]
     );
 
-    if (result.rows.length === 0) return res.status(401).send("Invalid credentials.");
+    if (result.rows.length === 0) return res.status(401).send("Wrong password.");
     const user = result.rows[0];
 
     const ok = await bcrypt.compare(password, user.password_hash);
