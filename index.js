@@ -302,11 +302,11 @@ app.post("/auth/login", async (req, res) => {
       [cleanEmail]
     );
 
-    if (result.rows.length === 0) return res.status(401).send("Wrong password.");
+    if (result.rows.length === 0) return res.status(401).send("Invalid credentials.");
     const user = result.rows[0];
 
     const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) return res.status(401).send("Invalid credentials.");
+    if (!ok) return res.status(401).send("Wrong password.");
 
     if (!user.email_verified) {
       return res.status(403).send("Email not verified.");
@@ -407,6 +407,128 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
     res.status(500).send("Server error.");
   }
 });
+
+// ---------------------------
+// Cloudinary signature (protected)
+// ---------------------------
+function cloudinarySignature(paramsToSign, apiSecret) {
+  // Cloudinary: sort params by key, join key=value with &, append api_secret, sha1
+  const sortedKeys = Object.keys(paramsToSign).sort();
+  const toSign = sortedKeys
+    .map((k) => `${k}=${paramsToSign[k]}`)
+    .join("&") + apiSecret;
+
+  return crypto.createHash("sha1").update(toSign).digest("hex");
+}
+
+app.get("/cloudinary/signature", requireAuth, async (req, res) => {
+  try {
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    const apiKey = process.env.CLOUDINARY_API_KEY;
+    const apiSecret = process.env.CLOUDINARY_API_SECRET;
+
+    if (!cloudName || !apiKey || !apiSecret) {
+      return res.status(500).send("Cloudinary env vars not set.");
+    }
+
+    const timestamp = Math.floor(Date.now() / 1000);
+    const folder = process.env.CLOUDINARY_FOLDER || "outly";
+
+    const paramsToSign = { timestamp, folder };
+
+    const signature = cloudinarySignature(paramsToSign, apiSecret);
+
+    return res.status(200).json({
+      timestamp,
+      signature,
+      apiKey,
+      cloudName,
+      folder
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+
+// ---------------------------
+// BUSINESS: my club (owner-only)
+// ---------------------------
+app.get("/business/clubs/me", requireAuth, requireRole("business", "admin"), async (req, res) => {
+  try {
+    const r = await pool.query(
+      "SELECT * FROM clubs WHERE owner_user_id=$1 LIMIT 1",
+      [req.user.userId]
+    );
+
+    if (r.rows.length === 0) return res.status(404).send("Club not found.");
+    return res.status(200).json(r.rows[0]);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+app.patch("/business/clubs/me", requireAuth, requireRole("business", "admin"), async (req, res) => {
+  try {
+    // fetch club first (ownership)
+    const clubR = await pool.query(
+      "SELECT id, owner_user_id FROM clubs WHERE owner_user_id=$1 LIMIT 1",
+      [req.user.userId]
+    );
+
+    if (clubR.rows.length === 0) return res.status(404).send("Club not found.");
+
+    const clubId = clubR.rows[0].id;
+
+    // whitelist fields (snake_case) + allow camelCase inputs too
+    const body = req.body || {};
+
+    const incoming = {
+      name: body.name,
+      description: body.description,
+      logo_url: body.logo_url ?? body.logoUrl,
+      banner_url: body.banner_url ?? body.bannerUrl,
+      contact_email: body.contact_email ?? body.contactEmail,
+      contact_phone: body.contact_phone ?? body.contactPhone,
+      instagram: body.instagram,
+      website: body.website,
+      address: body.address,
+      city: body.city,
+      country: body.country,
+      lat: body.lat,
+      lng: body.lng
+    };
+
+    // build dynamic UPDATE only for provided keys
+    const sets = [];
+    const values = [];
+    let idx = 1;
+
+    for (const [k, v] of Object.entries(incoming)) {
+      if (v === undefined) continue;
+      sets.push(`${k} = $${idx++}`);
+      values.push(v);
+    }
+
+    if (sets.length === 0) {
+      // nothing to update -> return current club
+      const cur = await pool.query("SELECT * FROM clubs WHERE id=$1", [clubId]);
+      return res.status(200).json(cur.rows[0]);
+    }
+
+    values.push(clubId);
+    const sql = `UPDATE clubs SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`;
+
+    const updated = await pool.query(sql, values);
+    return res.status(200).json(updated.rows[0]);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
 
 // ---------------------------
 // EVENTS (updated: upcoming true/false + time_status + ticket fields)
