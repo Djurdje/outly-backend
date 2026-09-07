@@ -196,3 +196,27 @@ COMMIT;
 -- 5. Ko pridejo plačila, se dodajo orders, tickets, refunds in payouts.
 --    Ta datoteka ostane vir resnice — vsaka sprememba baze gre skozi migracijo,
 --    nikoli več neposredno v živo bazo.
+
+-- refresh_tokens (migracija 004, S-06)
+
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id          SERIAL PRIMARY KEY,
+    user_id     INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- SHA-256 odtis žetona. Sam žeton se ne hrani: če kdo prebere bazo,
+    -- iz odtisa ne more sestaviti veljavnega žetona.
+    token_hash  TEXT        NOT NULL UNIQUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at  TIMESTAMPTZ NOT NULL,
+    -- Kdaj je bil preklican (odjava, rotacija, ponastavitev gesla). NULL = veljaven.
+    revoked_at  TIMESTAMPTZ,
+    -- Ob rotaciji: kateri žeton ga je nadomestil. Če se stari žeton uporabi
+    -- ŠE ENKRAT po rotaciji, je to znak kraje in prekličemo vse uporabnikove.
+    replaced_by INTEGER     REFERENCES refresh_tokens(id) ON DELETE SET NULL,
+    -- Kratek opis naprave (User-Agent), samo za pregled sej. Neobvezno.
+    device      TEXT        NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS refresh_tokens_user_idx
+    ON refresh_tokens (user_id, revoked_at);
+
