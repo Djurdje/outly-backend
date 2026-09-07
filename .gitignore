@@ -1,0 +1,24 @@
+# Odvisnosti — nikoli v git. V repozitoriju je danes 1338 datotek node_modules,
+# ki jih je treba odstraniti iz sledenja (git rm -r --cached node_modules).
+node_modules/
+
+# Skrivnosti
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# Dnevniki
+*.log
+npm-debug.log*
+
+# Izpisi preverjanja sheme
+izpis_baze.txt
+
+# Umaknjeni dvojniki (index 7.js, package 9.json)
+_staro/
+
+# Interno git smetisce (mount ne dovoli brisanja)
+.git/_smeti/

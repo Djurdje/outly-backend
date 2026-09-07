@@ -4,7 +4,9 @@
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "migrate": "node db/migrate.js",
+    "migrate:stanje": "node db/migrate.js --stanje"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",
