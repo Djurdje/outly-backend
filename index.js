@@ -33,6 +33,55 @@ function hashCode(code) {
   return crypto.createHash("sha256").update(code).digest("hex");
 }
 
+// ---------------------------
+// Žetoni (S-06)
+// ---------------------------
+// Dostopni JWT velja kratko; osveževalni žeton je naključen niz, v bazi samo
+// kot odtis, z rotacijo ob vsaki uporabi. Glej migracijo 004.
+const DOSTOPNI_VELJA = "1h";
+const OSVEZEVALNI_VELJA_DNI = 30;
+
+function podpisiDostopni(user) {
+  return jwt.sign(
+    { userId: user.id, email: user.email, username: user.username, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: DOSTOPNI_VELJA }
+  );
+}
+
+async function izdajOsvezevalni(userId, req, zamenjaId = null) {
+  const zeton = crypto.randomBytes(48).toString("base64url");
+  const naprava = String(req.headers["user-agent"] || "").slice(0, 200);
+  const r = await pool.query(
+    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, device)
+     VALUES ($1, $2, NOW() + ($3 || ' days')::interval, $4) RETURNING id`,
+    [userId, hashCode(zeton), String(OSVEZEVALNI_VELJA_DNI), naprava]
+  );
+  if (zamenjaId) {
+    await pool.query(
+      "UPDATE refresh_tokens SET revoked_at=NOW(), replaced_by=$2 WHERE id=$1",
+      [zamenjaId, r.rows[0].id]
+    );
+  }
+  return zeton;
+}
+
+async function prekliciVseZetone(userId) {
+  await pool.query(
+    "UPDATE refresh_tokens SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL",
+    [userId]
+  );
+}
+
+/** Odgovor prijave/osvežitve. `token` ostane zaradi združljivosti s starimi klienti. */
+async function odgovorSeje(user, req, zamenjaId = null) {
+  return {
+    token: podpisiDostopni(user),
+    expiresInSeconds: 3600,
+    refreshToken: await izdajOsvezevalni(user.id, req, zamenjaId),
+  };
+}
+
 async function sendVerificationEmail(toEmail, code) {
   if (!resend) {
     console.warn("⚠️ RESEND_API_KEY not set -> skipping email send");
@@ -218,7 +267,12 @@ app.post("/auth/register", omeji({ kljuc: "register", najvec: 5, oknoSekund: 360
     const existingEmail = await pool.query("SELECT id FROM users WHERE email=$1", [cleanEmail]);
     if (existingEmail.rows.length > 0) return res.status(409).send("Email already in use.");
 
-    const existingUsername = await pool.query("SELECT id FROM users WHERE username=$1", [cleanUsername]);
+    // Brez upoštevanja velikosti črk: "Martin" in "martin" sta isto ime (past 7).
+    // Unikatni indeks users_username_lower_key to jamči tudi v bazi; tu dobi
+    // uporabnik razumljivo sporočilo namesto napake 500.
+    const existingUsername = await pool.query(
+      "SELECT id FROM users WHERE LOWER(username)=LOWER($1)", [cleanUsername]
+    );
     if (existingUsername.rows.length > 0) return res.status(409).send("Username already in use.");
 
     const passwordHash = await bcrypt.hash(password, 12);
@@ -248,6 +302,11 @@ app.post("/auth/register", omeji({ kljuc: "register", najvec: 5, oknoSekund: 360
       email: cleanEmail
     });
   } catch (err) {
+    // Dve registraciji istega imena/e-naslova hkrati: prva zmaga, druga dobi 409.
+    if (err && err.code === "23505") {
+      const kaj = String(err.constraint || "").includes("email") ? "Email" : "Username";
+      return res.status(409).send(`${kaj} already in use.`);
+    }
     console.error(err);
     return res.status(500).send("Server error.");
   }
@@ -454,15 +513,83 @@ app.post("/auth/login", omeji({ kljuc: "login", najvec: 10, oknoSekund: 900 }), 
 
     if (!process.env.JWT_SECRET) return res.status(500).send("JWT_SECRET not set.");
 
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, username: user.username, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: "30d" }
-    );
-
-    return res.status(200).json({ token });
+    return res.status(200).json(await odgovorSeje(user, req));
   } catch (err) {
     console.error(err);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// ---------------------------
+// OSVEŽITEV IN ODJAVA (S-06)
+// ---------------------------
+app.post("/auth/refresh", omeji({ kljuc: "refresh", najvec: 60, oknoSekund: 900 }), async (req, res) => {
+  try {
+    const { refreshToken } = req.body || {};
+    if (typeof refreshToken !== "string" || refreshToken.length < 32) {
+      return res.status(400).send("Missing refreshToken.");
+    }
+    if (!process.env.JWT_SECRET) return res.status(500).send("JWT_SECRET not set.");
+
+    const r = await pool.query(
+      `SELECT t.id, t.user_id, t.expires_at, t.revoked_at, t.replaced_by,
+              u.id AS uid, u.email, u.username, u.role
+       FROM refresh_tokens t JOIN users u ON u.id = t.user_id
+       WHERE t.token_hash = $1`,
+      [hashCode(refreshToken)]
+    );
+    if (r.rows.length === 0) return res.status(401).send("Invalid refresh token.");
+    const t = r.rows[0];
+
+    if (t.revoked_at) {
+      if (t.replaced_by) {
+        // Žeton je bil že ZAMENJAN z novim in se je pojavil še enkrat: nekdo ima
+        // kopijo. Prekličemo vse uporabnikove seje; prijaviti se mora znova.
+        await prekliciVseZetone(t.user_id);
+        return res.status(401).send("Refresh token reused. All sessions revoked.");
+      }
+      // Preklican z odjavo / ponastavitvijo gesla: samo zavrnemo, drugih naprav ne diramo.
+      return res.status(401).send("Invalid refresh token.");
+    }
+    if (new Date(t.expires_at).getTime() < Date.now()) {
+      await pool.query("UPDATE refresh_tokens SET revoked_at=NOW() WHERE id=$1", [t.id]);
+      return res.status(401).send("Refresh token expired.");
+    }
+
+    const user = { id: t.uid, email: t.email, username: t.username, role: t.role };
+    return res.status(200).json(await odgovorSeje(user, req, t.id));
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// Odjava: prekliče osveževalni žeton te naprave. Dostopni JWT poteče sam v 1 uri.
+// Ne zahteva veljavnega dostopnega žetona — odjava mora delati tudi, ko je ta potekel.
+app.post("/auth/logout", async (req, res) => {
+  try {
+    const { refreshToken } = req.body || {};
+    if (typeof refreshToken === "string" && refreshToken.length >= 32) {
+      await pool.query(
+        "UPDATE refresh_tokens SET revoked_at=NOW() WHERE token_hash=$1 AND revoked_at IS NULL",
+        [hashCode(refreshToken)]
+      );
+    }
+    // Vedno 200: odjava ne sme "spodleteti" in uporabnika pustiti prijavljenega.
+    return res.status(200).json({ message: "Logged out." });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// Odjava povsod (vse naprave).
+app.post("/auth/logout-all", requireAuth, async (req, res) => {
+  try {
+    await prekliciVseZetone(req.user.userId);
+    return res.status(200).json({ message: "Logged out everywhere." });
+  } catch (e) {
+    console.error(e);
     return res.status(500).send("Server error.");
   }
 });
@@ -742,10 +869,47 @@ app.post("/auth/reset-password", omeji({ kljuc: "reset", najvec: 10, oknoSekund:
       [userId]
     );
 
-    // OPOMBA: obstojeci JWT-ji ostanejo veljavni se do 30 dni. Ce je geslo
-    // ukradeno, ponastavitev napadalca NE odjavi. To resi sele preklic zetonov
-    // (najdba S-06) — vpeljati skupaj s krajso veljavnostjo in osvezevanjem.
+    // Ponastavitev gesla odjavi vse naprave: osveževalni žetoni so preklicani,
+    // dostopni JWT-ji potečejo sami v največ 1 uri (S-06).
+    await prekliciVseZetone(userId);
     return res.status(200).json({ message: "Password updated." });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// ---------------------------
+// SPREMEMBA GESLA (prijavljen uporabnik)
+// ---------------------------
+app.post("/auth/change-password", requireAuth, omeji({ kljuc: "chpass", najvec: 10, oknoSekund: 900 }), async (req, res) => {
+  try {
+    const { currentPassword, newPassword, refreshToken } = req.body || {};
+    if (typeof currentPassword !== "string" || typeof newPassword !== "string") {
+      return res.status(400).send("Missing currentPassword or newPassword.");
+    }
+    if (newPassword.length < 8) return res.status(400).send("Password too short.");
+    if (newPassword === currentPassword) return res.status(400).send("New password must be different.");
+
+    const r = await pool.query("SELECT password_hash FROM users WHERE id=$1", [req.user.userId]);
+    if (r.rows.length === 0) return res.status(404).send("User not found.");
+
+    const ok = await bcrypt.compare(currentPassword, r.rows[0].password_hash);
+    if (!ok) return res.status(401).send("Invalid credentials.");
+
+    const hash = await bcrypt.hash(newPassword, 12);
+    await pool.query("UPDATE users SET password_hash=$2 WHERE id=$1", [req.user.userId, hash]);
+
+    // Odjavi VSE DRUGE naprave; ta naprava (njen osveževalni žeton) ostane prijavljena.
+    if (typeof refreshToken === "string" && refreshToken.length >= 32) {
+      await pool.query(
+        "UPDATE refresh_tokens SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL AND token_hash<>$2",
+        [req.user.userId, hashCode(refreshToken)]
+      );
+    } else {
+      await prekliciVseZetone(req.user.userId);
+    }
+    return res.status(200).json({ message: "Password changed." });
   } catch (e) {
     console.error(e);
     return res.status(500).send("Server error.");
@@ -1109,12 +1273,23 @@ app.patch("/business/clubs/me", requireAuth, requireRole("business", "admin"), a
       return res.status(200).json(cur.rows[0]);
     }
 
+    if (incoming.name !== undefined && String(incoming.name).trim().length === 0) {
+      return res.status(400).send("Club name is required.");
+    }
+    // Koordinati v paru; posamezno ju baza zavrne (clubs_coords_chk).
+    if ((incoming.lat === undefined) !== (incoming.lng === undefined)) {
+      return res.status(400).send("lat and lng must be sent together.");
+    }
+
     values.push(clubId);
     const sql = `UPDATE clubs SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`;
 
     const updated = await pool.query(sql, values);
     return res.status(200).json(updated.rows[0]);
   } catch (e) {
+    // Omejitev v bazi (prazno ime, koordinate izven obsega, min_age ...) -> 400, ne 500.
+    if (e && e.code === "23514") return res.status(400).send("Invalid club data: " + (e.constraint || "constraint"));
+    if (e && e.code === "22P02") return res.status(400).send("Invalid value type.");
     console.error(e);
     return res.status(500).send("Server error.");
   }
