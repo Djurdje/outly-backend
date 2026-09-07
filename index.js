@@ -547,6 +547,9 @@ app.patch("/me", requireAuth, async (req, res) => {
         const let_ = (Date.now() - dat.getTime()) / (365.2425 * 24 * 3600 * 1000);
         if (let_ <= 0)  return res.status(400).send("dateOfBirth cannot be in the future.");
         if (let_ > 120) return res.status(400).send("dateOfBirth is not plausible.");
+        // Meja za veljavno privolitev otroka v Sloveniji je 15 let (ZVOP-2, 8. clen).
+        // Aplikacija to preveri ze pred posiljanjem; streznik je zadnja obramba.
+        if (let_ < 15)  return res.status(400).send("You must be at least 15 years old.");
         dodaj("date_of_birth", d);
       }
     }
@@ -1121,6 +1124,44 @@ app.patch("/business/clubs/me", requireAuth, requireRole("business", "admin"), a
 // ---------------------------
 // EVENTS (updated: upcoming true/false + time_status + ticket fields)
 // ---------------------------
+// Stolpci dogodka na enem mestu (javni GET /events, GET /events/:id, GET /business/events).
+const STOLPCI_DOGODKA = `
+        id,
+        club_id,
+        title,
+        description,
+        poster_url,
+        start_at,
+        end_at,
+        min_age,
+        genres,
+        status,
+        created_at,
+        ticket_price_cents,
+        currency,
+        ticket_url,
+        CASE
+          WHEN start_at > NOW() THEN 'coming_soon'
+          ELSE 'popular'
+        END AS time_status`;
+
+// Vsi dogodki lastnega kluba, tudi osnutki in odpovedani. Samo za lastnika.
+app.get("/business/events", requireAuth, requireRole("business", "admin"), async (req, res) => {
+  try {
+    const klub = await pool.query("SELECT id FROM clubs WHERE owner_user_id=$1 LIMIT 1", [req.user.userId]);
+    if (klub.rows.length === 0) return res.status(404).send("Club not found.");
+
+    const r = await pool.query(
+      `SELECT ${STOLPCI_DOGODKA} FROM events WHERE club_id=$1 ORDER BY start_at DESC LIMIT 500`,
+      [klub.rows[0].id]
+    );
+    return res.status(200).json(r.rows);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
 app.get("/events", async (req, res) => {
   try {
     const { clubId, upcoming } = req.query;
@@ -1137,28 +1178,14 @@ app.get("/events", async (req, res) => {
     if (upcoming === "true") where.push(`start_at > NOW()`);
     if (upcoming === "false") where.push(`start_at <= NOW()`);
 
+    // Javno so vidni SAMO objavljeni dogodki. Osnutki in odpovedani so bili
+    // doslej vidni vsakomur; lastnik jih vidi prek GET /business/events.
+    where.push(`status = 'published'`);
+
     const sql = `
-      SELECT
-        id,
-        club_id,
-        title,
-        description,
-        poster_url,
-        start_at,
-        end_at,
-        min_age,
-        genres,
-        status,
-        created_at,
-        ticket_price_cents,
-        currency,
-        ticket_url,
-        CASE
-          WHEN start_at > NOW() THEN 'coming_soon'
-          ELSE 'popular'
-        END AS time_status
+      SELECT ${STOLPCI_DOGODKA}
       FROM events
-      ${where.length ? "WHERE " + where.join(" AND ") : ""}
+      WHERE ${where.join(" AND ")}
       ORDER BY start_at ASC
       LIMIT 200
     `;
@@ -1173,28 +1200,9 @@ app.get("/events", async (req, res) => {
 
 app.get("/events/:id", async (req, res) => {
   try {
+    if (!/^\d+$/.test(req.params.id)) return res.status(400).send("Invalid event id.");
     const r = await pool.query(
-      `SELECT
-        id,
-        club_id,
-        title,
-        description,
-        poster_url,
-        start_at,
-        end_at,
-        min_age,
-        genres,
-        status,
-        created_at,
-        ticket_price_cents,
-        currency,
-        ticket_url,
-        CASE
-          WHEN start_at > NOW() THEN 'coming_soon'
-          ELSE 'popular'
-        END AS time_status
-      FROM events
-      WHERE id=$1`,
+      `SELECT ${STOLPCI_DOGODKA} FROM events WHERE id=$1 AND status='published'`,
       [req.params.id]
     );
 
@@ -1225,6 +1233,22 @@ app.post("/events", requireAuth, requireRole("business", "admin"), async (req, r
     const ticketUrl = (req.body.ticketUrl ?? req.body.ticket_url ?? "").toString();
 
     if (!clubId || !title || !startAt) return res.status(400).send("Missing clubId, title or startAt.");
+    if (!/^\d+$/.test(String(clubId))) return res.status(400).send("Invalid clubId.");
+    if (String(title).trim().length === 0) return res.status(400).send("Title is required.");
+    if (Number.isNaN(new Date(startAt).getTime())) return res.status(400).send("startAt must be a valid date.");
+    if (endAt !== null && Number.isNaN(new Date(endAt).getTime())) return res.status(400).send("endAt must be a valid date.");
+    if (!["draft", "published", "cancelled"].includes(status)) {
+      return res.status(400).send("status must be draft, published or cancelled.");
+    }
+    if (ticketPriceCents !== null) {
+      const c = Number(ticketPriceCents);
+      if (!Number.isInteger(c) || c < 0) return res.status(400).send("ticketPriceCents must be a non-negative integer.");
+    }
+    if (genres !== undefined && !Array.isArray(genres)) return res.status(400).send("genres must be an array.");
+    if (minAge !== undefined && minAge !== null) {
+      const a = Number(minAge);
+      if (!Number.isInteger(a) || a < 0 || a > 99) return res.status(400).send("minAge must be between 0 and 99.");
+    }
 
     const clubR = await pool.query("SELECT id, owner_user_id, min_age, genres FROM clubs WHERE id=$1", [clubId]);
     if (clubR.rows.length === 0) return res.status(404).send("Club not found.");
