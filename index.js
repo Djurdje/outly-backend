@@ -101,12 +101,16 @@ async function sendVerificationEmail(toEmail, code) {
     </div>
   `;
 
-  await resend.emails.send({
-    from,
-    to: toEmail,
-    subject,
-    html,
-  });
+  // Resend NE vrze izjeme ob napaki (npr. nepotrjena domena posiljatelja ali
+  // testni kljuc, ki sme posiljati samo lastniku racuna) — vrne { error }.
+  // Brez tega zapisa je bila napaka nevidna: registracija je javila "koda poslana",
+  // mail pa ni nikoli odsel.
+  const r = await resend.emails.send({ from, to: toEmail, subject, html });
+  if (r && r.error) {
+    console.error("Resend napaka (verifikacija):", JSON.stringify(r.error), "from:", from);
+  } else {
+    console.log("Resend: verifikacijska koda poslana", r && r.data ? r.data.id : "");
+  }
 }
 
 // ---------------------------
@@ -751,7 +755,7 @@ async function posljiKodoZaPonastavitev(toEmail, code) {
   const from = process.env.EMAIL_FROM || "onboarding@resend.dev";
   const appName = process.env.APP_NAME || "Outly";
 
-  await resend.emails.send({
+  const r = await resend.emails.send({
     from,
     to: toEmail,
     subject: `${appName} password reset code`,
@@ -764,6 +768,9 @@ async function posljiKodoZaPonastavitev(toEmail, code) {
       <p>If you didn't request this, you can ignore this email — your password stays unchanged.</p>
     </div>`,
   });
+  if (r && r.error) {
+    console.error("Resend napaka (ponastavitev gesla):", JSON.stringify(r.error), "from:", from);
+  }
 }
 
 app.post("/auth/forgot-password", omeji({ kljuc: "forgot", najvec: 5, oknoSekund: 3600 }), async (req, res) => {
