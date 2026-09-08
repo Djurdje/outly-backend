@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="sl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Outly — admin</title>
+<style>
+  :root{
+    --bg:#0A0A0B; --panel:#131316; --panel2:#1A1A1F; --line:#26262E;
+    --ink:#F2F3F7; --muted:#9096A6; --faint:#5F6575;
+    --modra:#4C76FF; --modra-soft:#16203F;
+    --ok:#3DD68C; --ok-soft:#0F2A1E;
+    --napaka:#FF5C7A; --napaka-soft:#2E1219;
+    --opoz:#F5A742; --opoz-soft:#2C2113;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14.5px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif}
+  code,.mono,input,textarea,select,pre{font-family:"SF Mono",Menlo,Consolas,monospace}
+  a{color:var(--modra)}
+  .wrap{max-width:1320px;margin:0 auto;padding:20px 20px 60px}
+  header{display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between;
+    padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:16px}
+  .brand{display:flex;align-items:baseline;gap:11px}
+  .brand h1{margin:0;font-size:21px;font-weight:700;letter-spacing:-.02em}
+  .brand span{font-size:12px;color:var(--faint);text-transform:uppercase;letter-spacing:.1em}
+  .jaz{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted)}
+  .znacka{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+    padding:2px 7px;border-radius:4px;background:var(--modra-soft);color:var(--modra)}
+  .znacka.ok{background:var(--ok-soft);color:var(--ok)}
+  .znacka.opoz{background:var(--opoz-soft);color:var(--opoz)}
+  .znacka.slabo{background:var(--napaka-soft);color:var(--napaka)}
+  .znacka.siva{background:var(--panel2);color:var(--muted)}
+
+  label{display:block;font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);margin-bottom:4px}
+  input,select,textarea{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+    border-radius:6px;padding:8px 10px;font-size:13px}
+  input:focus,select:focus,textarea:focus{outline:2px solid var(--modra);outline-offset:-1px}
+  textarea{resize:vertical;min-height:56px}
+  button{background:var(--modra);color:#fff;border:0;border-radius:6px;padding:8px 14px;
+    font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;font-family:inherit}
+  button:hover{filter:brightness(1.12)}
+  button:disabled{opacity:.45;cursor:default}
+  button.tih{background:var(--panel2);color:var(--ink);border:1px solid var(--line)}
+  button.nevarno{background:var(--napaka-soft);color:var(--napaka);border:1px solid #4A2029}
+  button.dobro{background:var(--ok-soft);color:var(--ok);border:1px solid #1E4A34}
+  button.mali{padding:5px 9px;font-size:12px}
+
+  .prijava{max-width:380px;margin:60px auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:24px}
+  .prijava h2{margin:0 0 16px;font-size:18px}
+  .prijava .polje{margin-bottom:12px}
+  .napaka-vrstica{color:var(--napaka);font-size:13px;min-height:18px;margin:8px 0}
+
+  nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+  nav button{background:var(--panel);color:var(--muted);border:1px solid var(--line)}
+  nav button.aktiven{background:var(--modra-soft);color:var(--modra);border-color:#2B3D7A}
+  nav button .n{margin-left:6px;background:var(--napaka);color:#fff;border-radius:9px;padding:0 6px;font-size:11px}
+
+  .skupina{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-bottom:16px}
+  .skupina>h2{margin:0;font-size:12px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;
+    padding:11px 15px;border-bottom:1px solid var(--line);color:var(--muted);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .skupina>h2 .desno{margin-left:auto;display:flex;gap:8px;align-items:center}
+  .telo{padding:14px 15px}
+  .polja{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:12px}
+  .polja .siroko{grid-column:1/-1}
+  .vrsta{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);
+    text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  tr:hover td{background:rgba(255,255,255,.015)}
+  td.mono{font-size:12px;color:var(--muted)}
+  td .drobno{display:block;font-size:11.5px;color:var(--faint)}
+  .tabela{overflow-x:auto}
+  .prazno{padding:36px 15px;text-align:center;color:var(--faint);font-size:13px}
+  .stevilke{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+  .stevilka{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+  .stevilka b{display:block;font-size:26px;font-weight:700;letter-spacing:-.02em}
+  .stevilka span{font-size:11.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
+  .opozorilo{background:var(--opoz-soft);border:1px solid #4A3A1C;border-left:3px solid var(--opoz);
+    border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#F0DCC0}
+
+  #obvestila{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;max-width:420px;z-index:9}
+  .obv{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--modra);border-radius:6px;
+    padding:10px 14px;font-size:13px;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+  .obv.ok{border-left-color:var(--ok)} .obv.slabo{border-left-color:var(--napaka)}
+  .skrito{display:none!important}
+  img.mini{width:34px;height:34px;border-radius:6px;object-fit:cover;background:var(--panel2);vertical-align:middle}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><h1>Outly</h1><span>admin</span></div>
+    <div class="jaz" id="jaz"></div>
+  </header>
+
+  <!-- PRIJAVA -->
+  <div id="prijava" class="prijava">
+    <h2>Prijava v admin panel</h2>
+    <div class="polje"><label>E-naslov</label><input id="pEmail" type="email" autocomplete="username"></div>
+    <div class="polje"><label>Geslo</label><input id="pGeslo" type="password" autocomplete="current-password"></div>
+    <div class="napaka-vrstica" id="pNapaka"></div>
+    <button id="pGumb" style="width:100%">Prijava</button>
+    <p style="font-size:12px;color:var(--faint);margin:14px 0 0">Isti račun kot v aplikaciji. Vstop dovoli samo vloga <b>admin</b>.</p>
+  </div>
+
+  <!-- PANEL -->
+  <div id="panel" class="skrito">
+    <nav>
+      <button data-z="pregled" class="aktiven">Pregled</button>
+      <button data-z="prosnje">Prošnje <span class="n skrito" id="nProsenj"></span></button>
+      <button data-z="klubi">Klubi</button>
+      <button data-z="uporabniki">Uporabniki</button>
+      <button data-z="dogodki">Dogodki</button>
+    </nav>
+
+    <!-- PREGLED -->
+    <section id="z-pregled">
+      <div class="skupina"><h2>Stanje <span class="desno"><button class="tih mali" onclick="naloziPregled()">Osveži</button></span></h2>
+        <div class="telo"><div class="stevilke" id="stevilke"></div></div>
+      </div>
+    </section>
+
+    <!-- PROŠNJE -->
+    <section id="z-prosnje" class="skrito">
+      <div class="skupina">
+        <h2>Prošnje ustvarjalcev
+          <span class="desno">
+            <select id="prStatus" style="width:auto" onchange="naloziProsnje()">
+              <option value="new">nove</option><option value="approved">odobrene</option>
+              <option value="rejected">zavrnjene</option><option value="all">vse</option>
+            </select>
+            <button class="tih mali" onclick="naloziProsnje()">Osveži</button>
+          </span></h2>
+        <div class="tabela" id="prTabela"></div>
+      </div>
+      <p style="font-size:12.5px;color:var(--faint)">Odobritev: uporabnik z e-naslovom prošnje dobi vlogo <b>business</b> in prazen klub z imenom iz prošnje. Uporabnik mora biti v aplikaciji že registriran — sicer odobritev javi napako.</p>
+    </section>
+
+    <!-- KLUBI -->
+    <section id="z-klubi" class="skrito">
+      <div class="skupina">
+        <h2 id="kNaslov">Nov klub <span class="desno"><button class="tih mali" id="kPrekini" onclick="kPocisti()">Počisti</button></span></h2>
+        <div class="telo">
+          <input type="hidden" id="k_id">
+          <div class="polja">
+            <div><label>E-naslov lastnika *</label><input id="k_ownerEmail" placeholder="lastnik@klub.si"></div>
+            <div><label>Ime *</label><input id="k_name"></div>
+            <div><label>Mesto</label><input id="k_city" value="Ljubljana"></div>
+            <div><label>Država</label><input id="k_country" value="Slovenija"></div>
+            <div class="siroko"><label>Naslov</label><input id="k_address"></div>
+            <div><label>Lat</label><input id="k_lat" placeholder="46.0511"></div>
+            <div><label>Lng</label><input id="k_lng" placeholder="14.5051"></div>
+            <div><label>Min. starost</label><input id="k_minAge" value="18"></div>
+            <div><label>Žanri (vejica)</label><input id="k_genres" placeholder="techno, house"></div>
+            <div><label>Kontaktni e-naslov</label><input id="k_contactEmail"></div>
+            <div><label>Telefon</label><input id="k_contactPhone"></div>
+            <div><label>Instagram</label><input id="k_instagram"></div>
+            <div><label>Spletna stran</label><input id="k_website" placeholder="https://"></div>
+            <div class="siroko"><label>Logotip (URL, Cloudinary)</label><input id="k_logoUrl" placeholder="https://res.cloudinary.com/..."></div>
+            <div class="siroko"><label>Pasica (URL)</label><input id="k_bannerUrl" placeholder="https://"></div>
+            <div class="siroko"><label>Opis</label><textarea id="k_description"></textarea></div>
+          </div>
+          <div class="vrsta"><button id="kShrani" onclick="kShrani()">Ustvari klub</button><span id="kSporocilo" style="font-size:12.5px;color:var(--faint)"></span></div>
+        </div>
+      </div>
+      <div class="skupina">
+        <h2>Klubi <span class="desno"><input id="kIsci" placeholder="ime, mesto ali e-naslov lastnika" style="width:260px" onkeydown="if(event.key==='Enter')naloziKlube()"><button class="tih mali" onclick="naloziKlube()">Išči</button></span></h2>
+        <div class="tabela" id="kTabela"></div>
+      </div>
+    </section>
+
+    <!-- UPORABNIKI -->
+    <section id="z-uporabniki" class="skrito">
+      <div class="opozorilo">Dokler Resend ne pošilja vsem (domena outly.si ni potrjena), se novi uporabniki ne morejo potrditi sami. Gumb <b>Potrdi e-naslov</b> to naredi ročno.</div>
+      <div class="skupina">
+        <h2>Uporabniki <span class="desno"><input id="uIsci" placeholder="e-naslov ali uporabniško ime" style="width:260px" onkeydown="if(event.key==='Enter')naloziUporabnike()"><button class="tih mali" onclick="naloziUporabnike()">Išči</button></span></h2>
+        <div class="tabela" id="uTabela"></div>
+      </div>
+    </section>
+
+    <!-- DOGODKI -->
+    <section id="z-dogodki" class="skrito">
+      <div class="skupina">
+        <h2>Dogodki (vsi, tudi osnutki in odpovedani)
+          <span class="desno">
+            <select id="dStatus" style="width:auto" onchange="naloziDogodke()">
+              <option value="">vsi</option><option value="published">objavljeni</option>
+              <option value="draft">osnutki</option><option value="cancelled">odpovedani</option>
+            </select>
+            <button class="tih mali" onclick="naloziDogodke()">Osveži</button>
+          </span></h2>
+        <div class="tabela" id="dTabela"></div>
+      </div>
+    </section>
+  </div>
+</div>
+<div id="obvestila"></div>
+
+<script>
+// Panel teče na istem naslovu kot backend (Express streže /admin), zato je
+// osnova kar location.origin. Za lokalni test: ?api=http://localhost:3000
+const API = new URLSearchParams(location.search).get("api") || location.origin;
+const $ = (id) => document.getElementById(id);
+
+// ---------- seja ----------
+// Žetona sta v sessionStorage: zapreš zavihek, si odjavljen. Dostopni velja 1 h,
+// ob 401 ga osvežimo z osveževalnim (isti tok kot v aplikaciji).
+const seja = {
+  get token() { return sessionStorage.getItem("outly_admin_token"); },
+  get refresh() { return sessionStorage.getItem("outly_admin_refresh"); },
+  shrani(o) { sessionStorage.setItem("outly_admin_token", o.token); sessionStorage.setItem("outly_admin_refresh", o.refreshToken || ""); },
+  pocisti() { sessionStorage.removeItem("outly_admin_token"); sessionStorage.removeItem("outly_admin_refresh"); },
+};
+function vsebinaZetona(t) {
+  try { return JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))); } catch (_) { return null; }
+}
+
+function obvesti(bes, vrsta) {
+  const d = document.createElement("div"); d.className = "obv " + (vrsta || ""); d.textContent = bes;
+  $("obvestila").appendChild(d); setTimeout(() => d.remove(), vrsta === "slabo" ? 9000 : 4500);
+}
+function ubezi(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function datum(s) { if (!s) return "—"; const d = new Date(s); return d.toLocaleString("sl-SI", { dateStyle: "short", timeStyle: "short" }); }
+function evri(c) { return c === null || c === undefined ? "—" : (c / 100).toFixed(2).replace(".", ",") + " €"; }
+
+async function klic(metoda, pot, telo, ponovno = true) {
+  const glave = { "Content-Type": "application/json" };
+  if (seja.token) glave.Authorization = "Bearer " + seja.token;
+  const r = await fetch(API + pot, { method: metoda, headers: glave, body: telo === undefined ? undefined : JSON.stringify(telo) });
+  if (r.status === 401 && ponovno && seja.refresh && pot !== "/auth/refresh") {
+    const o = await fetch(API + "/auth/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refreshToken: seja.refresh }) });
+    if (o.ok) { seja.shrani(await o.json()); return klic(metoda, pot, telo, false); }
+    odjava("Seja je potekla. Prijavi se znova."); throw new Error("Seja je potekla.");
+  }
+  const bes = await r.text();
+  let podatki = bes; try { podatki = JSON.parse(bes); } catch (_) {}
+  if (!r.ok) {
+    const sporocilo = typeof podatki === "string" ? podatki : (podatki.message || podatki.error || bes);
+    throw new Error(`${r.status}: ${sporocilo}`);
+  }
+  return podatki;
+}
+
+// ---------- prijava ----------
+async function prijava() {
+  $("pNapaka").textContent = ""; $("pGumb").disabled = true;
+  try {
+    const o = await klic("POST", "/auth/login", { email: $("pEmail").value.trim(), password: $("pGeslo").value }, false);
+    const v = vsebinaZetona(o.token);
+    if (!v || v.role !== "admin") { $("pNapaka").textContent = "Ta račun nima vloge admin."; return; }
+    seja.shrani(o); pokaziPanel();
+  } catch (e) { $("pNapaka").textContent = e.message.replace(/^\d+: /, ""); }
+  finally { $("pGumb").disabled = false; }
+}
+function odjava(sporocilo) {
+  const rt = seja.refresh;
+  if (rt) fetch(API + "/auth/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refreshToken: rt }) }).catch(() => {});
+  seja.pocisti(); $("panel").classList.add("skrito"); $("prijava").classList.remove("skrito"); $("jaz").innerHTML = "";
+  if (sporocilo) $("pNapaka").textContent = sporocilo;
+}
+$("pGumb").onclick = prijava;
+$("pGeslo").onkeydown = (e) => { if (e.key === "Enter") prijava(); };
+
+function pokaziPanel() {
+  const v = vsebinaZetona(seja.token);
+  $("jaz").innerHTML = `<span>${ubezi(v.email)}</span><span class="znacka">${ubezi(v.role)}</span><button class="tih mali" onclick="odjava()">Odjava</button>`;
+  $("prijava").classList.add("skrito"); $("panel").classList.remove("skrito");
+  pokaziZavihek("pregled"); naloziPregled();
+}
+
+// ---------- zavihki ----------
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => pokaziZavihek(b.dataset.z));
+const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke };
+function pokaziZavihek(z) {
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("aktiven", b.dataset.z === z));
+  document.querySelectorAll("section[id^=z-]").forEach(s => s.classList.toggle("skrito", s.id !== "z-" + z));
+  nalozi[z]();
+}
+function tabela(el, glave, vrstice, prazno) {
+  if (!vrstice.length) { el.innerHTML = `<div class="prazno">${ubezi(prazno)}</div>`; return; }
+  el.innerHTML = `<table><thead><tr>${glave.map(g => `<th>${g}</th>`).join("")}</tr></thead><tbody>${vrstice.join("")}</tbody></table>`;
+}
+async function varno(fn) { try { await fn(); } catch (e) { obvesti(e.message, "slabo"); } }
+
+// ---------- pregled ----------
+async function naloziPregled() {
+  await varno(async () => {
+    const s = await klic("GET", "/admin/api/summary");
+    const kos = (n, ime) => `<div class="stevilka"><b>${n}</b><span>${ime}</span></div>`;
+    $("stevilke").innerHTML =
+      kos(s.new_applications, "novih prošenj") + kos(s.clubs, "klubov") + kos(s.hidden_clubs, "skritih klubov") +
+      kos(s.events, "dogodkov") + kos(s.upcoming_events, "prihajajočih") + kos(s.users, "uporabnikov") +
+      kos(s.business_users, "poslovnih računov") + kos(s.admins, "adminov");
+    $("nProsenj").textContent = s.new_applications; $("nProsenj").classList.toggle("skrito", !s.new_applications);
+  });
+}
+
+// ---------- prošnje ----------
+async function naloziProsnje() {
+  await varno(async () => {
+    const p = await klic("GET", "/admin/api/creator-applications?status=" + $("prStatus").value);
+    const st = { new: '<span class="znacka opoz">nova</span>', approved: '<span class="znacka ok">odobrena</span>', rejected: '<span class="znacka slabo">zavrnjena</span>' };
+    tabela($("prTabela"), ["#", "Podjetje", "Kontakt", "Kraj", "Oddana", "Stanje", ""], p.map(x => `
+      <tr>
+        <td class="mono">${x.id}</td>
+        <td><b>${ubezi(x.business_name)}</b><span class="drobno">${ubezi(x.business_type)}${x.licence_id ? " · " + ubezi(x.licence_id) : ""}</span>${x.message ? `<span class="drobno">${ubezi(x.message)}</span>` : ""}</td>
+        <td>${ubezi(x.contact_name)}${x.contact_role ? " (" + ubezi(x.contact_role) + ")" : ""}<span class="drobno">${ubezi(x.email)}${x.phone ? " · " + ubezi(x.phone) : ""}</span>${x.user_id ? `<span class="drobno">iz aplikacije, uporabnik #${x.user_id}</span>` : `<span class="drobno">brez prijave</span>`}</td>
+        <td>${ubezi(x.city)}<span class="drobno">${ubezi(x.business_address)}</span></td>
+        <td class="mono">${datum(x.created_at)}</td>
+        <td>${st[x.status] || ubezi(x.status)}${x.decided_at ? `<span class="drobno">${datum(x.decided_at)}${x.decision_note ? " · " + ubezi(x.decision_note) : ""}</span>` : ""}${x.club_id ? `<span class="drobno">klub #${x.club_id}</span>` : ""}</td>
+        <td>${x.status === "new" ? `<div class="vrsta"><input placeholder="opomba (neobvezno)" id="prOp${x.id}" style="width:160px"><button class="dobro mali" onclick="odloci(${x.id},'approve')">Odobri</button><button class="nevarno mali" onclick="odloci(${x.id},'reject')">Zavrni</button></div>` : ""}</td>
+      </tr>`), "Ni prošenj.");
+  });
+}
+async function odloci(id, kaj) {
+  await varno(async () => {
+    const note = ($("prOp" + id) || {}).value || "";
+    const r = await klic("POST", `/admin/api/creator-applications/${id}/${kaj}`, { note });
+    obvesti(kaj === "approve" ? `Odobreno: ${r.userEmail} je business, klub "${r.club.name}" (#${r.club.id}).` : `Prošnja ${id} zavrnjena.`, "ok");
+    naloziProsnje(); naloziPregled();
+  });
+}
+
+// ---------- klubi ----------
+const kPolja = ["ownerEmail", "name", "city", "country", "address", "lat", "lng", "minAge", "genres", "contactEmail", "contactPhone", "instagram", "website", "logoUrl", "bannerUrl", "description"];
+function kPocisti() {
+  $("k_id").value = ""; kPolja.forEach(p => $("k_" + p).value = "");
+  $("k_city").value = "Ljubljana"; $("k_country").value = "Slovenija"; $("k_minAge").value = "18";
+  $("kNaslov").firstChild.textContent = "Nov klub "; $("kShrani").textContent = "Ustvari klub"; $("kSporocilo").textContent = "";
+}
+function kTelo() {
+  const t = {};
+  for (const p of kPolja) {
+    const v = $("k_" + p).value.trim();
+    if (p === "lat" || p === "lng") continue;
+    if (p === "minAge") { t.minAge = v === "" ? 18 : Number(v); continue; }
+    if (p === "genres") { t.genres = v ? v.split(",").map(s => s.trim()).filter(Boolean) : []; continue; }
+    t[p] = v;
+  }
+  const lat = $("k_lat").value.trim(), lng = $("k_lng").value.trim();
+  if (lat || lng) { t.lat = Number(lat.replace(",", ".")); t.lng = Number(lng.replace(",", ".")); }
+  else { t.lat = null; t.lng = null; }
+  return t;
+}
+async function kShrani() {
+  await varno(async () => {
+    const id = $("k_id").value; const t = kTelo();
+    if (!t.ownerEmail) throw new Error("E-naslov lastnika je obvezen.");
+    if (!t.name) throw new Error("Ime kluba je obvezno.");
+    $("kShrani").disabled = true;
+    try {
+      const r = id ? await klic("PATCH", "/admin/api/clubs/" + id, t) : await klic("POST", "/admin/api/clubs", t);
+      obvesti(`${id ? "Shranjeno" : "Ustvarjeno"}: ${r.name} (#${r.id}), lastnik ${r.owner_email}.`, "ok");
+      kPocisti(); naloziKlube(); naloziPregled();
+    } finally { $("kShrani").disabled = false; }
+  });
+}
+let klubi = [];
+function kUredi(id) {
+  const k = klubi.find(x => x.id === id); if (!k) return;
+  $("k_id").value = k.id;
+  const m = { ownerEmail: k.owner_email, name: k.name, city: k.city, country: k.country, address: k.address, lat: k.lat ?? "", lng: k.lng ?? "",
+    minAge: k.min_age, genres: (k.genres || []).join(", "), contactEmail: k.contact_email, contactPhone: k.contact_phone, instagram: k.instagram,
+    website: k.website, logoUrl: k.logo_url, bannerUrl: k.banner_url, description: k.description };
+  for (const p of kPolja) $("k_" + p).value = m[p] ?? "";
+  $("kNaslov").firstChild.textContent = `Uredi klub #${k.id} `; $("kShrani").textContent = "Shrani spremembe";
+  $("kSporocilo").textContent = "Sprememba e-naslova lastnika prenese klub na drug račun.";
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+async function kSkrij(id, hidden) {
+  await varno(async () => { const r = await klic("PATCH", "/admin/api/clubs/" + id, { hidden }); obvesti(`${r.name}: ${hidden ? "skrit" : "viden"}.`, "ok"); naloziKlube(); naloziPregled(); });
+}
+async function naloziKlube() {
+  await varno(async () => {
+    klubi = await klic("GET", "/admin/api/clubs?q=" + encodeURIComponent($("kIsci").value.trim()));
+    tabela($("kTabela"), ["#", "", "Klub", "Lastnik", "Kraj", "Koord.", "Dogodki", "Stanje", ""], klubi.map(k => `
+      <tr>
+        <td class="mono">${k.id}</td>
+        <td>${k.logo_url ? `<img class="mini" src="${ubezi(k.logo_url)}" alt="">` : `<span class="mini" style="display:inline-block"></span>`}</td>
+        <td><b>${ubezi(k.name)}</b><span class="drobno">${[(k.genres || []).join(", "), k.min_age ? k.min_age + "+" : ""].filter(Boolean).join(" · ")}</span></td>
+        <td>${ubezi(k.owner_email || "—")}<span class="drobno">${ubezi(k.owner_username || "")}</span></td>
+        <td>${ubezi(k.city)}<span class="drobno">${ubezi(k.address)}</span></td>
+        <td class="mono">${k.lat !== null ? k.lat.toFixed(4) + ", " + k.lng.toFixed(4) : '<span class="znacka opoz">brez</span>'}</td>
+        <td class="mono">${k.event_count}</td>
+        <td>${k.hidden ? '<span class="znacka slabo">skrit</span>' : '<span class="znacka ok">viden</span>'}${k.stripe_charges_enabled ? ' <span class="znacka">stripe</span>' : ""}</td>
+        <td><div class="vrsta"><button class="tih mali" onclick="kUredi(${k.id})">Uredi</button>${k.hidden ? `<button class="dobro mali" onclick="kSkrij(${k.id},false)">Pokaži</button>` : `<button class="nevarno mali" onclick="kSkrij(${k.id},true)">Skrij</button>`}</div></td>
+      </tr>`), "Ni klubov. Ustvari prvega zgoraj.");
+  });
+}
+
+// ---------- uporabniki ----------
+async function naloziUporabnike() {
+  await varno(async () => {
+    const u = await klic("GET", "/admin/api/users?q=" + encodeURIComponent($("uIsci").value.trim()));
+    const zaklenjen = (x) => x.locked_until && new Date(x.locked_until) > new Date();
+    tabela($("uTabela"), ["#", "E-naslov", "Ime", "Vloga", "E-pošta", "Zaklep", "Klubi", "Registriran", ""], u.map(x => `
+      <tr>
+        <td class="mono">${x.id}</td>
+        <td>${ubezi(x.email)}${x.phone ? `<span class="drobno">${ubezi(x.phone)}</span>` : ""}</td>
+        <td>${ubezi(x.username)}${x.country ? `<span class="drobno">${ubezi(x.country)}</span>` : ""}</td>
+        <td><select id="uVloga${x.id}" style="width:auto" onchange="uVloga(${x.id})">${["user", "business", "admin"].map(r => `<option ${r === x.role ? "selected" : ""}>${r}</option>`).join("")}</select></td>
+        <td>${x.email_verified ? '<span class="znacka ok">potrjen</span>' : `<span class="znacka opoz">nepotrjen</span> <button class="tih mali" onclick="uPotrdi(${x.id})">Potrdi e-naslov</button>`}</td>
+        <td>${zaklenjen(x) ? `<span class="znacka slabo">do ${datum(x.locked_until)}</span> <button class="tih mali" onclick="uOdkleni(${x.id})">Odkleni</button>` : (x.failed_login_count ? `${x.failed_login_count} nap. poskusov` : "—")}</td>
+        <td class="mono">${x.club_count}</td>
+        <td class="mono">${datum(x.created_at)}${x.onboarded_at ? "" : '<span class="drobno">račun ni dokončan</span>'}</td>
+        <td></td>
+      </tr>`), "Ni zadetkov.");
+  });
+}
+async function uVloga(id) {
+  await varno(async () => { const r = await klic("PATCH", "/admin/api/users/" + id, { role: $("uVloga" + id).value }); obvesti(`${r.email} → ${r.role}. Nova vloga velja po ponovni prijavi v aplikaciji (najpozneje čez 1 h).`, "ok"); naloziUporabnike(); naloziPregled(); });
+}
+async function uOdkleni(id) { await varno(async () => { const r = await klic("PATCH", "/admin/api/users/" + id, { unlock: true }); obvesti(`${r.email} odklenjen.`, "ok"); naloziUporabnike(); }); }
+async function uPotrdi(id) { await varno(async () => { const r = await klic("PATCH", "/admin/api/users/" + id, { emailVerified: true }); obvesti(`${r.email}: e-naslov potrjen.`, "ok"); naloziUporabnike(); }); }
+
+// ---------- dogodki ----------
+async function naloziDogodke() {
+  await varno(async () => {
+    const s = $("dStatus").value;
+    const d = await klic("GET", "/admin/api/events" + (s ? "?status=" + s : ""));
+    const st = { published: '<span class="znacka ok">objavljen</span>', draft: '<span class="znacka siva">osnutek</span>', cancelled: '<span class="znacka slabo">odpovedan</span>' };
+    tabela($("dTabela"), ["#", "Dogodek", "Klub", "Začetek", "Cena", "Stanje", ""], d.map(x => `
+      <tr>
+        <td class="mono">${x.id}</td>
+        <td><b>${ubezi(x.title)}</b><span class="drobno">${[(x.genres || []).join(", "), x.min_age ? x.min_age + "+" : ""].filter(Boolean).join(" · ")}</span></td>
+        <td>${ubezi(x.club_name)}${x.club_hidden ? ' <span class="znacka slabo">klub skrit</span>' : ""}</td>
+        <td class="mono">${datum(x.start_at)}${x.end_at ? `<span class="drobno">do ${datum(x.end_at)}</span>` : ""}</td>
+        <td class="mono">${evri(x.ticket_price_cents)}</td>
+        <td>${st[x.status] || ubezi(x.status)}</td>
+        <td><div class="vrsta">${x.status !== "cancelled" ? `<button class="nevarno mali" onclick="dStatus(${x.id},'cancelled')">Umakni</button>` : ""}${x.status !== "published" ? `<button class="dobro mali" onclick="dStatus(${x.id},'published')">Objavi</button>` : ""}</div></td>
+      </tr>`), "Ni dogodkov.");
+  });
+}
+async function dStatus(id, status) {
+  await varno(async () => { const r = await klic("PATCH", "/admin/api/events/" + id, { status }); obvesti(`"${r.title}" → ${status}.`, "ok"); naloziDogodke(); naloziPregled(); });
+}
+
+// ---------- zagon ----------
+if (seja.token) {
+  const v = vsebinaZetona(seja.token);
+  if (v && v.role === "admin") pokaziPanel(); else seja.pocisti();
+}
+</script>
+</body>
+</html>
