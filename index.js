@@ -5,6 +5,7 @@ const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const { Resend } = require("resend");
+const path = require("path");
 
 const app = express();
 // Render stoji za proxyjem. Brez tega je req.ip naslov proxyja in bi
@@ -182,6 +183,11 @@ function requireRole(...allowed) {
 app.get("/", (req, res) => {
   res.send("Outly backend OK");
 });
+
+// Admin panel: statična stran v mapi admin/ (en HTML + JS, brez ogrodja).
+// Sama stran ne razkrije ničesar — vsi podatki pridejo prek poti /admin/api/*,
+// ki zahtevajo vlogo admin.
+app.use("/admin", express.static(path.join(__dirname, "admin"), { index: "index.html" }));
 
 // ---------------------------
 // ME (protected)
@@ -1013,6 +1019,9 @@ const JAVNI_STOLPCI_KLUBA = `id, owner_user_id, name, logo_url, banner_url, desc
   contact_email, contact_phone, instagram, website, address, city, country,
   lat, lng, min_age, genres, created_at`;
 
+// Lastnik vidi še stanje vidnosti in Stripa, ne pa stripe_account_id.
+const STOLPCI_KLUBA_LASTNIKA = `${JAVNI_STOLPCI_KLUBA}, hidden, stripe_charges_enabled, stripe_payouts_enabled`;
+
 function stevilo(vrednost, privzeto, najvec) {
   const n = parseInt(vrednost, 10);
   if (Number.isNaN(n) || n < 0) return privzeto;
@@ -1033,6 +1042,8 @@ app.get("/clubs", async (req, res) => {
     }
     // Zemljevid potrebuje samo klube s koordinatami.
     if (req.query.withCoords === "true") pogoji.push("lat IS NOT NULL AND lng IS NOT NULL");
+    // Skriti klubi (admin panel, migracija 006) javno ne obstajajo.
+    pogoji.push("hidden = FALSE");
 
     const kje = pogoji.length ? "WHERE " + pogoji.join(" AND ") : "";
 
@@ -1061,7 +1072,7 @@ app.get("/clubs", async (req, res) => {
 app.get("/clubs/map", async (req, res) => {
   try {
     const p = [];
-    const pogoji = ["lat IS NOT NULL", "lng IS NOT NULL"];
+    const pogoji = ["lat IS NOT NULL", "lng IS NOT NULL", "hidden = FALSE"];
 
     // Neobvezni okvir zemljevida: minLat,minLng,maxLat,maxLng
     const b = req.query.bbox;
@@ -1089,7 +1100,9 @@ app.get("/clubs/map", async (req, res) => {
 app.get("/clubs/:id", async (req, res) => {
   try {
     if (!/^\d+$/.test(req.params.id)) return res.status(400).send("Invalid club id.");
-    const r = await pool.query(`SELECT ${JAVNI_STOLPCI_KLUBA} FROM clubs WHERE id=$1`, [req.params.id]);
+    const r = await pool.query(
+      `SELECT ${JAVNI_STOLPCI_KLUBA} FROM clubs WHERE id=$1 AND hidden = FALSE`, [req.params.id]
+    );
     if (r.rows.length === 0) return res.status(404).send("Club not found.");
     res.json(r.rows[0]);
   } catch (e) {
@@ -1127,7 +1140,7 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
        address, city, country, lat, lng, min_age, genres)
        VALUES
       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-       RETURNING *`,
+       RETURNING ${STOLPCI_KLUBA_LASTNIKA}`,
       [
         req.user.userId,
         name,
@@ -1220,7 +1233,7 @@ app.get("/cloudinary/signature", requireAuth, izdajPodpis);
 app.get("/business/clubs/me", requireAuth, requireRole("business", "admin"), async (req, res) => {
   try {
     const r = await pool.query(
-      "SELECT * FROM clubs WHERE owner_user_id=$1 LIMIT 1",
+      `SELECT ${STOLPCI_KLUBA_LASTNIKA} FROM clubs WHERE owner_user_id=$1 LIMIT 1`,
       [req.user.userId]
     );
 
@@ -1276,7 +1289,7 @@ app.patch("/business/clubs/me", requireAuth, requireRole("business", "admin"), a
 
     if (sets.length === 0) {
       // nothing to update -> return current club
-      const cur = await pool.query("SELECT * FROM clubs WHERE id=$1", [clubId]);
+      const cur = await pool.query(`SELECT ${STOLPCI_KLUBA_LASTNIKA} FROM clubs WHERE id=$1`, [clubId]);
       return res.status(200).json(cur.rows[0]);
     }
 
@@ -1289,7 +1302,7 @@ app.patch("/business/clubs/me", requireAuth, requireRole("business", "admin"), a
     }
 
     values.push(clubId);
-    const sql = `UPDATE clubs SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`;
+    const sql = `UPDATE clubs SET ${sets.join(", ")} WHERE id = $${idx} RETURNING ${STOLPCI_KLUBA_LASTNIKA}`;
 
     const updated = await pool.query(sql, values);
     return res.status(200).json(updated.rows[0]);
@@ -1363,6 +1376,8 @@ app.get("/events", async (req, res) => {
     // Javno so vidni SAMO objavljeni dogodki. Osnutki in odpovedani so bili
     // doslej vidni vsakomur; lastnik jih vidi prek GET /business/events.
     where.push(`status = 'published'`);
+    // Dogodki skritih klubov javno niso vidni (migracija 006).
+    where.push(`club_id NOT IN (SELECT id FROM clubs WHERE hidden)`);
 
     const sql = `
       SELECT ${STOLPCI_DOGODKA}
@@ -1384,7 +1399,9 @@ app.get("/events/:id", async (req, res) => {
   try {
     if (!/^\d+$/.test(req.params.id)) return res.status(400).send("Invalid event id.");
     const r = await pool.query(
-      `SELECT ${STOLPCI_DOGODKA} FROM events WHERE id=$1 AND status='published'`,
+      `SELECT ${STOLPCI_DOGODKA} FROM events
+       WHERE id=$1 AND status='published'
+         AND club_id NOT IN (SELECT id FROM clubs WHERE hidden)`,
       [req.params.id]
     );
 
@@ -1617,7 +1634,8 @@ app.get("/search", async (req, res) => {
       pool.query(
         `SELECT id, name, city, logo_url, lat, lng, genres
          FROM clubs
-         WHERE name ILIKE $1 OR city ILIKE $1 OR description ILIKE $1
+         WHERE hidden = FALSE
+           AND (name ILIKE $1 OR city ILIKE $1 OR description ILIKE $1)
          ORDER BY (name ILIKE $2) DESC, name
          LIMIT $3`,
         [vzorec, `${q}%`, limit]
@@ -1626,7 +1644,7 @@ app.get("/search", async (req, res) => {
         `SELECT e.id, e.club_id, e.title, e.poster_url, e.start_at,
                 e.ticket_price_cents, e.currency, c.name AS club_name
          FROM events e JOIN clubs c ON c.id = e.club_id
-         WHERE e.status = 'published'
+         WHERE e.status = 'published' AND c.hidden = FALSE
            AND (e.title ILIKE $1 OR e.description ILIKE $1 OR c.name ILIKE $1)
          ORDER BY (e.start_at > NOW()) DESC, e.start_at
          LIMIT $2`,
@@ -1645,6 +1663,534 @@ app.get("/search", async (req, res) => {
     return res.status(500).send("Server error.");
   }
 });
+
+// ---------------------------
+// PROŠNJE USTVARJALCEV (javna oddaja) + ADMIN PANEL
+// ---------------------------
+// Do migracije 006 ni obstajala nobena pot, po kateri bi klub sploh nastal:
+// prošnje s spletne strani so šle v Supabase, ki ga backend ne vidi, vlogo
+// 'business' pa ni imel kdo dodeliti. Zdaj: aplikacija (ali kdorkoli) odda
+// prošnjo sem, admin jo v panelu (/admin) odobri -> uporabnik dobi vlogo
+// 'business' in prazen klub z imenom iz prošnje.
+//
+// Vse poti /admin/api/* zahtevajo vlogo admin (requireRole). Aplikacija in
+// panel vlogo samo kažeta; uveljavlja jo strežnik.
+
+const STOLPCI_PROSNJE = `id, user_id, business_name, business_type, business_address, city,
+  licence_id, contact_name, contact_role, email, phone, message,
+  status, decided_at, decided_by, decision_note, club_id, created_at`;
+
+// Uporabnik brez password_hash in brez ničesar, kar bi bilo za panel odveč.
+const ADMIN_POLJA_UPORABNIKA = `id, email, username, role, email_verified, avatar_url,
+  phone, date_of_birth, country, onboarded_at, failed_login_count, locked_until, created_at`;
+
+// Klub za admina: javni stolpci + hidden + stanje Stripa (brez stripe_account_id,
+// ki ga panel ne potrebuje in ki ne sme uhajati nikamor).
+const ADMIN_STOLPCI_KLUBA = `c.id, c.owner_user_id, c.name, c.logo_url, c.banner_url, c.description,
+  c.contact_email, c.contact_phone, c.instagram, c.website, c.address, c.city, c.country,
+  c.lat, c.lng, c.min_age, c.genres, c.hidden, c.stripe_charges_enabled, c.created_at,
+  u.email AS owner_email, u.username AS owner_username`;
+
+const VELJAVEN_EMAIL = /^[^@\s]+@[^@\s.]+\.[^@\s]+$/;
+
+function besedilo(v, najvec) {
+  if (v === undefined || v === null) return "";
+  return String(v).trim().slice(0, najvec);
+}
+
+// Neobvezna prijava: če je žeton priložen in veljaven, req.user obstaja;
+// če ga ni ali je neveljaven, pot vseeno teče naprej (kot neprijavljen).
+function neobveznaPrijava(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token || !process.env.JWT_SECRET) return next();
+  try { req.user = jwt.verify(token, process.env.JWT_SECRET); } catch (_) { /* neprijavljen */ }
+  next();
+}
+
+// POST /creator-applications — javno, omejeno. Aplikacija ga kliče iz
+// "Request for creator"; prijavljenemu uporabniku se prošnja veže na račun.
+app.post("/creator-applications", omeji({ kljuc: "prosnja", najvec: 5, oknoSekund: 3600 }), neobveznaPrijava, async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (typeof b !== "object" || Array.isArray(b)) return res.status(400).send("Invalid body.");
+
+    const businessName = besedilo(b.businessName ?? b.business_name, 120);
+    const contactName  = besedilo(b.contactName  ?? b.contact_name, 120);
+    // Prijavljeni uporabnik: e-naslov je njegov, ne more oddati prošnje za tujega.
+    const email = (req.user ? String(req.user.email) : besedilo(b.email, 254)).toLowerCase();
+
+    if (businessName.length < 2) return res.status(400).send("businessName is required (2-120 characters).");
+    if (contactName.length < 2)  return res.status(400).send("contactName is required (2-120 characters).");
+    if (!VELJAVEN_EMAIL.test(email)) return res.status(400).send("Valid email is required.");
+
+    const phoneRaw = besedilo(b.phone, 40).replace(/[\s\-()]/g, "");
+    if (phoneRaw && !/^\+?[0-9]{6,15}$/.test(phoneRaw)) {
+      return res.status(400).send("phone must contain 6-15 digits, optionally with leading +.");
+    }
+
+    const r = await pool.query(
+      `INSERT INTO creator_applications
+        (user_id, business_name, business_type, business_address, city, licence_id,
+         contact_name, contact_role, email, phone, message)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       RETURNING id, status, created_at`,
+      [
+        req.user ? req.user.userId : null,
+        businessName,
+        besedilo(b.businessType ?? b.business_type, 80),
+        besedilo(b.businessAddress ?? b.business_address, 200),
+        besedilo(b.city, 80),
+        besedilo(b.licenceId ?? b.licence_id, 80),
+        contactName,
+        besedilo(b.contactRole ?? b.contact_role, 80),
+        email,
+        phoneRaw,
+        besedilo(b.message, 2000),
+      ]
+    );
+    console.log("Nova prošnja ustvarjalca:", r.rows[0].id, businessName, email);
+    return res.status(201).json({
+      message: "Application received. We will review it and get back to you by email.",
+      id: r.rows[0].id, status: r.rows[0].status, createdAt: r.rows[0].created_at,
+    });
+  } catch (e) {
+    // Odprta prošnja s tem e-naslovom že obstaja (ca_email_open_key).
+    if (e && e.code === "23505") return res.status(409).send("An application for this email is already pending.");
+    if (e && e.code === "23514") return res.status(400).send("Invalid application data.");
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// Prijavljeni uporabnik vidi svoje prošnje (aplikacija pokaže "prošnja oddana / odobrena / zavrnjena").
+app.get("/creator-applications/me", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, business_name, status, decided_at, decision_note, club_id, created_at
+       FROM creator_applications
+       WHERE user_id = $1 OR LOWER(email) = LOWER($2)
+       ORDER BY created_at DESC LIMIT 20`,
+      [req.user.userId, req.user.email]
+    );
+    return res.status(200).json(r.rows);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// Vse pod /admin/api zahteva admina. Napaka je namenoma enaka za "ni žetona"
+// (401) in "napačna vloga" (403) kot drugod.
+const admin = express.Router();
+admin.use(requireAuth, requireRole("admin"));
+
+function celoId(v) { return /^\d+$/.test(String(v)) ? Number(v) : null; }
+
+// --- pregled ---
+admin.get("/summary", async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT
+        (SELECT COUNT(*)::int FROM creator_applications WHERE status='new') AS new_applications,
+        (SELECT COUNT(*)::int FROM clubs)                                    AS clubs,
+        (SELECT COUNT(*)::int FROM clubs WHERE hidden)                       AS hidden_clubs,
+        (SELECT COUNT(*)::int FROM users)                                    AS users,
+        (SELECT COUNT(*)::int FROM users WHERE role='business')              AS business_users,
+        (SELECT COUNT(*)::int FROM users WHERE role='admin')                 AS admins,
+        (SELECT COUNT(*)::int FROM events)                                   AS events,
+        (SELECT COUNT(*)::int FROM events WHERE status='published' AND start_at > NOW()) AS upcoming_events`);
+    return res.json(r.rows[0]);
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// --- prošnje ---
+admin.get("/creator-applications", async (req, res) => {
+  try {
+    const status = String(req.query.status || "new");
+    if (!["new", "approved", "rejected", "all"].includes(status)) {
+      return res.status(400).send("status must be new, approved, rejected or all.");
+    }
+    const p = [];
+    let kje = "";
+    if (status !== "all") { p.push(status); kje = "WHERE status = $1"; }
+    const r = await pool.query(
+      `SELECT ${STOLPCI_PROSNJE} FROM creator_applications ${kje}
+       ORDER BY (status='new') DESC, created_at DESC LIMIT 500`, p
+    );
+    return res.json(r.rows);
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// Odobri: uporabnik z e-naslovom prošnje dobi vlogo business in prazen klub.
+admin.post("/creator-applications/:id/approve", async (req, res) => {
+  const id = celoId(req.params.id);
+  if (!id) return res.status(400).send("Invalid application id.");
+  const opomba = besedilo((req.body || {}).note, 500);
+
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    // FOR UPDATE: dva admina ne moreta iste prošnje odobriti dvakrat.
+    const pr = await c.query(
+      `SELECT ${STOLPCI_PROSNJE} FROM creator_applications WHERE id=$1 FOR UPDATE`, [id]
+    );
+    if (pr.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Application not found."); }
+    const p = pr.rows[0];
+    if (p.status !== "new") { await c.query("ROLLBACK"); return res.status(409).send(`Application already ${p.status}.`); }
+
+    // Uporabnik: po vezi na račun ali po e-naslovu (male črke, kot pri registraciji).
+    const ur = await c.query(
+      `SELECT id, email, role, email_verified FROM users
+       WHERE id = $1 OR email = $2 ORDER BY (id = $1) DESC LIMIT 1 FOR UPDATE`,
+      [p.user_id ?? -1, p.email.toLowerCase()]
+    );
+    if (ur.rows.length === 0) {
+      await c.query("ROLLBACK");
+      return res.status(409).json({
+        error: "user_not_found",
+        message: `No Outly account with email ${p.email}. The applicant must register in the app first.`,
+      });
+    }
+    const u = ur.rows[0];
+
+    // Poslovni del aplikacije vidi samo PRVI klub lastnika (LIMIT 1). Drugi
+    // klub bi bil neviden in neurejljiv — zato ne ustvarjamo drugega.
+    const ima = await c.query("SELECT id, name FROM clubs WHERE owner_user_id=$1 LIMIT 1", [u.id]);
+    if (ima.rows.length > 0) {
+      await c.query("ROLLBACK");
+      return res.status(409).json({
+        error: "user_has_club",
+        message: `User ${u.email} already owns club "${ima.rows[0].name}" (id ${ima.rows[0].id}).`,
+      });
+    }
+
+    // Admin ostane admin (requireRole admina povsod spusti); navaden uporabnik postane business.
+    if (u.role === "user") await c.query("UPDATE users SET role='business' WHERE id=$1", [u.id]);
+
+    const kr = await c.query(
+      `INSERT INTO clubs (owner_user_id, name, address, city, contact_email, contact_phone)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, name`,
+      [u.id, p.business_name, p.business_address, p.city, p.email, p.phone]
+    );
+
+    const posodobljena = await c.query(
+      `UPDATE creator_applications
+       SET status='approved', decided_at=NOW(), decided_by=$2, decision_note=$3, club_id=$4
+       WHERE id=$1 RETURNING ${STOLPCI_PROSNJE}`,
+      [id, req.user.userId, opomba, kr.rows[0].id]
+    );
+    // Vloga je v JWT: stari dostopni žeton velja še do 1 h, osvežitev prinese novo vlogo.
+    await c.query("COMMIT");
+    console.log(`Prošnja ${id} odobrena (admin ${req.user.userId}): uporabnik ${u.id} -> business, klub ${kr.rows[0].id}`);
+    return res.status(200).json({ application: posodobljena.rows[0], club: kr.rows[0], userId: u.id, userEmail: u.email });
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (e && e.code === "23514") return res.status(400).send("Application data violates club constraints: " + (e.constraint || ""));
+    console.error(e);
+    return res.status(500).send("Server error.");
+  } finally { c.release(); }
+});
+
+admin.post("/creator-applications/:id/reject", async (req, res) => {
+  try {
+    const id = celoId(req.params.id);
+    if (!id) return res.status(400).send("Invalid application id.");
+    const opomba = besedilo((req.body || {}).note, 500);
+    const r = await pool.query(
+      `UPDATE creator_applications
+       SET status='rejected', decided_at=NOW(), decided_by=$2, decision_note=$3
+       WHERE id=$1 AND status='new' RETURNING ${STOLPCI_PROSNJE}`,
+      [id, req.user.userId, opomba]
+    );
+    if (r.rows.length === 0) {
+      const obstaja = await pool.query("SELECT status FROM creator_applications WHERE id=$1", [id]);
+      if (obstaja.rows.length === 0) return res.status(404).send("Application not found.");
+      return res.status(409).send(`Application already ${obstaja.rows[0].status}.`);
+    }
+    return res.status(200).json(r.rows[0]);
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// --- klubi ---
+admin.get("/clubs", async (req, res) => {
+  try {
+    const p = [];
+    let kje = "";
+    if (req.query.q) { p.push(`%${String(req.query.q).trim()}%`); kje = `WHERE c.name ILIKE $1 OR c.city ILIKE $1 OR u.email ILIKE $1`; }
+    const r = await pool.query(
+      `SELECT ${ADMIN_STOLPCI_KLUBA},
+              (SELECT COUNT(*)::int FROM events e WHERE e.club_id = c.id) AS event_count
+       FROM clubs c LEFT JOIN users u ON u.id = c.owner_user_id
+       ${kje} ORDER BY c.created_at DESC LIMIT 500`, p
+    );
+    return res.json(r.rows);
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// Skupno preverjanje polj kluba za POST in PATCH. Vrne { sets, vrednosti } ali napako.
+function poljaKluba(b, zaVstavljanje) {
+  const out = {};
+  const bes = (kljuc, ...imena) => {
+    for (const ime of imena) if (b[ime] !== undefined) { out[kljuc] = b[ime] === null ? "" : String(b[ime]).trim(); return; }
+  };
+  bes("name", "name");
+  bes("description", "description");
+  bes("logo_url", "logoUrl", "logo_url");
+  bes("banner_url", "bannerUrl", "banner_url");
+  bes("contact_email", "contactEmail", "contact_email");
+  bes("contact_phone", "contactPhone", "contact_phone");
+  bes("instagram", "instagram");
+  bes("website", "website");
+  bes("address", "address");
+  bes("city", "city");
+  bes("country", "country");
+
+  if (out.name !== undefined && (out.name.length === 0 || out.name.length > 120)) return { napaka: "name is required (1-120 characters)." };
+  if (out.contact_email !== undefined && out.contact_email && !VELJAVEN_EMAIL.test(out.contact_email)) return { napaka: "contactEmail is not a valid email." };
+  for (const k of ["logo_url", "banner_url", "website"]) {
+    if (out[k] && !/^https?:\/\//i.test(out[k])) return { napaka: `${k} must start with http:// or https://.` };
+    if (out[k] && out[k].length > 500) return { napaka: `${k} too long.` };
+  }
+  if (out.description !== undefined && out.description.length > 5000) return { napaka: "description too long (max 5000)." };
+
+  const lat = b.lat, lng = b.lng;
+  if ((lat === undefined) !== (lng === undefined)) return { napaka: "lat and lng must be sent together." };
+  if (lat !== undefined) {
+    if (lat === null && lng === null) { out.lat = null; out.lng = null; }
+    else {
+      const a = Number(lat), o = Number(lng);
+      if (!Number.isFinite(a) || !Number.isFinite(o) || a < -90 || a > 90 || o < -180 || o > 180) return { napaka: "lat/lng out of range." };
+      out.lat = a; out.lng = o;
+    }
+  }
+  const minAge = b.minAge ?? b.min_age;
+  if (minAge !== undefined) {
+    const n = Number(minAge);
+    if (!Number.isInteger(n) || n < 0 || n > 99) return { napaka: "minAge must be an integer 0-99." };
+    out.min_age = n;
+  }
+  if (b.genres !== undefined) {
+    if (!Array.isArray(b.genres)) return { napaka: "genres must be an array." };
+    const izbrani = [...new Set(b.genres.map(g => String(g).trim().toLowerCase()))];
+    const neznani = izbrani.filter(g => !ZANRI.includes(g));
+    if (neznani.length) return { napaka: `unknown genres: ${neznani.join(", ")}` };
+    out.genres = izbrani;
+  }
+  if (b.hidden !== undefined) {
+    if (typeof b.hidden !== "boolean") return { napaka: "hidden must be true or false." };
+    out.hidden = b.hidden;
+  }
+  if (zaVstavljanje && out.name === undefined) return { napaka: "name is required." };
+  return { polja: out };
+}
+
+async function lastnikPoEmailu(c, email) {
+  const e = String(email || "").trim().toLowerCase();
+  if (!VELJAVEN_EMAIL.test(e)) return { napaka: "ownerEmail is not a valid email." };
+  const r = await c.query("SELECT id, email, role FROM users WHERE email=$1", [e]);
+  if (r.rows.length === 0) return { napaka: `No account with email ${e}. The owner must register in the app first.` };
+  return { uporabnik: r.rows[0] };
+}
+
+admin.post("/clubs", async (req, res) => {
+  const b = req.body || {};
+  const c = await pool.connect();
+  try {
+    if (b.ownerEmail === undefined && b.owner_email === undefined) return res.status(400).send("ownerEmail is required.");
+    const pk = poljaKluba(b, true);
+    if (pk.napaka) return res.status(400).send(pk.napaka);
+
+    await c.query("BEGIN");
+    const l = await lastnikPoEmailu(c, b.ownerEmail ?? b.owner_email);
+    if (l.napaka) { await c.query("ROLLBACK"); return res.status(400).send(l.napaka); }
+    const u = l.uporabnik;
+
+    const ima = await c.query("SELECT id, name FROM clubs WHERE owner_user_id=$1 LIMIT 1", [u.id]);
+    if (ima.rows.length > 0) {
+      await c.query("ROLLBACK");
+      return res.status(409).send(`User ${u.email} already owns club "${ima.rows[0].name}" (id ${ima.rows[0].id}). One club per business account.`);
+    }
+    if (u.role === "user") await c.query("UPDATE users SET role='business' WHERE id=$1", [u.id]);
+
+    const stolpci = ["owner_user_id", ...Object.keys(pk.polja)];
+    const vrednosti = [u.id, ...Object.values(pk.polja)];
+    const r = await c.query(
+      `INSERT INTO clubs (${stolpci.join(", ")})
+       VALUES (${vrednosti.map((_, i) => `$${i + 1}`).join(", ")}) RETURNING id`,
+      vrednosti
+    );
+    const nov = await c.query(
+      `SELECT ${ADMIN_STOLPCI_KLUBA}, 0 AS event_count FROM clubs c LEFT JOIN users u ON u.id=c.owner_user_id WHERE c.id=$1`,
+      [r.rows[0].id]
+    );
+    await c.query("COMMIT");
+    return res.status(201).json(nov.rows[0]);
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (e && e.code === "23514") return res.status(400).send("Invalid club data: " + (e.constraint || "constraint"));
+    console.error(e);
+    return res.status(500).send("Server error.");
+  } finally { c.release(); }
+});
+
+admin.patch("/clubs/:id", async (req, res) => {
+  const id = celoId(req.params.id);
+  if (!id) return res.status(400).send("Invalid club id.");
+  const b = req.body || {};
+  const c = await pool.connect();
+  try {
+    const pk = poljaKluba(b, false);
+    if (pk.napaka) return res.status(400).send(pk.napaka);
+    const polja = pk.polja;
+
+    await c.query("BEGIN");
+    const obstaja = await c.query("SELECT id, owner_user_id FROM clubs WHERE id=$1 FOR UPDATE", [id]);
+    if (obstaja.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Club not found."); }
+
+    // Prenos lastništva po e-naslovu. Novi lastnik ne sme že imeti kluba.
+    const novEmail = b.ownerEmail ?? b.owner_email;
+    if (novEmail !== undefined) {
+      const l = await lastnikPoEmailu(c, novEmail);
+      if (l.napaka) { await c.query("ROLLBACK"); return res.status(400).send(l.napaka); }
+      if (l.uporabnik.id !== obstaja.rows[0].owner_user_id) {
+        const ima = await c.query("SELECT id FROM clubs WHERE owner_user_id=$1 AND id<>$2 LIMIT 1", [l.uporabnik.id, id]);
+        if (ima.rows.length > 0) { await c.query("ROLLBACK"); return res.status(409).send(`User ${l.uporabnik.email} already owns another club.`); }
+        if (l.uporabnik.role === "user") await c.query("UPDATE users SET role='business' WHERE id=$1", [l.uporabnik.id]);
+        polja.owner_user_id = l.uporabnik.id;
+      }
+    }
+
+    const kljuci = Object.keys(polja);
+    if (kljuci.length === 0) { await c.query("ROLLBACK"); return res.status(400).send("Nothing to update."); }
+    const vrednosti = Object.values(polja);
+    vrednosti.push(id);
+    await c.query(
+      `UPDATE clubs SET ${kljuci.map((k, i) => `${k} = $${i + 1}`).join(", ")} WHERE id = $${vrednosti.length}`,
+      vrednosti
+    );
+    const r = await c.query(
+      `SELECT ${ADMIN_STOLPCI_KLUBA}, (SELECT COUNT(*)::int FROM events e WHERE e.club_id=c.id) AS event_count
+       FROM clubs c LEFT JOIN users u ON u.id=c.owner_user_id WHERE c.id=$1`, [id]
+    );
+    await c.query("COMMIT");
+    return res.status(200).json(r.rows[0]);
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (e && e.code === "23514") return res.status(400).send("Invalid club data: " + (e.constraint || "constraint"));
+    if (e && e.code === "22P02") return res.status(400).send("Invalid value type.");
+    console.error(e);
+    return res.status(500).send("Server error.");
+  } finally { c.release(); }
+});
+
+// --- uporabniki ---
+admin.get("/users", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const p = [];
+    let kje = "";
+    if (q) { p.push(`%${q}%`); kje = "WHERE email ILIKE $1 OR username ILIKE $1"; }
+    const r = await pool.query(
+      `SELECT ${ADMIN_POLJA_UPORABNIKA},
+              (SELECT COUNT(*)::int FROM clubs c WHERE c.owner_user_id = users.id) AS club_count
+       FROM users ${kje} ORDER BY created_at DESC LIMIT 200`, p
+    );
+    return res.json(r.rows);
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// PATCH /admin/api/users/:id — { role } | { unlock: true } | { emailVerified: true }
+admin.patch("/users/:id", async (req, res) => {
+  try {
+    const id = celoId(req.params.id);
+    if (!id) return res.status(400).send("Invalid user id.");
+    const b = req.body || {};
+    const sets = [], vrednosti = [];
+    const dodaj = (k, v) => { vrednosti.push(v); sets.push(`${k} = $${vrednosti.length}`); };
+    let prekliciZetone = false;
+
+    if (b.role !== undefined) {
+      if (!["user", "business", "admin"].includes(b.role)) return res.status(400).send("role must be user, business or admin.");
+      // Admin si sam ne more vzeti vloge: sicer bi lahko ostal panel brez admina.
+      if (id === req.user.userId && b.role !== "admin") return res.status(400).send("You cannot remove your own admin role.");
+      dodaj("role", b.role);
+      // Nova vloga v žetonu šele ob osvežitvi; odvzem admina naj velja takoj, ko poteče dostopni žeton (1 h).
+      prekliciZetone = true;
+    }
+    if (b.unlock !== undefined) {
+      if (b.unlock !== true) return res.status(400).send("unlock must be true.");
+      dodaj("failed_login_count", 0);
+      dodaj("locked_until", null);
+    }
+    // Ročna potrditev e-naslova: nadomešča migracijo 005, dokler Resend ne
+    // pošilja vsem (domena outly.si še ni potrjena).
+    if (b.emailVerified !== undefined) {
+      if (b.emailVerified !== true) return res.status(400).send("emailVerified can only be set to true.");
+      dodaj("email_verified", true);
+    }
+    if (sets.length === 0) return res.status(400).send("Nothing to update.");
+
+    vrednosti.push(id);
+    const r = await pool.query(
+      `UPDATE users SET ${sets.join(", ")} WHERE id = $${vrednosti.length}
+       RETURNING ${ADMIN_POLJA_UPORABNIKA}`, vrednosti
+    );
+    if (r.rows.length === 0) return res.status(404).send("User not found.");
+    if (prekliciZetone) await prekliciVseZetone(id);
+    if (b.emailVerified === true) {
+      await pool.query("UPDATE email_verification_codes SET used_at=NOW() WHERE user_id=$1 AND used_at IS NULL", [id]);
+    }
+    console.log(`Admin ${req.user.userId} spremenil uporabnika ${id}:`, JSON.stringify(b));
+    return res.status(200).json(r.rows[0]);
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// --- dogodki ---
+admin.get("/events", async (req, res) => {
+  try {
+    const p = [];
+    const pogoji = [];
+    if (req.query.status) {
+      if (!["draft", "published", "cancelled"].includes(String(req.query.status))) return res.status(400).send("Invalid status.");
+      p.push(String(req.query.status)); pogoji.push(`e.status = $${p.length}`);
+    }
+    if (req.query.clubId) {
+      const cid = celoId(req.query.clubId);
+      if (!cid) return res.status(400).send("Invalid clubId.");
+      p.push(cid); pogoji.push(`e.club_id = $${p.length}`);
+    }
+    const kje = pogoji.length ? "WHERE " + pogoji.join(" AND ") : "";
+    const r = await pool.query(
+      `SELECT e.id, e.club_id, c.name AS club_name, c.hidden AS club_hidden, e.title, e.poster_url,
+              e.start_at, e.end_at, e.min_age, e.genres, e.status, e.ticket_price_cents, e.currency,
+              e.ticket_url, e.created_at
+       FROM events e JOIN clubs c ON c.id = e.club_id
+       ${kje} ORDER BY e.start_at DESC LIMIT 500`, p
+    );
+    return res.json(r.rows);
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// Umik dogodka: status -> cancelled. Ne briše: če bodo kdaj prodane vstopnice,
+// so naročila računovodski dokument (glej DELETE /events/:id).
+admin.patch("/events/:id", async (req, res) => {
+  try {
+    const id = celoId(req.params.id);
+    if (!id) return res.status(400).send("Invalid event id.");
+    const status = (req.body || {}).status;
+    if (!["draft", "published", "cancelled"].includes(status)) return res.status(400).send("status must be draft, published or cancelled.");
+    const r = await pool.query(
+      `UPDATE events SET status=$2 WHERE id=$1
+       RETURNING id, club_id, title, start_at, status`, [id, status]
+    );
+    if (r.rows.length === 0) return res.status(404).send("Event not found.");
+    console.log(`Admin ${req.user.userId} dogodek ${id} -> ${status}`);
+    return res.status(200).json(r.rows[0]);
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+app.use("/admin/api", admin);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("Server running on port", port));
