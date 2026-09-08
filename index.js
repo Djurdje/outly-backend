@@ -2412,7 +2412,7 @@ app.get("/business/sales", requireAuth, requireRole("business", "admin"), async 
   try {
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
-    const [povzetek, poDogodkih, zadnja] = await Promise.all([
+    const [povzetek, poDogodkih, zadnja, poDnevih] = await Promise.all([
       pool.query(
         `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
@@ -2434,6 +2434,15 @@ app.get("/business/sales", requireAuth, requireRole("business", "admin"), async 
         `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, u.username AS buyer_username
          FROM orders o JOIN events e ON e.id = o.event_id LEFT JOIN users u ON u.id = o.user_id
          WHERE o.club_id = $1 ORDER BY o.created_at DESC LIMIT 30`, [klub]),
+      // Zadnjih 14 dni po dnevih (tudi dnevi brez prodaje), za graf v nadzorni plosci.
+      pool.query(
+        `SELECT to_char(d.dan, 'YYYY-MM-DD') AS day,
+                COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
+                COALESCE(SUM(o.quantity),0)::int AS tickets
+         FROM generate_series((CURRENT_DATE - INTERVAL '13 days')::date, CURRENT_DATE, '1 day') AS d(dan)
+         LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded')
+              AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
+         GROUP BY d.dan ORDER BY d.dan`, [klub]),
     ]);
     return res.json({
       mode: testniNacinPlacil() ? "test" : "live",
@@ -2441,6 +2450,7 @@ app.get("/business/sales", requireAuth, requireRole("business", "admin"), async 
       summary: povzetek.rows[0],
       events: poDogodkih.rows,
       recent_orders: zadnja.rows,
+      sales_by_day: poDnevih.rows,
     });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
