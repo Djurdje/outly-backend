@@ -220,3 +220,48 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 CREATE INDEX IF NOT EXISTS refresh_tokens_user_idx
     ON refresh_tokens (user_id, revoked_at);
 
+
+-- =============================================================================
+-- Admin panel (migracija 006)
+-- =============================================================================
+
+-- Klub se lahko skrije namesto izbriše (izbris bi kaskadno pobral dogodke in
+-- naročila). Skrit klub ni v /clubs, /clubs/map, /search, javnih /events;
+-- lastnik ga v poslovnem delu še vedno vidi.
+-- ALTER TABLE clubs ADD COLUMN hidden BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Prošnje ustvarjalcev (aplikacija: "Request for creator", POST /creator-applications).
+-- Admin jih v panelu odobri: uporabnik z e-naslovom prošnje dobi vlogo
+-- 'business' in prazen klub z imenom iz prošnje. Ista polja kot obrazec
+-- Creator.html na spletni strani.
+CREATE TABLE IF NOT EXISTS creator_applications (
+    id               SERIAL PRIMARY KEY,
+    user_id          INTEGER     REFERENCES users(id) ON DELETE SET NULL,  -- oddal prijavljen uporabnik (ali NULL)
+    business_name    TEXT        NOT NULL,
+    business_type    TEXT        NOT NULL DEFAULT '',
+    business_address TEXT        NOT NULL DEFAULT '',
+    city             TEXT        NOT NULL DEFAULT '',
+    licence_id       TEXT        NOT NULL DEFAULT '',
+    contact_name     TEXT        NOT NULL,
+    contact_role     TEXT        NOT NULL DEFAULT '',
+    email            TEXT        NOT NULL,
+    phone            TEXT        NOT NULL DEFAULT '',
+    message          TEXT        NOT NULL DEFAULT '',
+    status           TEXT        NOT NULL DEFAULT 'new',     -- new | approved | rejected
+    decided_at       TIMESTAMPTZ,
+    decided_by       INTEGER     REFERENCES users(id) ON DELETE SET NULL,
+    decision_note    TEXT        NOT NULL DEFAULT '',
+    club_id          INTEGER     REFERENCES clubs(id) ON DELETE SET NULL,  -- klub, ki je nastal ob odobritvi
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT ca_status_chk        CHECK (status IN ('new', 'approved', 'rejected')),
+    CONSTRAINT ca_business_name_chk CHECK (LENGTH(TRIM(business_name)) BETWEEN 2 AND 120),
+    CONSTRAINT ca_contact_name_chk  CHECK (LENGTH(TRIM(contact_name)) BETWEEN 2 AND 120),
+    CONSTRAINT ca_email_chk         CHECK (email ~* '^[^@[:space:]]+@[^@[:space:].]+\.[^@[:space:]]+$'
+                                           AND LENGTH(email) BETWEEN 5 AND 254),
+    CONSTRAINT ca_decided_chk       CHECK ((status = 'new') = (decided_at IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS ca_status_created_idx ON creator_applications (status, created_at);
+-- En sam odprt postopek na e-naslov.
+CREATE UNIQUE INDEX IF NOT EXISTS ca_email_open_key ON creator_applications (LOWER(email)) WHERE status = 'new';
