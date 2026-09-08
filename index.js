@@ -1355,6 +1355,16 @@ const STOLPCI_DOGODKA = `
         ticket_price_cents,
         currency,
         ticket_url,
+        capacity,
+        sold_count,
+        -- Zaloga za oznake v aplikaciji ("Sold out", "Few left"). sold_count vodi
+        -- sprozilec iz migracije 002; capacity NULL = brez omejitve.
+        CASE
+          WHEN ticket_price_cents IS NULL THEN 'external'
+          WHEN capacity IS NOT NULL AND sold_count >= capacity THEN 'sold_out'
+          WHEN capacity IS NOT NULL AND capacity - sold_count <= GREATEST(5, capacity / 10) THEN 'few_left'
+          ELSE 'available'
+        END AS availability,
         CASE
           WHEN start_at > NOW() THEN 'coming_soon'
           ELSE 'popular'
@@ -1450,6 +1460,11 @@ app.post("/events", requireAuth, requireRole("business", "admin"), async (req, r
     const ticketPriceCents = req.body.ticketPriceCents ?? req.body.ticket_price_cents ?? null;
     const currency = (req.body.currency ?? "EUR").toString();
     const ticketUrl = (req.body.ticketUrl ?? req.body.ticket_url ?? "").toString();
+    const capacity = req.body.capacity ?? null;
+    if (capacity !== null) {
+      const c = Number(capacity);
+      if (!Number.isInteger(c) || c < 1 || c > 100000) return res.status(400).send("capacity must be a positive integer.");
+    }
 
     if (!clubId || !title || !startAt) return res.status(400).send("Missing clubId, title or startAt.");
     if (!/^\d+$/.test(String(clubId))) return res.status(400).send("Invalid clubId.");
@@ -1486,10 +1501,10 @@ app.post("/events", requireAuth, requireRole("business", "admin"), async (req, r
       (
         club_id, title, description, poster_url, start_at, end_at,
         min_age, genres, status,
-        ticket_price_cents, currency, ticket_url
+        ticket_price_cents, currency, ticket_url, capacity
       )
       VALUES
-      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       RETURNING *`,
       [
         clubId,
@@ -1503,7 +1518,8 @@ app.post("/events", requireAuth, requireRole("business", "admin"), async (req, r
         status,
         ticketPriceCents,
         currency,
-        ticketUrl
+        ticketUrl,
+        capacity
       ]
     );
 
@@ -1570,8 +1586,13 @@ app.patch("/events/:id", requireAuth, requireRole("business", "admin"), async (r
       ticket_price_cents: b.ticketPriceCents ?? b.ticket_price_cents,
       currency:           b.currency,
       ticket_url:         b.ticketUrl        ?? b.ticket_url,
+      capacity:           b.capacity,
     };
 
+    if (dovoljeno.capacity !== undefined && dovoljeno.capacity !== null) {
+      const c = Number(dovoljeno.capacity);
+      if (!Number.isInteger(c) || c < 1 || c > 100000) return res.status(400).send("capacity must be a positive integer.");
+    }
     if (dovoljeno.status !== undefined &&
         !["draft","published","cancelled"].includes(dovoljeno.status)) {
       return res.status(400).send("status must be draft, published or cancelled.");
