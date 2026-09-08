@@ -15,6 +15,11 @@ app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json());
 
+// BIGINT (OID 20) pride iz pg kot niz ("1"); orders.id in tickets.id sta BIGSERIAL
+// in aplikacija ju dekodira kot Int. Vrednosti so daleč pod 2^53, zato je varno.
+const pgTipi = require("pg").types;
+pgTipi.setTypeParser(20, (v) => (v === null ? null : parseInt(v, 10)));
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
