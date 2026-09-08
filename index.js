@@ -1273,8 +1273,23 @@ app.patch("/business/clubs/me", requireAuth, requireRole("business", "admin"), a
       city: body.city,
       country: body.country,
       lat: body.lat,
-      lng: body.lng
+      lng: body.lng,
+      // Doslej ju lastnik ni mogel nastaviti (samo admin) — ClubInfoView ju rabi.
+      genres: body.genres,
+      min_age: body.min_age ?? body.minAge
     };
+
+    if (incoming.genres !== undefined) {
+      if (!Array.isArray(incoming.genres)) return res.status(400).send("genres must be an array.");
+      incoming.genres = [...new Set(incoming.genres.map(g => String(g).trim().toLowerCase()))];
+      const neznani = incoming.genres.filter(g => !ZANRI.includes(g));
+      if (neznani.length) return res.status(400).json({ error: "unknown_genres", unknown: neznani, allowed: ZANRI });
+    }
+    if (incoming.min_age !== undefined) {
+      const n = Number(incoming.min_age);
+      if (!Number.isInteger(n) || n < 0 || n > 99) return res.status(400).send("minAge must be between 0 and 99.");
+      incoming.min_age = n;
+    }
 
     // build dynamic UPDATE only for provided keys
     const sets = [];
@@ -2191,6 +2206,275 @@ admin.patch("/events/:id", async (req, res) => {
 });
 
 app.use("/admin/api", admin);
+
+// ---------------------------
+// VSTOPNICE: nakup, moje vstopnice, prodaja kluba, skeniranje
+// ---------------------------
+// Model je v migraciji 002 (orders, tickets, sprožilci za zalogo). Denar:
+// prodajalec je KLUB, Outly je posrednik s provizijo (application_fee).
+//
+// NAČIN PLAČILA. Stripe Connect še ni vključen (rabi Stripe račun in odločitev
+// o proviziji). Do takrat deluje TESTNI NAČIN: naročilo se takoj označi kot
+// plačano, denar se ne premakne, naročilo dobi oznako test_ v
+// stripe_payment_intent_id in odgovor nosi mode:"test". Testni način je
+// dovoljen SAMO, dokler STRIPE_SECRET_KEY ni nastavljen (ali izrecno
+// TEST_PLACILA=true). Ko pride Stripe, ta pot dobi PaymentIntent in webhook;
+// vse ostalo (zaloga, vstopnice, QR, skener, prodaja) ostane.
+const PROVIZIJA_ODSTOTEK = Number(process.env.PROVIZIJA_ODSTOTEK || 10); // ODLOČITEV MARTINA — začasno 10 %
+const NAJVEC_NA_NAROCILO = 10;
+
+function testniNacinPlacil() {
+  if (process.env.TEST_PLACILA === "true") return true;
+  return !process.env.STRIPE_SECRET_KEY;
+}
+
+// Koda QR: podpisan JSON, da jo skener preveri tudi brez omrežja (opomba 3 v 002).
+// Skrivnost je QR_SECRET, sicer JWT_SECRET. Zamenjava skrivnosti razveljavi vse kode.
+function qrSkrivnost() { return process.env.QR_SECRET || process.env.JWT_SECRET || ""; }
+function podpisiQr(telo) {
+  const b = Buffer.from(JSON.stringify(telo)).toString("base64url");
+  const s = crypto.createHmac("sha256", qrSkrivnost()).update(b).digest("base64url").slice(0, 32);
+  return `${b}.${s}`;
+}
+function preveriQr(koda) {
+  if (typeof koda !== "string") return null;
+  const deli = koda.trim().split(".");
+  if (deli.length !== 2) return null;
+  const [b, s] = deli;
+  const pricakovan = crypto.createHmac("sha256", qrSkrivnost()).update(b).digest("base64url").slice(0, 32);
+  if (s.length !== pricakovan.length || !crypto.timingSafeEqual(Buffer.from(s), Buffer.from(pricakovan))) return null;
+  try { return JSON.parse(Buffer.from(b, "base64url").toString("utf8")); } catch (_) { return null; }
+}
+function qrVstopnice(t) {
+  return podpisiQr({ v: 1, t: t.serial, e: t.event_id, i: Math.floor(new Date(t.created_at).getTime() / 1000) });
+}
+function javnaRef() {
+  // 8 znakov brez zamenljivih (0/O, 1/I): OUT-7K3M9QPX
+  const abc = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+  let s = ""; const b = crypto.randomBytes(8);
+  for (let i = 0; i < 8; i++) s += abc[b[i] % abc.length];
+  return "OUT-" + s;
+}
+
+const STOLPCI_NAROCILA = `o.id, o.public_ref, o.event_id, o.club_id, o.quantity, o.unit_price_cents, o.total_cents,
+  o.currency, o.application_fee_cents, o.status, o.buyer_email, o.created_at, o.paid_at, o.cancelled_at,
+  o.refunded_cents, (o.stripe_payment_intent_id LIKE 'test_%') AS is_test`;
+const STOLPCI_VSTOPNICE = `t.id, t.order_id, t.event_id, t.serial, t.status, t.used_at, t.created_at`;
+
+async function vstopniceNarocil(idsNarocil) {
+  if (!idsNarocil.length) return {};
+  const r = await pool.query(
+    `SELECT ${STOLPCI_VSTOPNICE} FROM tickets t WHERE t.order_id = ANY($1::bigint[]) ORDER BY t.id`, [idsNarocil]
+  );
+  const po = {};
+  for (const t of r.rows) (po[t.order_id] ||= []).push({ ...t, qr: qrVstopnice(t) });
+  return po;
+}
+
+// POST /events/:id/orders — nakup. Telo: { quantity }.
+app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600 }), async (req, res) => {
+  const id = celoId(req.params.id);
+  if (!id) return res.status(400).send("Invalid event id.");
+  const q = Number((req.body || {}).quantity ?? 1);
+  if (!Number.isInteger(q) || q < 1 || q > NAJVEC_NA_NAROCILO) {
+    return res.status(400).send(`quantity must be an integer between 1 and ${NAJVEC_NA_NAROCILO}.`);
+  }
+  if (!testniNacinPlacil()) {
+    // Stripe je nastavljen, testna pot je izklopljena; prava pot še ni napisana.
+    return res.status(503).send("Payments are not available yet.");
+  }
+
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    const er = await c.query(
+      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
+              e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden
+       FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]
+    );
+    if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+    const e = er.rows[0];
+    if (e.status !== "published" || e.hidden) { await c.query("ROLLBACK"); return res.status(409).send("Event is not on sale."); }
+    if (e.ticket_price_cents === null) { await c.query("ROLLBACK"); return res.status(409).send("This event has no tickets on Outly."); }
+    const zdaj = Date.now();
+    if (new Date(e.start_at).getTime() < zdaj) { await c.query("ROLLBACK"); return res.status(409).send("Event has already started."); }
+    if (e.sales_open_at && new Date(e.sales_open_at).getTime() > zdaj) { await c.query("ROLLBACK"); return res.status(409).send("Ticket sales have not opened yet."); }
+    if (e.sales_close_at && new Date(e.sales_close_at).getTime() < zdaj) { await c.query("ROLLBACK"); return res.status(409).send("Ticket sales are closed."); }
+    if (e.capacity !== null && e.sold_count + q > e.capacity) {
+      await c.query("ROLLBACK"); return res.status(409).send(`Only ${Math.max(0, e.capacity - e.sold_count)} tickets left.`);
+    }
+
+    // Starost: datum rojstva je izjava uporabnika (glej 003), a 17-letniku
+    // vstopnice za 18+ ne prodamo. Brez datuma rojstva nakup za 18+ ni mogoč.
+    const ur = await c.query("SELECT email, starost(date_of_birth) AS leta FROM users WHERE id=$1", [req.user.userId]);
+    if (ur.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("User not found."); }
+    const u = ur.rows[0];
+    if (e.min_age > 0) {
+      if (u.leta === null) { await c.query("ROLLBACK"); return res.status(403).send("Add your date of birth to buy tickets for this event."); }
+      if (u.leta < e.min_age) { await c.query("ROLLBACK"); return res.status(403).send(`You must be at least ${e.min_age} to buy tickets for this event.`); }
+    }
+
+    const skupaj = e.ticket_price_cents * q;
+    const provizija = Math.round(skupaj * PROVIZIJA_ODSTOTEK / 100);
+    const ref = javnaRef();
+    const pi = "test_" + crypto.randomUUID();
+
+    // Sprožilec orders_rezerviraj zaklene dogodek in preveri zalogo še enkrat.
+    const or = await c.query(
+      `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency,
+                           application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'paid',$11,$12,NOW()) RETURNING id`,
+      [ref, req.user.userId, e.id, e.club_id, q, e.ticket_price_cents, skupaj, e.currency, provizija, e.vat_rate, pi, u.email]
+    );
+    const oid = or.rows[0].id;
+    await c.query(
+      `INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, q]
+    );
+    await c.query("COMMIT");
+
+    const nr = await pool.query(`SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name
+       FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id WHERE o.id = $1`, [oid]);
+    const vst = await vstopniceNarocil([oid]);
+    console.log(`Nakup (test): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, ${q}x ${e.ticket_price_cents} c`);
+    return res.status(201).json({ mode: "test", order: nr.rows[0], tickets: vst[oid] || [] });
+  } catch (err) {
+    await c.query("ROLLBACK").catch(() => {});
+    // Sprožilec: "Ni dovolj vstopnic" pride kot check_violation.
+    if (err && err.code === "23514") return res.status(409).send(/Ni dovolj/.test(err.message) ? "Not enough tickets left." : "Order rejected: " + (err.constraint || err.message));
+    console.error(err);
+    return res.status(500).send("Server error.");
+  } finally { c.release(); }
+});
+
+// GET /me/orders — moja naročila z vstopnicami.
+app.get("/me/orders", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name
+       FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id
+       WHERE o.user_id = $1 ORDER BY o.created_at DESC LIMIT 100`, [req.user.userId]
+    );
+    const vst = await vstopniceNarocil(r.rows.map(o => o.id));
+    return res.json(r.rows.map(o => ({ ...o, tickets: vst[o.id] || [] })));
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// GET /me/tickets — moje vstopnice (plačana naročila), prihajajoče najprej.
+app.get("/me/tickets", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT ${STOLPCI_VSTOPNICE}, o.public_ref, o.status AS order_status,
+              e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
+              cl.id AS club_id, cl.name AS club_name, cl.address, cl.city, cl.logo_url
+       FROM tickets t JOIN orders o ON o.id = t.order_id
+       JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id
+       WHERE o.user_id = $1 AND o.status IN ('paid','partially_refunded')
+       ORDER BY (e.start_at >= NOW()) DESC, e.start_at ASC, t.id ASC LIMIT 200`, [req.user.userId]
+    );
+    return res.json(r.rows.map(t => ({ ...t, qr: qrVstopnice(t) })));
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// --- poslovni del: prodaja ---
+async function mojKlubId(req) {
+  const r = await pool.query("SELECT id FROM clubs WHERE owner_user_id=$1 LIMIT 1", [req.user.userId]);
+  return r.rows.length ? r.rows[0].id : null;
+}
+
+// GET /business/sales — povzetek prodaje lastnega kluba, po dogodkih, zadnja naročila.
+app.get("/business/sales", requireAuth, requireRole("business", "admin"), async (req, res) => {
+  try {
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    const [povzetek, poDogodkih, zadnja] = await Promise.all([
+      pool.query(
+        `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
+                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
+                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents),0)::int AS net_cents,
+                COALESCE(SUM(o.quantity),0)::int AS tickets_sold,
+                COUNT(*)::int AS orders,
+                COUNT(DISTINCT o.user_id)::int AS buyers,
+                COALESCE(SUM(o.total_cents) FILTER (WHERE o.created_at > NOW() - INTERVAL '7 days'),0)::int AS gross_7d_cents,
+                COALESCE(SUM(o.quantity) FILTER (WHERE o.created_at > NOW() - INTERVAL '7 days'),0)::int AS tickets_7d
+         FROM orders o WHERE o.club_id = $1 AND o.status IN ('paid','partially_refunded')`, [klub]),
+      pool.query(
+        `SELECT e.id, e.title, e.start_at, e.poster_url, e.status, e.ticket_price_cents, e.capacity, e.sold_count,
+                COALESCE(SUM(o.total_cents) FILTER (WHERE o.status IN ('paid','partially_refunded')),0)::int AS gross_cents,
+                COALESCE(SUM(o.quantity) FILTER (WHERE o.status IN ('paid','partially_refunded')),0)::int AS tickets_sold,
+                (SELECT COUNT(*)::int FROM tickets t WHERE t.event_id = e.id AND t.status = 'used') AS checked_in
+         FROM events e LEFT JOIN orders o ON o.event_id = e.id
+         WHERE e.club_id = $1 GROUP BY e.id ORDER BY e.start_at DESC LIMIT 100`, [klub]),
+      pool.query(
+        `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, u.username AS buyer_username
+         FROM orders o JOIN events e ON e.id = o.event_id LEFT JOIN users u ON u.id = o.user_id
+         WHERE o.club_id = $1 ORDER BY o.created_at DESC LIMIT 30`, [klub]),
+    ]);
+    return res.json({
+      mode: testniNacinPlacil() ? "test" : "live",
+      fee_percent: PROVIZIJA_ODSTOTEK,
+      summary: povzetek.rows[0],
+      events: poDogodkih.rows,
+      recent_orders: zadnja.rows,
+    });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// GET /business/events/:id/tickets — vstopnice dogodka (za vrata: kdo je prišel).
+app.get("/business/events/:id/tickets", requireAuth, requireRole("business", "admin"), async (req, res) => {
+  try {
+    const id = celoId(req.params.id);
+    if (!id) return res.status(400).send("Invalid event id.");
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    const r = await pool.query(
+      `SELECT ${STOLPCI_VSTOPNICE}, o.public_ref, o.buyer_email, u.username AS buyer_username
+       FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id
+       LEFT JOIN users u ON u.id = o.user_id
+       WHERE t.event_id = $1 AND e.club_id = $2 ORDER BY t.id LIMIT 1000`, [id, klub]
+    );
+    return res.json(r.rows.map(t => ({ ...t, qr: qrVstopnice(t) })));
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// POST /business/tickets/scan — skener na vratih. Telo: { qr } (ali { serial } za ročni vnos).
+// Preveri podpis, lastništvo, stanje; vstopnico označi kot uporabljeno. Ponovni sken -> 409.
+app.post("/business/tickets/scan", requireAuth, requireRole("business", "admin"), async (req, res) => {
+  try {
+    const b = req.body || {};
+    let serial = null, ev = null;
+    if (b.qr !== undefined) {
+      const v = preveriQr(b.qr);
+      if (!v || !v.t) return res.status(400).json({ result: "invalid", message: "QR code is not valid (bad signature)." });
+      serial = String(v.t); ev = v.e;
+    } else if (typeof b.serial === "string") {
+      serial = b.serial.trim();
+    } else return res.status(400).send("qr or serial is required.");
+    if (!/^[0-9a-f-]{36}$/i.test(serial)) return res.status(400).json({ result: "invalid", message: "Ticket code is not valid." });
+
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+
+    const r = await pool.query(
+      `SELECT ${STOLPCI_VSTOPNICE}, e.club_id, e.title AS event_title, e.start_at, o.status AS order_status, o.public_ref, o.buyer_email
+       FROM tickets t JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = t.order_id WHERE t.serial = $1`, [serial]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ result: "unknown", message: "Ticket not found." });
+    const t = r.rows[0];
+    if (t.club_id !== klub) return res.status(403).json({ result: "wrong_club", message: "This ticket is for another club's event." });
+    if (ev !== undefined && ev !== null && Number(ev) !== t.event_id) return res.status(400).json({ result: "invalid", message: "QR code does not match the ticket." });
+    if (!["paid", "partially_refunded"].includes(t.order_status)) return res.status(409).json({ result: "unpaid", message: "Order is not paid." });
+    if (t.status === "used") return res.status(409).json({ result: "already_used", message: "Ticket was already scanned.", used_at: t.used_at, ticket: t });
+    if (t.status !== "valid") return res.status(409).json({ result: t.status, message: `Ticket is ${t.status}.`, ticket: t });
+
+    const u = await pool.query(
+      `UPDATE tickets SET status='used', used_at=NOW(), used_by_user_id=$2, scan_device=$3
+       WHERE id=$1 AND status='valid' RETURNING id, serial, status, used_at`,
+      [t.id, req.user.userId, String(req.headers["user-agent"] || "").slice(0, 100)]
+    );
+    if (u.rows.length === 0) return res.status(409).json({ result: "already_used", message: "Ticket was already scanned." });
+    return res.status(200).json({ result: "ok", message: "Welcome in.", ticket: { ...t, ...u.rows[0] } });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("Server running on port", port));
