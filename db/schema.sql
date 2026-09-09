@@ -1,267 +1,1063 @@
 -- =============================================================================
--- Outly — shema podatkovne baze
+-- Outly — shema podatkovne baze (GENERIRANA, ne urejaj rocno)
 -- =============================================================================
--- POZOR: to je REKONSTRUKCIJA, izpeljana iz poizvedb v index.js in iz tipov
--- v modelih Swift (APIClub, APIEvent, Me). Ni izvožena iz žive baze.
+-- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
+-- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
+-- kateri so bile pognane vse migracije 000–008, in sluzi samo za branje:
+-- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
--- Preden to uporabiš kot vir resnice, poženi db/preveri_shemo.sql na živi bazi
--- in razlike razreši. Šele nato je ta datoteka merodajna.
---
--- Namen: da baze ni mogoče izgubiti. Do zdaj je struktura obstajala samo
--- v živi bazi na Renderju in je nihče ni znal postaviti nazaj.
--- =============================================================================
-
-BEGIN;
-
--- -----------------------------------------------------------------------------
--- users
--- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS users (
-    id              SERIAL PRIMARY KEY,
-    email           TEXT        NOT NULL,
-    password_hash   TEXT        NOT NULL,
-    username        TEXT        NOT NULL,
-    role            TEXT        NOT NULL DEFAULT 'user',
-    avatar_url      TEXT,
-    email_verified  BOOLEAN     NOT NULL DEFAULT FALSE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    -- Zaklep računa po zaporednih napačnih prijavah (najdba S-02).
-    -- Omejevanje po IP naslovu se zaobide z menjavo naslova, to ne.
-    failed_login_count SMALLINT NOT NULL DEFAULT 0,
-    locked_until    TIMESTAMPTZ,
-
-    CONSTRAINT users_role_chk  CHECK (role IN ('user', 'business', 'admin')),
-    CONSTRAINT users_email_chk CHECK (POSITION('@' IN email) > 1)
-);
-
--- E-pošta se v aplikaciji povsod pretvori v male črke pred vpisom in iskanjem,
--- zato zadošča navaden unikatni indeks. Če to kdaj ne bi držalo, uporabi
--- CREATE UNIQUE INDEX ... ON users (LOWER(email)).
-CREATE UNIQUE INDEX IF NOT EXISTS users_email_key ON users (email);
-
--- NAPAKA V OBSTOJEČI KODI: uporabniško ime se NE pretvori v male črke,
--- zato sta "Martin" in "martin" danes dva različna uporabnika.
--- Ta indeks to prepreči. Ob uvedbi lahko naleti na obstoječe dvojnike —
--- najprej poženi poizvedbo za iskanje dvojnikov v db/preveri_shemo.sql.
-CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_key ON users (LOWER(username));
-
--- -----------------------------------------------------------------------------
--- email_verification_codes
--- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS email_verification_codes (
-    id          SERIAL PRIMARY KEY,
-    user_id     INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    code_hash   TEXT        NOT NULL,
-    expires_at  TIMESTAMPTZ NOT NULL,
-    used_at     TIMESTAMPTZ,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    -- Brez tega je šestmestno kodo mogoče ugibati neomejeno hitro (najdba S-03).
-    -- Po petih napačnih poskusih se koda razveljavi.
-    attempts    SMALLINT    NOT NULL DEFAULT 0
-);
-
--- Backend vedno išče zadnjo neporabljeno kodo uporabnika.
-CREATE INDEX IF NOT EXISTS evc_user_active_idx
-    ON email_verification_codes (user_id, created_at DESC)
-    WHERE used_at IS NULL;
-
--- -----------------------------------------------------------------------------
--- password_reset_codes
--- -----------------------------------------------------------------------------
--- Pozabljeno geslo. Do septembra 2026 tega ni bilo — kdor je pozabil geslo,
--- je bil trajno zaklenjen iz računa. Enaka oblika kot email_verification_codes,
--- da je logika v backendu enotna.
-CREATE TABLE IF NOT EXISTS password_reset_codes (
-    id          SERIAL PRIMARY KEY,
-    user_id     INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    code_hash   TEXT        NOT NULL,
-    expires_at  TIMESTAMPTZ NOT NULL,
-    used_at     TIMESTAMPTZ,
-    attempts    SMALLINT    NOT NULL DEFAULT 0,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS prc_user_active_idx
-    ON password_reset_codes (user_id, created_at DESC)
-    WHERE used_at IS NULL;
-
--- -----------------------------------------------------------------------------
--- clubs
--- -----------------------------------------------------------------------------
--- Vsi besedilni stolpci so NOT NULL DEFAULT '' namenoma: model APIClub v Swiftu
--- jih deklarira kot navaden String, ne String?. Ena sama vrednost NULL v bazi
--- zato razbije dekodiranje CELOTNEGA seznama klubov v aplikaciji, ne le ene
--- vrstice. Backend že vsiljuje `|| ""`, baza to zdaj tudi jamči.
-CREATE TABLE IF NOT EXISTS clubs (
-    id              SERIAL PRIMARY KEY,
-    owner_user_id   INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-
-    name            TEXT        NOT NULL,
-    logo_url        TEXT        NOT NULL DEFAULT '',
-    banner_url      TEXT        NOT NULL DEFAULT '',
-    description     TEXT        NOT NULL DEFAULT '',
-
-    contact_email   TEXT        NOT NULL DEFAULT '',
-    contact_phone   TEXT        NOT NULL DEFAULT '',
-    instagram       TEXT        NOT NULL DEFAULT '',
-    website         TEXT        NOT NULL DEFAULT '',
-
-    address         TEXT        NOT NULL DEFAULT '',
-    city            TEXT        NOT NULL DEFAULT '',
-    country         TEXT        NOT NULL DEFAULT '',
-
-    lat             DOUBLE PRECISION,
-    lng             DOUBLE PRECISION,
-
-    min_age         SMALLINT    NOT NULL DEFAULT 18,
-    genres          TEXT[]      NOT NULL DEFAULT '{}',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT clubs_name_chk    CHECK (LENGTH(TRIM(name)) > 0),
-    CONSTRAINT clubs_lat_chk     CHECK (lat IS NULL OR lat BETWEEN -90  AND 90),
-    CONSTRAINT clubs_lng_chk     CHECK (lng IS NULL OR lng BETWEEN -180 AND 180),
-    CONSTRAINT clubs_min_age_chk CHECK (min_age BETWEEN 0 AND 99),
-    -- Koordinati sta smiselni samo v paru; zemljevid filtrira `lat != nil && lng != nil`.
-    CONSTRAINT clubs_coords_chk  CHECK ((lat IS NULL) = (lng IS NULL))
-);
-
-CREATE INDEX IF NOT EXISTS clubs_owner_idx   ON clubs (owner_user_id);
-CREATE INDEX IF NOT EXISTS clubs_created_idx ON clubs (created_at DESC);
-
--- ODPRTA ODLOČITEV (najdba T-05): POST /clubs danes ne omejuje števila klubov
--- na lastnika, GET /business/clubs/me pa vzame LIMIT 1 — drugi klub postane
--- neviden in neurejljiv. Če velja "en klub na poslovni račun", odkomentiraj:
--- CREATE UNIQUE INDEX IF NOT EXISTS clubs_one_per_owner_key ON clubs (owner_user_id);
-
--- -----------------------------------------------------------------------------
--- events
--- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS events (
-    id                  SERIAL PRIMARY KEY,
-    club_id             INTEGER     NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
-
-    title               TEXT        NOT NULL,
-    description         TEXT        NOT NULL DEFAULT '',
-    poster_url          TEXT        NOT NULL DEFAULT '',
-
-    start_at            TIMESTAMPTZ NOT NULL,
-    end_at              TIMESTAMPTZ,
-
-    min_age             SMALLINT    NOT NULL DEFAULT 18,
-    genres              TEXT[]      NOT NULL DEFAULT '{}',
-    status              TEXT        NOT NULL DEFAULT 'published',
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    -- Prikazni polji. Prodaje vstopnic v aplikaciji ni: ticket_url je povezava
-    -- na TUJO prodajo. Ko pride Stripe, to nadomestita tabeli orders in tickets.
-    ticket_price_cents  INTEGER,
-    currency            CHAR(3)     NOT NULL DEFAULT 'EUR',
-    ticket_url          TEXT        NOT NULL DEFAULT '',
-
-    CONSTRAINT events_title_chk   CHECK (LENGTH(TRIM(title)) > 0),
-    CONSTRAINT events_status_chk  CHECK (status IN ('draft', 'published', 'cancelled')),
-    CONSTRAINT events_price_chk   CHECK (ticket_price_cents IS NULL OR ticket_price_cents >= 0),
-    CONSTRAINT events_min_age_chk CHECK (min_age BETWEEN 0 AND 99),
-    CONSTRAINT events_end_chk     CHECK (end_at IS NULL OR end_at > start_at)
-);
-
--- GET /events razvršča po start_at in filtrira po club_id ter start_at > NOW().
-CREATE INDEX IF NOT EXISTS events_start_idx       ON events (start_at);
-CREATE INDEX IF NOT EXISTS events_club_start_idx  ON events (club_id, start_at);
-
-COMMIT;
-
--- =============================================================================
--- OPOMBE, KI JIH JE TREBA REŠITI
--- =============================================================================
---
--- 1. TIMESTAMPTZ, ne TIMESTAMP. Če je v živi bazi start_at navaden TIMESTAMP
---    brez časovnega pasu, se bodo uri dogodkov ob prehodu na zimski oz. letni
---    čas premaknile za eno uro. Za aplikacijo, kjer je "ob 23.00" bistvo
---    izdelka, je to resna napaka. Preveri in po potrebi pretvori.
---
--- 2. Stolpec role je danes ob registraciji NEnastavljen (INSERT ga izpusti).
---    Če v živi bazi ni privzete vrednosti, so novi uporabniki NULL, requireRole
---    pa jih tiho zavrne. Ta shema postavlja DEFAULT 'user'.
---
--- 3. ON DELETE CASCADE na clubs.owner_user_id in events.club_id je pogoj za
---    brisanje računa, ki ga zahteva Apple (najdba A-01). Brez tega izbris
---    uporabnika ne bo mogoč zaradi tujih ključev.
---
--- 4. Za obstoječo bazo poženi db/migracije/001_varnost.sql — doda attempts,
---    failed_login_count, locked_until in tabelo password_reset_codes.
---
--- 5. Ko pridejo plačila, se dodajo orders, tickets, refunds in payouts.
---    Ta datoteka ostane vir resnice — vsaka sprememba baze gre skozi migracijo,
---    nikoli več neposredno v živo bazo.
-
--- refresh_tokens (migracija 004, S-06)
-
-
-CREATE TABLE IF NOT EXISTS refresh_tokens (
-    id          SERIAL PRIMARY KEY,
-    user_id     INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- SHA-256 odtis žetona. Sam žeton se ne hrani: če kdo prebere bazo,
-    -- iz odtisa ne more sestaviti veljavnega žetona.
-    token_hash  TEXT        NOT NULL UNIQUE,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at  TIMESTAMPTZ NOT NULL,
-    -- Kdaj je bil preklican (odjava, rotacija, ponastavitev gesla). NULL = veljaven.
-    revoked_at  TIMESTAMPTZ,
-    -- Ob rotaciji: kateri žeton ga je nadomestil. Če se stari žeton uporabi
-    -- ŠE ENKRAT po rotaciji, je to znak kraje in prekličemo vse uporabnikove.
-    replaced_by INTEGER     REFERENCES refresh_tokens(id) ON DELETE SET NULL,
-    -- Kratek opis naprave (User-Agent), samo za pregled sej. Neobvezno.
-    device      TEXT        NOT NULL DEFAULT ''
-);
-
-CREATE INDEX IF NOT EXISTS refresh_tokens_user_idx
-    ON refresh_tokens (user_id, revoked_at);
-
-
--- =============================================================================
--- Admin panel (migracija 006)
+-- Osvezi po vsaki novi migraciji:
+--   pg_dump --schema-only --no-owner --no-privileges "$DATABASE_URL" > db/schema.sql
+-- (in ta glava nazaj na vrh). Prejsnja rocna rekonstrukcija je bila zastarela
+-- (ni imela orders/tickets/refresh_tokens/...) — zato zdaj izvoz.
 -- =============================================================================
 
--- Klub se lahko skrije namesto izbriše (izbris bi kaskadno pobral dogodke in
--- naročila). Skrit klub ni v /clubs, /clubs/map, /search, javnih /events;
--- lastnik ga v poslovnem delu še vedno vidi.
--- ALTER TABLE clubs ADD COLUMN hidden BOOLEAN NOT NULL DEFAULT FALSE;
+--
+-- PostgreSQL database dump
+--
 
--- Prošnje ustvarjalcev (aplikacija: "Request for creator", POST /creator-applications).
--- Admin jih v panelu odobri: uporabnik z e-naslovom prošnje dobi vlogo
--- 'business' in prazen klub z imenom iz prošnje. Ista polja kot obrazec
--- Creator.html na spletni strani.
-CREATE TABLE IF NOT EXISTS creator_applications (
-    id               SERIAL PRIMARY KEY,
-    user_id          INTEGER     REFERENCES users(id) ON DELETE SET NULL,  -- oddal prijavljen uporabnik (ali NULL)
-    business_name    TEXT        NOT NULL,
-    business_type    TEXT        NOT NULL DEFAULT '',
-    business_address TEXT        NOT NULL DEFAULT '',
-    city             TEXT        NOT NULL DEFAULT '',
-    licence_id       TEXT        NOT NULL DEFAULT '',
-    contact_name     TEXT        NOT NULL,
-    contact_role     TEXT        NOT NULL DEFAULT '',
-    email            TEXT        NOT NULL,
-    phone            TEXT        NOT NULL DEFAULT '',
-    message          TEXT        NOT NULL DEFAULT '',
-    status           TEXT        NOT NULL DEFAULT 'new',     -- new | approved | rejected
-    decided_at       TIMESTAMPTZ,
-    decided_by       INTEGER     REFERENCES users(id) ON DELETE SET NULL,
-    decision_note    TEXT        NOT NULL DEFAULT '',
-    club_id          INTEGER     REFERENCES clubs(id) ON DELETE SET NULL,  -- klub, ki je nastal ob odobritvi
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT ca_status_chk        CHECK (status IN ('new', 'approved', 'rejected')),
-    CONSTRAINT ca_business_name_chk CHECK (LENGTH(TRIM(business_name)) BETWEEN 2 AND 120),
-    CONSTRAINT ca_contact_name_chk  CHECK (LENGTH(TRIM(contact_name)) BETWEEN 2 AND 120),
-    CONSTRAINT ca_email_chk         CHECK (email ~* '^[^@[:space:]]+@[^@[:space:].]+\.[^@[:space:]]+$'
-                                           AND LENGTH(email) BETWEEN 5 AND 254),
-    CONSTRAINT ca_decided_chk       CHECK ((status = 'new') = (decided_at IS NULL))
+
+
+--
+-- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION pgcrypto; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+--
+-- Name: rezerviraj_zalogo(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.rezerviraj_zalogo() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    zmogljivost INTEGER;
+    zasedeno    INTEGER;
+BEGIN
+    -- FOR UPDATE zaklene vrstico dogodka do konca transakcije.
+    SELECT capacity, sold_count INTO zmogljivost, zasedeno
+    FROM events WHERE id = NEW.event_id FOR UPDATE;
+
+    IF zmogljivost IS NOT NULL AND zasedeno + NEW.quantity > zmogljivost THEN
+        RAISE EXCEPTION 'Ni dovolj vstopnic: na voljo %, zahtevano %',
+            zmogljivost - zasedeno, NEW.quantity
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    UPDATE events SET sold_count = sold_count + NEW.quantity WHERE id = NEW.event_id;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: sprosti_zalogo(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sprosti_zalogo() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.status IN ('cancelled','refunded','failed')
+       AND OLD.status NOT IN ('cancelled','refunded','failed') THEN
+        UPDATE events SET sold_count = GREATEST(0, sold_count - OLD.quantity)
+        WHERE id = OLD.event_id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: starost(date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.starost(rojstvo date) RETURNS integer
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT CASE WHEN rojstvo IS NULL THEN NULL
+                ELSE EXTRACT(YEAR FROM AGE(CURRENT_DATE, rojstvo))::INTEGER END;
+$$;
+
+
+
+
+--
+-- Name: clubs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.clubs (
+    id integer NOT NULL,
+    owner_user_id integer NOT NULL,
+    name text NOT NULL,
+    logo_url text DEFAULT ''::text NOT NULL,
+    banner_url text DEFAULT ''::text NOT NULL,
+    description text DEFAULT ''::text NOT NULL,
+    contact_email text DEFAULT ''::text NOT NULL,
+    contact_phone text DEFAULT ''::text NOT NULL,
+    instagram text DEFAULT ''::text NOT NULL,
+    website text DEFAULT ''::text NOT NULL,
+    address text DEFAULT ''::text NOT NULL,
+    city text DEFAULT ''::text NOT NULL,
+    country text DEFAULT ''::text NOT NULL,
+    lat double precision,
+    lng double precision,
+    min_age smallint DEFAULT 18 NOT NULL,
+    genres text[] DEFAULT '{}'::text[] NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    stripe_account_id text,
+    stripe_charges_enabled boolean DEFAULT false NOT NULL,
+    stripe_payouts_enabled boolean DEFAULT false NOT NULL,
+    stripe_onboarded_at timestamp with time zone,
+    hidden boolean DEFAULT false NOT NULL,
+    CONSTRAINT clubs_coords_chk CHECK (((lat IS NULL) = (lng IS NULL))),
+    CONSTRAINT clubs_lat_chk CHECK (((lat IS NULL) OR ((lat >= ('-90'::integer)::double precision) AND (lat <= (90)::double precision)))),
+    CONSTRAINT clubs_lng_chk CHECK (((lng IS NULL) OR ((lng >= ('-180'::integer)::double precision) AND (lng <= (180)::double precision)))),
+    CONSTRAINT clubs_min_age_chk CHECK (((min_age >= 0) AND (min_age <= 99))),
+    CONSTRAINT clubs_name_chk CHECK ((length(TRIM(BOTH FROM name)) > 0))
 );
 
-CREATE INDEX IF NOT EXISTS ca_status_created_idx ON creator_applications (status, created_at);
--- En sam odprt postopek na e-naslov.
-CREATE UNIQUE INDEX IF NOT EXISTS ca_email_open_key ON creator_applications (LOWER(email)) WHERE status = 'new';
+
+--
+-- Name: clubs_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.clubs_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: clubs_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.clubs_id_seq OWNED BY public.clubs.id;
+
+
+--
+-- Name: creator_applications; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.creator_applications (
+    id integer NOT NULL,
+    user_id integer,
+    business_name text NOT NULL,
+    business_type text DEFAULT ''::text NOT NULL,
+    business_address text DEFAULT ''::text NOT NULL,
+    city text DEFAULT ''::text NOT NULL,
+    licence_id text DEFAULT ''::text NOT NULL,
+    contact_name text NOT NULL,
+    contact_role text DEFAULT ''::text NOT NULL,
+    email text NOT NULL,
+    phone text DEFAULT ''::text NOT NULL,
+    message text DEFAULT ''::text NOT NULL,
+    status text DEFAULT 'new'::text NOT NULL,
+    decided_at timestamp with time zone,
+    decided_by integer,
+    decision_note text DEFAULT ''::text NOT NULL,
+    club_id integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ca_business_name_chk CHECK (((length(TRIM(BOTH FROM business_name)) >= 2) AND (length(TRIM(BOTH FROM business_name)) <= 120))),
+    CONSTRAINT ca_contact_name_chk CHECK (((length(TRIM(BOTH FROM contact_name)) >= 2) AND (length(TRIM(BOTH FROM contact_name)) <= 120))),
+    CONSTRAINT ca_decided_chk CHECK (((status = 'new'::text) = (decided_at IS NULL))),
+    CONSTRAINT ca_email_chk CHECK (((email ~* '^[^@[:space:]]+@[^@[:space:].]+\.[^@[:space:]]+$'::text) AND ((length(email) >= 5) AND (length(email) <= 254)))),
+    CONSTRAINT ca_status_chk CHECK ((status = ANY (ARRAY['new'::text, 'approved'::text, 'rejected'::text])))
+);
+
+
+--
+-- Name: creator_applications_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.creator_applications_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: creator_applications_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.creator_applications_id_seq OWNED BY public.creator_applications.id;
+
+
+--
+-- Name: email_verification_codes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.email_verification_codes (
+    id integer NOT NULL,
+    user_id integer NOT NULL,
+    code_hash text NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    used_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    attempts smallint DEFAULT 0 NOT NULL
+);
+
+
+--
+-- Name: email_verification_codes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.email_verification_codes_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: email_verification_codes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.email_verification_codes_id_seq OWNED BY public.email_verification_codes.id;
+
+
+--
+-- Name: events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.events (
+    id integer NOT NULL,
+    club_id integer NOT NULL,
+    title text NOT NULL,
+    description text DEFAULT ''::text NOT NULL,
+    poster_url text DEFAULT ''::text NOT NULL,
+    start_at timestamp with time zone NOT NULL,
+    end_at timestamp with time zone,
+    min_age smallint DEFAULT 18 NOT NULL,
+    genres text[] DEFAULT '{}'::text[] NOT NULL,
+    status text DEFAULT 'published'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    ticket_price_cents integer,
+    currency character(3) DEFAULT 'EUR'::bpchar NOT NULL,
+    ticket_url text DEFAULT ''::text NOT NULL,
+    capacity integer,
+    sold_count integer DEFAULT 0 NOT NULL,
+    vat_rate numeric(4,3),
+    sales_open_at timestamp with time zone,
+    sales_close_at timestamp with time zone,
+    CONSTRAINT events_capacity_chk CHECK (((capacity IS NULL) OR (capacity > 0))),
+    CONSTRAINT events_end_chk CHECK (((end_at IS NULL) OR (end_at > start_at))),
+    CONSTRAINT events_min_age_chk CHECK (((min_age >= 0) AND (min_age <= 99))),
+    CONSTRAINT events_price_chk CHECK (((ticket_price_cents IS NULL) OR (ticket_price_cents >= 0))),
+    CONSTRAINT events_sales_window_chk CHECK (((sales_close_at IS NULL) OR (sales_open_at IS NULL) OR (sales_close_at > sales_open_at))),
+    CONSTRAINT events_sold_chk CHECK (((sold_count >= 0) AND ((capacity IS NULL) OR (sold_count <= capacity)))),
+    CONSTRAINT events_status_chk CHECK ((status = ANY (ARRAY['draft'::text, 'published'::text, 'cancelled'::text]))),
+    CONSTRAINT events_title_chk CHECK ((length(TRIM(BOTH FROM title)) > 0)),
+    CONSTRAINT events_vat_chk CHECK (((vat_rate IS NULL) OR ((vat_rate >= (0)::numeric) AND (vat_rate < (1)::numeric))))
+);
+
+
+--
+-- Name: events_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.events_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: events_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.events_id_seq OWNED BY public.events.id;
+
+
+--
+-- Name: orders; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.orders (
+    id bigint NOT NULL,
+    public_ref text NOT NULL,
+    user_id integer,
+    event_id integer NOT NULL,
+    club_id integer NOT NULL,
+    quantity smallint NOT NULL,
+    unit_price_cents integer NOT NULL,
+    total_cents integer NOT NULL,
+    currency character(3) DEFAULT 'EUR'::bpchar NOT NULL,
+    application_fee_cents integer DEFAULT 0 NOT NULL,
+    vat_rate numeric(4,3),
+    status text DEFAULT 'pending'::text NOT NULL,
+    stripe_payment_intent_id text,
+    stripe_charge_id text,
+    stripe_account_id text,
+    buyer_email text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    paid_at timestamp with time zone,
+    cancelled_at timestamp with time zone,
+    refunded_cents integer DEFAULT 0 NOT NULL,
+    CONSTRAINT orders_fee_chk CHECK (((application_fee_cents >= 0) AND (application_fee_cents <= total_cents))),
+    CONSTRAINT orders_paid_chk CHECK (((status <> 'paid'::text) OR (paid_at IS NOT NULL))),
+    CONSTRAINT orders_price_chk CHECK (((unit_price_cents >= 0) AND (total_cents >= 0))),
+    CONSTRAINT orders_qty_chk CHECK (((quantity > 0) AND (quantity <= 20))),
+    CONSTRAINT orders_refund_chk CHECK (((refunded_cents >= 0) AND (refunded_cents <= total_cents))),
+    CONSTRAINT orders_status_chk CHECK ((status = ANY (ARRAY['pending'::text, 'paid'::text, 'failed'::text, 'cancelled'::text, 'refunded'::text, 'partially_refunded'::text]))),
+    CONSTRAINT orders_total_chk CHECK ((total_cents = (unit_price_cents * quantity)))
+);
+
+
+--
+-- Name: orders_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.orders_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: orders_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.orders_id_seq OWNED BY public.orders.id;
+
+
+--
+-- Name: password_reset_codes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.password_reset_codes (
+    id integer NOT NULL,
+    user_id integer NOT NULL,
+    code_hash text NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    used_at timestamp with time zone,
+    attempts smallint DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: password_reset_codes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.password_reset_codes_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: password_reset_codes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.password_reset_codes_id_seq OWNED BY public.password_reset_codes.id;
+
+
+--
+-- Name: refresh_tokens; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.refresh_tokens (
+    id integer NOT NULL,
+    user_id integer NOT NULL,
+    token_hash text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    revoked_at timestamp with time zone,
+    replaced_by integer,
+    device text DEFAULT ''::text NOT NULL
+);
+
+
+--
+-- Name: refresh_tokens_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.refresh_tokens_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: refresh_tokens_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.refresh_tokens_id_seq OWNED BY public.refresh_tokens.id;
+
+
+--
+-- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.schema_migrations (
+    datoteka text NOT NULL,
+    odtis text NOT NULL,
+    uporabljen timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: ticket_transfers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ticket_transfers (
+    id bigint NOT NULL,
+    ticket_id bigint NOT NULL,
+    from_user_id integer,
+    to_user_id integer,
+    to_email text NOT NULL,
+    old_serial uuid NOT NULL,
+    new_serial uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: ticket_transfers_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.ticket_transfers_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: ticket_transfers_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.ticket_transfers_id_seq OWNED BY public.ticket_transfers.id;
+
+
+--
+-- Name: tickets; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tickets (
+    id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    event_id integer NOT NULL,
+    serial uuid DEFAULT gen_random_uuid() NOT NULL,
+    status text DEFAULT 'valid'::text NOT NULL,
+    used_at timestamp with time zone,
+    used_by_user_id integer,
+    scan_device text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    holder_user_id integer,
+    CONSTRAINT tickets_status_chk CHECK ((status = ANY (ARRAY['valid'::text, 'used'::text, 'void'::text, 'refunded'::text]))),
+    CONSTRAINT tickets_used_chk CHECK (((status <> 'used'::text) OR (used_at IS NOT NULL)))
+);
+
+
+--
+-- Name: tickets_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.tickets_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: tickets_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.tickets_id_seq OWNED BY public.tickets.id;
+
+
+--
+-- Name: users; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.users (
+    id integer NOT NULL,
+    email text NOT NULL,
+    password_hash text NOT NULL,
+    username text NOT NULL,
+    role text DEFAULT 'user'::text NOT NULL,
+    avatar_url text,
+    email_verified boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    failed_login_count smallint DEFAULT 0 NOT NULL,
+    locked_until timestamp with time zone,
+    phone text,
+    phone_verified boolean DEFAULT false NOT NULL,
+    date_of_birth date,
+    country character(2),
+    genres text[] DEFAULT '{}'::text[] NOT NULL,
+    onboarded_at timestamp with time zone,
+    CONSTRAINT users_country_chk CHECK (((country IS NULL) OR (country ~ '^[A-Z]{2}$'::text))),
+    CONSTRAINT users_dob_chk CHECK (((date_of_birth IS NULL) OR ((date_of_birth < CURRENT_DATE) AND (date_of_birth > (CURRENT_DATE - '120 years'::interval))))),
+    CONSTRAINT users_email_chk CHECK ((POSITION(('@'::text) IN (email)) > 1)),
+    CONSTRAINT users_phone_chk CHECK (((phone IS NULL) OR (phone ~ '^\+[1-9][0-9]{7,14}$'::text))),
+    CONSTRAINT users_role_chk CHECK ((role = ANY (ARRAY['user'::text, 'business'::text, 'admin'::text])))
+);
+
+
+--
+-- Name: users_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.users_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: users_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
+
+
+--
+-- Name: clubs id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.clubs ALTER COLUMN id SET DEFAULT nextval('public.clubs_id_seq'::regclass);
+
+
+--
+-- Name: creator_applications id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.creator_applications ALTER COLUMN id SET DEFAULT nextval('public.creator_applications_id_seq'::regclass);
+
+
+--
+-- Name: email_verification_codes id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.email_verification_codes ALTER COLUMN id SET DEFAULT nextval('public.email_verification_codes_id_seq'::regclass);
+
+
+--
+-- Name: events id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.events ALTER COLUMN id SET DEFAULT nextval('public.events_id_seq'::regclass);
+
+
+--
+-- Name: orders id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders ALTER COLUMN id SET DEFAULT nextval('public.orders_id_seq'::regclass);
+
+
+--
+-- Name: password_reset_codes id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.password_reset_codes ALTER COLUMN id SET DEFAULT nextval('public.password_reset_codes_id_seq'::regclass);
+
+
+--
+-- Name: refresh_tokens id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens ALTER COLUMN id SET DEFAULT nextval('public.refresh_tokens_id_seq'::regclass);
+
+
+--
+-- Name: ticket_transfers id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ticket_transfers ALTER COLUMN id SET DEFAULT nextval('public.ticket_transfers_id_seq'::regclass);
+
+
+--
+-- Name: tickets id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tickets ALTER COLUMN id SET DEFAULT nextval('public.tickets_id_seq'::regclass);
+
+
+--
+-- Name: users id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+
+
+--
+-- Name: clubs clubs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.clubs
+    ADD CONSTRAINT clubs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: creator_applications creator_applications_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.creator_applications
+    ADD CONSTRAINT creator_applications_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: email_verification_codes email_verification_codes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.email_verification_codes
+    ADD CONSTRAINT email_verification_codes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: events events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.events
+    ADD CONSTRAINT events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: orders orders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: password_reset_codes password_reset_codes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.password_reset_codes
+    ADD CONSTRAINT password_reset_codes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: refresh_tokens refresh_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: refresh_tokens refresh_tokens_token_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_token_hash_key UNIQUE (token_hash);
+
+
+--
+-- Name: schema_migrations schema_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.schema_migrations
+    ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (datoteka);
+
+
+--
+-- Name: ticket_transfers ticket_transfers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ticket_transfers
+    ADD CONSTRAINT ticket_transfers_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tickets tickets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tickets
+    ADD CONSTRAINT tickets_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ca_email_open_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ca_email_open_key ON public.creator_applications USING btree (lower(email)) WHERE (status = 'new'::text);
+
+
+--
+-- Name: ca_status_created_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ca_status_created_idx ON public.creator_applications USING btree (status, created_at);
+
+
+--
+-- Name: clubs_created_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX clubs_created_idx ON public.clubs USING btree (created_at DESC);
+
+
+--
+-- Name: clubs_hidden_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX clubs_hidden_idx ON public.clubs USING btree (hidden) WHERE hidden;
+
+
+--
+-- Name: clubs_owner_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX clubs_owner_idx ON public.clubs USING btree (owner_user_id);
+
+
+--
+-- Name: clubs_stripe_account_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX clubs_stripe_account_key ON public.clubs USING btree (stripe_account_id) WHERE (stripe_account_id IS NOT NULL);
+
+
+--
+-- Name: evc_user_active_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX evc_user_active_idx ON public.email_verification_codes USING btree (user_id, created_at DESC) WHERE (used_at IS NULL);
+
+
+--
+-- Name: events_club_start_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX events_club_start_idx ON public.events USING btree (club_id, start_at);
+
+
+--
+-- Name: events_start_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX events_start_idx ON public.events USING btree (start_at);
+
+
+--
+-- Name: orders_club_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_club_idx ON public.orders USING btree (club_id, created_at DESC);
+
+
+--
+-- Name: orders_event_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_event_idx ON public.orders USING btree (event_id, status);
+
+
+--
+-- Name: orders_pi_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX orders_pi_key ON public.orders USING btree (stripe_payment_intent_id) WHERE (stripe_payment_intent_id IS NOT NULL);
+
+
+--
+-- Name: orders_public_ref_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX orders_public_ref_key ON public.orders USING btree (public_ref);
+
+
+--
+-- Name: orders_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_user_idx ON public.orders USING btree (user_id, created_at DESC);
+
+
+--
+-- Name: prc_user_active_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX prc_user_active_idx ON public.password_reset_codes USING btree (user_id, created_at DESC) WHERE (used_at IS NULL);
+
+
+--
+-- Name: refresh_tokens_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX refresh_tokens_user_idx ON public.refresh_tokens USING btree (user_id, revoked_at);
+
+
+--
+-- Name: ticket_transfers_ticket_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ticket_transfers_ticket_idx ON public.ticket_transfers USING btree (ticket_id, created_at DESC);
+
+
+--
+-- Name: tickets_event_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX tickets_event_idx ON public.tickets USING btree (event_id, status);
+
+
+--
+-- Name: tickets_holder_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX tickets_holder_idx ON public.tickets USING btree (holder_user_id) WHERE (holder_user_id IS NOT NULL);
+
+
+--
+-- Name: tickets_order_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX tickets_order_idx ON public.tickets USING btree (order_id);
+
+
+--
+-- Name: tickets_serial_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX tickets_serial_key ON public.tickets USING btree (serial);
+
+
+--
+-- Name: users_email_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX users_email_key ON public.users USING btree (email);
+
+
+--
+-- Name: users_genres_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX users_genres_idx ON public.users USING gin (genres);
+
+
+--
+-- Name: users_phone_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX users_phone_key ON public.users USING btree (phone) WHERE (phone IS NOT NULL);
+
+
+--
+-- Name: users_username_lower_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX users_username_lower_key ON public.users USING btree (lower(username));
+
+
+--
+-- Name: orders orders_rezerviraj; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER orders_rezerviraj BEFORE INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.rezerviraj_zalogo();
+
+
+--
+-- Name: orders orders_sprosti; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER orders_sprosti AFTER UPDATE OF status ON public.orders FOR EACH ROW EXECUTE FUNCTION public.sprosti_zalogo();
+
+
+--
+-- Name: clubs clubs_owner_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.clubs
+    ADD CONSTRAINT clubs_owner_user_id_fkey FOREIGN KEY (owner_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: creator_applications creator_applications_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.creator_applications
+    ADD CONSTRAINT creator_applications_club_id_fkey FOREIGN KEY (club_id) REFERENCES public.clubs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: creator_applications creator_applications_decided_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.creator_applications
+    ADD CONSTRAINT creator_applications_decided_by_fkey FOREIGN KEY (decided_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: creator_applications creator_applications_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.creator_applications
+    ADD CONSTRAINT creator_applications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: email_verification_codes email_verification_codes_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.email_verification_codes
+    ADD CONSTRAINT email_verification_codes_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: events events_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.events
+    ADD CONSTRAINT events_club_id_fkey FOREIGN KEY (club_id) REFERENCES public.clubs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: orders orders_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_club_id_fkey FOREIGN KEY (club_id) REFERENCES public.clubs(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: orders orders_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: orders orders_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: password_reset_codes password_reset_codes_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.password_reset_codes
+    ADD CONSTRAINT password_reset_codes_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: refresh_tokens refresh_tokens_replaced_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_replaced_by_fkey FOREIGN KEY (replaced_by) REFERENCES public.refresh_tokens(id) ON DELETE SET NULL;
+
+
+--
+-- Name: refresh_tokens refresh_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ticket_transfers ticket_transfers_from_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ticket_transfers
+    ADD CONSTRAINT ticket_transfers_from_user_id_fkey FOREIGN KEY (from_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ticket_transfers ticket_transfers_ticket_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ticket_transfers
+    ADD CONSTRAINT ticket_transfers_ticket_id_fkey FOREIGN KEY (ticket_id) REFERENCES public.tickets(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: ticket_transfers ticket_transfers_to_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ticket_transfers
+    ADD CONSTRAINT ticket_transfers_to_user_id_fkey FOREIGN KEY (to_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: tickets tickets_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tickets
+    ADD CONSTRAINT tickets_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: tickets tickets_holder_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tickets
+    ADD CONSTRAINT tickets_holder_user_id_fkey FOREIGN KEY (holder_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: tickets tickets_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tickets
+    ADD CONSTRAINT tickets_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: tickets tickets_used_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tickets
+    ADD CONSTRAINT tickets_used_by_user_id_fkey FOREIGN KEY (used_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- PostgreSQL database dump complete
+--
+
+

@@ -785,6 +785,75 @@ CREATE INDEX IF NOT EXISTS clubs_hidden_idx ON clubs (hidden) WHERE hidden;
 
 
 
+-- ###########################################################################
+-- ##  007_servisni_admin.sql
+-- ###########################################################################
+-- =============================================================================
+-- Migracija 007 — servisni admin račun za vnos vsebine (8. 9. 2026)
+-- =============================================================================
+-- Do sestanka z investitorji (11. 9.) je treba prek admin panela vnesti testne
+-- klube. Martin ni doma in ne more sam v panel; agent gesel ne sprejema.
+-- Zato servisni račun agent@outly.si z vlogo admin. Geslo je naključnih
+-- 28 znakov (bcrypt, cost 12) — odtis v javnem repozitoriju ni napadljiv.
+--
+-- Odločeno z Martinovim izrecnim "DA" 8. 9. 2026.
+-- PO SESTANKU: v panelu Uporabniki → agent@outly.si → vloga user (ali geslo
+-- zamenjaj prek /auth/change-password). Ne pusti ga za vedno.
+--
+-- Varno za ponovni zagon.
+-- =============================================================================
+
+
+INSERT INTO users (email, password_hash, username, role, email_verified, onboarded_at)
+VALUES ('agent@outly.si', '$2b$12$pUCL8YhY5WIC/DxSM.YtuOtWiWJGWjtsfzP/yUKFhemOlFJGCJOMy', 'outly_agent', 'admin', TRUE, NOW())
+ON CONFLICT (email) DO NOTHING;
+
+
+
+
+-- ###########################################################################
+-- ##  008_prenos_vstopnic.sql
+-- ###########################################################################
+-- 008_prenos_vstopnic.sql
+-- Prenos vstopnice prijatelju: kupec kupi 4, vsak dobi svojo.
+--
+-- Zakaj: brez tega so vse vstopnice naročila na kupcu in na vratih morajo
+-- vsi priti skupaj. Prenos ne spreminja naročila (denar, račun ostaneta na
+-- kupcu) — spremeni samo IMETNIKA vstopnice in izda nov QR.
+--
+-- Pravila (uveljavlja index.js, POST /tickets/:id/transfer):
+--   – prenese lahko samo trenutni imetnik (kupec ali kdor jo je prejel),
+--   – samo veljavna vstopnica ('valid') in samo pred začetkom dogodka,
+--   – prejemnik mora imeti Outly račun (po e-naslovu) in izpolnjevati min_age,
+--   – ob prenosu se serial zamenja -> star QR ne velja več (skener: "unknown").
+--
+-- holder_user_id = NULL pomeni, da je imetnik kupec (orders.user_id).
+-- Če imetnik izbriše račun (ON DELETE SET NULL), se vstopnica vrne kupcu —
+-- vstopnica je plačana in ne sme izginiti.
+
+ALTER TABLE tickets
+  ADD COLUMN IF NOT EXISTS holder_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS tickets_holder_idx
+  ON tickets (holder_user_id) WHERE holder_user_id IS NOT NULL;
+
+-- Sledljivost: kdo je komu kdaj prenesel; stara in nova koda.
+CREATE TABLE IF NOT EXISTS ticket_transfers (
+    id            BIGSERIAL   PRIMARY KEY,
+    ticket_id     BIGINT      NOT NULL REFERENCES tickets(id) ON DELETE RESTRICT,
+    from_user_id  INTEGER     REFERENCES users(id) ON DELETE SET NULL,
+    to_user_id    INTEGER     REFERENCES users(id) ON DELETE SET NULL,
+    to_email      TEXT        NOT NULL,
+    old_serial    UUID        NOT NULL,
+    new_serial    UUID        NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS ticket_transfers_ticket_idx ON ticket_transfers (ticket_id, created_at DESC);
+
+
+
+
 -- =============================================================================
 -- Vpis v evidenco
 -- =============================================================================
@@ -795,7 +864,9 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('003_profil.sql', '0ce5aea875b6c656'),
     ('004_zetoni.sql', '9085530755675770'),
     ('005_potrdi_testni_racun.sql', 'e28cb08ba9281802'),
-    ('006_admin.sql', '73e84c32e4887e8b')
+    ('006_admin.sql', '73e84c32e4887e8b'),
+    ('007_servisni_admin.sql', '53824ea557444115'),
+    ('008_prenos_vstopnic.sql', '4dbd6b805ec7231e')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
