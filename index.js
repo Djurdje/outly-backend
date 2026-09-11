@@ -184,6 +184,47 @@ function requireRole(...allowed) {
   };
 }
 
+// ---------------------------
+// Klub uporabnika in vloga v njem (migracija 009)
+// ---------------------------
+// Lastnik: clubs.owner_user_id -> 'owner'. Član ekipe: club_members ->
+// 'manager' ali 'doorman'. Vsak uporabnik ima največ en klub.
+// Vrne null, če uporabnik nima kluba.
+async function klubUporabnika(userId) {
+  const l = await pool.query("SELECT id FROM clubs WHERE owner_user_id=$1 LIMIT 1", [userId]);
+  if (l.rows.length) return { clubId: l.rows[0].id, role: "owner" };
+  const m = await pool.query("SELECT club_id, role FROM club_members WHERE user_id=$1 LIMIT 1", [userId]);
+  if (m.rows.length) return { clubId: m.rows[0].club_id, role: m.rows[0].role };
+  return null;
+}
+
+// Middleware za poslovne poti: req.klub = { clubId, role }.
+// Brez argumentov spusti vsako vlogo v klubu; z argumenti samo naštete.
+// Admin brez lastnega kluba dobi { clubId: null, role: 'admin' } — poti, ki
+// rabijo klub, mu vrnejo 404 kot do zdaj; poti za urejanje dogodkov ga spustijo.
+// Vratar (doorman) sme SAMO skenirati in gledati vstopnice dogodka.
+function requireClub(...vloge) {
+  return async (req, res, next) => {
+    try {
+      if (!req.user) return res.status(401).send("Unauthorized.");
+      let k = await klubUporabnika(req.user.userId);
+      if (!k) {
+        if (req.user.role === "admin") k = { clubId: null, role: "admin" };
+        else if (req.user.role === "business") return res.status(404).send("Club not found.");
+        else return res.status(403).send("Forbidden.");
+      }
+      if (vloge.length && k.role !== "admin" && !vloge.includes(k.role)) {
+        return res.status(403).send("Your role in the club does not allow this.");
+      }
+      req.klub = k;
+      next();
+    } catch (e) {
+      console.error(e);
+      return res.status(500).send("Server error.");
+    }
+  };
+}
+
 // test endpoint
 app.get("/", (req, res) => {
   res.send("Outly backend OK");
@@ -205,7 +246,10 @@ app.get("/me", requireAuth, async (req, res) => {
     );
 
     if (result.rows.length === 0) return res.status(404).send("User not found.");
-    return res.status(200).json(result.rows[0]);
+    // Klub in vloga v njem (lastnik ali član ekipe, migracija 009). Aplikacija
+    // po club_role pokaže poslovni obraz — tudi vratarju, ki ima users.role 'user'.
+    const k = await klubUporabnika(req.user.userId);
+    return res.status(200).json({ ...result.rows[0], club_id: k ? k.clubId : null, club_role: k ? k.role : null });
   } catch (err) {
     console.error(err);
     return res.status(500).send("Server error.");
@@ -1235,32 +1279,26 @@ app.get("/cloudinary/signature", requireAuth, izdajPodpis);
 // ---------------------------
 // BUSINESS: my club (owner-only)
 // ---------------------------
-app.get("/business/clubs/me", requireAuth, requireRole("business", "admin"), async (req, res) => {
+app.get("/business/clubs/me", requireAuth, requireClub(), async (req, res) => {
   try {
+    if (!req.klub.clubId) return res.status(404).send("Club not found.");
     const r = await pool.query(
-      `SELECT ${STOLPCI_KLUBA_LASTNIKA} FROM clubs WHERE owner_user_id=$1 LIMIT 1`,
-      [req.user.userId]
+      `SELECT ${STOLPCI_KLUBA_LASTNIKA} FROM clubs WHERE id=$1`,
+      [req.klub.clubId]
     );
 
     if (r.rows.length === 0) return res.status(404).send("Club not found.");
-    return res.status(200).json(r.rows[0]);
+    return res.status(200).json({ ...r.rows[0], my_role: req.klub.role });
   } catch (e) {
     console.error(e);
     return res.status(500).send("Server error.");
   }
 });
 
-app.patch("/business/clubs/me", requireAuth, requireRole("business", "admin"), async (req, res) => {
+app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
-    // fetch club first (ownership)
-    const clubR = await pool.query(
-      "SELECT id, owner_user_id FROM clubs WHERE owner_user_id=$1 LIMIT 1",
-      [req.user.userId]
-    );
-
-    if (clubR.rows.length === 0) return res.status(404).send("Club not found.");
-
-    const clubId = clubR.rows[0].id;
+    if (!req.klub.clubId) return res.status(404).send("Club not found.");
+    const clubId = req.klub.clubId;
 
     // whitelist fields (snake_case) + allow camelCase inputs too
     const body = req.body || {};
@@ -1371,14 +1409,13 @@ const STOLPCI_DOGODKA = `
         END AS time_status`;
 
 // Vsi dogodki lastnega kluba, tudi osnutki in odpovedani. Samo za lastnika.
-app.get("/business/events", requireAuth, requireRole("business", "admin"), async (req, res) => {
+app.get("/business/events", requireAuth, requireClub(), async (req, res) => {
   try {
-    const klub = await pool.query("SELECT id FROM clubs WHERE owner_user_id=$1 LIMIT 1", [req.user.userId]);
-    if (klub.rows.length === 0) return res.status(404).send("Club not found.");
+    if (!req.klub.clubId) return res.status(404).send("Club not found.");
 
     const r = await pool.query(
       `SELECT ${STOLPCI_DOGODKA} FROM events WHERE club_id=$1 ORDER BY start_at DESC LIMIT 500`,
-      [klub.rows[0].id]
+      [req.klub.clubId]
     );
     return res.status(200).json(r.rows);
   } catch (e) {
@@ -1444,7 +1481,7 @@ app.get("/events/:id", async (req, res) => {
 });
 
 // POST /events (updated: accepts camelCase + snake_case, includes ticket fields)
-app.post("/events", requireAuth, requireRole("business", "admin"), async (req, res) => {
+app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
     // accept both formats
     const clubId = req.body.clubId ?? req.body.club_id;
@@ -1489,7 +1526,7 @@ app.post("/events", requireAuth, requireRole("business", "admin"), async (req, r
 
     const club = clubR.rows[0];
 
-    if (req.user.role === "business" && Number(club.owner_user_id) !== Number(req.user.userId)) {
+    if (req.klub.role !== "admin" && Number(club.id) !== Number(req.klub.clubId)) {
       return res.status(403).send("You can only create events for your own club.");
     }
 
@@ -1561,14 +1598,14 @@ async function dogodekZaUrejanje(req, res) {
   if (r.rows.length === 0) { res.status(404).send("Event not found."); return null; }
 
   const d = r.rows[0];
-  if (req.user.role === "business" && Number(d.owner_user_id) !== Number(req.user.userId)) {
+  if (req.klub.role !== "admin" && Number(d.club_id) !== Number(req.klub.clubId)) {
     res.status(403).send("You can only manage events of your own club.");
     return null;
   }
   return d;
 }
 
-app.patch("/events/:id", requireAuth, requireRole("business", "admin"), async (req, res) => {
+app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
     const d = await dogodekZaUrejanje(req, res);
     if (!d) return;
@@ -1625,7 +1662,7 @@ app.patch("/events/:id", requireAuth, requireRole("business", "admin"), async (r
   }
 });
 
-app.delete("/events/:id", requireAuth, requireRole("business", "admin"), async (req, res) => {
+app.delete("/events/:id", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
     const d = await dogodekZaUrejanje(req, res);
     if (!d) return;
@@ -2412,13 +2449,13 @@ app.get("/me/tickets", requireAuth, async (req, res) => {
 });
 
 // --- poslovni del: prodaja ---
+// Klub iz requireClub (lastnik ali član ekipe). Admin brez kluba -> null -> 404.
 async function mojKlubId(req) {
-  const r = await pool.query("SELECT id FROM clubs WHERE owner_user_id=$1 LIMIT 1", [req.user.userId]);
-  return r.rows.length ? r.rows[0].id : null;
+  return req.klub ? req.klub.clubId : null;
 }
 
 // GET /business/sales — povzetek prodaje lastnega kluba, po dogodkih, zadnja naročila.
-app.get("/business/sales", requireAuth, requireRole("business", "admin"), async (req, res) => {
+app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
@@ -2466,7 +2503,7 @@ app.get("/business/sales", requireAuth, requireRole("business", "admin"), async 
 });
 
 // GET /business/events/:id/tickets — vstopnice dogodka (za vrata: kdo je prišel).
-app.get("/business/events/:id/tickets", requireAuth, requireRole("business", "admin"), async (req, res) => {
+app.get("/business/events/:id/tickets", requireAuth, requireClub(), async (req, res) => {
   try {
     const id = celoId(req.params.id);
     if (!id) return res.status(400).send("Invalid event id.");
@@ -2545,7 +2582,7 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
 
 // POST /business/tickets/scan — skener na vratih. Telo: { qr } (ali { serial } za ročni vnos).
 // Preveri podpis, lastništvo, stanje; vstopnico označi kot uporabljeno. Ponovni sken -> 409.
-app.post("/business/tickets/scan", requireAuth, requireRole("business", "admin"), async (req, res) => {
+app.post("/business/tickets/scan", requireAuth, requireClub(), async (req, res) => {
   try {
     const b = req.body || {};
     let serial = null, ev = null;
@@ -2581,6 +2618,127 @@ app.post("/business/tickets/scan", requireAuth, requireRole("business", "admin")
     );
     if (u.rows.length === 0) return res.status(409).json({ result: "already_used", message: "Ticket was already scanned." });
     return res.status(200).json({ result: "ok", message: "Welcome in.", ticket: { ...t, ...u.rows[0] } });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// ---------------------------
+// EKIPA KLUBA (migracija 009)
+// ---------------------------
+// Lastnik dodaja managerje in vratarje; manager sme dodajati in odstranjevati
+// samo vratarje. Član mora že imeti Outly račun (po e-naslovu) — povabil brez
+// računa ni, ker bi bilo treba voditi še stanje "čaka". Sodelavec je lahko v
+// največ eni ekipi in lastnik kluba ne more biti hkrati član druge.
+const VLOGE_EKIPE = ["manager", "doorman"];
+
+async function seznamEkipe(clubId) {
+  const r = await pool.query(
+    `SELECT * FROM (
+       SELECT u.id AS user_id, u.username, u.email, u.avatar_url, 'owner' AS role, c.created_at, NULL::int AS invited_by_user_id
+         FROM clubs c JOIN users u ON u.id = c.owner_user_id WHERE c.id = $1
+       UNION ALL
+       SELECT u.id, u.username, u.email, u.avatar_url, m.role, m.created_at, m.invited_by_user_id
+         FROM club_members m JOIN users u ON u.id = m.user_id WHERE m.club_id = $1
+     ) e ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END, created_at`,
+    [clubId]
+  );
+  return r.rows;
+}
+
+async function posljiObvestiloEkipi(toEmail, clubName, role) {
+  if (!resend) return;
+  const from = process.env.EMAIL_FROM || "onboarding@resend.dev";
+  const appName = process.env.APP_NAME || "Outly";
+  const vloga = role === "manager" ? "manager" : "door staff";
+  try {
+    const r = await resend.emails.send({
+      from, to: toEmail,
+      subject: `You've joined the ${clubName} team on ${appName}`,
+      html: `
+    <div style="font-family: Arial, sans-serif; line-height:1.5">
+      <h2>${appName} – Club team</h2>
+      <p>You were added to the team of <b>${clubName}</b> as <b>${vloga}</b>.</p>
+      <p>Open the ${appName} app and go to your profile — the club tools are there.</p>
+      <p>If you don't know this club, you can ignore this email or leave the team in the app.</p>
+    </div>`,
+    });
+    if (r && r.error) console.error("Resend napaka (ekipa):", JSON.stringify(r.error));
+  } catch (e) { console.error("Resend napaka (ekipa):", e); }
+}
+
+// GET /business/team — lastnik + člani. Vratar ekipe ne vidi.
+app.get("/business/team", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  try {
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    return res.json({ my_role: req.klub.role, members: await seznamEkipe(klub) });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// POST /business/team — telo: { email, role }. Vrne posodobljen seznam.
+app.post("/business/team", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  try {
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    const b = req.body || {};
+    const email = typeof b.email === "string" ? b.email.trim().toLowerCase() : "";
+    const role = typeof b.role === "string" ? b.role.trim().toLowerCase() : "";
+    if (!email || !email.includes("@")) return res.status(400).send("Valid email is required.");
+    if (!VLOGE_EKIPE.includes(role)) return res.status(400).send("role must be manager or doorman.");
+    if (req.klub.role === "manager" && role !== "doorman") {
+      return res.status(403).send("Only the club owner can add managers.");
+    }
+
+    const u = await pool.query("SELECT id, username, email FROM users WHERE LOWER(email)=$1", [email]);
+    if (u.rows.length === 0) {
+      return res.status(404).json({ error: "no_account", message: "No Outly account with this email. Ask them to sign up first." });
+    }
+    const clan = u.rows[0];
+    if (Number(clan.id) === Number(req.user.userId)) return res.status(400).send("You are already in this team.");
+
+    const jeLastnik = await pool.query("SELECT id FROM clubs WHERE owner_user_id=$1 LIMIT 1", [clan.id]);
+    if (jeLastnik.rows.length) {
+      const svoj = Number(jeLastnik.rows[0].id) === Number(klub);
+      return res.status(409).json({ error: "is_owner", message: svoj ? "This user owns the club." : "This user already owns another club." });
+    }
+    const ze = await pool.query("SELECT club_id, role FROM club_members WHERE user_id=$1", [clan.id]);
+    if (ze.rows.length) {
+      const tu = Number(ze.rows[0].club_id) === Number(klub);
+      return res.status(409).json({ error: "already_member", message: tu ? `Already in the team as ${ze.rows[0].role}.` : "This user is already in another club's team." });
+    }
+
+    await pool.query(
+      "INSERT INTO club_members (club_id, user_id, role, invited_by_user_id) VALUES ($1,$2,$3,$4)",
+      [klub, clan.id, role, req.user.userId]
+    );
+    const ime = await pool.query("SELECT name FROM clubs WHERE id=$1", [klub]);
+    posljiObvestiloEkipi(clan.email, ime.rows[0] ? ime.rows[0].name : "your club", role); // brez await: mail ne sme zadrževati odgovora
+    return res.status(201).json({ my_role: req.klub.role, members: await seznamEkipe(klub) });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// DELETE /business/team/me — član sam zapusti ekipo (tudi vratar).
+app.delete("/business/team/me", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query("DELETE FROM club_members WHERE user_id=$1 RETURNING club_id", [req.user.userId]);
+    if (r.rows.length === 0) return res.status(404).send("You are not in a club team.");
+    return res.status(204).send();
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// DELETE /business/team/:userId — odstrani člana. Manager sme samo vratarje.
+app.delete("/business/team/:userId", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  try {
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    const uid = celoId(req.params.userId);
+    if (!uid) return res.status(400).send("Invalid user id.");
+    const m = await pool.query("SELECT role FROM club_members WHERE club_id=$1 AND user_id=$2", [klub, uid]);
+    if (m.rows.length === 0) return res.status(404).send("Member not found.");
+    if (req.klub.role === "manager" && m.rows[0].role !== "doorman" && Number(uid) !== Number(req.user.userId)) {
+      return res.status(403).send("Only the club owner can remove managers.");
+    }
+    await pool.query("DELETE FROM club_members WHERE club_id=$1 AND user_id=$2", [klub, uid]);
+    return res.json({ my_role: req.klub.role, members: await seznamEkipe(klub) });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
