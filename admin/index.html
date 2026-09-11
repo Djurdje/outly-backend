@@ -209,17 +209,32 @@
 const API = new URLSearchParams(location.search).get("api") || location.origin;
 const $ = (id) => document.getElementById(id);
 
-// ---------- seja ----------
+// ---------- seja (Supabase Auth, migracija 010) ----------
+// Prijava gre neposredno na Supabase (isti račun kot na outly.si in v aplikaciji);
+// backend Supabasov žeton preveri in vlogo prebere iz svoje baze (GET /me).
 // Žetona sta v sessionStorage: zapreš zavihek, si odjavljen. Dostopni velja 1 h,
-// ob 401 ga osvežimo z osveževalnim (isti tok kot v aplikaciji).
+// ob 401 ga osvežimo z osveževalnim.
+// URL in objavljeni ključ sta javna (ista kot v supabase-config.js na outly.si).
+const SUPABASE_URL = "https://zbewqcxnvrwebxonvebx.supabase.co";
+const SUPABASE_KEY = "sb_publishable_NzgXZhG7RGs0mZMjGYtyig_XfOvepXS";
+
 const seja = {
   get token() { return sessionStorage.getItem("outly_admin_token"); },
   get refresh() { return sessionStorage.getItem("outly_admin_refresh"); },
-  shrani(o) { sessionStorage.setItem("outly_admin_token", o.token); sessionStorage.setItem("outly_admin_refresh", o.refreshToken || ""); },
-  pocisti() { sessionStorage.removeItem("outly_admin_token"); sessionStorage.removeItem("outly_admin_refresh"); },
+  get jaz() { try { return JSON.parse(sessionStorage.getItem("outly_admin_jaz") || "null"); } catch (_) { return null; } },
+  shrani(o) { sessionStorage.setItem("outly_admin_token", o.access_token); sessionStorage.setItem("outly_admin_refresh", o.refresh_token || ""); },
+  shraniJaz(m) { sessionStorage.setItem("outly_admin_jaz", JSON.stringify({ email: m.email, role: m.role })); },
+  pocisti() { ["outly_admin_token", "outly_admin_refresh", "outly_admin_jaz"].forEach(k => sessionStorage.removeItem(k)); },
 };
-function vsebinaZetona(t) {
-  try { return JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))); } catch (_) { return null; }
+
+async function supabaseAuth(pot, telo, token) {
+  const glave = { "Content-Type": "application/json", apikey: SUPABASE_KEY };
+  if (token) glave.Authorization = "Bearer " + token;
+  const r = await fetch(SUPABASE_URL + "/auth/v1" + pot, { method: "POST", headers: glave, body: JSON.stringify(telo || {}) });
+  const bes = await r.text();
+  let o = {}; try { o = JSON.parse(bes); } catch (_) {}
+  if (!r.ok) throw new Error(`${r.status}: ${o.msg || o.error_description || o.message || o.error || bes}`);
+  return o;
 }
 
 function obvesti(bes, vrsta) {
@@ -234,10 +249,13 @@ async function klic(metoda, pot, telo, ponovno = true) {
   const glave = { "Content-Type": "application/json" };
   if (seja.token) glave.Authorization = "Bearer " + seja.token;
   const r = await fetch(API + pot, { method: metoda, headers: glave, body: telo === undefined ? undefined : JSON.stringify(telo) });
-  if (r.status === 401 && ponovno && seja.refresh && pot !== "/auth/refresh") {
-    const o = await fetch(API + "/auth/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refreshToken: seja.refresh }) });
-    if (o.ok) { seja.shrani(await o.json()); return klic(metoda, pot, telo, false); }
-    odjava("Seja je potekla. Prijavi se znova."); throw new Error("Seja je potekla.");
+  if (r.status === 401 && ponovno && seja.refresh) {
+    try {
+      seja.shrani(await supabaseAuth("/token?grant_type=refresh_token", { refresh_token: seja.refresh }));
+      return klic(metoda, pot, telo, false);
+    } catch (_) {
+      odjava("Seja je potekla. Prijavi se znova."); throw new Error("Seja je potekla.");
+    }
   }
   const bes = await r.text();
   let podatki = bes; try { podatki = JSON.parse(bes); } catch (_) {}
@@ -267,16 +285,17 @@ async function varnostnaKopija() {
 async function prijava() {
   $("pNapaka").textContent = ""; $("pGumb").disabled = true;
   try {
-    const o = await klic("POST", "/auth/login", { email: $("pEmail").value.trim(), password: $("pGeslo").value }, false);
-    const v = vsebinaZetona(o.token);
-    if (!v || v.role !== "admin") { $("pNapaka").textContent = "Ta račun nima vloge admin."; return; }
-    seja.shrani(o); pokaziPanel();
-  } catch (e) { $("pNapaka").textContent = e.message.replace(/^\d+: /, ""); }
+    const o = await supabaseAuth("/token?grant_type=password", { email: $("pEmail").value.trim(), password: $("pGeslo").value });
+    seja.shrani(o);
+    const m = await klic("GET", "/me", undefined, false);
+    if (!m || m.role !== "admin") { seja.pocisti(); $("pNapaka").textContent = "Ta račun nima vloge admin."; return; }
+    seja.shraniJaz(m); pokaziPanel();
+  } catch (e) { seja.pocisti(); $("pNapaka").textContent = e.message.replace(/^\d+: /, ""); }
   finally { $("pGumb").disabled = false; }
 }
 function odjava(sporocilo) {
-  const rt = seja.refresh;
-  if (rt) fetch(API + "/auth/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refreshToken: rt }) }).catch(() => {});
+  const t = seja.token;
+  if (t) supabaseAuth("/logout", {}, t).catch(() => {});
   seja.pocisti(); $("panel").classList.add("skrito"); $("prijava").classList.remove("skrito"); $("jaz").innerHTML = "";
   if (sporocilo) $("pNapaka").textContent = sporocilo;
 }
@@ -284,7 +303,7 @@ $("pGumb").onclick = prijava;
 $("pGeslo").onkeydown = (e) => { if (e.key === "Enter") prijava(); };
 
 function pokaziPanel() {
-  const v = vsebinaZetona(seja.token);
+  const v = seja.jaz || { email: "", role: "" };
   $("jaz").innerHTML = `<span>${ubezi(v.email)}</span><span class="znacka">${ubezi(v.role)}</span><button class="tih mali" onclick="odjava()">Odjava</button>`;
   $("prijava").classList.add("skrito"); $("panel").classList.remove("skrito");
   pokaziZavihek("pregled"); naloziPregled();
@@ -459,7 +478,7 @@ async function dStatus(id, status) {
 
 // ---------- zagon ----------
 if (seja.token) {
-  const v = vsebinaZetona(seja.token);
+  const v = seja.jaz;
   if (v && v.role === "admin") pokaziPanel(); else seja.pocisti();
 }
 </script>
