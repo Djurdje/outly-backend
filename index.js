@@ -21,6 +21,10 @@ pgTipi.setTypeParser(20, (v) => (v === null ? null : parseInt(v, 10)));
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
+  // Varovalka: če zahtevek 10 s čaka na prosto povezavo (pool je zaseden ali se
+  // je zaklenil), dobi napako in 500 namesto večnega čakanja. Brez tega bi en
+  // hrošč tipa "pool.query med držanjem odjemalca" obesil cel strežnik.
+  connectionTimeoutMillis: 10000,
 });
 
 // Resend init
@@ -2091,9 +2095,11 @@ const STOLPCI_IMETNIKA = `${IMETNIK} AS holder_id, hu.username AS holder_usernam
   (t.holder_user_id IS NOT NULL AND t.holder_user_id IS DISTINCT FROM o.user_id) AS transferred`;
 const JOIN_IMETNIK = `LEFT JOIN users hu ON hu.id = ${IMETNIK}`;
 
-async function vstopniceNarocil(idsNarocil) {
+// db: neobvezen odjemalec iz pool.connect(); klicatelj, ki ga že drži, MORA
+// poizvedovati prek njega, ne prek pool (glej opombo pri POST /events/:id/orders).
+async function vstopniceNarocil(idsNarocil, db = pool) {
   if (!idsNarocil.length) return {};
-  const r = await pool.query(
+  const r = await db.query(
     `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_IMETNIKA} FROM tickets t JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK}
      WHERE t.order_id = ANY($1::bigint[]) ORDER BY t.id`, [idsNarocil]
   );
@@ -2164,9 +2170,13 @@ app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, 
     );
     await c.query("COMMIT");
 
-    const nr = await pool.query(`SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name
+    // POZOR: tu še držimo odjemalca c. Branje po COMMIT-u gre prek c, NE prek
+    // pool: pri 10+ hkratnih nakupih (pool ima privzeto 10 povezav) bi vsak
+    // zahtevek držal svojo povezavo in čakal na enajsto -> celoten backend
+    // obvisi, dokler ga Render ne zažene znova (ugotovljeno s testom sočasnosti).
+    const nr = await c.query(`SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name
        FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id WHERE o.id = $1`, [oid]);
-    const vst = await vstopniceNarocil([oid]);
+    const vst = await vstopniceNarocil([oid], c);
     console.log(`Nakup (test): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, ${q}x ${e.ticket_price_cents} c`);
     return res.status(201).json({ mode: "test", order: nr.rows[0], tickets: vst[oid] || [] });
   } catch (err) {
@@ -2251,7 +2261,14 @@ app.get("/me/tickets", requireAuth, async (req, res) => {
        FROM tickets t JOIN orders o ON o.id = t.order_id
        JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id
        ${JOIN_IMETNIK} LEFT JOIN users bu ON bu.id = o.user_id
-       WHERE ${IMETNIK} = $1 AND o.status IN ('paid','partially_refunded')
+       WHERE t.id IN (
+         -- Dva indeksirana vira namesto COALESCE(...) = $1, ki je bral VSE
+         -- vstopnice in naročila (pri 120.000 vstopnicah 30 ms, raste linearno).
+         SELECT id FROM tickets WHERE holder_user_id = $1
+         UNION ALL
+         SELECT t2.id FROM orders o2 JOIN tickets t2 ON t2.order_id = o2.id
+          WHERE o2.user_id = $1 AND t2.holder_user_id IS NULL
+       ) AND o.status IN ('paid','partially_refunded')
        ORDER BY (e.start_at >= NOW()) DESC, e.start_at ASC, t.id ASC LIMIT 200`, [req.user.userId]
     );
     return res.json(r.rows.map(t => ({ ...t, qr: qrVstopnice(t) })));
@@ -2421,12 +2438,21 @@ app.post("/business/tickets/scan", requireAuth, requireClub(), async (req, res) 
     if (t.status === "used") return res.status(409).json({ result: "already_used", message: "Ticket was already scanned.", used_at: t.used_at, ticket: t });
     if (t.status !== "valid") return res.status(409).json({ result: t.status, message: `Ticket is ${t.status}.`, ticket: t });
 
+    // Pogoj serial=$4: če je bila vstopnica med branjem zgoraj in tem UPDATE-om
+    // prenesena prijatelju (prenos ji da NOV serial), stara koda ne sme več
+    // veljati — sicer bi pošiljatelj vstopil s staro kodo, prejemnik pa bi
+    // dobil že porabljeno vstopnico (ugotovljeno s testom sočasnosti).
     const u = await pool.query(
       `UPDATE tickets SET status='used', used_at=NOW(), used_by_user_id=$2, scan_device=$3
-       WHERE id=$1 AND status='valid' RETURNING id, serial, status, used_at`,
-      [t.id, req.user.userId, String(req.headers["user-agent"] || "").slice(0, 100)]
+       WHERE id=$1 AND status='valid' AND serial=$4 RETURNING id, serial, status, used_at`,
+      [t.id, req.user.userId, String(req.headers["user-agent"] || "").slice(0, 100), serial]
     );
-    if (u.rows.length === 0) return res.status(409).json({ result: "already_used", message: "Ticket was already scanned." });
+    if (u.rows.length === 0) {
+      const z = await pool.query(`SELECT status, serial FROM tickets WHERE id=$1`, [t.id]);
+      const s = z.rows[0];
+      if (s && s.serial !== serial) return res.status(409).json({ result: "transferred", message: "This ticket was passed on to someone else. Ask them to show their new code." });
+      return res.status(409).json({ result: "already_used", message: "Ticket was already scanned." });
+    }
     return res.status(200).json({ result: "ok", message: "Welcome in.", ticket: { ...t, ...u.rows[0] } });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
