@@ -2268,6 +2268,46 @@ admin.patch("/events/:id", async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
+// --- varnostna kopija ---
+// GET /admin/api/export — logični izvoz VSEH tabel v shemi public kot JSON
+// (vrstice + trenutne vrednosti zaporedij), v enem posnetku (REPEATABLE READ),
+// da so tabele med seboj skladne. Samo branje; nič se ne spremeni.
+// Namenjeno varnostnim kopijam pred večjimi migracijami (Render brezplačni
+// načrt kopij nima). Vsebuje tudi odtise gesel — datoteko hrani zasebno.
+admin.get("/export", async (req, res) => {
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const t = await c.query(
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name`
+    );
+    const tables = {};
+    for (const { table_name } of t.rows) {
+      const r = await c.query(`SELECT * FROM "${table_name.replace(/"/g, '""')}"`);
+      tables[table_name] = { count: r.rowCount, columns: r.fields.map((f) => f.name), rows: r.rows };
+    }
+    const s = await c.query(
+      `SELECT sequencename AS name, last_value FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename`
+    );
+    const v = await c.query("SELECT version() AS version, NOW() AS now");
+    await c.query("COMMIT");
+    console.log(`Admin ${req.user.userId} izvoz baze (${t.rows.length} tabel)`);
+    return res.json({
+      exported_at: v.rows[0].now,
+      postgres: v.rows[0].version,
+      tables,
+      sequences: s.rows,
+    });
+  } catch (e) {
+    try { await c.query("ROLLBACK"); } catch (_) {}
+    console.error(e);
+    return res.status(500).send("Server error.");
+  } finally {
+    c.release();
+  }
+});
+
 app.use("/admin/api", admin);
 
 // ---------------------------
