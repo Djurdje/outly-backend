@@ -1382,6 +1382,45 @@ async function neobveznaPrijava(req, res, next) {
 
 // POST /creator-applications — javno, omejeno. Aplikacija ga kliče iz
 // "Request for creator"; prijavljenemu uporabniku se prošnja veže na račun.
+// Maili ob novi prošnji: obvestilo ekipi (TEAM_EMAIL, več naslovov z vejico;
+// privzeto luka@outly.si, fedja@outly.si) in potrdilo prijavitelju. Do 11. 9. 2026
+// je to za spletni obrazec delal Supabase/Brevo; zdaj spletna stran in
+// aplikacija uporabljata isto pot, zato maili tu. Napaka pri pošiljanju NE
+// podre prošnje (ta je že shranjena).
+function ubeziHtml(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+async function posljiMailProsnja(p) {
+  if (!resend) return;
+  const from = process.env.EMAIL_FROM || "onboarding@resend.dev";
+  const appName = process.env.APP_NAME || "Outly";
+  const ekipa = String(process.env.TEAM_EMAIL || "luka@outly.si,fedja@outly.si").split(",").map(e => e.trim()).filter(Boolean);
+  const vrstica = (k, v) => v ? `<tr><td style="padding:4px 12px 4px 0;color:#666">${k}</td><td style="padding:4px 0"><b>${ubeziHtml(v)}</b></td></tr>` : "";
+  try {
+    const r1 = await resend.emails.send({
+      from, to: ekipa, replyTo: p.email,
+      subject: `Nova prošnja ustvarjalca: ${p.businessName}`,
+      html: `
+    <div style="font-family: Arial, sans-serif; line-height:1.5">
+      <h2>${appName} – nova prošnja ustvarjalca (#${p.id})</h2>
+      <table>${vrstica("Podjetje", p.businessName)}${vrstica("Vrsta", p.businessType)}${vrstica("Naslov", p.businessAddress)}${vrstica("Kraj", p.city)}${vrstica("Licenca", p.licenceId)}${vrstica("Kontakt", p.contactName)}${vrstica("Vloga", p.contactRole)}${vrstica("E-naslov", p.email)}${vrstica("Telefon", p.phone)}${vrstica("Sporočilo", p.message)}${vrstica("Vir", p.userId ? "aplikacija (uporabnik #" + p.userId + ")" : "spletna stran")}</table>
+      <p>Odobri ali zavrni v admin panelu: <a href="https://outly-backend-roy3.onrender.com/admin/">outly-backend-roy3.onrender.com/admin</a> → Prošnje.</p>
+    </div>`,
+    });
+    if (r1 && r1.error) console.error("Resend napaka (prošnja, ekipa):", JSON.stringify(r1.error));
+    const r2 = await resend.emails.send({
+      from, to: p.email,
+      subject: `We received your application, ${p.contactName}`,
+      html: `
+    <div style="font-family: Arial, sans-serif; line-height:1.5">
+      <h2>${appName} – application received</h2>
+      <p>Thanks for applying to bring <b>${ubeziHtml(p.businessName)}</b> to ${appName}.</p>
+      <p>A real person reads every application. If we need documents — business licence, proof of ownership, tax number or bank details — we will ask for them in our reply. Please don't send them before we ask.</p>
+      <p>We'll get back to you at this address.</p>
+    </div>`,
+    });
+    if (r2 && r2.error) console.error("Resend napaka (prošnja, potrdilo):", JSON.stringify(r2.error));
+  } catch (e) { console.error("Resend napaka (prošnja):", e); }
+}
+
 app.post("/creator-applications", omeji({ kljuc: "prosnja", najvec: 5, oknoSekund: 3600 }), neobveznaPrijava, async (req, res) => {
   try {
     const b = req.body || {};
@@ -1422,6 +1461,12 @@ app.post("/creator-applications", omeji({ kljuc: "prosnja", najvec: 5, oknoSekun
       ]
     );
     console.log("Nova prošnja ustvarjalca:", r.rows[0].id, businessName, email);
+    posljiMailProsnja({
+      id: r.rows[0].id, userId: req.user ? req.user.userId : null, businessName, contactName, email, phone: phoneRaw,
+      businessType: besedilo(b.businessType ?? b.business_type, 80), businessAddress: besedilo(b.businessAddress ?? b.business_address, 200),
+      city: besedilo(b.city, 80), licenceId: besedilo(b.licenceId ?? b.licence_id, 80), contactRole: besedilo(b.contactRole ?? b.contact_role, 80),
+      message: besedilo(b.message, 2000),
+    }).catch(() => {});
     return res.status(201).json({
       message: "Application received. We will review it and get back to you by email.",
       id: r.rows[0].id, status: r.rows[0].status, createdAt: r.rows[0].created_at,
