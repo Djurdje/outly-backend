@@ -1858,6 +1858,93 @@ admin.patch("/events/:id", async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
+// --- finance ---
+// GET /admin/api/finance?from=YYYY-MM-DD&to=YYYY-MM-DD
+// Promet celotne platforme za admin panel: skupaj, po klubih, po dogodkih,
+// po dnevih, zadnja naročila. Zneski v centih, EUR. "Prihodek Outlyja" =
+// application_fee_cents (provizija PROVIZIJA_ODSTOTEK); "za klube" = bruto
+// minus provizija minus vračila. Štejejo se samo plačana naročila
+// (paid, partially_refunded); v testnem načinu (Stripe še ni) so to naročila
+// s public_ref 'test_%' — panel to jasno označi.
+admin.get("/finance", async (req, res) => {
+  try {
+    const dan = (v) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v : null;
+    const do_ = dan(req.query.to) || new Date().toISOString().slice(0, 10);
+    const od = dan(req.query.from) || new Date(Date.now() - 29 * 864e5).toISOString().slice(0, 10);
+    if (od > do_) return res.status(400).send("from must be before to.");
+    // Meji sta datuma; zgornja je vključujoča (do konca dneva).
+    const p = [od, do_];
+    const KJE = `o.status IN ('paid','partially_refunded') AND o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day')`;
+
+    const [skupaj, poKlubih, poDogodkih, poDnevih, zadnja, vseh] = await Promise.all([
+      pool.query(
+        `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
+                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
+                COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
+                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents),0)::int AS clubs_net_cents,
+                COALESCE(SUM(o.quantity),0)::int AS tickets_sold,
+                COUNT(*)::int AS orders,
+                COUNT(DISTINCT o.user_id)::int AS buyers,
+                COUNT(DISTINCT o.club_id)::int AS clubs_with_sales,
+                COUNT(*) FILTER (WHERE o.stripe_payment_intent_id LIKE 'test_%')::int AS test_orders
+         FROM orders o WHERE ${KJE}`, p),
+      pool.query(
+        `SELECT c.id, c.name, c.city, c.stripe_charges_enabled, c.stripe_payouts_enabled,
+                COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
+                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
+                COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
+                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents),0)::int AS net_cents,
+                COALESCE(SUM(o.quantity),0)::int AS tickets_sold,
+                COUNT(o.id)::int AS orders
+         FROM clubs c LEFT JOIN orders o ON o.club_id = c.id AND ${KJE}
+         GROUP BY c.id ORDER BY gross_cents DESC, c.name`, p),
+      pool.query(
+        `SELECT e.id, e.title, e.start_at, e.status, e.ticket_price_cents, e.capacity, e.sold_count,
+                c.name AS club_name,
+                COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
+                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
+                COALESCE(SUM(o.quantity),0)::int AS tickets_sold,
+                (SELECT COUNT(*)::int FROM tickets t WHERE t.event_id = e.id AND t.status = 'used') AS checked_in
+         FROM events e JOIN clubs c ON c.id = e.club_id
+         LEFT JOIN orders o ON o.event_id = e.id AND ${KJE}
+         GROUP BY e.id, c.name HAVING COUNT(o.id) > 0
+         ORDER BY gross_cents DESC LIMIT 50`, p),
+      pool.query(
+        `SELECT to_char(d.dan, 'YYYY-MM-DD') AS day,
+                COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
+                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
+                COALESCE(SUM(o.quantity),0)::int AS tickets,
+                COUNT(o.id)::int AS orders
+         FROM generate_series($1::date, $2::date, '1 day') AS d(dan)
+         LEFT JOIN orders o ON o.status IN ('paid','partially_refunded')
+              AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
+         GROUP BY d.dan ORDER BY d.dan`, p),
+      pool.query(
+        `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, c.name AS club_name, u.username AS buyer_username
+         FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs c ON c.id = o.club_id
+         LEFT JOIN users u ON u.id = o.user_id
+         WHERE o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day')
+         ORDER BY o.created_at DESC LIMIT 100`, p),
+      pool.query(
+        `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
+                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
+                COALESCE(SUM(o.quantity),0)::int AS tickets_sold, COUNT(*)::int AS orders
+         FROM orders o WHERE o.status IN ('paid','partially_refunded')`),
+    ]);
+    return res.json({
+      mode: testniNacinPlacil() ? "test" : "live",
+      fee_percent: PROVIZIJA_ODSTOTEK,
+      from: od, to: do_,
+      summary: skupaj.rows[0],
+      all_time: vseh.rows[0],
+      by_club: poKlubih.rows,
+      by_event: poDogodkih.rows,
+      by_day: poDnevih.rows,
+      recent_orders: zadnja.rows,
+    });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
 // --- varnostna kopija ---
 // GET /admin/api/export — logični izvoz VSEH tabel v shemi public kot JSON
 // (vrstice + trenutne vrednosti zaporedij), v enem posnetku (REPEATABLE READ),
@@ -2060,6 +2147,54 @@ app.get("/me/orders", requireAuth, async (req, res) => {
 });
 
 // GET /me/tickets — moje vstopnice (plačana naročila), prihajajoče najprej.
+// ---------------------------
+// PRILJUBLJENI DOGODKI (migracija 012)
+// ---------------------------
+// GET /me/favorites -> { ids: [..], events: [..] } (dogodki, ki še obstajajo;
+// odpovedani/osnutki so izpuščeni iz seznama, id-ji pa ostanejo, da srček v
+// aplikaciji ne "pade").
+app.get("/me/favorites", requireAuth, async (req, res) => {
+  try {
+    const [ids, dogodki] = await Promise.all([
+      pool.query("SELECT event_id FROM event_favorites WHERE user_id=$1 ORDER BY created_at DESC", [req.user.userId]),
+      pool.query(
+        `SELECT x.*, f.created_at AS favorited_at
+         FROM event_favorites f
+         JOIN (SELECT ${STOLPCI_DOGODKA} FROM events) x ON x.id = f.event_id
+         WHERE f.user_id = $1 AND x.status = 'published'
+           AND x.club_id NOT IN (SELECT id FROM clubs WHERE hidden)
+         ORDER BY x.start_at ASC`,
+        [req.user.userId]),
+    ]);
+    return res.json({ ids: ids.rows.map(r => r.event_id), events: dogodki.rows });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// PUT /me/favorites/:eventId — označi (idempotentno). 404, če dogodka ni.
+app.put("/me/favorites/:eventId", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.eventId, 10);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).send("Invalid event id.");
+    const r = await pool.query(
+      `INSERT INTO event_favorites (user_id, event_id)
+       SELECT $1, e.id FROM events e WHERE e.id = $2
+       ON CONFLICT DO NOTHING RETURNING event_id`, [req.user.userId, id]);
+    const obstaja = r.rows.length || (await pool.query("SELECT 1 FROM events WHERE id=$1", [id])).rows.length;
+    if (!obstaja) return res.status(404).send("Event not found.");
+    return res.status(200).json({ event_id: id, favorite: true });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// DELETE /me/favorites/:eventId — odznači (idempotentno).
+app.delete("/me/favorites/:eventId", requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.eventId, 10);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).send("Invalid event id.");
+    await pool.query("DELETE FROM event_favorites WHERE user_id=$1 AND event_id=$2", [req.user.userId, id]);
+    return res.status(200).json({ event_id: id, favorite: false });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
 app.get("/me/tickets", requireAuth, async (req, res) => {
   try {
     const r = await pool.query(
