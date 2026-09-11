@@ -853,6 +853,41 @@ CREATE INDEX IF NOT EXISTS ticket_transfers_ticket_idx ON ticket_transfers (tick
 
 
 
+-- ###########################################################################
+-- ##  009_ekipa.sql
+-- ###########################################################################
+-- 009_ekipa.sql
+-- Ekipa kluba: lastnik doda sodelavce, ki v aplikaciji vidijo poslovni obraz
+-- SVOJEGA kluba, ne da bi bili lastniki.
+--
+-- Zakaj: na vratih skenira vstopnice vratar, ne lastnik. Do zdaj je bil edini
+-- način deliti lastnikov račun (geslo naokoli), kar je varnostna luknja in
+-- onemogoča sledljivost (tickets.used_by_user_id bi bil vedno lastnik).
+--
+-- Vloge (uveljavlja index.js, requireClub):
+--   – owner   : implicitno, clubs.owner_user_id; ni v tej tabeli,
+--   – manager : vse kot lastnik razen dodajanja/odstranjevanja managerjev,
+--   – doorman : samo skener in seznam vstopnic dogodka (kdo je prišel).
+--
+-- Uporabnik je lahko član NAJVEČ ENE ekipe (UNIQUE user_id) — s tem je
+-- "moj klub" enolično določen in aplikacija ne rabi izbirnika kluba.
+-- Lastnik kluba ne more biti hkrati član druge ekipe (preveri index.js).
+-- users.role članov ostane 'user'; poslovni obraz v aplikaciji se odloča po
+-- club_role iz GET /me, ne po users.role.
+
+CREATE TABLE IF NOT EXISTS club_members (
+    id                  SERIAL      PRIMARY KEY,
+    club_id             INTEGER     NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
+    user_id             INTEGER     NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    role                TEXT        NOT NULL CHECK (role IN ('manager', 'doorman')),
+    invited_by_user_id  INTEGER     REFERENCES users(id) ON DELETE SET NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS club_members_club_idx ON club_members (club_id, role);
+
+
+
 
 -- =============================================================================
 -- Vpis v evidenco
@@ -866,7 +901,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('005_potrdi_testni_racun.sql', 'e28cb08ba9281802'),
     ('006_admin.sql', '73e84c32e4887e8b'),
     ('007_servisni_admin.sql', '53824ea557444115'),
-    ('008_prenos_vstopnic.sql', '4dbd6b805ec7231e')
+    ('008_prenos_vstopnic.sql', '4dbd6b805ec7231e'),
+    ('009_ekipa.sql', '17ec9f99d87e3bb8')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

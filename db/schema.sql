@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–008, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–009, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,8 +15,6 @@
 --
 -- PostgreSQL database dump
 --
-
-
 
 
 --
@@ -90,6 +88,43 @@ CREATE FUNCTION public.starost(rojstvo date) RETURNS integer
 $$;
 
 
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: club_members; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.club_members (
+    id integer NOT NULL,
+    club_id integer NOT NULL,
+    user_id integer NOT NULL,
+    role text NOT NULL,
+    invited_by_user_id integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT club_members_role_check CHECK ((role = ANY (ARRAY['manager'::text, 'doorman'::text])))
+);
+
+
+--
+-- Name: club_members_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.club_members_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: club_members_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.club_members_id_seq OWNED BY public.club_members.id;
 
 
 --
@@ -550,6 +585,13 @@ ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
 
 
 --
+-- Name: club_members id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_members ALTER COLUMN id SET DEFAULT nextval('public.club_members_id_seq'::regclass);
+
+
+--
 -- Name: clubs id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -617,6 +659,22 @@ ALTER TABLE ONLY public.tickets ALTER COLUMN id SET DEFAULT nextval('public.tick
 --
 
 ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+
+
+--
+-- Name: club_members club_members_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_members
+    ADD CONSTRAINT club_members_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: club_members club_members_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_members
+    ADD CONSTRAINT club_members_user_id_key UNIQUE (user_id);
 
 
 --
@@ -727,6 +785,13 @@ CREATE UNIQUE INDEX ca_email_open_key ON public.creator_applications USING btree
 --
 
 CREATE INDEX ca_status_created_idx ON public.creator_applications USING btree (status, created_at);
+
+
+--
+-- Name: club_members_club_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_members_club_idx ON public.club_members USING btree (club_id, role);
 
 
 --
@@ -902,6 +967,30 @@ CREATE TRIGGER orders_rezerviraj BEFORE INSERT ON public.orders FOR EACH ROW EXE
 --
 
 CREATE TRIGGER orders_sprosti AFTER UPDATE OF status ON public.orders FOR EACH ROW EXECUTE FUNCTION public.sprosti_zalogo();
+
+
+--
+-- Name: club_members club_members_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_members
+    ADD CONSTRAINT club_members_club_id_fkey FOREIGN KEY (club_id) REFERENCES public.clubs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: club_members club_members_invited_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_members
+    ADD CONSTRAINT club_members_invited_by_user_id_fkey FOREIGN KEY (invited_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: club_members club_members_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_members
+    ADD CONSTRAINT club_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
