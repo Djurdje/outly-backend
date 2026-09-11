@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–010, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–011, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -16,6 +16,21 @@
 -- PostgreSQL database dump
 --
 
+\restrict g2p121kBUxtvckB6hS1NTe5noKhNBmcr0IjdAzdmR8WoGMBkLCbhD7HDgWhZxRh
+
+-- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
+-- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
 
 --
 -- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -
@@ -235,41 +250,6 @@ ALTER SEQUENCE public.creator_applications_id_seq OWNED BY public.creator_applic
 
 
 --
--- Name: email_verification_codes; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.email_verification_codes (
-    id integer NOT NULL,
-    user_id integer NOT NULL,
-    code_hash text NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    used_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    attempts smallint DEFAULT 0 NOT NULL
-);
-
-
---
--- Name: email_verification_codes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.email_verification_codes_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: email_verification_codes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.email_verification_codes_id_seq OWNED BY public.email_verification_codes.id;
-
-
---
 -- Name: events; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -377,77 +357,6 @@ CREATE SEQUENCE public.orders_id_seq
 --
 
 ALTER SEQUENCE public.orders_id_seq OWNED BY public.orders.id;
-
-
---
--- Name: password_reset_codes; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.password_reset_codes (
-    id integer NOT NULL,
-    user_id integer NOT NULL,
-    code_hash text NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    used_at timestamp with time zone,
-    attempts smallint DEFAULT 0 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: password_reset_codes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.password_reset_codes_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: password_reset_codes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.password_reset_codes_id_seq OWNED BY public.password_reset_codes.id;
-
-
---
--- Name: refresh_tokens; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.refresh_tokens (
-    id integer NOT NULL,
-    user_id integer NOT NULL,
-    token_hash text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    revoked_at timestamp with time zone,
-    replaced_by integer,
-    device text DEFAULT ''::text NOT NULL
-);
-
-
---
--- Name: refresh_tokens_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.refresh_tokens_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: refresh_tokens_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.refresh_tokens_id_seq OWNED BY public.refresh_tokens.id;
 
 
 --
@@ -607,13 +516,6 @@ ALTER TABLE ONLY public.creator_applications ALTER COLUMN id SET DEFAULT nextval
 
 
 --
--- Name: email_verification_codes id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.email_verification_codes ALTER COLUMN id SET DEFAULT nextval('public.email_verification_codes_id_seq'::regclass);
-
-
---
 -- Name: events id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -625,20 +527,6 @@ ALTER TABLE ONLY public.events ALTER COLUMN id SET DEFAULT nextval('public.event
 --
 
 ALTER TABLE ONLY public.orders ALTER COLUMN id SET DEFAULT nextval('public.orders_id_seq'::regclass);
-
-
---
--- Name: password_reset_codes id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.password_reset_codes ALTER COLUMN id SET DEFAULT nextval('public.password_reset_codes_id_seq'::regclass);
-
-
---
--- Name: refresh_tokens id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.refresh_tokens ALTER COLUMN id SET DEFAULT nextval('public.refresh_tokens_id_seq'::regclass);
 
 
 --
@@ -695,14 +583,6 @@ ALTER TABLE ONLY public.creator_applications
 
 
 --
--- Name: email_verification_codes email_verification_codes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.email_verification_codes
-    ADD CONSTRAINT email_verification_codes_pkey PRIMARY KEY (id);
-
-
---
 -- Name: events events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -716,30 +596,6 @@ ALTER TABLE ONLY public.events
 
 ALTER TABLE ONLY public.orders
     ADD CONSTRAINT orders_pkey PRIMARY KEY (id);
-
-
---
--- Name: password_reset_codes password_reset_codes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.password_reset_codes
-    ADD CONSTRAINT password_reset_codes_pkey PRIMARY KEY (id);
-
-
---
--- Name: refresh_tokens refresh_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.refresh_tokens
-    ADD CONSTRAINT refresh_tokens_pkey PRIMARY KEY (id);
-
-
---
--- Name: refresh_tokens refresh_tokens_token_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.refresh_tokens
-    ADD CONSTRAINT refresh_tokens_token_hash_key UNIQUE (token_hash);
 
 
 --
@@ -824,13 +680,6 @@ CREATE UNIQUE INDEX clubs_stripe_account_key ON public.clubs USING btree (stripe
 
 
 --
--- Name: evc_user_active_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX evc_user_active_idx ON public.email_verification_codes USING btree (user_id, created_at DESC) WHERE (used_at IS NULL);
-
-
---
 -- Name: events_club_start_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -877,20 +726,6 @@ CREATE UNIQUE INDEX orders_public_ref_key ON public.orders USING btree (public_r
 --
 
 CREATE INDEX orders_user_idx ON public.orders USING btree (user_id, created_at DESC);
-
-
---
--- Name: prc_user_active_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX prc_user_active_idx ON public.password_reset_codes USING btree (user_id, created_at DESC) WHERE (used_at IS NULL);
-
-
---
--- Name: refresh_tokens_user_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX refresh_tokens_user_idx ON public.refresh_tokens USING btree (user_id, revoked_at);
 
 
 --
@@ -950,17 +785,17 @@ CREATE UNIQUE INDEX users_phone_key ON public.users USING btree (phone) WHERE (p
 
 
 --
--- Name: users_username_lower_key; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX users_username_lower_key ON public.users USING btree (lower(username));
-
-
---
 -- Name: users_supabase_uid_key; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE UNIQUE INDEX users_supabase_uid_key ON public.users USING btree (supabase_uid) WHERE (supabase_uid IS NOT NULL);
+
+
+--
+-- Name: users_username_lower_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX users_username_lower_key ON public.users USING btree (lower(username));
 
 
 --
@@ -1034,14 +869,6 @@ ALTER TABLE ONLY public.creator_applications
 
 
 --
--- Name: email_verification_codes email_verification_codes_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.email_verification_codes
-    ADD CONSTRAINT email_verification_codes_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
 -- Name: events events_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1071,30 +898,6 @@ ALTER TABLE ONLY public.orders
 
 ALTER TABLE ONLY public.orders
     ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
-
-
---
--- Name: password_reset_codes password_reset_codes_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.password_reset_codes
-    ADD CONSTRAINT password_reset_codes_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
--- Name: refresh_tokens refresh_tokens_replaced_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.refresh_tokens
-    ADD CONSTRAINT refresh_tokens_replaced_by_fkey FOREIGN KEY (replaced_by) REFERENCES public.refresh_tokens(id) ON DELETE SET NULL;
-
-
---
--- Name: refresh_tokens refresh_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.refresh_tokens
-    ADD CONSTRAINT refresh_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -1157,4 +960,5 @@ ALTER TABLE ONLY public.tickets
 -- PostgreSQL database dump complete
 --
 
+\unrestrict g2p121kBUxtvckB6hS1NTe5noKhNBmcr0IjdAzdmR8WoGMBkLCbhD7HDgWhZxRh
 
