@@ -155,20 +155,207 @@ function omeji({ kljuc, najvec, oknoSekund }) {
 }
 
 // ---------------------------
-// Auth middleware (JWT)
+// Supabase Auth (migracija 010) — edina identiteta aplikacije in spletne strani
 // ---------------------------
-function requireAuth(req, res, next) {
+// Supabase izda ES256 JWT; javni ključ je na /auth/v1/.well-known/jwks.json.
+// Preverjamo ga sami z vgrajenim crypto (brez nove odvisnosti): podpis JWT
+// pri ES256 je surov r||s (IEEE P1363), ne DER.
+// SUPABASE_URL in objavljeni ključ (sb_publishable_…) sta JAVNA podatka — ista
+// sta v supabase-config.js na outly.si. Skrivnosti (service_role) tu NI in
+// je ne sme biti.
+const SUPABASE_URL = (process.env.SUPABASE_URL || "https://zbewqcxnvrwebxonvebx.supabase.co").replace(/\/+$/, "");
+const SUPABASE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY || "sb_publishable_NzgXZhG7RGs0mZMjGYtyig_XfOvepXS";
+const SUPABASE_ISS = SUPABASE_URL + "/auth/v1";
+
+const jwks = { kljuci: new Map(), nalozeno: 0 };
+const JWKS_OSVEZI_MS = 10 * 60 * 1000;
+
+async function naloziJwks(prisilno) {
+  const zdaj = Date.now();
+  if (!prisilno && jwks.kljuci.size && zdaj - jwks.nalozeno < JWKS_OSVEZI_MS) return;
+  // Vrtenje ključa je redko; brez tega bi neveljaven žeton z izmišljenim kid
+  // sprožil klic na Supabase ob vsakem poskusu.
+  if (prisilno && zdaj - jwks.nalozeno < 60 * 1000) return;
+  let novi;
+  try {
+    const r = await fetch(SUPABASE_ISS + "/.well-known/jwks.json", { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const telo = await r.json();
+    novi = new Map();
+    for (const k of telo.keys || []) {
+      if (k.kty !== "EC" || k.crv !== "P-256" || !k.kid) continue;
+      novi.set(k.kid, crypto.createPublicKey({ key: k, format: "jwk" }));
+    }
+    if (!novi.size) throw new Error("empty");
+  } catch (e) {
+    // Supabase nedosegljiv: stari ključi ostanejo v uporabi (vrtenje je redko),
+    // brez ključev pa klicatelj dobi 503, ne 401 (401 bi aplikacijo odjavil).
+    if (jwks.kljuci.size) { jwks.nalozeno = zdaj - JWKS_OSVEZI_MS + 60 * 1000; return; }
+    const n = new Error("JWKS " + (e && e.message)); n.jwks = true; throw n;
+  }
+  jwks.kljuci = novi;
+  jwks.nalozeno = zdaj;
+}
+
+function b64urlJson(del) {
+  return JSON.parse(Buffer.from(del, "base64url").toString("utf8"));
+}
+
+// Vrne payload ali vrže napako. Preveri: obliko, alg ES256, kid, podpis,
+// izdajatelja, občinstvo 'authenticated', exp/nbf.
+async function preveriSupabaseZeton(token) {
+  const deli = token.split(".");
+  if (deli.length !== 3) throw new Error("oblika");
+  const glava = b64urlJson(deli[0]);
+  if (glava.alg !== "ES256" || !glava.kid) throw new Error("alg");
+
+  await naloziJwks(false);
+  let kljuc = jwks.kljuci.get(glava.kid);
+  if (!kljuc) { await naloziJwks(true); kljuc = jwks.kljuci.get(glava.kid); }
+  if (!kljuc) throw new Error("kid");
+
+  let ok = false;
+  try {
+    ok = crypto.verify(
+      "sha256",
+      Buffer.from(deli[0] + "." + deli[1]),
+      { key: kljuc, dsaEncoding: "ieee-p1363" },
+      Buffer.from(deli[2], "base64url")
+    );
+  } catch (_) { ok = false; }
+  if (!ok) throw new Error("podpis");
+
+  const p = b64urlJson(deli[1]);
+  const zdaj = Math.floor(Date.now() / 1000);
+  if (p.iss !== SUPABASE_ISS) throw new Error("iss");
+  const aud = Array.isArray(p.aud) ? p.aud : [p.aud];
+  if (!aud.includes("authenticated")) throw new Error("aud");
+  if (typeof p.exp !== "number" || p.exp <= zdaj) throw new Error("exp");
+  if (typeof p.nbf === "number" && p.nbf > zdaj + 60) throw new Error("nbf");
+  if (typeof p.sub !== "string" || !/^[0-9a-f-]{36}$/i.test(p.sub)) throw new Error("sub");
+  if (typeof p.email !== "string" || !p.email.includes("@")) throw new Error("email");
+  if (p.is_anonymous === true) throw new Error("anon");
+  return p;
+}
+
+// Računi, izbrisani v tej instanci (DELETE /me): Supabasov žeton je brez stanja
+// in velja še do ure, zato bi ga ponovljen klic (npr. GET /me v aplikaciji)
+// sicer obudil kot prazen nov račun. Ključ = sub, vrednost = exp žetona.
+const izbrisaniSub = new Map();
+setInterval(() => {
+  const zdaj = Math.floor(Date.now() / 1000);
+  for (const [k, exp] of izbrisaniSub) if (exp <= zdaj) izbrisaniSub.delete(k);
+}, 5 * 60 * 1000).unref();
+
+const POLJA_SEJE = "id, email, username, role";
+
+// Uporabniško ime za novo vrstico: iz user_metadata.username (aplikacija ga
+// pošlje ob registraciji), sicer iz dela e-naslova pred @. Pravila kot pri
+// PATCH /me: 3–20 znakov, črke/številke/podčrtaj.
+function predlogImena(p) {
+  const meta = p.user_metadata || {};
+  const zeljeno = typeof meta.username === "string" ? meta.username.trim() : "";
+  if (/^[a-zA-Z0-9_]{3,20}$/.test(zeljeno)) return zeljeno;
+  const osnova = String(p.email).split("@")[0].replace(/[^a-zA-Z0-9_]/g, "").slice(0, 16);
+  return (osnova.length >= 3 ? osnova : "user") ;
+}
+
+// Lokalna vrstica za Supabasov račun:
+//   1. po supabase_uid,
+//   2. po e-naslovu (obstoječi račun iz časov lastne prijave → poveže se; Supabase
+//      e-naslov potrdi pred izdajo seje, zato je lastništvo naslova dokazano),
+//   3. sicer nova vrstica (email_verified = true, brez gesla).
+async function uporabnikIzSupabase(p) {
+  const uid = p.sub.toLowerCase();
+  const email = String(p.email).trim().toLowerCase();
+
+  if (izbrisaniSub.has(uid)) throw new Error("izbrisan");
+
+  const r1 = await pool.query(`SELECT ${POLJA_SEJE} FROM users WHERE supabase_uid=$1`, [uid]);
+  if (r1.rows.length) return r1.rows[0];
+
+  // Povezava po e-naslovu in nov račun samo s POTRJENIM e-naslovom. Supabase
+  // ga s "Confirm email" potrdi pred prvo sejo in to zapiše v user_metadata;
+  // če bi kdo to nastavitev izklopil, bi sicer vsak lahko prevzel tuj stari
+  // račun z vpisom tujega e-naslova.
+  if (!(p.user_metadata && p.user_metadata.email_verified === true)) throw new Error("email_unverified");
+
+  const r2 = await pool.query(
+    `UPDATE users SET supabase_uid=$1, email_verified=true, failed_login_count=0, locked_until=NULL
+     WHERE email=$2 AND supabase_uid IS NULL RETURNING ${POLJA_SEJE}`,
+    [uid, email]
+  );
+  if (r2.rows.length) return r2.rows[0];
+
+  const ime = predlogImena(p);
+  for (let poskus = 0; poskus < 4; poskus++) {
+    const kandidat = poskus === 0 ? ime : `${ime.slice(0, 14)}_${crypto.randomInt(1000, 9999)}`;
+    try {
+      const r3 = await pool.query(
+        `INSERT INTO users (email, password_hash, username, email_verified, supabase_uid)
+         VALUES ($1, NULL, $2, true, $3) RETURNING ${POLJA_SEJE}`,
+        [email, kandidat, uid]
+      );
+      return r3.rows[0];
+    } catch (e) {
+      if (e && e.code === "23505") {
+        // Isto ime že obstaja → nov poskus s pripono. Isti e-naslov ali uid
+        // (tekma dveh prvih klicev) → poišči še enkrat.
+        const c = String(e.constraint || "");
+        if (c.includes("supabase")) {
+          const r4 = await pool.query(`SELECT ${POLJA_SEJE} FROM users WHERE supabase_uid=$1`, [uid]);
+          if (r4.rows.length) return r4.rows[0];
+        }
+        if (c.includes("email")) {
+          // Vrstica s tem e-naslovom že kaže na drug (star) Supabasov uid —
+          // isti lastnik naslova se je pri Supabase registriral znova.
+          const r4 = await pool.query(
+            `UPDATE users SET supabase_uid=$1 WHERE email=$2 RETURNING ${POLJA_SEJE}`, [uid, email]
+          );
+          if (r4.rows.length) return r4.rows[0];
+        }
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error("username");
+}
+
+// ---------------------------
+// Auth middleware
+// ---------------------------
+// Sprejme Supabasov žeton (ES256) ALI — začasno, dokler aplikacija ne preide —
+// stari lastni žeton (HS256, JWT_SECRET). req.user = { userId, email,
+// username, role, auth: 'supabase' | 'legacy' }. Pri Supabase pride vloga iz
+// baze ob vsakem klicu (ni več v žetonu), zato sprememba vloge velja takoj.
+async function razberiUporabnika(token) {
+  const glava = b64urlJson(token.split(".")[0]);
+  if (glava.alg === "ES256") {
+    const p = await preveriSupabaseZeton(token);
+    const u = await uporabnikIzSupabase(p);
+    return { userId: u.id, email: u.email, username: u.username, role: u.role, auth: "supabase",
+             supabaseToken: token, supabaseSub: p.sub.toLowerCase(), supabaseExp: p.exp };
+  }
+  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET");
+  const p = jwt.verify(token, process.env.JWT_SECRET);
+  return { ...p, auth: "legacy" };
+}
+
+async function requireAuth(req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-
   if (!token) return res.status(401).send("Missing token.");
-  if (!process.env.JWT_SECRET) return res.status(500).send("JWT_SECRET not set.");
-
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = payload; // { userId, email, username, role, iat, exp }
-    next();
+    req.user = await razberiUporabnika(token);
+    return next();
   } catch (err) {
+    if (err && err.jwks) {
+      console.error(err.message);
+      return res.status(503).send("Auth service unavailable.");
+    }
+    if (err && err.message === "email_unverified") return res.status(403).send("Email not verified.");
+    if (err && err.code) { console.error(err); return res.status(500).send("Server error."); }
     return res.status(401).send("Invalid token.");
   }
 }
@@ -545,6 +732,12 @@ app.post("/auth/login", omeji({ kljuc: "login", najvec: 10, oknoSekund: 900 }), 
       return res.status(429).send("Too many failed attempts. Please try again later.");
     }
 
+    // Račun brez lokalnega gesla (Supabase): enak odgovor kot napačno geslo.
+    if (!user.password_hash) {
+      await bcrypt.compare(password, "$2b$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalid");
+      return res.status(401).send(NAPACNO);
+    }
+
     const ok = await bcrypt.compare(password, user.password_hash);
 
     if (!ok) {
@@ -839,7 +1032,9 @@ app.post("/auth/forgot-password", omeji({ kljuc: "forgot", najvec: 5, oknoSekund
     // ugotavljanje, kateri e-naslovi so pri nas registrirani (ista logika kot S-05).
     const ODGOVOR = { message: "If an account exists for that email, a reset code has been sent." };
 
-    const userR = await pool.query("SELECT id FROM users WHERE email=$1", [cleanEmail]);
+    // Račun, vezan na Supabase, geslo ponastavlja pri Supabase; tu bi mu sicer
+    // ustvarili lokalno geslo in s tem drugo pot za prijavo.
+    const userR = await pool.query("SELECT id FROM users WHERE email=$1 AND supabase_uid IS NULL", [cleanEmail]);
     if (userR.rows.length === 0) return res.status(200).json(ODGOVOR);
 
     const userId = userR.rows[0].id;
@@ -884,7 +1079,7 @@ app.post("/auth/reset-password", omeji({ kljuc: "reset", najvec: 10, oknoSekund:
     const cleanCode = code.trim();
     if (cleanCode.length !== 6) return res.status(400).send("Code must be 6 digits.");
 
-    const userR = await pool.query("SELECT id FROM users WHERE email=$1", [cleanEmail]);
+    const userR = await pool.query("SELECT id FROM users WHERE email=$1 AND supabase_uid IS NULL", [cleanEmail]);
     if (userR.rows.length === 0) return res.status(400).send("Invalid or expired code.");
     const userId = userR.rows[0].id;
 
@@ -953,8 +1148,13 @@ app.post("/auth/change-password", requireAuth, omeji({ kljuc: "chpass", najvec: 
     if (newPassword.length < 8) return res.status(400).send("Password too short.");
     if (newPassword === currentPassword) return res.status(400).send("New password must be different.");
 
+    // Geslo Supabasovega računa spreminja Supabase (aplikacija kliče
+    // PUT /auth/v1/user), ne mi — pri nas ga ni.
+    if (req.user.auth === "supabase") return res.status(400).send("Password is managed by the identity provider.");
+
     const r = await pool.query("SELECT password_hash FROM users WHERE id=$1", [req.user.userId]);
     if (r.rows.length === 0) return res.status(404).send("User not found.");
+    if (!r.rows[0].password_hash) return res.status(400).send("Password is managed by the identity provider.");
 
     const ok = await bcrypt.compare(currentPassword, r.rows[0].password_hash);
     if (!ok) return res.status(401).send("Invalid credentials.");
@@ -983,21 +1183,53 @@ app.post("/auth/change-password", requireAuth, omeji({ kljuc: "chpass", najvec: 
 // ---------------------------
 // Apple od junija 2022 zahteva, da uporabnik racun izbrise ZNOTRAJ aplikacije.
 // Brez tega je oddaja zavrnjena.
+// Supabasov račun: geslo je preverila aplikacija tik pred klicem (ponovna
+// prijava pri Supabase), mi ga nimamo. Po izbrisu lokalnih podatkov pokličemo
+// še Supabasov RPC delete_my_account (shema 10 spletne strani) Z UPORABNIKOVIM
+// žetonom — izbriše auth.users vrstico in prijavo na waitlisti. Brez tega bi
+// se ob naslednji prijavi ustvaril prazen lokalni račun.
+async function izbrisiSupabaseRacun(token) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/rpc/delete_my_account", {
+    method: "POST",
+    headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: "{}",
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!r.ok) throw new Error("delete_my_account " + r.status + " " + (await r.text()).slice(0, 200));
+}
+
 app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3600 }), async (req, res) => {
   try {
     const { password } = req.body || {};
+    const supabase = req.user.auth === "supabase";
+
     if (typeof password !== "string" || !password) {
       return res.status(400).send("Password required to delete account.");
     }
 
-    const r = await pool.query("SELECT password_hash FROM users WHERE id=$1", [req.user.userId]);
-    if (r.rows.length === 0) return res.status(404).send("User not found.");
-
-    const ok = await bcrypt.compare(password, r.rows[0].password_hash);
-    if (!ok) return res.status(401).send("Invalid credentials.");
+    if (supabase) {
+      // Ponovna prijava pri Supabase s trenutnim geslom: ukraden žeton (velja
+      // do ure) sam ne sme zadostovati za nepovraten izbris.
+      const r = await fetch(SUPABASE_ISS + "/token?grant_type=password", {
+        method: "POST",
+        headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ email: req.user.email, password }),
+        signal: AbortSignal.timeout(8000),
+      }).catch(() => null);
+      if (!r) return res.status(503).send("Auth service unavailable.");
+      if (r.status === 400 || r.status === 401 || r.status === 403) return res.status(401).send("Invalid credentials.");
+      if (!r.ok) return res.status(503).send("Auth service unavailable.");
+    } else {
+      const r = await pool.query("SELECT password_hash FROM users WHERE id=$1", [req.user.userId]);
+      if (r.rows.length === 0) return res.status(404).send("User not found.");
+      if (!r.rows[0].password_hash) return res.status(400).send("Password is managed by the identity provider.");
+      const ok = await bcrypt.compare(password, r.rows[0].password_hash);
+      if (!ok) return res.status(401).send("Invalid credentials.");
+    }
 
     // Brez tabele orders (pred migracijo 002) je izbris preprost.
     if (!obstajajoNarocila) {
+      if (supabase) { await izbrisiSupabaseRacun(req.user.supabaseToken); izbrisaniSub.set(req.user.supabaseSub, req.user.supabaseExp); }
       await pool.query("DELETE FROM users WHERE id=$1", [req.user.userId]);
       return res.status(200).json({ message: "Account deleted." });
     }
@@ -1043,7 +1275,19 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       //    naracila ostanejo, a niso vec vezana na osebo.
       await odjemalec.query("DELETE FROM users WHERE id=$1", [req.user.userId]);
 
+      // 4. Supabasov račun — PRED potrditvijo transakcije: če Supabase odpove,
+      //    ostane vse, kot je bilo, in uporabnik lahko poskusi znova.
+      if (supabase) {
+        try { await izbrisiSupabaseRacun(req.user.supabaseToken); }
+        catch (e) {
+          await odjemalec.query("ROLLBACK");
+          console.error(e);
+          return res.status(502).send("Could not delete the account at the identity provider. Please try again.");
+        }
+      }
+
       await odjemalec.query("COMMIT");
+      if (supabase) izbrisaniSub.set(req.user.supabaseSub, req.user.supabaseExp);
       return res.status(200).json({ message: "Account deleted." });
     } catch (e) {
       await odjemalec.query("ROLLBACK").catch(() => {});
@@ -1778,11 +2022,11 @@ function besedilo(v, najvec) {
 
 // Neobvezna prijava: če je žeton priložen in veljaven, req.user obstaja;
 // če ga ni ali je neveljaven, pot vseeno teče naprej (kot neprijavljen).
-function neobveznaPrijava(req, res, next) {
+async function neobveznaPrijava(req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-  if (!token || !process.env.JWT_SECRET) return next();
-  try { req.user = jwt.verify(token, process.env.JWT_SECRET); } catch (_) { /* neprijavljen */ }
+  if (!token) return next();
+  try { req.user = await razberiUporabnika(token); } catch (_) { /* neprijavljen */ }
   next();
 }
 
