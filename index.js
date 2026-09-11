@@ -1,8 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const bcrypt = require("bcrypt");
 const { Pool } = require("pg");
-const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const { Resend } = require("resend");
 const path = require("path");
@@ -29,95 +27,11 @@ const pool = new Pool({
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 // ---------------------------
-// Helpers (verification)
+// Lastna prijava (bcrypt + HS256 JWT, verifikacijske kode, osveževalni žetoni)
+// je bila odstranjena 11. 9. 2026: identiteta je Supabase Auth (glej spodaj).
+// Tabele refresh_tokens, email_verification_codes in password_reset_codes
+// ostanejo v bazi prazne/nedotaknjene do čistilne migracije.
 // ---------------------------
-function generate6DigitCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
-
-function hashCode(code) {
-  return crypto.createHash("sha256").update(code).digest("hex");
-}
-
-// ---------------------------
-// Žetoni (S-06)
-// ---------------------------
-// Dostopni JWT velja kratko; osveževalni žeton je naključen niz, v bazi samo
-// kot odtis, z rotacijo ob vsaki uporabi. Glej migracijo 004.
-const DOSTOPNI_VELJA = "1h";
-const OSVEZEVALNI_VELJA_DNI = 30;
-
-function podpisiDostopni(user) {
-  return jwt.sign(
-    { userId: user.id, email: user.email, username: user.username, role: user.role },
-    process.env.JWT_SECRET,
-    { expiresIn: DOSTOPNI_VELJA }
-  );
-}
-
-async function izdajOsvezevalni(userId, req, zamenjaId = null) {
-  const zeton = crypto.randomBytes(48).toString("base64url");
-  const naprava = String(req.headers["user-agent"] || "").slice(0, 200);
-  const r = await pool.query(
-    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, device)
-     VALUES ($1, $2, NOW() + ($3 || ' days')::interval, $4) RETURNING id`,
-    [userId, hashCode(zeton), String(OSVEZEVALNI_VELJA_DNI), naprava]
-  );
-  if (zamenjaId) {
-    await pool.query(
-      "UPDATE refresh_tokens SET revoked_at=NOW(), replaced_by=$2 WHERE id=$1",
-      [zamenjaId, r.rows[0].id]
-    );
-  }
-  return zeton;
-}
-
-async function prekliciVseZetone(userId) {
-  await pool.query(
-    "UPDATE refresh_tokens SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL",
-    [userId]
-  );
-}
-
-/** Odgovor prijave/osvežitve. `token` ostane zaradi združljivosti s starimi klienti. */
-async function odgovorSeje(user, req, zamenjaId = null) {
-  return {
-    token: podpisiDostopni(user),
-    expiresInSeconds: 3600,
-    refreshToken: await izdajOsvezevalni(user.id, req, zamenjaId),
-  };
-}
-
-async function sendVerificationEmail(toEmail, code) {
-  if (!resend) {
-    console.warn("⚠️ RESEND_API_KEY not set -> skipping email send");
-    return;
-  }
-  const from = process.env.EMAIL_FROM || "onboarding@resend.dev";
-  const appName = process.env.APP_NAME || "Outly";
-
-  const subject = `${appName} verification code`;
-  const html = `
-    <div style="font-family: Arial, sans-serif; line-height:1.5">
-      <h2>${appName} – Email verification</h2>
-      <p>Your verification code is:</p>
-      <div style="font-size:28px; font-weight:700; letter-spacing:4px; padding:12px 0">${code}</div>
-      <p>This code expires in <b>10 minutes</b>.</p>
-      <p>If you didn’t request this, you can ignore this email.</p>
-    </div>
-  `;
-
-  // Resend NE vrze izjeme ob napaki (npr. nepotrjena domena posiljatelja ali
-  // testni kljuc, ki sme posiljati samo lastniku racuna) — vrne { error }.
-  // Brez tega zapisa je bila napaka nevidna: registracija je javila "koda poslana",
-  // mail pa ni nikoli odsel.
-  const r = await resend.emails.send({ from, to: toEmail, subject, html });
-  if (r && r.error) {
-    console.error("Resend napaka (verifikacija):", JSON.stringify(r.error), "from:", from);
-  } else {
-    console.log("Resend: verifikacijska koda poslana", r && r.data ? r.data.id : "");
-  }
-}
 
 // ---------------------------
 // Omejevanje pogostosti (S-02)
@@ -325,21 +239,14 @@ async function uporabnikIzSupabase(p) {
 // ---------------------------
 // Auth middleware
 // ---------------------------
-// Sprejme Supabasov žeton (ES256) ALI — začasno, dokler aplikacija ne preide —
-// stari lastni žeton (HS256, JWT_SECRET). req.user = { userId, email,
-// username, role, auth: 'supabase' | 'legacy' }. Pri Supabase pride vloga iz
-// baze ob vsakem klicu (ni več v žetonu), zato sprememba vloge velja takoj.
+// Sprejme samo Supabasov žeton (ES256). req.user = { userId, email, username,
+// role, auth: 'supabase', supabaseToken, supabaseSub, supabaseExp }. Vloga pride
+// iz baze ob vsakem klicu (ni v žetonu), zato sprememba vloge velja takoj.
 async function razberiUporabnika(token) {
-  const glava = b64urlJson(token.split(".")[0]);
-  if (glava.alg === "ES256") {
-    const p = await preveriSupabaseZeton(token);
-    const u = await uporabnikIzSupabase(p);
-    return { userId: u.id, email: u.email, username: u.username, role: u.role, auth: "supabase",
-             supabaseToken: token, supabaseSub: p.sub.toLowerCase(), supabaseExp: p.exp };
-  }
-  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET");
-  const p = jwt.verify(token, process.env.JWT_SECRET);
-  return { ...p, auth: "legacy" };
+  const p = await preveriSupabaseZeton(token);
+  const u = await uporabnikIzSupabase(p);
+  return { userId: u.id, email: u.email, username: u.username, role: u.role, auth: "supabase",
+           supabaseToken: token, supabaseSub: p.sub.toLowerCase(), supabaseExp: p.exp };
 }
 
 async function requireAuth(req, res, next) {
@@ -478,368 +385,6 @@ app.patch("/me/avatar", requireAuth, async (req, res) => {
 
     if (r.rows.length === 0) return res.status(404).send("User not found.");
     return res.status(200).json(r.rows[0]);
-  } catch (e) {
-    console.error(e);
-    return res.status(500).send("Server error.");
-  }
-});
-
-// ---------------------------
-// REGISTER
-// ---------------------------
-app.post("/auth/register", omeji({ kljuc: "register", najvec: 5, oknoSekund: 3600 }), async (req, res) => {
-  try {
-    const { email, password, username } = req.body;
-
-    if (!email || !password || !username) {
-      return res.status(400).send("Missing email, password, or username.");
-    }
-    if (typeof email !== "string" || typeof password !== "string" || typeof username !== "string") {
-      return res.status(400).send("Invalid input types.");
-    }
-
-    const cleanEmail = email.trim().toLowerCase();
-    const cleanUsername = username.trim();
-
-    if (!cleanEmail.includes("@")) return res.status(400).send("Invalid email.");
-    if (password.length < 8) return res.status(400).send("Password too short.");
-
-    if (cleanUsername.length < 3) return res.status(400).send("Username too short.");
-    if (cleanUsername.length > 20) return res.status(400).send("Username too long.");
-    if (!/^[a-zA-Z0-9_]+$/.test(cleanUsername)) {
-      return res.status(400).send("Username invalid. Use letters, numbers, underscore.");
-    }
-
-    const existingEmail = await pool.query("SELECT id FROM users WHERE email=$1", [cleanEmail]);
-    if (existingEmail.rows.length > 0) return res.status(409).send("Email already in use.");
-
-    // Brez upoštevanja velikosti črk: "Martin" in "martin" sta isto ime (past 7).
-    // Unikatni indeks users_username_lower_key to jamči tudi v bazi; tu dobi
-    // uporabnik razumljivo sporočilo namesto napake 500.
-    const existingUsername = await pool.query(
-      "SELECT id FROM users WHERE LOWER(username)=LOWER($1)", [cleanUsername]
-    );
-    if (existingUsername.rows.length > 0) return res.status(409).send("Username already in use.");
-
-    const passwordHash = await bcrypt.hash(password, 12);
-
-    // NOTE: role default je tvoj DB default ali NULL; če želiš, lahko tukaj eksplicitno nastaviš 'user'
-    const created = await pool.query(
-      "INSERT INTO users (email, password_hash, username, email_verified) VALUES ($1,$2,$3,false) RETURNING id, email",
-      [cleanEmail, passwordHash, cleanUsername]
-    );
-
-    const userId = created.rows[0].id;
-
-    const code = generate6DigitCode();
-    const codeHash = hashCode(code);
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    await pool.query(
-      `INSERT INTO email_verification_codes (user_id, code_hash, expires_at)
-       VALUES ($1,$2,$3)`,
-      [userId, codeHash, expiresAt]
-    );
-
-    await sendVerificationEmail(cleanEmail, code);
-
-    return res.status(201).json({
-      message: "User created. Verification code sent to email.",
-      email: cleanEmail
-    });
-  } catch (err) {
-    // Dve registraciji istega imena/e-naslova hkrati: prva zmaga, druga dobi 409.
-    if (err && err.code === "23505") {
-      const kaj = String(err.constraint || "").includes("email") ? "Email" : "Username";
-      return res.status(409).send(`${kaj} already in use.`);
-    }
-    console.error(err);
-    return res.status(500).send("Server error.");
-  }
-});
-
-// ---------------------------
-// VERIFY EMAIL
-// ---------------------------
-app.post("/auth/verify-email", omeji({ kljuc: "verify", najvec: 10, oknoSekund: 900 }), async (req, res) => {
-  try {
-    const { email, code } = req.body;
-
-    if (!email || !code) return res.status(400).send("Missing email or code.");
-    if (typeof email !== "string" || typeof code !== "string") return res.status(400).send("Invalid types.");
-
-    const cleanEmail = email.trim().toLowerCase();
-    const cleanCode = code.trim();
-
-    if (cleanCode.length !== 6) return res.status(400).send("Code must be 6 digits.");
-
-    const userR = await pool.query("SELECT id, email_verified FROM users WHERE email=$1", [cleanEmail]);
-    if (userR.rows.length === 0) return res.status(404).send("User not found.");
-
-    const user = userR.rows[0];
-    if (user.email_verified) {
-      return res.status(200).json({ message: "Email already verified." });
-    }
-
-    const codeR = await pool.query(
-      `SELECT id, code_hash, expires_at, used_at, attempts
-       FROM email_verification_codes
-       WHERE user_id=$1 AND used_at IS NULL
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [user.id]
-    );
-
-    if (codeR.rows.length === 0) return res.status(400).send("No active code. Please resend.");
-
-    const row = codeR.rows[0];
-    if (new Date(row.expires_at).getTime() < Date.now()) {
-      return res.status(400).send("Code expired. Please resend.");
-    }
-
-    // S-03: brez tega je sestmestno kodo (milijon kombinacij) mogoce ugibati
-    // neomejeno hitro znotraj desetminutnega okna.
-    const NAJVEC_POSKUSOV_KODE = 5;
-    if (row.attempts >= NAJVEC_POSKUSOV_KODE) {
-      await pool.query("UPDATE email_verification_codes SET used_at=NOW() WHERE id=$1", [row.id]);
-      return res.status(400).send("Too many attempts. Please resend the code.");
-    }
-
-    const incomingHash = hashCode(cleanCode);
-    if (incomingHash !== row.code_hash) {
-      const poskusov = row.attempts + 1;
-      if (poskusov >= NAJVEC_POSKUSOV_KODE) {
-        // Zadnji dovoljeni poskus je bil napacen -> koda se razveljavi.
-        await pool.query(
-          "UPDATE email_verification_codes SET attempts=$2, used_at=NOW() WHERE id=$1",
-          [row.id, poskusov]
-        );
-      } else {
-        await pool.query("UPDATE email_verification_codes SET attempts=$2 WHERE id=$1", [row.id, poskusov]);
-      }
-      return res.status(400).send("Invalid code.");
-    }
-
-    await pool.query("UPDATE users SET email_verified=true WHERE id=$1", [user.id]);
-    await pool.query("UPDATE email_verification_codes SET used_at=NOW() WHERE id=$1", [row.id]);
-
-    return res.status(200).json({ message: "Email verified." });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).send("Server error.");
-  }
-});
-
-// ---------------------------
-// RESEND CODE
-// ---------------------------
-app.post("/auth/resend-verification", omeji({ kljuc: "resend", najvec: 5, oknoSekund: 3600 }), async (req, res) => {
-  try {
-    const { email } = req.body;
-    if (!email) return res.status(400).send("Missing email.");
-    if (typeof email !== "string") return res.status(400).send("Invalid types.");
-
-    const cleanEmail = email.trim().toLowerCase();
-
-    const userR = await pool.query("SELECT id, email_verified FROM users WHERE email=$1", [cleanEmail]);
-    if (userR.rows.length === 0) return res.status(404).send("User not found.");
-
-    const user = userR.rows[0];
-    if (user.email_verified) return res.status(200).json({ message: "Email already verified." });
-
-    const lastR = await pool.query(
-      `SELECT id, expires_at, created_at, used_at
-       FROM email_verification_codes
-       WHERE user_id=$1 AND used_at IS NULL
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [user.id]
-    );
-
-    if (lastR.rows.length > 0) {
-      const last = lastR.rows[0];
-      const createdAt = new Date(last.created_at).getTime();
-      const tooSoon = (Date.now() - createdAt) < 60 * 1000;
-      const notExpired = new Date(last.expires_at).getTime() > Date.now();
-
-      if (tooSoon && notExpired) {
-        return res.status(429).send("Please wait a bit before requesting another code.");
-      }
-    }
-
-    const code = generate6DigitCode();
-    const codeHash = hashCode(code);
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    await pool.query(
-      `INSERT INTO email_verification_codes (user_id, code_hash, expires_at)
-       VALUES ($1,$2,$3)`,
-      [user.id, codeHash, expiresAt]
-    );
-
-    await sendVerificationEmail(cleanEmail, code);
-
-    return res.status(200).json({ message: "Verification code resent." });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).send("Server error.");
-  }
-});
-
-// ---------------------------
-// LOGIN (blocked if not verified)
-// ---------------------------
-app.post("/auth/login", omeji({ kljuc: "login", najvec: 10, oknoSekund: 900 }), async (req, res) => {
-  try {
-    const { email, password } = req.body;
-
-    if (!email || !password) return res.status(400).send("Missing email or password.");
-    if (typeof email !== "string" || typeof password !== "string") {
-      return res.status(400).send("Invalid input types.");
-    }
-
-    const cleanEmail = email.trim().toLowerCase();
-
-    const result = await pool.query(
-      `SELECT id, email, username, role, password_hash, email_verified,
-              failed_login_count, locked_until
-       FROM users WHERE email=$1`,
-      [cleanEmail]
-    );
-
-    // S-05: enaka napaka za neobstojec racun in napacno geslo. Prej je razlika
-    // med "Invalid credentials." in "Wrong password." izdala, kateri e-naslovi
-    // so pri nas registrirani.
-    const NAPACNO = "Invalid credentials.";
-
-    if (result.rows.length === 0) {
-      // Porabimo primerljivo kolicino casa kot pri pravem uporabniku, da se
-      // obstoja racuna ne da razbrati iz hitrosti odgovora.
-      await bcrypt.compare(password, "$2b$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalid");
-      return res.status(401).send(NAPACNO);
-    }
-    const user = result.rows[0];
-
-    // S-02: zaklep racuna po zaporednih napacnih prijavah. Deluje ne glede na
-    // to, od kod poskusi prihajajo - omejevanje po IP naslovu se zaobide z
-    // menjavo naslova, tega ne.
-    const NAJVEC_POSKUSOV = 8;
-    const ZAKLEP_MINUT = 15;
-
-    if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) {
-      const cezKoliko = Math.ceil((new Date(user.locked_until).getTime() - Date.now()) / 1000);
-      res.set("Retry-After", String(cezKoliko));
-      return res.status(429).send("Too many failed attempts. Please try again later.");
-    }
-
-    // Račun brez lokalnega gesla (Supabase): enak odgovor kot napačno geslo.
-    if (!user.password_hash) {
-      await bcrypt.compare(password, "$2b$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalid");
-      return res.status(401).send(NAPACNO);
-    }
-
-    const ok = await bcrypt.compare(password, user.password_hash);
-
-    if (!ok) {
-      const poskusov = (user.failed_login_count || 0) + 1;
-      if (poskusov >= NAJVEC_POSKUSOV) {
-        await pool.query(
-          `UPDATE users SET failed_login_count=0, locked_until=NOW() + ($2 || ' minutes')::interval
-           WHERE id=$1`,
-          [user.id, String(ZAKLEP_MINUT)]
-        );
-      } else {
-        await pool.query("UPDATE users SET failed_login_count=$2 WHERE id=$1", [user.id, poskusov]);
-      }
-      return res.status(401).send(NAPACNO);
-    }
-
-    // Uspesna prijava pobrise stevec.
-    if (user.failed_login_count > 0 || user.locked_until) {
-      await pool.query("UPDATE users SET failed_login_count=0, locked_until=NULL WHERE id=$1", [user.id]);
-    }
-
-    if (!user.email_verified) {
-      return res.status(403).send("Email not verified.");
-    }
-
-    if (!process.env.JWT_SECRET) return res.status(500).send("JWT_SECRET not set.");
-
-    return res.status(200).json(await odgovorSeje(user, req));
-  } catch (err) {
-    console.error(err);
-    return res.status(500).send("Server error.");
-  }
-});
-
-// ---------------------------
-// OSVEŽITEV IN ODJAVA (S-06)
-// ---------------------------
-app.post("/auth/refresh", omeji({ kljuc: "refresh", najvec: 60, oknoSekund: 900 }), async (req, res) => {
-  try {
-    const { refreshToken } = req.body || {};
-    if (typeof refreshToken !== "string" || refreshToken.length < 32) {
-      return res.status(400).send("Missing refreshToken.");
-    }
-    if (!process.env.JWT_SECRET) return res.status(500).send("JWT_SECRET not set.");
-
-    const r = await pool.query(
-      `SELECT t.id, t.user_id, t.expires_at, t.revoked_at, t.replaced_by,
-              u.id AS uid, u.email, u.username, u.role
-       FROM refresh_tokens t JOIN users u ON u.id = t.user_id
-       WHERE t.token_hash = $1`,
-      [hashCode(refreshToken)]
-    );
-    if (r.rows.length === 0) return res.status(401).send("Invalid refresh token.");
-    const t = r.rows[0];
-
-    if (t.revoked_at) {
-      if (t.replaced_by) {
-        // Žeton je bil že ZAMENJAN z novim in se je pojavil še enkrat: nekdo ima
-        // kopijo. Prekličemo vse uporabnikove seje; prijaviti se mora znova.
-        await prekliciVseZetone(t.user_id);
-        return res.status(401).send("Refresh token reused. All sessions revoked.");
-      }
-      // Preklican z odjavo / ponastavitvijo gesla: samo zavrnemo, drugih naprav ne diramo.
-      return res.status(401).send("Invalid refresh token.");
-    }
-    if (new Date(t.expires_at).getTime() < Date.now()) {
-      await pool.query("UPDATE refresh_tokens SET revoked_at=NOW() WHERE id=$1", [t.id]);
-      return res.status(401).send("Refresh token expired.");
-    }
-
-    const user = { id: t.uid, email: t.email, username: t.username, role: t.role };
-    return res.status(200).json(await odgovorSeje(user, req, t.id));
-  } catch (e) {
-    console.error(e);
-    return res.status(500).send("Server error.");
-  }
-});
-
-// Odjava: prekliče osveževalni žeton te naprave. Dostopni JWT poteče sam v 1 uri.
-// Ne zahteva veljavnega dostopnega žetona — odjava mora delati tudi, ko je ta potekel.
-app.post("/auth/logout", async (req, res) => {
-  try {
-    const { refreshToken } = req.body || {};
-    if (typeof refreshToken === "string" && refreshToken.length >= 32) {
-      await pool.query(
-        "UPDATE refresh_tokens SET revoked_at=NOW() WHERE token_hash=$1 AND revoked_at IS NULL",
-        [hashCode(refreshToken)]
-      );
-    }
-    // Vedno 200: odjava ne sme "spodleteti" in uporabnika pustiti prijavljenega.
-    return res.status(200).json({ message: "Logged out." });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).send("Server error.");
-  }
-});
-
-// Odjava povsod (vse naprave).
-app.post("/auth/logout-all", requireAuth, async (req, res) => {
-  try {
-    await prekliciVseZetone(req.user.userId);
-    return res.status(200).json({ message: "Logged out everywhere." });
   } catch (e) {
     console.error(e);
     return res.status(500).send("Server error.");
@@ -990,195 +535,6 @@ app.patch("/me", requireAuth, async (req, res) => {
 });
 
 // ---------------------------
-// POZABLJENO GESLO
-// ---------------------------
-// Do zdaj tega ni bilo. Kdor je pozabil geslo, je bil trajno zaklenjen iz
-// svojega racuna in ga tudi podpora ni mogla resiti.
-
-async function posljiKodoZaPonastavitev(toEmail, code) {
-  if (!resend) {
-    console.warn("⚠️ RESEND_API_KEY ni nastavljen -> mail ni poslan");
-    return;
-  }
-  const from = process.env.EMAIL_FROM || "onboarding@resend.dev";
-  const appName = process.env.APP_NAME || "Outly";
-
-  const r = await resend.emails.send({
-    from,
-    to: toEmail,
-    subject: `${appName} password reset code`,
-    html: `
-    <div style="font-family: Arial, sans-serif; line-height:1.5">
-      <h2>${appName} – Password reset</h2>
-      <p>Your password reset code is:</p>
-      <div style="font-size:28px; font-weight:700; letter-spacing:4px; padding:12px 0">${code}</div>
-      <p>This code expires in <b>15 minutes</b>.</p>
-      <p>If you didn't request this, you can ignore this email — your password stays unchanged.</p>
-    </div>`,
-  });
-  if (r && r.error) {
-    console.error("Resend napaka (ponastavitev gesla):", JSON.stringify(r.error), "from:", from);
-  }
-}
-
-app.post("/auth/forgot-password", omeji({ kljuc: "forgot", najvec: 5, oknoSekund: 3600 }), async (req, res) => {
-  try {
-    const { email } = req.body;
-    if (typeof email !== "string" || !email.trim()) return res.status(400).send("Missing email.");
-
-    const cleanEmail = email.trim().toLowerCase();
-
-    // VEDNO 200, tudi ce racuna ni. Drugace bi ta pot postala orodje za
-    // ugotavljanje, kateri e-naslovi so pri nas registrirani (ista logika kot S-05).
-    const ODGOVOR = { message: "If an account exists for that email, a reset code has been sent." };
-
-    // Račun, vezan na Supabase, geslo ponastavlja pri Supabase; tu bi mu sicer
-    // ustvarili lokalno geslo in s tem drugo pot za prijavo.
-    const userR = await pool.query("SELECT id FROM users WHERE email=$1 AND supabase_uid IS NULL", [cleanEmail]);
-    if (userR.rows.length === 0) return res.status(200).json(ODGOVOR);
-
-    const userId = userR.rows[0].id;
-
-    // Ne posiljaj nove kode pogosteje kot enkrat na minuto.
-    const zadnja = await pool.query(
-      `SELECT created_at FROM password_reset_codes
-       WHERE user_id=$1 AND used_at IS NULL
-       ORDER BY created_at DESC LIMIT 1`,
-      [userId]
-    );
-    if (zadnja.rows.length > 0 &&
-        Date.now() - new Date(zadnja.rows[0].created_at).getTime() < 60 * 1000) {
-      return res.status(200).json(ODGOVOR);
-    }
-
-    const code = generate6DigitCode();
-    await pool.query(
-      `INSERT INTO password_reset_codes (user_id, code_hash, expires_at)
-       VALUES ($1,$2,$3)`,
-      [userId, hashCode(code), new Date(Date.now() + 15 * 60 * 1000)]
-    );
-
-    await posljiKodoZaPonastavitev(cleanEmail, code);
-    return res.status(200).json(ODGOVOR);
-  } catch (e) {
-    console.error(e);
-    return res.status(500).send("Server error.");
-  }
-});
-
-app.post("/auth/reset-password", omeji({ kljuc: "reset", najvec: 10, oknoSekund: 900 }), async (req, res) => {
-  try {
-    const { email, code, newPassword } = req.body;
-
-    if (typeof email !== "string" || typeof code !== "string" || typeof newPassword !== "string") {
-      return res.status(400).send("Missing email, code or newPassword.");
-    }
-    if (newPassword.length < 8) return res.status(400).send("Password too short.");
-
-    const cleanEmail = email.trim().toLowerCase();
-    const cleanCode = code.trim();
-    if (cleanCode.length !== 6) return res.status(400).send("Code must be 6 digits.");
-
-    const userR = await pool.query("SELECT id FROM users WHERE email=$1 AND supabase_uid IS NULL", [cleanEmail]);
-    if (userR.rows.length === 0) return res.status(400).send("Invalid or expired code.");
-    const userId = userR.rows[0].id;
-
-    const codeR = await pool.query(
-      `SELECT id, code_hash, expires_at, attempts
-       FROM password_reset_codes
-       WHERE user_id=$1 AND used_at IS NULL
-       ORDER BY created_at DESC LIMIT 1`,
-      [userId]
-    );
-    if (codeR.rows.length === 0) return res.status(400).send("Invalid or expired code.");
-
-    const row = codeR.rows[0];
-    if (new Date(row.expires_at).getTime() < Date.now()) {
-      return res.status(400).send("Invalid or expired code.");
-    }
-
-    const NAJVEC = 5;
-    if (row.attempts >= NAJVEC) {
-      await pool.query("UPDATE password_reset_codes SET used_at=NOW() WHERE id=$1", [row.id]);
-      return res.status(400).send("Too many attempts. Please request a new code.");
-    }
-
-    if (hashCode(cleanCode) !== row.code_hash) {
-      const poskusov = row.attempts + 1;
-      await pool.query(
-        poskusov >= NAJVEC
-          ? "UPDATE password_reset_codes SET attempts=$2, used_at=NOW() WHERE id=$1"
-          : "UPDATE password_reset_codes SET attempts=$2 WHERE id=$1",
-        [row.id, poskusov]
-      );
-      return res.status(400).send("Invalid or expired code.");
-    }
-
-    const passwordHash = await bcrypt.hash(newPassword, 12);
-
-    // Ponastavitev gesla hkrati odklene racun in razveljavi vse ostale kode.
-    await pool.query(
-      `UPDATE users SET password_hash=$2, failed_login_count=0, locked_until=NULL WHERE id=$1`,
-      [userId, passwordHash]
-    );
-    await pool.query(
-      "UPDATE password_reset_codes SET used_at=NOW() WHERE user_id=$1 AND used_at IS NULL",
-      [userId]
-    );
-
-    // Ponastavitev gesla odjavi vse naprave: osveževalni žetoni so preklicani,
-    // dostopni JWT-ji potečejo sami v največ 1 uri (S-06).
-    await prekliciVseZetone(userId);
-    return res.status(200).json({ message: "Password updated." });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).send("Server error.");
-  }
-});
-
-// ---------------------------
-// SPREMEMBA GESLA (prijavljen uporabnik)
-// ---------------------------
-app.post("/auth/change-password", requireAuth, omeji({ kljuc: "chpass", najvec: 10, oknoSekund: 900 }), async (req, res) => {
-  try {
-    const { currentPassword, newPassword, refreshToken } = req.body || {};
-    if (typeof currentPassword !== "string" || typeof newPassword !== "string") {
-      return res.status(400).send("Missing currentPassword or newPassword.");
-    }
-    if (newPassword.length < 8) return res.status(400).send("Password too short.");
-    if (newPassword === currentPassword) return res.status(400).send("New password must be different.");
-
-    // Geslo Supabasovega računa spreminja Supabase (aplikacija kliče
-    // PUT /auth/v1/user), ne mi — pri nas ga ni.
-    if (req.user.auth === "supabase") return res.status(400).send("Password is managed by the identity provider.");
-
-    const r = await pool.query("SELECT password_hash FROM users WHERE id=$1", [req.user.userId]);
-    if (r.rows.length === 0) return res.status(404).send("User not found.");
-    if (!r.rows[0].password_hash) return res.status(400).send("Password is managed by the identity provider.");
-
-    const ok = await bcrypt.compare(currentPassword, r.rows[0].password_hash);
-    if (!ok) return res.status(401).send("Invalid credentials.");
-
-    const hash = await bcrypt.hash(newPassword, 12);
-    await pool.query("UPDATE users SET password_hash=$2 WHERE id=$1", [req.user.userId, hash]);
-
-    // Odjavi VSE DRUGE naprave; ta naprava (njen osveževalni žeton) ostane prijavljena.
-    if (typeof refreshToken === "string" && refreshToken.length >= 32) {
-      await pool.query(
-        "UPDATE refresh_tokens SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL AND token_hash<>$2",
-        [req.user.userId, hashCode(refreshToken)]
-      );
-    } else {
-      await prekliciVseZetone(req.user.userId);
-    }
-    return res.status(200).json({ message: "Password changed." });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).send("Server error.");
-  }
-});
-
-// ---------------------------
 // BRISANJE RAČUNA (Apple 5.1.1(v), najdba A-01)
 // ---------------------------
 // Apple od junija 2022 zahteva, da uporabnik racun izbrise ZNOTRAJ aplikacije.
@@ -1201,13 +557,13 @@ async function izbrisiSupabaseRacun(token) {
 app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3600 }), async (req, res) => {
   try {
     const { password } = req.body || {};
-    const supabase = req.user.auth === "supabase";
+    const supabase = true;
 
     if (typeof password !== "string" || !password) {
       return res.status(400).send("Password required to delete account.");
     }
 
-    if (supabase) {
+    {
       // Ponovna prijava pri Supabase s trenutnim geslom: ukraden žeton (velja
       // do ure) sam ne sme zadostovati za nepovraten izbris.
       const r = await fetch(SUPABASE_ISS + "/token?grant_type=password", {
@@ -1219,12 +575,6 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       if (!r) return res.status(503).send("Auth service unavailable.");
       if (r.status === 400 || r.status === 401 || r.status === 403) return res.status(401).send("Invalid credentials.");
       if (!r.ok) return res.status(503).send("Auth service unavailable.");
-    } else {
-      const r = await pool.query("SELECT password_hash FROM users WHERE id=$1", [req.user.userId]);
-      if (r.rows.length === 0) return res.status(404).send("User not found.");
-      if (!r.rows[0].password_hash) return res.status(400).send("Password is managed by the identity provider.");
-      const ok = await bcrypt.compare(password, r.rows[0].password_hash);
-      if (!ok) return res.status(401).send("Invalid credentials.");
     }
 
     // Brez tabele orders (pred migracijo 002) je izbris preprost.
@@ -2437,7 +1787,6 @@ admin.patch("/users/:id", async (req, res) => {
       // Admin si sam ne more vzeti vloge: sicer bi lahko ostal panel brez admina.
       if (id === req.user.userId && b.role !== "admin") return res.status(400).send("You cannot remove your own admin role.");
       dodaj("role", b.role);
-      // Nova vloga v žetonu šele ob osvežitvi; odvzem admina naj velja takoj, ko poteče dostopni žeton (1 h).
       prekliciZetone = true;
     }
     if (b.unlock !== undefined) {
@@ -2459,7 +1808,7 @@ admin.patch("/users/:id", async (req, res) => {
        RETURNING ${ADMIN_POLJA_UPORABNIKA}`, vrednosti
     );
     if (r.rows.length === 0) return res.status(404).send("User not found.");
-    if (prekliciZetone) await prekliciVseZetone(id);
+    // Vloga pride iz baze ob vsakem klicu (Supabase Auth), preklic žetonov ni več potreben.
     if (b.emailVerified === true) {
       await pool.query("UPDATE email_verification_codes SET used_at=NOW() WHERE user_id=$1 AND used_at IS NULL", [id]);
     }
