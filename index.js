@@ -1809,9 +1809,6 @@ admin.patch("/users/:id", async (req, res) => {
     );
     if (r.rows.length === 0) return res.status(404).send("User not found.");
     // Vloga pride iz baze ob vsakem klicu (Supabase Auth), preklic žetonov ni več potreben.
-    if (b.emailVerified === true) {
-      await pool.query("UPDATE email_verification_codes SET used_at=NOW() WHERE user_id=$1 AND used_at IS NULL", [id]);
-    }
     console.log(`Admin ${req.user.userId} spremenil uporabnika ${id}:`, JSON.stringify(b));
     return res.status(200).json(r.rows[0]);
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
