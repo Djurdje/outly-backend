@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–009, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–010, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -542,7 +542,7 @@ ALTER SEQUENCE public.tickets_id_seq OWNED BY public.tickets.id;
 CREATE TABLE public.users (
     id integer NOT NULL,
     email text NOT NULL,
-    password_hash text NOT NULL,
+    password_hash text,
     username text NOT NULL,
     role text DEFAULT 'user'::text NOT NULL,
     avatar_url text,
@@ -556,6 +556,7 @@ CREATE TABLE public.users (
     country character(2),
     genres text[] DEFAULT '{}'::text[] NOT NULL,
     onboarded_at timestamp with time zone,
+    supabase_uid uuid,
     CONSTRAINT users_country_chk CHECK (((country IS NULL) OR (country ~ '^[A-Z]{2}$'::text))),
     CONSTRAINT users_dob_chk CHECK (((date_of_birth IS NULL) OR ((date_of_birth < CURRENT_DATE) AND (date_of_birth > (CURRENT_DATE - '120 years'::interval))))),
     CONSTRAINT users_email_chk CHECK ((POSITION(('@'::text) IN (email)) > 1)),
@@ -953,6 +954,13 @@ CREATE UNIQUE INDEX users_phone_key ON public.users USING btree (phone) WHERE (p
 --
 
 CREATE UNIQUE INDEX users_username_lower_key ON public.users USING btree (lower(username));
+
+
+--
+-- Name: users_supabase_uid_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX users_supabase_uid_key ON public.users USING btree (supabase_uid) WHERE (supabase_uid IS NOT NULL);
 
 
 --
