@@ -79,6 +79,12 @@
   .stevilka{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
   .stevilka b{display:block;font-size:26px;font-weight:700;letter-spacing:-.02em}
   .stevilka span{font-size:11.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
+  .stevilka small{display:block;font-size:11.5px;color:var(--faint);margin-top:2px}
+  .graf{display:flex;align-items:flex-end;gap:3px;height:140px;padding-top:18px}
+  .graf .stolpec{flex:1;min-width:6px;height:100%;background:var(--panel2);border-radius:3px 3px 0 0;position:relative;display:flex;flex-direction:column;justify-content:flex-end}
+  .graf .stolpec i{display:block;background:#4C76FF;border-radius:3px 3px 0 0;width:100%}
+  .graf .stolpec:hover::after{content:attr(data-o);position:absolute;bottom:100%;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:11.5px;white-space:nowrap;z-index:2}
+  .graf-osi{display:flex;justify-content:space-between;font-size:11px;color:var(--faint);margin-top:6px}
   .opozorilo{background:var(--opoz-soft);border:1px solid #4A3A1C;border-left:3px solid var(--opoz);
     border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#F0DCC0}
 
@@ -115,6 +121,7 @@
       <button data-z="klubi">Klubi</button>
       <button data-z="uporabniki">Uporabniki</button>
       <button data-z="dogodki">Dogodki</button>
+      <button data-z="finance">Finance</button>
     </nav>
 
     <!-- PREGLED -->
@@ -125,6 +132,23 @@
       <div class="skupina"><h2>Varnostna kopija <span class="desno"><button class="tih mali" id="bkGumb" onclick="varnostnaKopija()">Prenesi izvoz baze (JSON)</button></span></h2>
         <div class="telo" style="font-size:12.5px;color:var(--faint)">Izvozi vse tabele v eno datoteko JSON (vsebuje tudi odtise gesel – hrani zasebno). Nič se ne spremeni.</div>
       </div>
+    </section>
+
+    <!-- FINANCE -->
+    <section id="z-finance" class="skrito">
+      <div class="skupina"><h2>Finance <span id="fNacin" class="znacka"></span>
+        <span class="desno"><label style="font-size:12px;color:var(--faint)">od</label><input type="date" id="fOd"><label style="font-size:12px;color:var(--faint)">do</label><input type="date" id="fDo">
+        <button class="tih mali" onclick="fObdobje(30)">30 dni</button><button class="tih mali" onclick="fObdobje(90)">90 dni</button><button class="tih mali" onclick="fObdobje(365)">leto</button>
+        <button class="mali" onclick="naloziFinance()">Pokaži</button><button class="tih mali" onclick="fIzvoz()">CSV naročil</button></span></h2>
+        <div class="telo">
+          <div class="stevilke" id="fStevilke"></div>
+          <div id="fOpomba" style="font-size:12.5px;color:var(--faint);margin-top:10px"></div>
+        </div>
+      </div>
+      <div class="skupina"><h2>Po dnevih</h2><div class="telo"><div id="fGraf" class="graf"></div><div class="graf-osi" id="fOsi"></div></div></div>
+      <div class="skupina"><h2>Po klubih</h2><div class="telo" style="padding:0" id="fKlubi"></div></div>
+      <div class="skupina"><h2>Po dogodkih</h2><div class="telo" style="padding:0" id="fDogodki"></div></div>
+      <div class="skupina"><h2>Zadnja naročila</h2><div class="telo" style="padding:0" id="fNarocila"></div></div>
     </section>
 
     <!-- PROŠNJE -->
@@ -311,7 +335,7 @@ function pokaziPanel() {
 
 // ---------- zavihki ----------
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => pokaziZavihek(b.dataset.z));
-const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke };
+const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke, finance: naloziFinance };
 function pokaziZavihek(z) {
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("aktiven", b.dataset.z === z));
   document.querySelectorAll("section[id^=z-]").forEach(s => s.classList.toggle("skrito", s.id !== "z-" + z));
@@ -334,6 +358,68 @@ async function naloziPregled() {
       kos(s.business_users, "poslovnih računov") + kos(s.admins, "adminov");
     $("nProsenj").textContent = s.new_applications; $("nProsenj").classList.toggle("skrito", !s.new_applications);
   });
+}
+
+// ---------- finance ----------
+let fPodatki = null;
+function fObdobje(dni) {
+  const d = new Date(); $("fDo").value = d.toISOString().slice(0, 10);
+  d.setDate(d.getDate() - dni + 1); $("fOd").value = d.toISOString().slice(0, 10);
+  naloziFinance();
+}
+async function naloziFinance() {
+  if (!$("fOd").value || !$("fDo").value) { const d = new Date(); $("fDo").value = d.toISOString().slice(0, 10); d.setDate(d.getDate() - 29); $("fOd").value = d.toISOString().slice(0, 10); }
+  await varno(async () => {
+    const f = await klic("GET", `/admin/api/finance?from=${$("fOd").value}&to=${$("fDo").value}`);
+    fPodatki = f;
+    const s = f.summary, v = f.all_time;
+    $("fNacin").textContent = f.mode === "test" ? "TESTNI NAČIN – brez pravega denarja" : "v živo";
+    $("fNacin").className = "znacka " + (f.mode === "test" ? "opoz" : "ok");
+    const kos = (n, ime, pod) => `<div class="stevilka"><b>${n}</b><span>${ime}</span>${pod ? `<small>${pod}</small>` : ""}</div>`;
+    $("fStevilke").innerHTML =
+      kos(evri(s.gross_cents), "bruto prodaja", `od začetka ${evri(v.gross_cents)}`) +
+      kos(evri(s.fee_cents), `prihodek Outlyja (${f.fee_percent} %)`, `od začetka ${evri(v.fee_cents)}`) +
+      kos(evri(s.clubs_net_cents), "za klube (neto)", `bruto − provizija − vračila`) +
+      kos(evri(s.refunded_cents), "vračila") +
+      kos(s.tickets_sold, "vstopnic", `od začetka ${v.tickets_sold}`) +
+      kos(s.orders, "naročil", `${s.buyers} kupcev · ${s.clubs_with_sales} klubov`);
+    $("fOpomba").textContent = s.test_orders
+      ? `${s.test_orders} od ${s.orders} naročil je testnih (brez plačila). Pravi denar teče šele s Stripom; takrat se tu pokažejo tudi nakazila klubom.`
+      : "";
+    // graf po dnevih (bruto; provizija temnejši del)
+    const maks = Math.max(1, ...f.by_day.map(d => d.gross_cents));
+    $("fGraf").innerHTML = f.by_day.map(d => {
+      const h = Math.round(100 * d.gross_cents / maks);
+      return `<div class="stolpec" data-o="${d.day}: ${evri(d.gross_cents)} · ${d.tickets} vst."><i style="height:${h}%"></i></div>`;
+    }).join("");
+    $("fOsi").innerHTML = `<span>${f.from}</span><span>${f.to}</span>`;
+    tabela($("fKlubi"), ["Klub", "Bruto", "Provizija", "Vračila", "Neto klubu", "Vstopnic", "Naročil", "Stripe"], f.by_club.map(k => `
+      <tr><td><b>${ubezi(k.name)}</b><span class="drobno">${ubezi(k.city || "")}</span></td>
+      <td class="mono">${evri(k.gross_cents)}</td><td class="mono">${evri(k.fee_cents)}</td><td class="mono">${evri(k.refunded_cents)}</td>
+      <td class="mono"><b>${evri(k.net_cents)}</b></td><td class="mono">${k.tickets_sold}</td><td class="mono">${k.orders}</td>
+      <td>${k.stripe_payouts_enabled ? '<span class="znacka ok">nakazila</span>' : (k.stripe_charges_enabled ? '<span class="znacka opoz">brez nakazil</span>' : '<span class="znacka">ni povezan</span>')}</td></tr>`), "V tem obdobju ni prodaje.");
+    tabela($("fDogodki"), ["Dogodek", "Klub", "Kdaj", "Cena", "Prodano / kap.", "Prišlo", "Bruto", "Provizija"], f.by_event.map(e => `
+      <tr><td><b>${ubezi(e.title)}</b><span class="drobno">${ubezi(e.status)}</span></td><td>${ubezi(e.club_name)}</td>
+      <td class="mono">${datum(e.start_at)}</td><td class="mono">${evri(e.ticket_price_cents)}</td>
+      <td class="mono">${e.tickets_sold}${e.capacity ? " / " + e.capacity : ""}</td><td class="mono">${e.checked_in}</td>
+      <td class="mono">${evri(e.gross_cents)}</td><td class="mono">${evri(e.fee_cents)}</td></tr>`), "V tem obdobju ni prodaje.");
+    const st = { paid: '<span class="znacka ok">plačano</span>', partially_refunded: '<span class="znacka opoz">delno vrnjeno</span>', refunded: '<span class="znacka slabo">vrnjeno</span>', cancelled: '<span class="znacka slabo">preklicano</span>', pending: '<span class="znacka">v teku</span>' };
+    tabela($("fNarocila"), ["Ref", "Kdaj", "Dogodek", "Klub", "Kupec", "Kol.", "Znesek", "Provizija", "Stanje"], f.recent_orders.map(o => `
+      <tr><td class="mono">${ubezi(o.public_ref)}${o.is_test ? ' <span class="znacka opoz">test</span>' : ""}</td><td class="mono">${datum(o.created_at)}</td>
+      <td>${ubezi(o.event_title)}</td><td>${ubezi(o.club_name)}</td><td>${ubezi(o.buyer_username || "")}<span class="drobno">${ubezi(o.buyer_email)}</span></td>
+      <td class="mono">${o.quantity}</td><td class="mono">${evri(o.total_cents)}</td><td class="mono">${evri(o.application_fee_cents)}</td>
+      <td>${st[o.status] || ubezi(o.status)}${o.refunded_cents ? `<span class="drobno">vrnjeno ${evri(o.refunded_cents)}</span>` : ""}</td></tr>`), "V tem obdobju ni naročil.");
+  });
+}
+function fIzvoz() {
+  if (!fPodatki) { obvesti("Najprej naloži podatke.", "slabo"); return; }
+  const g = ["ref", "datum", "dogodek", "klub", "kupec", "e-naslov", "kolicina", "znesek_eur", "provizija_eur", "vracilo_eur", "stanje", "test"];
+  const v = fPodatki.recent_orders.map(o => [o.public_ref, o.created_at, o.event_title, o.club_name, o.buyer_username || "", o.buyer_email, o.quantity,
+    (o.total_cents / 100).toFixed(2), (o.application_fee_cents / 100).toFixed(2), (o.refunded_cents / 100).toFixed(2), o.status, o.is_test ? "da" : "ne"]);
+  const csv = [g, ...v].map(r => r.map(x => `"${String(x ?? "").replace(/"/g, '""')}"`).join(";")).join("\n");
+  const b = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = `outly-narocila-${fPodatki.from}-${fPodatki.to}.csv`; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
 }
 
 // ---------- prošnje ----------
