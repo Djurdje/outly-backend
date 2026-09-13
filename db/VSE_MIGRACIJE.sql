@@ -972,6 +972,45 @@ CREATE INDEX IF NOT EXISTS event_favorites_event_idx ON event_favorites (event_i
 
 
 
+-- ###########################################################################
+-- ##  013_vabila_v_ekipo.sql
+-- ###########################################################################
+-- 013_vabila_v_ekipo.sql
+-- Vabila v ekipo kluba (Figma "My clubs" / "My clubs inv" / "My clubs con").
+--
+-- Zakaj: do zdaj je lastnik sodelavca dodal NEPOSREDNO (POST /business/team ->
+-- vrstica v club_members brez privolitve). Po Figmi uporabnik vabilo prejme v
+-- obvestilih ("X has sent you an invitation to work as a Manager") in ga sprejme
+-- ali zavrne. Šele ob sprejemu nastane vrstica v club_members.
+--
+-- Stanja: pending -> accepted | declined | cancelled (lastnik/manager prekliče).
+-- Uporabnik ima za isti klub največ ENO čakajoče vabilo (delni unikatni indeks);
+-- lahko pa ima čakajoča vabila več klubov — ob sprejemu enega se ostala
+-- označijo kot declined (uporabnik je lahko v največ eni ekipi, migracija 009).
+-- Vabilo velja samo za uporabnika, ki že ima Outly račun (kot prej).
+
+CREATE TABLE IF NOT EXISTS club_invites (
+    id                  SERIAL      PRIMARY KEY,
+    club_id             INTEGER     NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
+    user_id             INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role                TEXT        NOT NULL CHECK (role IN ('manager', 'doorman')),
+    status              TEXT        NOT NULL DEFAULT 'pending'
+                                    CHECK (status IN ('pending', 'accepted', 'declined', 'cancelled')),
+    invited_by_user_id  INTEGER     REFERENCES users(id) ON DELETE SET NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    responded_at        TIMESTAMPTZ
+);
+
+-- Največ eno čakajoče vabilo na (klub, uporabnik).
+CREATE UNIQUE INDEX IF NOT EXISTS club_invites_pending_uniq
+    ON club_invites (club_id, user_id) WHERE status = 'pending';
+
+-- Obvestila uporabnika: "moja čakajoča vabila".
+CREATE INDEX IF NOT EXISTS club_invites_user_pending_idx
+    ON club_invites (user_id) WHERE status = 'pending';
+
+
+
 -- =============================================================================
 -- Vpis v evidenco
 -- =============================================================================
@@ -988,7 +1027,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('009_ekipa.sql', '17ec9f99d87e3bb8'),
     ('010_supabase_auth.sql', '13538382ae669c2e'),
     ('011_pocisti_lastno_prijavo.sql', 'b12170e325d475d6'),
-    ('012_priljubljeni.sql', '582bd1010193b34a')
+    ('012_priljubljeni.sql', '582bd1010193b34a'),
+    ('013_vabila_v_ekipo.sql', 'b676a9d2808909c0')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

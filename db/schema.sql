@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–012, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–013, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -16,7 +16,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict NkjVnXbzlHwyOE6d7UEtab2YmmNFt2xf8TsDbAOsXqE1zm0WKk6ptdLMZ6VHdEe
+\restrict ELcc63Ap8gbEadHo7fbWdTNzQycGj5FXim7cXfdTrOD7AF092iyMLt45vgOzk3T
 
 -- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
@@ -106,6 +106,44 @@ $$;
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
+
+--
+-- Name: club_invites; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.club_invites (
+    id integer NOT NULL,
+    club_id integer NOT NULL,
+    user_id integer NOT NULL,
+    role text NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    invited_by_user_id integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    responded_at timestamp with time zone,
+    CONSTRAINT club_invites_role_check CHECK ((role = ANY (ARRAY['manager'::text, 'doorman'::text]))),
+    CONSTRAINT club_invites_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'accepted'::text, 'declined'::text, 'cancelled'::text])))
+);
+
+
+--
+-- Name: club_invites_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.club_invites_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: club_invites_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.club_invites_id_seq OWNED BY public.club_invites.id;
+
 
 --
 -- Name: club_members; Type: TABLE; Schema: public; Owner: -
@@ -506,6 +544,13 @@ ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
 
 
 --
+-- Name: club_invites id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_invites ALTER COLUMN id SET DEFAULT nextval('public.club_invites_id_seq'::regclass);
+
+
+--
 -- Name: club_members id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -559,6 +604,14 @@ ALTER TABLE ONLY public.tickets ALTER COLUMN id SET DEFAULT nextval('public.tick
 --
 
 ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+
+
+--
+-- Name: club_invites club_invites_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_invites
+    ADD CONSTRAINT club_invites_pkey PRIMARY KEY (id);
 
 
 --
@@ -661,6 +714,20 @@ CREATE UNIQUE INDEX ca_email_open_key ON public.creator_applications USING btree
 --
 
 CREATE INDEX ca_status_created_idx ON public.creator_applications USING btree (status, created_at);
+
+
+--
+-- Name: club_invites_pending_uniq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX club_invites_pending_uniq ON public.club_invites USING btree (club_id, user_id) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: club_invites_user_pending_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_invites_user_pending_idx ON public.club_invites USING btree (user_id) WHERE (status = 'pending'::text);
 
 
 --
@@ -839,6 +906,30 @@ CREATE TRIGGER orders_sprosti AFTER UPDATE OF status ON public.orders FOR EACH R
 
 
 --
+-- Name: club_invites club_invites_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_invites
+    ADD CONSTRAINT club_invites_club_id_fkey FOREIGN KEY (club_id) REFERENCES public.clubs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: club_invites club_invites_invited_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_invites
+    ADD CONSTRAINT club_invites_invited_by_user_id_fkey FOREIGN KEY (invited_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: club_invites club_invites_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_invites
+    ADD CONSTRAINT club_invites_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: club_members club_members_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1002,5 +1093,5 @@ ALTER TABLE ONLY public.tickets
 -- PostgreSQL database dump complete
 --
 
-\unrestrict NkjVnXbzlHwyOE6d7UEtab2YmmNFt2xf8TsDbAOsXqE1zm0WKk6ptdLMZ6VHdEe
+\unrestrict ELcc63Ap8gbEadHo7fbWdTNzQycGj5FXim7cXfdTrOD7AF092iyMLt45vgOzk3T
 
