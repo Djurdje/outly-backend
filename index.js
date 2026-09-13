@@ -347,7 +347,14 @@ app.get("/me", requireAuth, async (req, res) => {
     // Klub in vloga v njem (lastnik ali član ekipe, migracija 009). Aplikacija
     // po club_role pokaže poslovni obraz — tudi vratarju, ki ima users.role 'user'.
     const k = await klubUporabnika(req.user.userId);
-    return res.status(200).json({ ...result.rows[0], club_id: k ? k.clubId : null, club_role: k ? k.role : null });
+    // Čakajoča vabila v ekipo (migracija 013) — značka na zvoncu v "My clubs".
+    const v = await pool.query("SELECT COUNT(*)::int AS n FROM club_invites WHERE user_id=$1 AND status='pending'", [req.user.userId]);
+    return res.status(200).json({
+      ...result.rows[0],
+      club_id: k ? k.clubId : null,
+      club_role: k ? k.role : null,
+      pending_invites: v.rows[0] ? v.rows[0].n : 0,
+    });
   } catch (err) {
     console.error(err);
     return res.status(500).send("Server error.");
@@ -2460,10 +2467,11 @@ app.post("/business/tickets/scan", requireAuth, requireClub(), async (req, res) 
 // ---------------------------
 // EKIPA KLUBA (migracija 009)
 // ---------------------------
-// Lastnik dodaja managerje in vratarje; manager sme dodajati in odstranjevati
-// samo vratarje. Član mora že imeti Outly račun (po e-naslovu) — povabil brez
-// računa ni, ker bi bilo treba voditi še stanje "čaka". Sodelavec je lahko v
-// največ eni ekipi in lastnik kluba ne more biti hkrati član druge.
+// Lastnik vabi managerje in vratarje; manager sme vabiti in odstranjevati
+// samo vratarje. Od migracije 013 je dodajanje VABILO: uporabnik ga sprejme ali
+// zavrne v aplikaciji (My clubs -> zvonec), član nastane ob sprejemu. Povabljeni
+// mora že imeti Outly račun (po e-naslovu). Sodelavec je lahko v največ eni
+// ekipi in lastnik kluba ne more biti hkrati član druge.
 const VLOGE_EKIPE = ["manager", "doorman"];
 
 async function seznamEkipe(clubId) {
@@ -2480,7 +2488,9 @@ async function seznamEkipe(clubId) {
   return r.rows;
 }
 
-async function posljiObvestiloEkipi(toEmail, clubName, role) {
+// Mail sodelavcu ob VABILU (migracija 013): vabilo sprejme ali zavrne v aplikaciji
+// (Profile -> My clubs -> zvonec). Prej je bil dodan neposredno.
+async function posljiVabiloEkipi(toEmail, clubName, role) {
   if (!resend) return;
   const from = process.env.EMAIL_FROM || "onboarding@resend.dev";
   const appName = process.env.APP_NAME || "Outly";
@@ -2488,29 +2498,47 @@ async function posljiObvestiloEkipi(toEmail, clubName, role) {
   try {
     const r = await resend.emails.send({
       from, to: toEmail,
-      subject: `You've joined the ${clubName} team on ${appName}`,
+      subject: `${clubName} invited you to their team on ${appName}`,
       html: `
     <div style="font-family: Arial, sans-serif; line-height:1.5">
       <h2>${appName} – Club team</h2>
-      <p>You were added to the team of <b>${clubName}</b> as <b>${vloga}</b>.</p>
-      <p>Open the ${appName} app and go to your profile — the club tools are there.</p>
-      <p>If you don't know this club, you can ignore this email or leave the team in the app.</p>
+      <p><b>${clubName}</b> has invited you to work with them as <b>${vloga}</b>.</p>
+      <p>Open the ${appName} app, go to <b>Profile → My clubs</b> and tap the bell to accept or reject the invitation.</p>
+      <p>If you don't know this club, simply reject the invitation or ignore this email.</p>
     </div>`,
     });
-    if (r && r.error) console.error("Resend napaka (ekipa):", JSON.stringify(r.error));
-  } catch (e) { console.error("Resend napaka (ekipa):", e); }
+    if (r && r.error) console.error("Resend napaka (vabilo):", JSON.stringify(r.error));
+  } catch (e) { console.error("Resend napaka (vabilo):", e); }
 }
 
-// GET /business/team — lastnik + člani. Vratar ekipe ne vidi.
+// Čakajoča vabila kluba (za GET /business/team).
+async function seznamVabilKluba(clubId) {
+  const r = await pool.query(
+    `SELECT i.id, i.user_id, u.username, u.email, u.avatar_url, i.role, i.created_at, i.invited_by_user_id
+       FROM club_invites i JOIN users u ON u.id = i.user_id
+      WHERE i.club_id = $1 AND i.status = 'pending'
+      ORDER BY i.created_at`,
+    [clubId]
+  );
+  return r.rows;
+}
+
+async function odgovorEkipe(req, klub) {
+  return { my_role: req.klub.role, members: await seznamEkipe(klub), invites: await seznamVabilKluba(klub) };
+}
+
+// GET /business/team — lastnik + člani + čakajoča vabila. Vratar ekipe ne vidi.
 app.get("/business/team", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
-    return res.json({ my_role: req.klub.role, members: await seznamEkipe(klub) });
+    return res.json(await odgovorEkipe(req, klub));
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
-// POST /business/team — telo: { email, role }. Vrne posodobljen seznam.
+// POST /business/team — telo: { email, role }. Od migracije 013 ustvari VABILO
+// (status pending); član nastane šele, ko uporabnik vabilo sprejme
+// (POST /me/invites/:id/accept). Vrne posodobljen seznam (members + invites).
 app.post("/business/team", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
     const klub = await mojKlubId(req);
@@ -2521,7 +2549,7 @@ app.post("/business/team", requireAuth, requireClub("owner", "manager"), async (
     if (!email || !email.includes("@")) return res.status(400).send("Valid email is required.");
     if (!VLOGE_EKIPE.includes(role)) return res.status(400).send("role must be manager or doorman.");
     if (req.klub.role === "manager" && role !== "doorman") {
-      return res.status(403).send("Only the club owner can add managers.");
+      return res.status(403).send("Only the club owner can invite managers.");
     }
 
     const u = await pool.query("SELECT id, username, email FROM users WHERE LOWER(email)=$1", [email]);
@@ -2541,14 +2569,108 @@ app.post("/business/team", requireAuth, requireClub("owner", "manager"), async (
       const tu = Number(ze.rows[0].club_id) === Number(klub);
       return res.status(409).json({ error: "already_member", message: tu ? `Already in the team as ${ze.rows[0].role}.` : "This user is already in another club's team." });
     }
+    const caka = await pool.query("SELECT id FROM club_invites WHERE club_id=$1 AND user_id=$2 AND status='pending'", [klub, clan.id]);
+    if (caka.rows.length) {
+      return res.status(409).json({ error: "already_invited", message: "This user already has a pending invitation from your club." });
+    }
 
     await pool.query(
-      "INSERT INTO club_members (club_id, user_id, role, invited_by_user_id) VALUES ($1,$2,$3,$4)",
+      "INSERT INTO club_invites (club_id, user_id, role, invited_by_user_id) VALUES ($1,$2,$3,$4)",
       [klub, clan.id, role, req.user.userId]
     );
     const ime = await pool.query("SELECT name FROM clubs WHERE id=$1", [klub]);
-    posljiObvestiloEkipi(clan.email, ime.rows[0] ? ime.rows[0].name : "your club", role); // brez await: mail ne sme zadrževati odgovora
-    return res.status(201).json({ my_role: req.klub.role, members: await seznamEkipe(klub) });
+    posljiVabiloEkipi(clan.email, ime.rows[0] ? ime.rows[0].name : "A club", role); // brez await: mail ne sme zadrževati odgovora
+    return res.status(201).json(await odgovorEkipe(req, klub));
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// DELETE /business/team/invites/:id — prekliče čakajoče vabilo. Manager sme samo vratarje.
+// (Definirano PRED /business/team/:userId; poti se ne prekrivata, ker ima ta dodaten del.)
+app.delete("/business/team/invites/:id", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  try {
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    const id = celoId(req.params.id);
+    if (!id) return res.status(400).send("Invalid invite id.");
+    const i = await pool.query("SELECT role FROM club_invites WHERE id=$1 AND club_id=$2 AND status='pending'", [id, klub]);
+    if (i.rows.length === 0) return res.status(404).send("Invitation not found.");
+    if (req.klub.role === "manager" && i.rows[0].role !== "doorman") {
+      return res.status(403).send("Only the club owner can cancel manager invitations.");
+    }
+    await pool.query("UPDATE club_invites SET status='cancelled', responded_at=NOW() WHERE id=$1", [id]);
+    return res.json(await odgovorEkipe(req, klub));
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// ---------------------------
+// MOJA VABILA (uporabnik; migracija 013)
+// ---------------------------
+async function mojaVabila(userId) {
+  const r = await pool.query(
+    `SELECT i.id, i.club_id, c.name AS club_name, c.logo_url AS club_logo_url, c.city AS club_city,
+            i.role, i.created_at, u.username AS invited_by_username
+       FROM club_invites i
+       JOIN clubs c ON c.id = i.club_id
+       LEFT JOIN users u ON u.id = i.invited_by_user_id
+      WHERE i.user_id = $1 AND i.status = 'pending'
+      ORDER BY i.created_at DESC`,
+    [userId]
+  );
+  return r.rows;
+}
+
+// GET /me/invites -> { invites: [...] } (samo čakajoča).
+app.get("/me/invites", requireAuth, async (req, res) => {
+  try {
+    return res.json({ invites: await mojaVabila(req.user.userId) });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// POST /me/invites/:id/accept -> { club: {id, name, logo_url}, role, invites: [...] }.
+// V eni transakciji: vabilo mora biti čakajoče in moje; uporabnik ne sme biti
+// lastnik kluba ali že član (največ ena ekipa); ostala čakajoča vabila -> declined.
+app.post("/me/invites/:id/accept", requireAuth, async (req, res) => {
+  const id = celoId(req.params.id);
+  if (!id) return res.status(400).send("Invalid invite id.");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const i = await client.query(
+      "SELECT i.id, i.club_id, i.role, i.invited_by_user_id, c.name, c.logo_url FROM club_invites i JOIN clubs c ON c.id=i.club_id WHERE i.id=$1 AND i.user_id=$2 AND i.status='pending' FOR UPDATE OF i",
+      [id, req.user.userId]
+    );
+    if (i.rows.length === 0) { await client.query("ROLLBACK"); return res.status(404).send("Invitation not found or no longer pending."); }
+    const v = i.rows[0];
+    const lastnik = await client.query("SELECT id FROM clubs WHERE owner_user_id=$1 LIMIT 1", [req.user.userId]);
+    if (lastnik.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "is_owner", message: "You own a club and can't join another team." }); }
+    const clan = await client.query("SELECT club_id FROM club_members WHERE user_id=$1", [req.user.userId]);
+    if (clan.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "already_member", message: "You are already in a club team. Leave it first." }); }
+
+    await client.query(
+      "INSERT INTO club_members (club_id, user_id, role, invited_by_user_id) VALUES ($1,$2,$3,$4)",
+      [v.club_id, req.user.userId, v.role, v.invited_by_user_id]
+    );
+    await client.query("UPDATE club_invites SET status='accepted', responded_at=NOW() WHERE id=$1", [id]);
+    await client.query("UPDATE club_invites SET status='declined', responded_at=NOW() WHERE user_id=$1 AND status='pending'", [req.user.userId]);
+    await client.query("COMMIT");
+    return res.json({ club: { id: v.club_id, name: v.name, logo_url: v.logo_url }, role: v.role, invites: [] });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    console.error(e); return res.status(500).send("Server error.");
+  } finally { client.release(); }
+});
+
+// POST /me/invites/:id/decline -> { invites: [...] }.
+app.post("/me/invites/:id/decline", requireAuth, async (req, res) => {
+  try {
+    const id = celoId(req.params.id);
+    if (!id) return res.status(400).send("Invalid invite id.");
+    const r = await pool.query(
+      "UPDATE club_invites SET status='declined', responded_at=NOW() WHERE id=$1 AND user_id=$2 AND status='pending' RETURNING id",
+      [id, req.user.userId]
+    );
+    if (r.rows.length === 0) return res.status(404).send("Invitation not found or no longer pending.");
+    return res.json({ invites: await mojaVabila(req.user.userId) });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
@@ -2574,7 +2696,7 @@ app.delete("/business/team/:userId", requireAuth, requireClub("owner", "manager"
       return res.status(403).send("Only the club owner can remove managers.");
     }
     await pool.query("DELETE FROM club_members WHERE club_id=$1 AND user_id=$2", [klub, uid]);
-    return res.json({ my_role: req.klub.role, members: await seznamEkipe(klub) });
+    return res.json(await odgovorEkipe(req, klub));
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
