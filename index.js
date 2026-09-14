@@ -671,7 +671,30 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 // treba tu dodati zavestno.
 const JAVNI_STOLPCI_KLUBA = `id, owner_user_id, name, logo_url, banner_url, description,
   contact_email, contact_phone, instagram, website, address, city, country,
-  lat, lng, min_age, genres, created_at`;
+  lat, lng, min_age, genres, created_at, bar_prices`;
+
+// Cenik bara (migracija 014): seznam postavk, ki ga klub ureja v celoti.
+// Vrne ocisceno kopijo ali niz z napako. Cene v centih, kot pri vstopnicah.
+const CENIK_NAJVEC_POSTAVK = 60;
+function preveriCenik(vhod) {
+  if (!Array.isArray(vhod)) return { napaka: "barPrices must be an array." };
+  if (vhod.length > CENIK_NAJVEC_POSTAVK) return { napaka: `barPrices: at most ${CENIK_NAJVEC_POSTAVK} items.` };
+  const postavke = [];
+  for (const p of vhod) {
+    if (!p || typeof p !== "object" || Array.isArray(p)) return { napaka: "barPrices: each item must be an object." };
+    const name = String(p.name ?? "").trim();
+    if (name.length < 1 || name.length > 60) return { napaka: "barPrices: name must be 1-60 characters." };
+    const cents = p.price_cents ?? p.priceCents;
+    if (!Number.isInteger(cents) || cents < 0 || cents > 100000) {
+      return { napaka: "barPrices: price_cents must be an integer between 0 and 100000." };
+    }
+    const category = String(p.category ?? "").trim().slice(0, 30);
+    const postavka = { name, price_cents: cents };
+    if (category) postavka.category = category;
+    postavke.push(postavka);
+  }
+  return { postavke };
+}
 
 // Lastnik vidi še stanje vidnosti in Stripa, ne pa stripe_account_id.
 const STOLPCI_KLUBA_LASTNIKA = `${JAVNI_STOLPCI_KLUBA}, hidden, stripe_charges_enabled, stripe_payouts_enabled`;
@@ -924,8 +947,17 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
       lng: body.lng,
       // Doslej ju lastnik ni mogel nastaviti (samo admin) — ClubInfoView ju rabi.
       genres: body.genres,
-      min_age: body.min_age ?? body.minAge
+      min_age: body.min_age ?? body.minAge,
+      // Cenik bara (migracija 014). Poslje se cel seznam; prazen seznam = brez cenika.
+      bar_prices: body.bar_prices ?? body.barPrices
     };
+
+    if (incoming.bar_prices !== undefined) {
+      const c = preveriCenik(incoming.bar_prices);
+      if (c.napaka) return res.status(400).send(c.napaka);
+      // pg bi JS seznam poslal kot Postgresov ARRAY, ne kot JSON -> vedno JSON.stringify + ::jsonb.
+      incoming.bar_prices = JSON.stringify(c.postavke);
+    }
 
     if (incoming.genres !== undefined) {
       if (!Array.isArray(incoming.genres)) return res.status(400).send("genres must be an array.");
@@ -946,7 +978,7 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
 
     for (const [k, v] of Object.entries(incoming)) {
       if (v === undefined) continue;
-      sets.push(`${k} = $${idx++}`);
+      sets.push(k === "bar_prices" ? `${k} = $${idx++}::jsonb` : `${k} = $${idx++}`);
       values.push(v);
     }
 
