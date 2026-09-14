@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–013, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–014, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -16,7 +16,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ELcc63Ap8gbEadHo7fbWdTNzQycGj5FXim7cXfdTrOD7AF092iyMLt45vgOzk3T
+\restrict r03y9E36rC72XA0zXxVeaLtfVEKMFCNxXCJISc0ZFhjBbN1h9nZeiO4LUls6QjX
 
 -- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
@@ -31,6 +31,20 @@ SET check_function_bodies = false;
 SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
+
+--
+-- Name: public; Type: SCHEMA; Schema: -; Owner: -
+--
+
+-- *not* creating schema, since initdb creates it
+
+
+--
+-- Name: SCHEMA public; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON SCHEMA public IS '';
+
 
 --
 -- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -
@@ -208,6 +222,8 @@ CREATE TABLE public.clubs (
     stripe_payouts_enabled boolean DEFAULT false NOT NULL,
     stripe_onboarded_at timestamp with time zone,
     hidden boolean DEFAULT false NOT NULL,
+    bar_prices jsonb DEFAULT '[]'::jsonb NOT NULL,
+    CONSTRAINT clubs_bar_prices_chk CHECK ((jsonb_typeof(bar_prices) = 'array'::text)),
     CONSTRAINT clubs_coords_chk CHECK (((lat IS NULL) = (lng IS NULL))),
     CONSTRAINT clubs_lat_chk CHECK (((lat IS NULL) OR ((lat >= ('-90'::integer)::double precision) AND (lat <= (90)::double precision)))),
     CONSTRAINT clubs_lng_chk CHECK (((lng IS NULL) OR ((lng >= ('-180'::integer)::double precision) AND (lng <= (180)::double precision)))),
@@ -1093,5 +1109,5 @@ ALTER TABLE ONLY public.tickets
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ELcc63Ap8gbEadHo7fbWdTNzQycGj5FXim7cXfdTrOD7AF092iyMLt45vgOzk3T
+\unrestrict r03y9E36rC72XA0zXxVeaLtfVEKMFCNxXCJISc0ZFhjBbN1h9nZeiO4LUls6QjX
 
