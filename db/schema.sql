@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–014, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–015, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -16,7 +16,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict r03y9E36rC72XA0zXxVeaLtfVEKMFCNxXCJISc0ZFhjBbN1h9nZeiO4LUls6QjX
+\restrict tIh6oJDyOYJZa1kAZitBrxd1Vk7g5pUx8gadCkvZJgL1Uewgl1vbi0fo4mL0299
 
 -- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
@@ -223,8 +223,11 @@ CREATE TABLE public.clubs (
     stripe_onboarded_at timestamp with time zone,
     hidden boolean DEFAULT false NOT NULL,
     bar_prices jsonb DEFAULT '[]'::jsonb NOT NULL,
+    gallery_urls text[] DEFAULT '{}'::text[] NOT NULL,
+    video_url text DEFAULT ''::text NOT NULL,
     CONSTRAINT clubs_bar_prices_chk CHECK ((jsonb_typeof(bar_prices) = 'array'::text)),
     CONSTRAINT clubs_coords_chk CHECK (((lat IS NULL) = (lng IS NULL))),
+    CONSTRAINT clubs_gallery_chk CHECK ((cardinality(gallery_urls) <= 3)),
     CONSTRAINT clubs_lat_chk CHECK (((lat IS NULL) OR ((lat >= ('-90'::integer)::double precision) AND (lat <= (90)::double precision)))),
     CONSTRAINT clubs_lng_chk CHECK (((lng IS NULL) OR ((lng >= ('-180'::integer)::double precision) AND (lng <= (180)::double precision)))),
     CONSTRAINT clubs_min_age_chk CHECK (((min_age >= 0) AND (min_age <= 99))),
@@ -1109,5 +1112,5 @@ ALTER TABLE ONLY public.tickets
 -- PostgreSQL database dump complete
 --
 
-\unrestrict r03y9E36rC72XA0zXxVeaLtfVEKMFCNxXCJISc0ZFhjBbN1h9nZeiO4LUls6QjX
+\unrestrict tIh6oJDyOYJZa1kAZitBrxd1Vk7g5pUx8gadCkvZJgL1Uewgl1vbi0fo4mL0299
 
