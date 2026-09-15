@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Test cenika bara (migracija 014). Zagon (lokalno, PG16 na 5433, baza z vsemi migracijami):
+ * Test cenika bara (migracija 014) in galerije/videa (015). Zagon (lokalno, PG16 na 5433, baza z vsemi migracijami):
  *   DATABASE_URL="postgres://postgres@localhost:5433/outly?host=/tmp/pg" node _testi/test_cenik.js
  * Vzorec kot test_vabila.js: lokalni JWKS (3999), backend na 3113.
  */
@@ -100,6 +100,22 @@ async function api(method, path, token, body) {
   assert(r.status === 400, "ime 61 znakov -> 400", r.status);
   r = await api("GET", "/clubs/1");
   assert(r.body.bar_prices.length === 0, "po napakah cenik nespremenjen", r.body.bar_prices);
+
+  console.log("\n# Galerija in video (migracija 015)");
+  r = await api("GET", "/clubs/1");
+  assert(Array.isArray(r.body.gallery_urls) && r.body.gallery_urls.length === 0 && r.body.video_url === "", "privzeto gallery_urls=[] video_url=''", r.body);
+  r = await api("PATCH", "/business/clubs/me", T.lastnik, { galleryUrls: ["https://res.cloudinary.com/a/1.jpg", " https://res.cloudinary.com/a/2.jpg ", ""], videoUrl: "https://res.cloudinary.com/a/v.mp4" });
+  assert(r.status === 200 && r.body.gallery_urls.length === 2 && r.body.gallery_urls[1] === "https://res.cloudinary.com/a/2.jpg" && r.body.video_url === "https://res.cloudinary.com/a/v.mp4", "PATCH galleryUrls (prazni preskoceni, trim) + videoUrl", r.body);
+  r = await api("GET", "/clubs");
+  assert(r.body[0].gallery_urls.length === 2, "GET /clubs vraca gallery_urls", r.body[0]);
+  r = await api("PATCH", "/business/clubs/me", T.lastnik, { galleryUrls: ["https://a/1.jpg","https://a/2.jpg","https://a/3.jpg","https://a/4.jpg"] });
+  assert(r.status === 400, "4 slike -> 400", r.status);
+  r = await api("PATCH", "/business/clubs/me", T.lastnik, { galleryUrls: ["http://a/1.jpg"] });
+  assert(r.status === 400, "http (ne https) -> 400", r.status);
+  r = await api("PATCH", "/business/clubs/me", T.lastnik, { videoUrl: "javascript:alert(1)" });
+  assert(r.status === 400, "videoUrl brez https -> 400", r.status);
+  r = await api("PATCH", "/business/clubs/me", T.lastnik, { videoUrl: "", galleryUrls: [] });
+  assert(r.status === 200 && r.body.video_url === "" && r.body.gallery_urls.length === 0, "prazno = odstrani", r.body);
 
   console.log("\n# Pravice");
   r = await api("PATCH", "/business/clubs/me", T.ana, { barPrices: [{ name: "Pivo", price_cents: 100 }] });
