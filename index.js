@@ -671,7 +671,7 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 // treba tu dodati zavestno.
 const JAVNI_STOLPCI_KLUBA = `id, owner_user_id, name, logo_url, banner_url, description,
   contact_email, contact_phone, instagram, website, address, city, country,
-  lat, lng, min_age, genres, created_at, bar_prices`;
+  lat, lng, min_age, genres, created_at, bar_prices, gallery_urls, video_url`;
 
 // Cenik bara (migracija 014): seznam postavk, ki ga klub ureja v celoti.
 // Vrne ocisceno kopijo ali niz z napako. Cene v centih, kot pri vstopnicah.
@@ -949,8 +949,26 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
       genres: body.genres,
       min_age: body.min_age ?? body.minAge,
       // Cenik bara (migracija 014). Poslje se cel seznam; prazen seznam = brez cenika.
-      bar_prices: body.bar_prices ?? body.barPrices
+      bar_prices: body.bar_prices ?? body.barPrices,
+      // Slideshow (do 3 slike) in predstavitveni video (migracija 015).
+      gallery_urls: body.gallery_urls ?? body.galleryUrls,
+      video_url: body.video_url ?? body.videoUrl
     };
+
+    // URL slike/videa: https, brez presledkov, razumna dolzina. Prazen niz je dovoljen (odstrani).
+    const veljavenUrl = (u) => typeof u === "string" && u.length <= 500 && /^https:\/\/\S+$/.test(u);
+    if (incoming.gallery_urls !== undefined) {
+      if (!Array.isArray(incoming.gallery_urls)) return res.status(400).send("galleryUrls must be an array.");
+      const g = incoming.gallery_urls.map(u => String(u ?? "").trim()).filter(u => u.length > 0);
+      if (g.length > 3) return res.status(400).send("galleryUrls: at most 3 images.");
+      if (!g.every(veljavenUrl)) return res.status(400).send("galleryUrls: each item must be an https URL.");
+      incoming.gallery_urls = g;
+    }
+    if (incoming.video_url !== undefined) {
+      const v = String(incoming.video_url ?? "").trim();
+      if (v !== "" && !veljavenUrl(v)) return res.status(400).send("videoUrl must be an https URL.");
+      incoming.video_url = v;
+    }
 
     if (incoming.bar_prices !== undefined) {
       const c = preveriCenik(incoming.bar_prices);
