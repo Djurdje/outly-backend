@@ -29,7 +29,10 @@ tu je samo to, kar velja ZDAJ. Ko datoteka preseže ~8 KB, staro združi, ne dod
   (Martin: glej seznam v opisu PR-ja #7).
 - Spletna stran outly.si: waitlist (Supabase), registracija/prijava (Supabase Auth), profil s točkami in invite linkom,
   Creator prošnja → backend, pravni dokumenti `/terms`, `/privacy`, `/privacy-app`. 16. 9.: popravek Share na iOS Safari objavljen.
-- Testi backenda: `npm test` = `_testi/test_vabila.js` (38) + `_testi/test_cenik.js` (32) + `_testi/test_dogodki_7dni.js` (10) — zeleni 16. 9. 2026.
+- Testi backenda: `npm test` = `_testi/test_vabila.js` (38) + `_testi/test_cenik.js` (32) + `_testi/test_dogodki_7dni.js` (10)
+  + `_testi/test_vstopnice.js` (58) + `_testi/test_prenos.js` (37) + `_testi/test_finance_admin.js` (49) — skupaj 224,
+  zeleni 16. 9. 2026 (PR #9: pokritost denarnih poti — nakup vstopnic z oversell zaščito pri vzporednih nakupih, prenos
+  vstopnice, admin finance/izvoz; `index.js` ni bilo treba popraviti, pravih hroščev ni odkrilo).
   Stresni test 11. 9.: 616 req/s pri 40 vzporednih, brez napak.
 - Demo podatki: 5 klubov (Cirkus, K4, Cvetličarna, Square, Nebo), ~15 dogodkov, kupec `gost@outly.si`, admin `martin…`, servisni `agent@outly.si`.
 
