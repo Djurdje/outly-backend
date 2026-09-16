@@ -13,7 +13,7 @@ Delovni postopek za vsako nalogo:
 3. Test: nova ali razširjena skripta v `_testi/` po vzorcu `test_vabila.js` (lastni port, lokalni JWKS, TRUNCATE na začetku), dodana v `npm test`.
    Poženi `npm run migrate` na prazni bazi in `npm test`; oboje mora biti zeleno.
 4. Če sprememba vpliva na iOS ali spletno stran (nova polja v odgovoru, nova pot), zapiši to v `docs/STATE.md` pod odprte naloge za `ios-dev`/`web-dev`.
-5. Commit v slovenščini brez šumnikov z odstavkom »Preverjeno: …«. Veja + PR; po zelenem CI PR mergaj (`gh pr merge --squash --delete-branch`),
+5. Commit v slovenščini brez šumnikov z odstavkom »Preverjeno: …«. Veja + PR; po zelenem CI PR mergaj (PR mergaj s squash (GitHub MCP orodje merge_pull_request; gh CLI v oblaku ni) in pobrisi vejo),
    počakaj na Render deploy in preveri `/clubs`, `/events` → 200. Brez Martinovega DA NE mergaj samo migracij, ki brišejo/spreminjajo produkcijske podatke.
 
 Ne sprejemaj poverilnic. Ne dotikaj se produkcijske baze drugače kot prek migracij.
