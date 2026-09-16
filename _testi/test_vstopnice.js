@@ -2,7 +2,10 @@
 /**
  * Test nakupa in skeniranja vstopnic (migracija 002 + 008). Zagon (lokalno, PG16, prazna baza z vsemi migracijami):
  *   DATABASE_URL="postgres://postgres@localhost:5432/outly" node _testi/test_vstopnice.js
- * Vzorec kot test_vabila.js: lokalni JWKS (3999), backend na svojem portu (3114).
+ * Vzorec kot test_vabila.js: lokalni JWKS (3999), backend na svojem portu (3117).
+ * Pozor: POST /events/:id/orders ima omejevalnik "nakup" 20/uro na req.ip (index.js), deljen med
+ * VSEMI nakupi v tej datoteki (proces je svez, torej ni deljen z drugimi test datotekami). Ce dodajas
+ * nove scenarije nakupa, sesteje stevilo klicev proti tej meji.
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -11,7 +14,7 @@ const { Pool } = require("pg");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const PORT = 3114, JWKS_PORT = 3999;
+const PORT = 3117, JWKS_PORT = 3999;
 const BASE = `http://127.0.0.1:${PORT}`;
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });

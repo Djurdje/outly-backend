@@ -122,8 +122,9 @@ async function api(method, path, token, body) {
   assert(r.status === 200 && r.body.summary.gross_cents === 0, "obdobje brez narocil (jutri-pojutrisnjem) -> gross 0", r.body.summary);
   r = await api("GET", `/admin/api/finance?from=${pojutrisnjem}&to=${jutri}`, T.admin);
   assert(r.status === 400, "from > to -> 400", r.status);
+  const privzetiOd = new Date(Date.now() - 29 * 24 * 3600 * 1000).toISOString().slice(0, 10);
   r = await api("GET", "/admin/api/finance?from=nekaj-narobe", T.admin);
-  assert(r.status === 200, "neveljaven from se ignorira (privzeta vrednost)", r.body.from);
+  assert(r.status === 200 && r.body.from === privzetiOd, "neveljaven from se ignorira -> privzeto zadnjih 29 dni", r.body.from);
 
   console.log("\n# PATCH /admin/api/users/:id — vloga in odklep");
   const navadenId = (await pool.query("SELECT id FROM users WHERE email='navaden@outly.si'")).rows[0].id;
