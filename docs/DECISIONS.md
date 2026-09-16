@@ -61,8 +61,10 @@ Odločitve se ne odpirajo znova brez Martina. Nova odločitev = nova vrstica na 
 
 - Render web service → paket 7 USD (0,5 CPU, 512 MB) je dovolj za 500+ uporabnikov (stresni test 11. 9.: 616 req/s).
 - Render baza → plačljivi paket **pred 7. 10. 2026** (brezplačna se izbriše; januarja se je to že zgodilo).
-- Apple Developer: Martin ima **Individual račun (od 16. 9. 2026)**; pozneje App Transfer na NEXT DIMENSIONS.
-  Bundle ID se zamenja (`si.outly.app`), gradnja podpisana v GitHub Actions, distribucija prek TestFlighta.
+- 2026-09-16: Apple Developer: Martin ima **Individual račun**; pozneje App Transfer na NEXT DIMENSIONS. Bundle ID `si.outly.app`,
+  ime v App Store Connect »Outly - Nightlife« (»Outly« zasedeno). **Distribucija samo prek TestFlighta** (podpis v GitHub Actions s cloud
+  signing, API ključ v secrets, nič v repu); Sideloadly/AltServer se opustita. Runner `macos-26`; `MARKETING_VERSION` dviguje Martin.
+- 2026-09-16: iOS PR-ji morajo skozi prevod za simulator v Actions pred merge-om; TestFlight upload samo ob pushu v `master`.
 - Stripe račun odpre Luka za NEXT DIMENSIONS; Connect Express za klube; ključi `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
   na Render nastavi Martin/Luka; webhook `/stripe/webhook`, idempotentnost prek `orders_pi_key`.
 - Supabase Pro (25 USD) pred javnim zagonom (kopije).
