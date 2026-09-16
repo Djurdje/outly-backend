@@ -14,7 +14,7 @@ Skupni možgani projekta (preberi, preden karkoli spremeniš):
 - Veja `main` = produkcija. Render ima vklopljen auto-deploy: **vsak merge v main je v ~60 s živ**
   (`npm run migrate && npm start`, migracije tečejo ob vsakem deployu).
 - Zato: **nikoli ne potiskaj neposredno v main.** Delaj na veji, odpri PR, počakaj na zelen workflow `Testi`
-  in **PR sam mergaj** (`gh pr merge --squash --delete-branch`, ali `--auto`, da se merge zgodi ob zelenem CI). Zaščita veje
+  in **PR sam mergaj** (PR mergaj s squash (GitHub MCP orodje merge_pull_request; gh CLI v oblaku ni) in pobrisi vejo, ali `--auto`, da se merge zgodi ob zelenem CI). Zaščita veje
   vsiljuje PR + zelen CI; človeka vmes ni – od Martinovega ukaza do produkcije gre samodejno (odločeno 16. 9. 2026).
 - **Po merge-u počakaj na deploy (~60–90 s) in preveri produkcijo** (spodaj). Če pade, takoj odpri popravek ali revert PR.
 - Edina izjema, kjer NE mergaš brez Martinovega DA: migracija, ki briše ali spreminja obstoječe produkcijske podatke
