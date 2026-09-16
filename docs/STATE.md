@@ -9,6 +9,9 @@ tu je samo to, kar velja ZDAJ. Ko datoteka preseže ~8 KB, staro združi, ne dod
   priljubljeni (`/me/favorites`), vstopnice v testnem načinu (nakup, QR s HMAC, prenos prijatelju, sken, dvojni sken → 409),
   ekipa kluba + vabila (`/business/team`, `/me/invites`), cenik bara, prošnje ustvarjalcev (maili prek Resenda),
   admin `/admin/api/*` (pregled, prošnje, klubi, uporabniki, dogodki, finance s CSV, izvoz baze JSON).
+  **Pretekli dogodki so javno vidni 7 dni po začetku** (16. 9., Martin): `GET /events?upcoming=false` (stran kluba »Popular«,
+  hit tedna na domačem zaslonu) vrne samo zadnjih 7 dni; starejši v bazi ostanejo (vstopnice, naročila, `GET /business/events`
+  za lastnika, `GET /events/:id`). Ni brisanja. Test `_testi/test_dogodki_7dni.js` (10).
 - iOS: **TestFlight deluje od 16. 9. 2026** – vsak push v `master` naredi podpisan build (cloud signing, runner `macos-26`) in ga naloži
   na TestFlight (App Store Connect »Outly - Nightlife«, bundle `si.outly.app`, Martinov Individual Apple Developer račun). Prvi build
   1.0 (31); Martin ga ima na telefonu, interna skupina testerjev ustvarjena. Na napravi še niso preverjeni: cenik bara, slideshow/video
@@ -26,7 +29,7 @@ tu je samo to, kar velja ZDAJ. Ko datoteka preseže ~8 KB, staro združi, ne dod
   (Martin: glej seznam v opisu PR-ja #7).
 - Spletna stran outly.si: waitlist (Supabase), registracija/prijava (Supabase Auth), profil s točkami in invite linkom,
   Creator prošnja → backend, pravni dokumenti `/terms`, `/privacy`, `/privacy-app`. 16. 9.: popravek Share na iOS Safari objavljen.
-- Testi backenda: `npm test` = `_testi/test_vabila.js` (38) + `_testi/test_cenik.js` (32) — zeleni 16. 9. 2026.
+- Testi backenda: `npm test` = `_testi/test_vabila.js` (38) + `_testi/test_cenik.js` (32) + `_testi/test_dogodki_7dni.js` (10) — zeleni 16. 9. 2026.
   Stresni test 11. 9.: 616 req/s pri 40 vzporednih, brez napak.
 - Demo podatki: 5 klubov (Cirkus, K4, Cvetličarna, Square, Nebo), ~15 dogodkov, kupec `gost@outly.si`, admin `martin…`, servisni `agent@outly.si`.
 
