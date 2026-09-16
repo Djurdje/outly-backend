@@ -16,6 +16,14 @@ tu je samo to, kar velja ZDAJ. Ko datoteka preseže ~8 KB, staro združi, ne dod
   **Build 35 (16. 9., PR outly-app #3)**: popravek »Connection problem« ob podrsu navzdol (pull-to-refresh) na domačem zaslonu –
   SwiftUI prekine nalogo `.refreshable` ob spremembi stanja, URLError.cancelled se je kazal kot napaka povezave; osvežitev zdaj teče v
   samostojni `Task {}` na vseh petih zaslonih z `.refreshable`. Prevod v CI zelen, **na napravi še ni preverjeno** (Martin).
+  **Build 39 (16. 9., PR outly-app #6)**: aplikacija dobila slovenščino, preklop jezika brez ponovnega zagona –
+  `Jezik.swift` podrazred `Bundle.main`, ne `.environment(\.locale)` (Apple ga na iOS 18+ ne upošteva za navigacijske naslove).
+  `Outly/Localizable.xcstrings`, 641 ključev. `STRING_CATALOG_GENERATE_SYMBOLS = NO` (Xcode 26 je ob generiranju Swift simbolov
+  padel na ključih, ki se razlikujejo samo po velikosti črk/ločilih – past za naslednje ključe v katalogu).
+  **Build 41 (16. 9., PR outly-app #7)**: preklop jezika premaknjen z Profila (segmentni gumb ni bil dober) v Moj račun →
+  **Language** – vrstica kaže trenutni jezik, vodi na seznam s kljukico pri izbranem. `Jezik.seznam` (koda + ime) je zdaj en sam
+  vir podprtih jezikov – nov jezik se doda samo tja, brez sprememb zaslona. Prevod v CI zelen, **na napravi še ni preverjeno**
+  (Martin: glej seznam v opisu PR-ja #7).
 - Spletna stran outly.si: waitlist (Supabase), registracija/prijava (Supabase Auth), profil s točkami in invite linkom,
   Creator prošnja → backend, pravni dokumenti `/terms`, `/privacy`, `/privacy-app`. 16. 9.: popravek Share na iOS Safari objavljen.
 - Testi backenda: `npm test` = `_testi/test_vabila.js` (38) + `_testi/test_cenik.js` (32) — zeleni 16. 9. 2026.
@@ -45,6 +53,10 @@ tu je samo to, kar velja ZDAJ. Ko datoteka preseže ~8 KB, staro združi, ne dod
 - Figma MCP: dnevna omejitev klicev (Starter) — ogled prek figma.com v brskalniku.
 - iOS `.refreshable`: vedno `await Task { await load() }.value`, nikoli `await load()` neposredno (sicer SwiftUI prekine nalogo ob
   prvi spremembi stanja in uporabnik vidi »Connection problem«).
+- iOS jezik: nov ključ v `Outly/Localizable.xcstrings` ne sme trčiti (po veliki/mali črki ali ločilih) z drugim ključem – Xcode 26
+  generira Swift simbole iz ključev in gradnja pade (`STRING_CATALOG_GENERATE_SYMBOLS = NO` to sicer izklopi, a preveri, če se kdaj
+  spet vklopi). Nova datoteka z `ObservableObject`/`@Published` v tem projektu rabi eksplicitno `import Combine` (Xcode 26 ga
+  prek SwiftUI ne uvozi več samodejno).
 - Ostale pasti (AsyncImage brez okvirja, gnezden NavigationStack, pg BIGINT, Resend `{error}`, JSONB vs ARRAY) so v `CLAUDE.md` tega repa in iOS repa.
 
 ## Način dela od 16. 9. 2026
