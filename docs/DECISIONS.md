@@ -75,3 +75,6 @@ Odločitve se ne odpirajo znova brez Martina. Nova odločitev = nova vrstica na 
 - Vsi trije repozitoriji imajo `CLAUDE.md` + `.claude/agents/`; ta datoteka in `STATE.md` (v backend repu) sta skupni
   možgani vseh agentov. Delo teče prek **cloud sej Claude Code** (claude.ai/code, mobilna aplikacija) in PR-jev;
   `main`/`master` sta zaščitena, merge šele po zelenem CI. Neposredno potiskanje v produkcijske veje se opusti.
+- 2026-09-16 (pozneje): **Merge je samodejen.** Od Martinovega ukaza do produkcije brez njegove interakcije: agent odpre PR, počaka na zelen CI,
+  PR mergaj, preveri produkcijo. Varovala so CI testi + `qa-reviewer`. Edina izjema: migracije, ki brišejo/spreminjajo produkcijske
+  podatke, čakajo Martinov DA. Razlog: Martin hoče upravljati s telefona brez klikanja po GitHubu.
