@@ -13,6 +13,9 @@ tu je samo to, kar velja ZDAJ. Ko datoteka preseže ~8 KB, staro združi, ne dod
   na TestFlight (App Store Connect »Outly - Nightlife«, bundle `si.outly.app`, Martinov Individual Apple Developer račun). Prvi build
   1.0 (31); Martin ga ima na telefonu, interna skupina testerjev ustvarjena. Na napravi še niso preverjeni: cenik bara, slideshow/video
   kluba (Cloudinary video upload), nov zaslon dogodka, Password & security / Notifications (#26–#31).
+  **Build 35 (16. 9., PR outly-app #3)**: popravek »Connection problem« ob podrsu navzdol (pull-to-refresh) na domačem zaslonu –
+  SwiftUI prekine nalogo `.refreshable` ob spremembi stanja, URLError.cancelled se je kazal kot napaka povezave; osvežitev zdaj teče v
+  samostojni `Task {}` na vseh petih zaslonih z `.refreshable`. Prevod v CI zelen, **na napravi še ni preverjeno** (Martin).
 - Spletna stran outly.si: waitlist (Supabase), registracija/prijava (Supabase Auth), profil s točkami in invite linkom,
   Creator prošnja → backend, pravni dokumenti `/terms`, `/privacy`, `/privacy-app`. 16. 9.: popravek Share na iOS Safari objavljen.
 - Testi backenda: `npm test` = `_testi/test_vabila.js` (38) + `_testi/test_cenik.js` (32) — zeleni 16. 9. 2026.
@@ -40,6 +43,8 @@ tu je samo to, kar velja ZDAJ. Ko datoteka preseže ~8 KB, staro združi, ne dod
 - iOS Actions porabi macOS minute (×10): ena gradnja z uploadom ~8–10 min = 80–100 od 2000 brezplačnih minut/mesec za zasebni repo
   (~20 pushev v master na mesec); PR-ji sprožijo samo prevod za simulator (~4 min).
 - Figma MCP: dnevna omejitev klicev (Starter) — ogled prek figma.com v brskalniku.
+- iOS `.refreshable`: vedno `await Task { await load() }.value`, nikoli `await load()` neposredno (sicer SwiftUI prekine nalogo ob
+  prvi spremembi stanja in uporabnik vidi »Connection problem«).
 - Ostale pasti (AsyncImage brez okvirja, gnezden NavigationStack, pg BIGINT, Resend `{error}`, JSONB vs ARRAY) so v `CLAUDE.md` tega repa in iOS repa.
 
 ## Način dela od 16. 9. 2026
