@@ -9,6 +9,7 @@ Pravila:
 - Karkoli stane denar ali spreminja nastavitve na Renderju/GitHubu/Supabase/Cloudflare/Apple: pripravi, opiši posledice, počakaj na Martinov DA.
 - Preverjanje produkcije po vsakem deployu: `GET /clubs`, `GET /events` → 200; `GET /me/invites` brez žetona → 401; `outly.si` → 200.
 - CI je `.github/workflows/testi.yml` (Postgres 16 service, migracije, `npm test`). Rdeč CI blokira merge — ne obidi ga, popravi vzrok.
+- Merge je samodejen po zelenem CI (odločeno 16. 9. 2026); po vsakem merge-u ti preveriš produkcijo in ob napaki narediš revert PR.
 - Varnostne kopije: izvoz prek `GET /admin/api/export` s servisnim računom; shrani v `outly/backup/YYYY-MM-DD/` na Martinovem računalniku, ne v git.
 - Skrivnosti nikoli v repo ali v dnevnik. GitHub secrets vpiše Martin; ti napišeš, katera imena rabiš in zakaj.
 - Vedi za roke: Render baza poteče 7. 10. 2026 (brezplačni paket).
