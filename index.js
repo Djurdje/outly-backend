@@ -1091,9 +1091,12 @@ app.get("/events", async (req, res) => {
       where.push(`club_id = $${params.length}`);
     }
 
-    // coming soon vs popular
+    // coming soon vs popular. Pretekli dogodki so javno vidni samo 7 dni po zacetku
+    // (Martin, 16. 9. 2026): stran kluba in "hit tedna" na domacem zaslonu kazeta samo
+    // zadnji teden, starejsi izginejo. V bazi ostanejo (vstopnice, narocila, zgodovina
+    // kluba v GET /business/events); GET /events/:id jih se vrne (povezava z vstopnice).
     if (upcoming === "true") where.push(`start_at > NOW()`);
-    if (upcoming === "false") where.push(`start_at <= NOW()`);
+    if (upcoming === "false") where.push(`start_at <= NOW() AND start_at > NOW() - INTERVAL '7 days'`);
 
     // Javno so vidni SAMO objavljeni dogodki. Osnutki in odpovedani so bili
     // doslej vidni vsakomur; lastnik jih vidi prek GET /business/events.

@@ -7,7 +7,7 @@
     "start": "node index.js",
     "migrate": "node db/migrate.js",
     "migrate:stanje": "node db/migrate.js --stanje",
-    "test": "node _testi/test_vabila.js && node _testi/test_cenik.js"
+    "test": "node _testi/test_vabila.js && node _testi/test_cenik.js && node _testi/test_dogodki_7dni.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
