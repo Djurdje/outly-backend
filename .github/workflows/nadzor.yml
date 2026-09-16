@@ -1,0 +1,79 @@
+# Nadzor produkcije: vsakih 15 minut preveri backend, spletno stran in Supabase Auth.
+# Ob napaki: workflow je rdec (GitHub poslje mail lastniku) IN push obvestilo na telefon
+# prek ntfy.sh na kanal iz secreta NTFY_TOPIC (brez racuna: v aplikaciji ntfy se narocis na kanal).
+# Rocni zagon z "test=true" poslje testno obvestilo, da preveris, ali push pride.
+name: Nadzor produkcije
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Poslji testno obvestilo (true/false)"
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  nadzor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Preveri produkcijo
+        id: preveri
+        shell: bash
+        run: |
+          set -u
+          NAPAKE=""
+          preveri() { # ime url pricakovan_status [niz_v_odgovoru] [dodatna_glava]
+            local ime="$1" url="$2" pricakovan="$3" niz="${4:-}" glava="${5:-X-Nadzor: outly}"
+            local telo status
+            telo=$(curl -sS --max-time 25 --retry 3 --retry-delay 10 --retry-all-errors -H "$glava" -w '\n%{http_code}' "$url" 2>/dev/null) || telo=$'\n000'
+            status="${telo##*$'\n'}"
+            telo="${telo%$'\n'*}"
+            if [ "$status" != "$pricakovan" ]; then
+              NAPAKE+="$ime: status $status (pricakovan $pricakovan)"$'\n'
+            elif [ -n "$niz" ] && ! grep -q -- "$niz" <<<"$telo"; then
+              NAPAKE+="$ime: odgovor brez '$niz'"$'\n'
+            else
+              echo "OK  $ime ($status)"
+            fi
+          }
+          preveri "backend /clubs"   "https://outly-backend-roy3.onrender.com/clubs"   200 '"id"'
+          preveri "backend /events"  "https://outly-backend-roy3.onrender.com/events"  200
+          preveri "backend admin"    "https://outly-backend-roy3.onrender.com/admin/"  200
+          preveri "backend auth"     "https://outly-backend-roy3.onrender.com/me/invites" 401
+          preveri "outly.si"         "https://outly.si/"                                200 'Outly'
+          preveri "outly.si /terms"  "https://outly.si/terms"                           200
+          # javni (publishable) kljuc, isti kot v kodi aplikacije in spletne strani
+          preveri "supabase auth"    "https://zbewqcxnvrwebxonvebx.supabase.co/auth/v1/health" 200 '' "apikey: sb_publishable_NzgXZhG7RGs0mZMjGYtyig_XfOvepXS"
+          if [ "${{ github.event.inputs.test || 'false' }}" = "true" ]; then
+            NAPAKE+="TESTNO OBVESTILO - vse je v redu, to je samo preizkus."$'\n'
+          fi
+          {
+            echo "napake<<EOF"
+            printf '%s' "$NAPAKE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ -n "$NAPAKE" ] && [ "${{ github.event.inputs.test || 'false' }}" != "true" ]; then
+            echo "::error::$NAPAKE"
+            exit 1
+          fi
+
+      - name: Push obvestilo na telefon (ntfy)
+        if: always() && steps.preveri.outputs.napake != ''
+        env:
+          TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NAPAKE: ${{ steps.preveri.outputs.napake }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TOPIC" ]; then echo "NTFY_TOPIC ni nastavljen - push preskocen"; exit 0; fi
+          curl -sS --max-time 20 \
+            -H "Title: Outly produkcija" \
+            -H "Priority: high" \
+            -H "Tags: rotating_light" \
+            -H "Click: $RUN_URL" \
+            -d "$NAPAKE" \
+            "https://ntfy.sh/$TOPIC" >/dev/null && echo "Push poslan."
