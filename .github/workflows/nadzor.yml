@@ -2,6 +2,8 @@
 # Ob napaki: workflow je rdec (GitHub poslje mail lastniku) IN push obvestilo na telefon
 # prek ntfy.sh na kanal iz secreta NTFY_TOPIC (brez racuna: v aplikaciji ntfy se narocis na kanal).
 # Rocni zagon z "test=true" poslje testno obvestilo, da preveris, ali push pride.
+# Ob PRAVI napaki (ne pri testu) poklice se routine "Popravljalec" (Claude Code, API sprozilec;
+# secrets ROUTINE_FIRE_URL + ROUTINE_FIRE_TOKEN), ki napako razisce in popravi ali reverta.
 name: Nadzor produkcije
 
 on:
@@ -10,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       test:
-        description: "Poslji testno obvestilo (true/false)"
+        description: "true = testni push; routine = testni push + testni zagon routine Popravljalec; false = nic"
         default: "false"
 
 permissions:
@@ -49,15 +51,18 @@ jobs:
           preveri "outly.si /terms"  "https://outly.si/terms"                           200
           # javni (publishable) kljuc, isti kot v kodi aplikacije in spletne strani
           preveri "supabase auth"    "https://zbewqcxnvrwebxonvebx.supabase.co/auth/v1/health" 200 '' "apikey: sb_publishable_NzgXZhG7RGs0mZMjGYtyig_XfOvepXS"
-          if [ "${{ github.event.inputs.test || 'false' }}" = "true" ]; then
+          TEST="${{ github.event.inputs.test || 'false' }}"
+          if [ "$TEST" = "true" ]; then
             NAPAKE+="TESTNO OBVESTILO - vse je v redu, to je samo preizkus."$'\n'
+          elif [ "$TEST" = "routine" ]; then
+            NAPAKE+="TESTNI ALARM (simulacija, produkcija je v redu) - Popravljalec: samo preveri stanje in poslji porocilo, nic ne spreminjaj."$'\n'
           fi
           {
             echo "napake<<EOF"
             printf '%s' "$NAPAKE"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-          if [ -n "$NAPAKE" ] && [ "${{ github.event.inputs.test || 'false' }}" != "true" ]; then
+          if [ -n "$NAPAKE" ] && [ "$TEST" = "false" ]; then
             echo "::error::$NAPAKE"
             exit 1
           fi
@@ -77,3 +82,25 @@ jobs:
             -H "Click: $RUN_URL" \
             -d "$NAPAKE" \
             "https://ntfy.sh/$TOPIC" >/dev/null && echo "Push poslan."
+
+      - name: Sprozi routine Popravljalec (Claude Code)
+        if: always() && steps.preveri.outputs.napake != '' && github.event.inputs.test != 'true'
+        env:
+          FIRE_URL: ${{ secrets.ROUTINE_FIRE_URL }}
+          FIRE_TOKEN: ${{ secrets.ROUTINE_FIRE_TOKEN }}
+          NAPAKE: ${{ steps.preveri.outputs.napake }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$FIRE_URL" ] || [ -z "$FIRE_TOKEN" ]; then echo "ROUTINE_FIRE_* ni nastavljen - routine preskocena"; exit 0; fi
+          TEXT=$(printf 'Alarm nadzora produkcije %s (%s)\n%s' "$(date -u +%Y-%m-%dT%H:%MZ)" "$RUN_URL" "$NAPAKE")
+          BODY=$(jq -cn --arg t "$TEXT" '{text:$t}')
+          ODG=$(curl -sS --max-time 30 -w '\n%{http_code}' -X POST "$FIRE_URL" \
+            -H "Authorization: Bearer $FIRE_TOKEN" \
+            -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "Content-Type: application/json" \
+            -d "$BODY") || ODG=$'\n000'
+          STATUS="${ODG##*$'\n'}"
+          echo "Routine odgovor: $STATUS"
+          echo "${ODG%$'\n'*}" | sed -E 's/"claude_code_session_url":"([^"]*)"/\nSeja: \1\n/' | head -c 600
+          [ "$STATUS" = "200" ] || [ "$STATUS" = "201" ] || echo "::warning::Routine se ni sprozila (HTTP $STATUS)"
