@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-16. Zgodovina po dnevih je v arhivu `prompt-za-agenta.md` (Martinov računalnik);
+Zadnja posodobitev: 2026-09-17. Zgodovina po dnevih je v arhivu `prompt-za-agenta.md` (Martinov računalnik);
 tu je samo to, kar velja ZDAJ. Ko datoteka preseže ~8 KB, staro združi, ne dodajaj.
 
 ## Kaj je v produkciji in dela
@@ -52,6 +52,15 @@ tu je samo to, kar velja ZDAJ. Ko datoteka preseže ~8 KB, staro združi, ne dod
 
 ## Znane blokade in pasti (aktivne)
 
+- **17. 9. 2026, lažni alarm**: Nadzor produkcije je sprožil rutino Popravljalec zaradi run #9
+  (`test/nadzor-pravi-alarm`, commit »Change expected status code for /clubs endpoint«) — Djurdje je na testni
+  veji namerno spremenil pričakovan status `/clubs`, da preveri celoten cevovod opozarjanja (ntfy + routina).
+  Ni bila prava napaka; zadnji redni (schedule) zagon na `main` tik pred tem (22:08 UTC) je bil zelen, novih
+  mergeev v `main` v tistem času ni bilo. **Past za prihodnje zagone te rutine**: cloud okolje Popravljalca
+  nima izhodnega dostopa (egress proxy vrne 403 »organization policy«) do `outly-backend-roy3.onrender.com`,
+  `outly.si`, `supabase.co` ali `ntfy.sh` — neposreden curl iz postopka v CLAUDE.md tam ni izvedljiv, stanje se
+  je potrdilo posredno prek zgodovine GitHub Actions (»Nadzor produkcije«, veja `main`) in vsebine `nadzor.yml`.
+  Če to ni namerno, je treba sejam Popravljalca odpreti izhodni dostop do teh gostiteljev.
 - Render baza brezplačna → **poteče 7. 10. 2026**.
 - Sideloadly/AltServer nista več potrebna – gradnje pridejo prek TestFlighta (90 dni veljavnosti builda).
 - iOS Actions porabi macOS minute (×10): ena gradnja z uploadom ~8–10 min = 80–100 od 2000 brezplačnih minut/mesec za zasebni repo
