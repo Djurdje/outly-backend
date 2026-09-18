@@ -42,7 +42,13 @@ if (!DATABASE_URL) {
   process.exit(1);
 }
 
-if (!DATABASE_URL.includes("localhost") && !zastavicaNiLocalhost) {
+// Gostitelj iz razclenjenega URL-ja, ne podniz: niz "localhost" kje drugje v URL-ju
+// (npr. v geslu ali parametru) ne sme odpreti vrat. Nerazclenljiv URL velja za tuj.
+function jeLocalhost(url) {
+  try { return new URL(url).hostname === "localhost"; } catch (_) { return false; }
+}
+
+if (!jeLocalhost(DATABASE_URL) && !zastavicaNiLocalhost) {
   izpisNapake(
     'DATABASE_URL ne vsebuje "localhost" — obnova v cilj, ki ni lokalna baza, je zavrnjena.\n' +
       "  Za obnovo v novo (prazno) bazo izven localhost dodaj zastavico --cilj-ni-localhost."
@@ -252,8 +258,15 @@ async function glavno() {
       await client.query(`ALTER TABLE "${tabela.replace(/"/g, '""')}" ENABLE TRIGGER USER`);
     }
 
+    // Imena zaporedij iz izvoza preverimo proti cilju (enako kot tabele in stolpce).
+    const zaporedjaCilja = new Set(
+      (await client.query("SELECT sequencename FROM pg_sequences WHERE schemaname='public'")).rows.map((r) => r.sequencename)
+    );
     for (const zaporedje of izvoz.sequences || []) {
       if (zaporedje.last_value === null || zaporedje.last_value === undefined) continue;
+      if (!zaporedjaCilja.has(zaporedje.name)) {
+        throw new Zavrnitev(`Zaporedje "${zaporedje.name}" iz izvoza v cilju ne obstaja.`);
+      }
       await client.query("SELECT setval($1::regclass, $2, true)", [`public.${zaporedje.name}`, zaporedje.last_value]);
     }
 

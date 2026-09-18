@@ -42,16 +42,40 @@ function zeton(email, sub) {
 function uuid(n) { return `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`; }
 let ok = 0, fail = 0;
 function assert(cond, msg, extra) { if (cond) { ok++; console.log("  ✓", msg); } else { fail++; console.log("  ✗", msg, extra !== undefined ? JSON.stringify(extra) : ""); } }
+// Sveza, migrirana in prazna ciljna baza outly_obnova (drop + create + migrate + brez seeda 007).
+async function pripraviPrazenCilj() {
+  console.log("\n# Priprava ciljne baze outly_obnova (drop, create, migrate)");
+  if (obnovljeniPool) { await obnovljeniPool.end().catch(() => {}); obnovljeniPool = null; }
+  const vzdrzevalniOdjemalec = new Client({ connectionString: vzdrzevalnaUrl.toString() });
+  await vzdrzevalniOdjemalec.connect();
+  await vzdrzevalniOdjemalec.query("DROP DATABASE IF EXISTS outly_obnova WITH (FORCE)");
+  await vzdrzevalniOdjemalec.query("CREATE DATABASE outly_obnova");
+  await vzdrzevalniOdjemalec.end();
+
+  const izidMigracij = poganjajNode(["db/migrate.js"], { DATABASE_URL: obnovaUrl.toString() });
+  assert(izidMigracij.koda === 0, "migracije na prazni outly_obnova -> 0", izidMigracij.stdout + izidMigracij.stderr);
+
+  // Migracija 007 vstavi servisni racun agent@outly.si (glej db/migracije/007_servisni_admin.sql)
+  // — edini seed podatek med vsemi migracijami. obnovi_izvoz.js po nacrtu zahteva
+  // POPOLNOMA prazno bazo (brez izjeme), zato ga pred obnovo pobrisemo — enako
+  // mora narediti Martin pred obnovo prave baze (glej docs/ARCHITECTURE.md, Obnova).
+  const obnovaOdjemalec = new Client({ connectionString: obnovaUrl.toString() });
+  await obnovaOdjemalec.connect();
+  await obnovaOdjemalec.query("DELETE FROM users");
+  await obnovaOdjemalec.end();
+}
+
 async function api(method, path, token, body) {
   const r = await fetch(BASE + path, { method, headers: { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
   const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = t; }
   return { status: r.status, body: j };
 }
 function poganjajNode(args, env, casovnaOmejitevMs) {
-  const r = spawnSync(process.execPath, args, { cwd: KORENSKA_MAPA, env: { ...process.env, ...env }, encoding: "utf8", timeout: casovnaOmejitevMs || 60000 });
+  const r = spawnSync(process.execPath, args, { cwd: KORENSKA_MAPA, env: { ...process.env, TZ: TZ_TESTA, ...env }, encoding: "utf8", timeout: casovnaOmejitevMs || 60000 });
   return { koda: r.status, stdout: r.stdout || "", stderr: r.stderr || "" };
 }
 
+const TZ_TESTA = "Europe/Ljubljana";
 const pool = new Pool({ connectionString: DB });
 const vzdrzevalnaUrl = new URL(DB); vzdrzevalnaUrl.pathname = "/postgres";
 const obnovaUrl = new URL(DB); obnovaUrl.pathname = "/outly_obnova";
@@ -111,26 +135,7 @@ async function telo() {
   potIzvoza = path.join(os.tmpdir(), `outly_izvoz_test_${Date.now()}.json`);
   fs.writeFileSync(potIzvoza, JSON.stringify(izvoz));
 
-  console.log("\n# Priprava ciljne baze outly_obnova");
-  const vzdrzevalniOdjemalec = new Client({ connectionString: vzdrzevalnaUrl.toString() });
-  await vzdrzevalniOdjemalec.connect();
-  await vzdrzevalniOdjemalec.query("DROP DATABASE IF EXISTS outly_obnova WITH (FORCE)");
-  await vzdrzevalniOdjemalec.query("CREATE DATABASE outly_obnova");
-  await vzdrzevalniOdjemalec.end();
-
-  console.log("\n# npm run migrate na outly_obnova");
-  let izidMigracij = poganjajNode(["db/migrate.js"], { DATABASE_URL: obnovaUrl.toString() });
-  assert(izidMigracij.koda === 0, "migracije na prazni outly_obnova -> 0", izidMigracij.stdout + izidMigracij.stderr);
-
-  // Migracija 007 vstavi servisni racun agent@outly.si (glej db/migracije/007_servisni_admin.sql)
-  // — edini seed podatek med vsemi migracijami. obnovi_izvoz.js po nacrtu zahteva
-  // POPOLNOMA prazno bazo (brez izjeme, glej tocko 1 zahtev), zato ga pred pravo
-  // obnovo pobrisemo — enako bi moral narediti Martin pred obnovo prave baze
-  // (glej opombo v docs/STATE.md).
-  const obnovaOdjemalec = new Client({ connectionString: obnovaUrl.toString() });
-  await obnovaOdjemalec.connect();
-  await obnovaOdjemalec.query("DELETE FROM users");
-  await obnovaOdjemalec.end();
+  await pripraviPrazenCilj();
 
   console.log("\n# node db/obnovi_izvoz.js na outly_obnova");
   let izidObnove = poganjajNode(["db/obnovi_izvoz.js", potIzvoza], { DATABASE_URL: obnovaUrl.toString() });
@@ -200,12 +205,38 @@ async function telo() {
   assert(izidTujegaGostitelja.koda !== 0, "obnova brez localhost brez zastavice -> izhodna koda != 0", izidTujegaGostitelja.stdout + izidTujegaGostitelja.stderr);
   assert(trajanjeMs < 3000, `zavrnitev je bila hitra (${trajanjeMs} ms) — brez poskusa povezave`, trajanjeMs);
   assert(/localhost/i.test(izidTujegaGostitelja.stderr), "sporocilo omeni localhost/zastavico", izidTujegaGostitelja.stderr);
+
+  console.log("\n# (h) napaka sredi vstavljanja -> ROLLBACK: cilj ostane prazen, sprozilci spet vklopljeni");
+  await pripraviPrazenCilj();
+  // Pokvarjen izvoz: zadnji vstopnici podtaknemo tuji kljuc na neobstojec dogodek.
+  // Tabela tickets pride v vrstnem redu tujih kljucev med zadnjimi, torej je vecina
+  // vrstic ze vstavljenih, ko INSERT pade (23503) — ravno to mora transakcija razveljaviti.
+  const pokvarjen = JSON.parse(fs.readFileSync(potIzvoza, "utf8"));
+  const zadnjaVstopnica = pokvarjen.tables.tickets.rows[pokvarjen.tables.tickets.rows.length - 1];
+  zadnjaVstopnica.event_id = 999999;
+  const potPokvarjenega = path.join(os.tmpdir(), `outly_izvoz_pokvarjen_${Date.now()}.json`);
+  fs.writeFileSync(potPokvarjenega, JSON.stringify(pokvarjen));
+  let izidPokvarjene = poganjajNode(["db/obnovi_izvoz.js", potPokvarjenega], { DATABASE_URL: obnovaUrl.toString() });
+  fs.unlinkSync(potPokvarjenega);
+  assert(izidPokvarjene.koda !== 0, "obnova pokvarjenega izvoza -> izhodna koda != 0", izidPokvarjene.stdout + izidPokvarjene.stderr);
+  obnovljeniPool = new Pool({ connectionString: obnovaUrl.toString() });
+  let skupajVrstic = 0;
+  for (const tabela of Object.keys(izvoz.tables)) {
+    if (tabela === "schema_migrations") continue;
+    const stev = await obnovljeniPool.query(`SELECT count(*)::int AS n FROM "${tabela}"`);
+    skupajVrstic += stev.rows[0].n;
+  }
+  assert(skupajVrstic === 0, "po neuspeli obnovi je cilj se vedno prazen (ROLLBACK)", skupajVrstic);
+  const sprozilci = await obnovljeniPool.query("SELECT tgname, tgenabled FROM pg_trigger WHERE NOT tgisinternal ORDER BY tgname");
+  assert(sprozilci.rows.length > 0 && sprozilci.rows.every(t => t.tgenabled === "O"), "vsi uporabniski sprozilci so po neuspeli obnovi vklopljeni (tgenabled='O')", sprozilci.rows);
 }
 
 (async () => {
   await pool.query("TRUNCATE ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
-  srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
+  // TZ namerno ni UTC: izvoz in obnova tečeta v istem pasu kot Martinov računalnik (Europe/Ljubljana).
+  // Brez tega je test za DATE stolpce okoljsko odvisen (na UTC runnerju je zelen tudi ob napaki).
+  srv = spawn("node", ["index.js"], { env: { ...process.env, TZ: TZ_TESTA, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
   srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
   for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
 
