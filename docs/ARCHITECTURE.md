@@ -64,7 +64,9 @@ Zagon vseh: `npm test` (isto teče v Actions `Testi` ob vsakem PR-ju). Številke
 
 ## Nadzor produkcije in mrtvo človeka držalo (Healthchecks.io)
 
-Workflow `.github/workflows/nadzor.yml` vsakih 15 minut preveri backend, spletno stran in Supabase Auth.
+Workflow `.github/workflows/nadzor.yml` ima cron `*/15` (vsakih 15 minut) in preveri backend, spletno stran in Supabase Auth.
+**V resnici GitHub ta cron sproži na 4–5 ur** (izmerjeno 17.–18. 9. 2026, glej `STATE.md`, past »GitHub cron«) —
+zato je to globlja preverba, ne hiter alarm. Hiter alarm rabi zunanji uptime monitor.
 Ob napaki: zagon je rdeč (GitHub pošlje mail), push obvestilo na telefon prek ntfy (`secrets.NTFY_TOPIC`)
 in klic rutine Popravljalec (`secrets.ROUTINE_FIRE_URL`, `ROUTINE_FIRE_TOKEN`).
 
@@ -74,17 +76,41 @@ Zato zadnji korak uspešnega zagona pingne Healthchecks.io (`curl -fsS -m 10 --r
 Healthchecks logiko obrne: **javi, ko pinga NI.** Če `HC_URL` ni nastavljen, se korak preskoči z opozorilom
 (workflow ostane zelen), zato ta sprememba ničesar ne podre, dokler Martin računa ne ustvari.
 
-**Kaj mora narediti Martin (enkrat, ~5 minut):**
+**Narejeno 18. 9. 2026** (račun, check, ntfy integracija, secret `HC_URL`; ping potrjen v zagonu 35294068646).
+Postopek ostane tu za primer ponovne postavitve:
 
 1. Ustvari brezplačen račun na `https://healthchecks.io`.
-2. Nov check, ime npr. »Outly nadzor produkcije«, **Period 15 min**, **Grace 20 min**
-   (15 = enako kot cron, 20 = toliko odloga, da počasen zagon ne sproži lažnega alarma).
+2. Nov check, ime npr. »Outly nadzor produkcije«, **Period 6 h**, **Grace 3 h**
+   (ne 15/20 min: GitHub cron dejansko teče na 4–5 ur, s 15/20 min bi Healthchecks javljal lažen izpad po vsakem zagonu;
+   na 15/20 min se vrne šele, ko nadzor teče na zunanjem ponudniku).
 3. Obvestilo naveži na **ntfy kanal** (Healthchecks → Integrations → ntfy), na isti kanal kot `NTFY_TOPIC`,
    da vse pride na en telefon.
 4. Kopiraj **ping URL** checka in ga v `Djurdje/outly-backend` shrani kot secret `HC_URL`
    (GitHub → Settings → Secrets and variables → Actions → New repository secret).
 
 Po tem je alarm dvojen: nadzor javi, ko je produkcija pokvarjena, Healthchecks pa, ko je pokvarjen nadzor.
+
+## Varnostne kopije in obnova
+
+Render brezplačna baza **nima kopij**. Edina pot nazaj je logični izvoz `GET /admin/api/export`
+(gumb v admin panelu, vlogo `admin`; JSON vseh tabel v enem posnetku) in skripta `db/obnovi_izvoz.js`,
+ki tak JSON obnovi v **prazno, z migracijami pripravljeno** bazo. Kaj skripta zagotavlja (test `_testi/test_obnova.js`):
+
+- zavrne cilj, ki ni `localhost`, brez izrecne zastavice `--cilj-ni-localhost`; zavrne cilj, ki že ima podatke (brez izjeme);
+- zavrne cilj, katerega seznam migracij ni enak izvozu (obnova v drugačno shemo je nevarna);
+- vstavlja v vrstnem redu tujih ključev z izklopljenimi uporabniškimi sprožilci (`sold_count` se ne šteje dvakrat),
+  nastavi zaporedja, preveri števila vrstic; vse v eni transakciji (ob napaki ostane cilj prazen).
+
+**Postopek obnove v novo bazo (Martinov računalnik, ~10 min):**
+
+1. Nova prazna PostgreSQL 16 baza (Render ali lokalno). Nikoli obstoječa produkcijska.
+2. `export DATABASE_URL=<url nove baze>` → `npm run migrate` (shema + servisni račun iz migracije 007).
+3. `DELETE FROM users WHERE email='agent@outly.si';` (edini seed migracij; izvoz ga že vsebuje — glej past v `STATE.md`).
+4. `node db/obnovi_izvoz.js <izvoz.json> --cilj-ni-localhost` → izpis po tabelah + »Obnova končana«.
+5. Backend preusmeri na novo bazo (Render → Environment → `DATABASE_URL`) in preveri `GET /clubs`, `GET /events`.
+
+Pozor: obnova iz starejšega izvoza **oživi že unovčene vstopnice**, ki so bile skenirane po izvozu — pred dogodkom
+naredi svež izvoz. Izvoz hrani osebne podatke; shrani ga zasebno (`outly/backup/`), nikoli v git.
 
 ## iOS brez Maca — TestFlight (od 16. 9. 2026)
 

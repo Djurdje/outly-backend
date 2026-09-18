@@ -2068,9 +2068,15 @@ admin.get("/export", async (req, res) => {
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name`
     );
+    // DATE (OID 1082) v izvozu kot besedilo "YYYY-MM-DD": privzeti razčlenjevalnik
+    // naredi Date v lokalnem času procesa in toISOString ga v pasu z odmikom
+    // (Europe/Ljubljana) premakne za dan nazaj — date_of_birth bi po obnovi
+    // pomenil drug rojstni dan (ujeto v _testi/test_obnova.js). Samo za ta klic,
+    // odgovori API-ja se ne spremenijo.
+    const tipiIzvoza = { getTypeParser: (oid, fmt) => (oid === 1082 ? (v) => v : pgTipi.getTypeParser(oid, fmt)) };
     const tables = {};
     for (const { table_name } of t.rows) {
-      const r = await c.query(`SELECT * FROM "${table_name.replace(/"/g, '""')}"`);
+      const r = await c.query({ text: `SELECT * FROM "${table_name.replace(/"/g, '""')}"`, types: tipiIzvoza });
       tables[table_name] = { count: r.rowCount, columns: r.fields.map((f) => f.name), rows: r.rows };
     }
     const s = await c.query(

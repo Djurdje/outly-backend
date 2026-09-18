@@ -240,6 +240,23 @@ function preveriQrPodpisLokalno(qr, secret) {
   r = await api("POST", "/business/tickets/scan", T.lastnik, { qr: "ponarejen.qr" });
   assert(r.status === 400, "neveljaven QR (napacen podpis) -> 400", r.body);
 
+  // Vrnjena vstopnica: najprej vrnjeno narocilo (vstopnica se 'valid'), nato se vstopnica sama.
+  // Poti za vracilo se ni (Stripe), zato stanje nastavimo v bazi - skener mora oboje zavrniti.
+  const zaVracilo = await pool.query(
+    "SELECT t.id, t.serial, t.order_id FROM tickets t WHERE t.event_id=$1 AND t.status='valid' LIMIT 1", [dogodekOk]
+  );
+  const vr = zaVracilo.rows[0];
+  await pool.query("UPDATE orders SET status='refunded', refunded_cents=total_cents WHERE id=$1", [vr.order_id]);
+  r = await api("POST", "/business/tickets/scan", T.lastnik, { serial: vr.serial });
+  assert(r.status === 409 && r.body.result === "unpaid", "vstopnica vrnjenega narocila -> 409 unpaid", r.body);
+  // Delno vracilo: narocilo ostane veljavno (partially_refunded), vrnjena je samo ta vstopnica.
+  await pool.query("UPDATE orders SET status='partially_refunded' WHERE id=$1", [vr.order_id]);
+  await pool.query("UPDATE tickets SET status='refunded' WHERE id=$1", [vr.id]);
+  r = await api("POST", "/business/tickets/scan", T.lastnik, { serial: vr.serial });
+  assert(r.status === 409 && r.body.result === "refunded", "vrnjena vstopnica delno vrnjenega narocila -> 409 refunded", r.body);
+  const seValid = await pool.query("SELECT status FROM tickets WHERE id=$1", [vr.id]);
+  assert(seValid.rows[0].status === "refunded", "sken vrnjene vstopnice je ni oznacil kot uporabljeno", seValid.rows[0]);
+
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
   const napake = log.split("\n").filter(l => /error|TypeError|Unhandled/i.test(l) && !/Server error\./.test(l) && !/Resend/i.test(l));
   if (napake.length) console.log("\nLog backenda (sumljivo):\n" + napake.join("\n"));
