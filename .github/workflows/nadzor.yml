@@ -104,3 +104,28 @@ jobs:
           echo "Routine odgovor: $STATUS"
           echo "${ODG%$'\n'*}" | sed -E 's/"claude_code_session_url":"([^"]*)"/\nSeja: \1\n/' | head -c 600
           [ "$STATUS" = "200" ] || [ "$STATUS" = "201" ] || echo "::warning::Routine se ni sprozila (HTTP $STATUS)"
+
+      # Mrtev cloveka drzalo: ce ta workflow sploh NE stece (GitHub Actions v izpadu,
+      # onemogocen cron po 60 dneh nedejavnosti, pokvarjen YAML), zgoraj nihce ne opozori —
+      # rdeca lucka rabi zagon. Healthchecks.io obrne logiko: ce pinga ni v 15 min + 20 min
+      # odloga, javi ON.
+      #
+      # Pogoj je namenoma "napake == ''", ne samo success(): pri rocnem zagonu z test=true
+      # ali test=routine korak "Preveri produkcijo" NE pade, tudi ce je produkcija res podrta
+      # (exit 1 je pogojen s TEST=false). Z golim success() bi tak zagon poslal ping "vse OK"
+      # sredi resnicnega izpada in Healthchecks bi molcal. Prazen "napake" pomeni: vseh sedem
+      # preverb je bilo zelenih in to ni bil testni zagon.
+      - name: Ping Healthchecks.io (mrtev cloveka drzalo)
+        if: success() && steps.preveri.outputs.napake == ''
+        env:
+          HC_URL: ${{ secrets.HC_URL }}
+        run: |
+          if [ -z "$HC_URL" ]; then
+            echo "::warning::HC_URL ni nastavljen - ping preskocen (glej docs/ARCHITECTURE.md, razdelek Healthchecks.io)."
+            exit 0
+          fi
+          # Brez "|| true" bi izpad Healthchecks.io (DNS, 5xx, pretecen URL) obarval CEL nadzor
+          # rdece in poslal Martinu mail, ceprav je produkcija zdrava - tocno vzorec laznega
+          # alarma iz docs/INCIDENTI.md. Manjkajoc ping javi Healthchecks sam, to je njegov posel.
+          curl -fsS -m 10 --retry 3 "$HC_URL" && echo "Ping poslan." \
+            || echo "::warning::Healthchecks ping ni uspel - to NI napaka produkcije (preveri secret HC_URL)."

@@ -1,0 +1,114 @@
+# Zascita: obcutljive spremembe zahtevajo oznako "odobril-martin".
+#
+# Zakaj: agent (tudi rutina Popravljalec) sme sam mergati PR-je. Brez tega bi lahko
+# sam zdruzil spremembo, ki izklopi njegov lastni alarm — popravil bi nadzor namesto napake.
+# Ta workflow je pade-in-ustavi za pet skupin datotek:
+#   .github/workflows/**   CI, nadzor produkcije, gradnja iOS (alarm sam)
+#   CLAUDE.md, .claude/**  navodila in agenti (pravila igre)
+#   db/migracije/**        shema baze (nepovratno v produkciji)
+#   placilna/dostopna logika v index.js (requireRole, requireClub, orders, tickets, stripe)
+#
+# POZOR: sprozilec je namenoma "pull_request_target", ne "pull_request". Tako se izvede
+# razlicica tega workflowa z veje main, NE tista iz PR-ja — sicer bi PR, ki spremeni to
+# datoteko, ravno s to spremembo izklopil svoje preverjanje. Koda iz PR-ja se NIKOLI ne
+# prevzame (ni checkouta, ni npm) — beremo samo seznam spremenjenih datotek prek API-ja.
+name: Zascita
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  zascita:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Obcutljive spremembe zahtevajo oznako odobril-martin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          OZNAKA: odobril-martin
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Seznam spremenjenih datotek + njihovi diffi (vse strani).
+          gh api --paginate "repos/$REPO/pulls/$PR/files" > /tmp/datoteke.json
+          POTI=$(jq -r '.[].filename' /tmp/datoteke.json)
+          echo "Spremenjene datoteke:"; echo "$POTI" | sed 's/^/  /'
+
+          RAZLOGI=""
+          dodaj() { RAZLOGI+="  - $1"$'\n'; }
+
+          # 1..4: obcutljive poti. Poleg novega imena gledamo tudi .previous_filename,
+          # sicer bi preimenovanje IZ zascitene poti (npr. CLAUDE.md -> NAVODILA.md) ubezalo
+          # preverbi: novo ime vzorcu ne ustreza vec, sprememba pa je enako obcutljiva.
+          POTI_S_STARIMI=$(jq -r '.[] | (.filename, (.previous_filename // empty))' /tmp/datoteke.json)
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            case "$p" in
+              .github/workflows/*) dodaj "$p (CI / nadzor / gradnja — alarm sam)" ;;
+              CLAUDE.md|.claude/*)  dodaj "$p (navodila agentom)" ;;
+              db/migracije/*)       dodaj "$p (shema baze, nepovratno v produkciji)" ;;
+            esac
+          done <<< "$POTI_S_STARIMI"
+
+          # 5: placilna in dostopna logika. Testne skripte in dokumenti so izvzeti —
+          # tam so te besede normalne in bi oznako zahtevale ob vsakem PR-ju.
+          VZOREC='requireRole|requireClub|stripe|PROVIZIJA|application_fee|orders|tickets'
+          OBCUTLJIVE_KODE=$(jq -r '
+            .[] | select(.filename | test("^(_testi/|docs/|admin/|\\.github/)") | not)
+                | select(.filename | test("\\.(js|sql)$"))
+                | select((.patch // "") | test("(?m)^[+-].*('"$VZOREC"')"; "i"))
+                | .filename' /tmp/datoteke.json)
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            dodaj "$p (placilna/dostopna logika: requireRole/requireClub/orders/tickets/stripe)"
+          done <<< "$OBCUTLJIVE_KODE"
+
+          # Fail-safe: pri zelo velikem diffu GitHub polje "patch" IZPUSTI. Brez tega bi tak
+          # diff tiho padel skozi (prazen patch se ne ujame z nicimer) — ravno dovolj velik
+          # prepis placilne poti bi tako ubezal oznaki. Ce patcha ni, datoteka VELJA za obcutljivo.
+          BREZ_PATCHA=$(jq -r '
+            .[] | select(.filename | test("^(_testi/|docs/|admin/|\\.github/)") | not)
+                | select(.filename | test("\\.(js|sql)$"))
+                | select(has("patch") | not)
+                | .filename' /tmp/datoteke.json)
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            dodaj "$p (prevelik diff - GitHub ni vrnil patcha, zato velja za obcutljivo)"
+          done <<< "$BREZ_PATCHA"
+
+          RAZLOGI=$(printf '%s' "$RAZLOGI" | sort -u)
+          if [ -z "$RAZLOGI" ]; then
+            echo "Nic obcutljivega v tem PR-ju — oznaka ni potrebna."
+            exit 0
+          fi
+
+          echo "Obcutljivo v tem PR-ju:"; printf '%s\n' "$RAZLOGI"
+
+          # Oznake beremo prek API-ja (svezo stanje tudi ob ponovnem zagonu starega zagona).
+          IMA=$(gh api "repos/$REPO/pulls/$PR" --jq '[.labels[].name] | index("'"$OZNAKA"'") != null')
+          if [ "$IMA" = "true" ]; then
+            echo "Oznaka '$OZNAKA' je prisotna — v redu."
+            exit 0
+          fi
+
+          {
+            echo "### Zascita: manjka oznaka \`$OZNAKA\`"
+            echo
+            echo "PR se dotika stvari, ki jih agent ne sme zdruziti sam:"
+            echo
+            printf '%s\n' "$RAZLOGI"
+            echo
+            echo "Martin naj PR-ju doda oznako \`$OZNAKA\` (GitHub → PR → Labels), nato se ta preverba pozene znova."
+            echo "Agent si oznake NE sme dodati sam — s tem bi zascito izklopil."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::error::Manjka oznaka '$OZNAKA' — PR spreminja obcutljive datoteke (glej povzetek zagona)."
+          exit 1

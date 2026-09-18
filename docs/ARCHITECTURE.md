@@ -39,6 +39,53 @@ outly.si (statika, Cloudflare Pages) ──▶ Supabase (Auth + waitlist RPC)
                                      └──▶ Express /me, /creator-applications (isti žeton kot aplikacija)
 ```
 
+## Poslovne invariante
+
+Stvari, ki se ne smejo zgoditi NIKOLI. Vsaka ima mehanizem v kodi, ki jo zagotavlja, in test, ki pade, če
+mehanizem odpade. Če spreminjaš kaj iz tega stolpca »mehanizem«, najprej poglej test — in obratno: nov
+mehanizem brez testa tu ne sme pristati. Invariante so močnejše od pravil v `CLAUDE.md`: pravilo se pozabi,
+test pade.
+
+| # | Ne sme se zgoditi | Mehanizem (kje) | Test (primer) |
+|---|---|---|---|
+| I1 | Ista vstopnica se unovči dvakrat (dvojni vstop z eno kodo) | `POST /business/tickets/scan` v `index.js`: pogojni `UPDATE tickets SET status='used' … WHERE id=$1 AND status='valid' AND serial=$4` — odločitev je en sam atomaren stavek, ne branje + pisanje | `_testi/test_vstopnice.js`: »dvojni sken iste vstopnice -> 409« (v. 217), »vratar prav tako dobi 409 na ze skenirano vstopnico« (v. 220) |
+| I2 | Oversell: prodanih je več vstopnic, kot je zmogljivost dogodka | Sprožilec `orders_rezerviraj` → `rezerviraj_zalogo()` v `db/migracije/002_placila.sql`: `SELECT … FOR UPDATE` zaklene dogodek v isti transakciji kot vstavljanje naročila; poleg tega omejitev `events_sold_chk (sold_count <= capacity)`. `index.js` prevede `check_violation` (23514) v 409 | `_testi/test_vstopnice.js`: »natanko 3 od 5 vzporednih nakupov uspe« (v. 179), »sold_count == capacity, brez oversell« (v. 182) |
+| I3 | Uporabnik vidi tuja naročila ali tuje vstopnice | Vse poti `/me/*` filtrirajo po `req.user.userId` iz žetona, ne po parametru iz zahteve: `WHERE o.user_id = $1` (`GET /me/orders`), imetnik vstopnice (`GET /me/tickets`). Poti »pokaži naročilo po id« ni | `_testi/test_vstopnice.js`: »bor ne vidi Aninih narocil (brez prekrivanja id-jev)« (v. 193); `_testi/test_prenos.js`: »ana (stari imetnik) vstopnice vec NE vidi« (v. 114) |
+| I4 | `stripe_account_id` (ali druga skrivnost kluba) uide v odgovor API-ja | Našteti seznami stolpcev v `index.js`, nikoli `SELECT *`: `JAVNI_STOLPCI_KLUBA`, `STOLPCI_KLUBA_LASTNIKA` (lastnik vidi samo `stripe_charges_enabled`/`payouts_enabled`), `ADMIN_STOLPCI_KLUBA` | `_testi/test_invariante.js`: 14 poti (javne, poslovne, admin) — »/clubs: odgovor ne vsebuje stripe_account_id«, plus kontrola »stripe_account_id JE v bazi (test ni prazen)« |
+| I5 | Vloga se uveljavi samo v aplikaciji (odjemalec si jo priredi) | `requireAuth` / `requireRole` / `requireClub` v `index.js`; vloga se bere **iz baze ob vsakem klicu**, ne iz žetona, zato odvzem vloge velja takoj. Vratar (`doorman`) sme samo skenirati | `_testi/test_finance_admin.js`: »GET /admin/api/finance business vloga -> 403« (v. 82), »/export business vloga -> 403« (v. 88); `_testi/test_cenik.js`: »vratar ne more urejati -> 403« (v. 122); `_testi/test_vstopnice.js`: »navaden uporabnik (ni clan kluba) ne sme skenirati -> 403« (v. 229) |
+| I6 | Ponarejena QR koda odpre vrata | `qrVstopnice()` / `preveriQr()` v `index.js`: HMAC-SHA256 s `QR_SECRET` čez podpisan JSON; skener zavrne neujemanje podpisa pred vsakim dostopom do baze | `_testi/test_vstopnice.js`: »QR podpis je veljaven glede na QR_SECRET=test« (v. 201), »QR z napacno skrivnostjo se NE preveri« (v. 204), »neveljaven QR (napacen podpis) -> 400« (v. 241) |
+| I7 | Po prenosu vstopnice prijatelju pošiljatelj vstopi s starim posnetkom zaslona | `POST /tickets/:id/transfer` v `index.js` dodeli vstopnici **nov `serial`** (nova QR koda); sken zahteva `serial=$4`, zato stara koda ne zadene ničesar | `_testi/test_prenos.js`: »ana (stari imetnik) vstopnice vec NE vidi v /me/tickets« (v. 114), »ana po prenosu ni vec imetnik -> 404« (v. 123) |
+| I8 | Mladoletnik kupi ali dobi vstopnico za dogodek 18+ | `POST /events/:id/orders` in `POST /tickets/:id/transfer` v `index.js` preverita `starost(date_of_birth) >= e.min_age` **na strežniku**; brez datuma rojstva nakup za `min_age > 0` ni mogoč | `_testi/test_vstopnice.js`: »16-letnik na dogodku 18+ -> 403« (v. 169), »brez datuma rojstva … -> 403« (v. 167); `_testi/test_prenos.js`: »prenos mladoletnemu na dogodek 18+ -> 403« (v. 149) |
+| I9 | Znesek se izgubi v plavajoči vejici (centi, provizija) | Vsi zneski so `INTEGER` centi v shemi; vhod preverja `Number.isInteger` (`preveriCenik`, `quantity`), provizija je `Math.round(skupaj * PROVIZIJA_ODSTOTEK / 100)` | `_testi/test_vstopnice.js`: »total_cents = 2 x 1500 (celi centi)« (v. 134); `_testi/test_cenik.js`: »cena s plavajoco vejico -> 400« (v. 90); `_testi/test_finance_admin.js`: »provizija 10% = 300 centov« (v. 74) |
+| I10 | Izpad Supabase Auth odjavi vse uporabnike (JWKS nedosegljiv → 401) | `requireAuth` v `index.js`: napaka z zastavico `err.jwks` vrne **503**, ne 401. Manjkajoč ali pokvarjen žeton ostane 401; javne poti med izpadom delajo naprej | `_testi/test_invariante.js`: »GET /me pri nedosegljivem JWKS -> 503 (NE 401)«, »brez žetona je se vedno 401«, »javne poti med izpadom Auth delajo naprej«, »med izpadom Auth ni nastalo novo narocilo« |
+
+Zagon vseh: `npm test` (isto teče v Actions `Testi` ob vsakem PR-ju). Številke vrstic so kazalec, ne pogodba —
+če se razidejo, išči po besedilu trditve.
+
+## Nadzor produkcije in mrtvo človeka držalo (Healthchecks.io)
+
+Workflow `.github/workflows/nadzor.yml` vsakih 15 minut preveri backend, spletno stran in Supabase Auth.
+Ob napaki: zagon je rdeč (GitHub pošlje mail), push obvestilo na telefon prek ntfy (`secrets.NTFY_TOPIC`)
+in klic rutine Popravljalec (`secrets.ROUTINE_FIRE_URL`, `ROUTINE_FIRE_TOKEN`).
+
+Ta veriga ima slepo pego: **opozori le, če se zagon zgodi.** Če GitHub Actions pade, če GitHub po 60 dneh
+nedejavnosti ugasne cron ali če kdo pokvari YAML, ni ne rdeče lučke ne pusha — vse je videti mirno.
+Zato zadnji korak uspešnega zagona pingne Healthchecks.io (`curl -fsS -m 10 --retry 3 "$HC_URL"`).
+Healthchecks logiko obrne: **javi, ko pinga NI.** Če `HC_URL` ni nastavljen, se korak preskoči z opozorilom
+(workflow ostane zelen), zato ta sprememba ničesar ne podre, dokler Martin računa ne ustvari.
+
+**Kaj mora narediti Martin (enkrat, ~5 minut):**
+
+1. Ustvari brezplačen račun na `https://healthchecks.io`.
+2. Nov check, ime npr. »Outly nadzor produkcije«, **Period 15 min**, **Grace 20 min**
+   (15 = enako kot cron, 20 = toliko odloga, da počasen zagon ne sproži lažnega alarma).
+3. Obvestilo naveži na **ntfy kanal** (Healthchecks → Integrations → ntfy), na isti kanal kot `NTFY_TOPIC`,
+   da vse pride na en telefon.
+4. Kopiraj **ping URL** checka in ga v `Djurdje/outly-backend` shrani kot secret `HC_URL`
+   (GitHub → Settings → Secrets and variables → Actions → New repository secret).
+
+Po tem je alarm dvojen: nadzor javi, ko je produkcija pokvarjena, Healthchecks pa, ko je pokvarjen nadzor.
+
 ## iOS brez Maca — TestFlight (od 16. 9. 2026)
 
 1. Merge v `master` → Actions `Gradnja iOS` (~8–10 min): prevod za simulator (artefakt `Outly-simulator-app` za appetize.io) +
