@@ -53,7 +53,8 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   sedem zagonov v 24 urah. GitHub razporejene workflowe pri nizki dejavnosti repa zamika brez opozorila. Posledice:
   (1) izpad produkcije je lahko neviden do 5 ur, ne 15 min; (2) Healthchecks s Period 15 / Grace 20 min javlja lažen
   izpad ~35 min po vsakem zagonu (glej predpostavko zgoraj); (3) »vsakih 15 min« v `CLAUDE.md` in `nadzor.yml` opisuje cron,
-  ne resničnosti. Prava rešitev ni v repu: zunanji uptime monitor (Martinov račun), workflow ostane kot globlja preverba.
+  ne resničnosti. Rešitev od 18. 9. 2026: **UptimeRobot** (4 monitorji na 5 min, glej `ARCHITECTURE.md`, razdelek Nadzor);
+  workflow ostane kot globlja preverba (401 brez žetona, Popravljalec, Healthchecks).
 - **Agent na GitHubu JE lastnik.** Vsa dejanja iz sej Claude Code gredo prek računa `Djurdje` (API `get_me` 18. 9. 2026),
   ki je edini sodelavec repa z vlogo `admin`. Zato so oznaka `odobril-martin`, ruleset za `main` in »agent si oznake ne sme
   dodati sam« **dogovor, ne varovalo**: isti račun lahko oznako doda, ruleset izklopi ali potisne mimo. Trdo postane šele,
