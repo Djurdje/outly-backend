@@ -40,9 +40,8 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   zagonu. Nastavitev je v Martinovi Healthchecks konzoli, agent je ne more spremeniti. Kdaj se vrne na 15/20:
   ko nadzor teče na zunanjem ponudniku (npr. UptimeRobot/Better Stack, brezplačno na 5 min) in ne na GitHub Actions.
 
-- **18. 9. 2026:** Workflow `Zascita` sproži zahtevo po oznaki tudi pri navadnih spremembah `index.js`,
-  ki se dotaknejo besed `orders` / `tickets` (te so v kodi pogoste). Raje preveč alarmov kot premalo;
-  če Martina to preveč ustavlja, se vzorec v `.github/workflows/zascita.yml` zoži na `requireRole|requireClub|stripe`.
+- ~~**18. 9. 2026:** Workflow `Zascita` sproži zahtevo po oznaki tudi pri `orders` / `tickets`~~ — Martin je 18. 9.
+  odločil »zoži«; ožji vzorec je v `DECISIONS.md` (Način dela).
 - **18. 9. 2026:** Naloge, ki so bile v STATE.md, so razbite na Issues po tem, kdo jih mora narediti,
   ne po področju. Dve nalogi (Stripe) sta zato dve vrstici: račun (Martin) in koda (agent).
 

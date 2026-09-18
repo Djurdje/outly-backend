@@ -31,5 +31,6 @@
 ## Oznaka `odobril-martin`
 
 <!-- Workflow "Zascita" zahteva to oznako, ce PR spreminja .github/workflows/**, CLAUDE.md, .claude/**,
-     db/migracije/** ali placilno/dostopno logiko (requireRole/requireClub, orders, tickets, stripe).
+     db/migracije/** ali placilno/dostopno logiko (requireRole/requireClub, stripe/PROVIZIJA/application_fee,
+     QR_SECRET/preveriQr/podpisiQr, rezerviraj_zalogo/sprosti_zalogo).
      Oznako doda Martin — agent si je ne sme dodati sam. -->
