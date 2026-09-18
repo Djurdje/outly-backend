@@ -7,7 +7,7 @@
     "start": "node index.js",
     "migrate": "node db/migrate.js",
     "migrate:stanje": "node db/migrate.js --stanje",
-    "test": "node _testi/test_vabila.js && node _testi/test_cenik.js && node _testi/test_dogodki_7dni.js && node _testi/test_vstopnice.js && node _testi/test_prenos.js && node _testi/test_finance_admin.js"
+    "test": "node _testi/test_vabila.js && node _testi/test_cenik.js && node _testi/test_dogodki_7dni.js && node _testi/test_vstopnice.js && node _testi/test_prenos.js && node _testi/test_finance_admin.js && node _testi/test_invariante.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

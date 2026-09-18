@@ -104,3 +104,18 @@ jobs:
           echo "Routine odgovor: $STATUS"
           echo "${ODG%$'\n'*}" | sed -E 's/"claude_code_session_url":"([^"]*)"/\nSeja: \1\n/' | head -c 600
           [ "$STATUS" = "200" ] || [ "$STATUS" = "201" ] || echo "::warning::Routine se ni sprozila (HTTP $STATUS)"
+
+      # Mrtev cloveka drzalo: ce ta workflow sploh NE stece (GitHub Actions v izpadu,
+      # onemogocen cron po 60 dneh nedejavnosti, pokvarjen YAML), zgoraj nihce ne opozori —
+      # rdeca lucka rabi zagon. Healthchecks.io obrne logiko: ce pinga ni v 15 min + 20 min
+      # odloga, javi ON. Ping gre samo ob USPESNEM zagonu (korak "Preveri produkcijo" zelen).
+      - name: Ping Healthchecks.io (mrtev cloveka drzalo)
+        if: success()
+        env:
+          HC_URL: ${{ secrets.HC_URL }}
+        run: |
+          if [ -z "$HC_URL" ]; then
+            echo "::warning::HC_URL ni nastavljen - ping preskocen (glej docs/ARCHITECTURE.md, razdelek Healthchecks.io)."
+            exit 0
+          fi
+          curl -fsS -m 10 --retry 3 "$HC_URL" && echo "Ping poslan."
