@@ -27,6 +27,9 @@ Skupni možgani projekta (preberi, preden karkoli spremeniš):
   Oznako doda **Martin**; agent si je ne sme dodati sam — s tem bi izklopil lastni alarm. Če je PR rdeč zaradi tega,
   ni kaj popravljati: povej Martinu, kaj v PR-ju je občutljivo, in počakaj.
   (Workflow teče kot `pull_request_target`, torej se vedno izvede različica z `main` — PR te preverbe ne more izklopiti.)
+- **Dokler `Zascita` ni med obveznimi checki** (zaščita veje `main`; [#15](https://github.com/Djurdje/outly-backend/issues/15)),
+  je rdeč `Zascita` samo lučka, ki merge-a tehnično ne ustavi. Zato pred vsakim merge-om preveri stanje
+  **obeh** checkov — `Testi` in `Zascita` — ne samo `Testi`. Rdeč `Zascita` pomeni: ne mergaj, povej Martinu.
 - Backend: `https://outly-backend-roy3.onrender.com` · admin panel `/admin/` · Render storitev
   `srv-d5fuiovgi27c73e4boq0`, baza `outly-db` (`dpg-daf7vav40ujc73a28g8g-a`, Frankfurt).
 - Po deployu preveri: `GET /clubs` in `GET /events` → 200, `GET /me/invites` brez žetona → 401.

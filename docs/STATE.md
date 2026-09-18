@@ -42,6 +42,10 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
 ## Znane pasti (aktivne)
 
+- **`Zascita` še ni obvezen check** (#15): rdeč zagon merge-a tehnično ne ustavi, dokler ga Martin ne doda
+  med required status checks. Do takrat mora agent pred merge-om ročno pogledati **oba** checka, ne samo `Testi`.
+- **`jq` in `^`**: v `jq` je `^` zasidran na cel niz, ne na vrstico — vzorec čez vrstice diffa rabi `(?m)`.
+  Brez tega filter tiho ne ujame ničesar in preverba je videti zelena. (Ujeto pri pisanju `zascita.yml`.)
 - **Seje Popravljalca nimajo izhodnega dostopa**: egress proxy vrne 403 »organization policy« za
   `outly-backend-roy3.onrender.com`, `outly.si`, `supabase.co` in `ntfy.sh`. Neposreden `curl` iz postopka
   v `CLAUDE.md` tam **ni izvedljiv** — stanje produkcije se potrdi posredno prek zgodovine Actions

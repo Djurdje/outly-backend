@@ -45,7 +45,10 @@ jobs:
           RAZLOGI=""
           dodaj() { RAZLOGI+="  - $1"$'\n'; }
 
-          # 1..4: obcutljive poti
+          # 1..4: obcutljive poti. Poleg novega imena gledamo tudi .previous_filename,
+          # sicer bi preimenovanje IZ zascitene poti (npr. CLAUDE.md -> NAVODILA.md) ubezalo
+          # preverbi: novo ime vzorcu ne ustreza vec, sprememba pa je enako obcutljiva.
+          POTI_S_STARIMI=$(jq -r '.[] | (.filename, (.previous_filename // empty))' /tmp/datoteke.json)
           while IFS= read -r p; do
             [ -n "$p" ] || continue
             case "$p" in
@@ -53,7 +56,7 @@ jobs:
               CLAUDE.md|.claude/*)  dodaj "$p (navodila agentom)" ;;
               db/migracije/*)       dodaj "$p (shema baze, nepovratno v produkciji)" ;;
             esac
-          done <<< "$POTI"
+          done <<< "$POTI_S_STARIMI"
 
           # 5: placilna in dostopna logika. Testne skripte in dokumenti so izvzeti —
           # tam so te besede normalne in bi oznako zahtevale ob vsakem PR-ju.
@@ -67,6 +70,19 @@ jobs:
             [ -n "$p" ] || continue
             dodaj "$p (placilna/dostopna logika: requireRole/requireClub/orders/tickets/stripe)"
           done <<< "$OBCUTLJIVE_KODE"
+
+          # Fail-safe: pri zelo velikem diffu GitHub polje "patch" IZPUSTI. Brez tega bi tak
+          # diff tiho padel skozi (prazen patch se ne ujame z nicimer) — ravno dovolj velik
+          # prepis placilne poti bi tako ubezal oznaki. Ce patcha ni, datoteka VELJA za obcutljivo.
+          BREZ_PATCHA=$(jq -r '
+            .[] | select(.filename | test("^(_testi/|docs/|admin/|\\.github/)") | not)
+                | select(.filename | test("\\.(js|sql)$"))
+                | select(has("patch") | not)
+                | .filename' /tmp/datoteke.json)
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            dodaj "$p (prevelik diff - GitHub ni vrnil patcha, zato velja za obcutljivo)"
+          done <<< "$BREZ_PATCHA"
 
           RAZLOGI=$(printf '%s' "$RAZLOGI" | sort -u)
           if [ -z "$RAZLOGI" ]; then
