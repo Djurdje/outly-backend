@@ -30,9 +30,15 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 1. **Render baza na plačljivi paket pred 7. 10. 2026** — po tem datumu se izbriše (#12).
 2. Stripe račun (#16) blokira tehnično plačilno pot (#19).
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
-4. Healthchecks.io račun + secret `HC_URL` (#14) — dokler ga ni, izpad samega nadzora ni viden.
+4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
+   Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
 
 ## Predpostavke, ki jih je sprejel agent (brez Martina)
+
+- **18. 9. 2026:** Healthchecks check naj ima **Period 6 h, Grace 3 h** (ne 15/20 min), dokler nadzor teče na
+  GitHubovem cronu — glej past »GitHub cron teče na 4–5 ur«. S 15/20 min bi Healthchecks javljal lažen izpad po vsakem
+  zagonu. Nastavitev je v Martinovi Healthchecks konzoli, agent je ne more spremeniti. Kdaj se vrne na 15/20:
+  ko nadzor teče na zunanjem ponudniku (npr. UptimeRobot/Better Stack, brezplačno na 5 min) in ne na GitHub Actions.
 
 - **18. 9. 2026:** Workflow `Zascita` sproži zahtevo po oznaki tudi pri navadnih spremembah `index.js`,
   ki se dotaknejo besed `orders` / `tickets` (te so v kodi pogoste). Raje preveč alarmov kot premalo;
@@ -42,6 +48,16 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
 ## Znane pasti (aktivne)
 
+- **GitHub cron `*/15` teče na 4–5 ur, ne na 15 min.** Zagoni `Nadzor produkcije` z dogodkom `schedule` na `main`
+  (Actions API, prebrano 18. 9. 2026 01:30 UTC): 17. 9. ob 00:45, 05:42, 10:26, 15:11, 19:02, 22:08 in 18. 9. ob 00:17 UTC —
+  sedem zagonov v 24 urah. GitHub razporejene workflowe pri nizki dejavnosti repa zamika brez opozorila. Posledice:
+  (1) izpad produkcije je lahko neviden do 5 ur, ne 15 min; (2) Healthchecks s Period 15 / Grace 20 min javlja lažen
+  izpad ~35 min po vsakem zagonu (glej predpostavko zgoraj); (3) »vsakih 15 min« v `CLAUDE.md` in `nadzor.yml` opisuje cron,
+  ne resničnosti. Prava rešitev ni v repu: zunanji uptime monitor (Martinov račun), workflow ostane kot globlja preverba.
+- **Agent na GitHubu JE lastnik.** Vsa dejanja iz sej Claude Code gredo prek računa `Djurdje` (API `get_me` 18. 9. 2026),
+  ki je edini sodelavec repa z vlogo `admin`. Zato so oznaka `odobril-martin`, ruleset za `main` in »agent si oznake ne sme
+  dodati sam« **dogovor, ne varovalo**: isti račun lahko oznako doda, ruleset izklopi ali potisne mimo. Trdo postane šele,
+  ko seje tečejo prek ločenega računa z vlogo `write` (brez admin) in je ruleset brez izjem za bypass — glej #15.
 - **`Zascita` še ni obvezen check** (#15): rdeč zagon merge-a tehnično ne ustavi, dokler ga Martin ne doda
   med required status checks. Do takrat mora agent pred merge-om ročno pogledati **oba** checka, ne samo `Testi`.
 - **`jq` in `^`**: v `jq` je `^` zasidran na cel niz, ne na vrstico — vzorec čez vrstice diffa rabi `(?m)`.
