@@ -85,6 +85,13 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 - **Figma MCP**: dnevna omejitev klicev (Starter) — ogled prek figma.com v brskalniku.
 - Ostale pasti (AsyncImage brez okvirja, gnezden NavigationStack, pg BIGINT, Resend `{error}`, JSONB vs ARRAY)
   so v `CLAUDE.md` tega repa in iOS repa.
+- **Obnova izvoza (`db/obnovi_izvoz.js`) zahteva POPOLNOMA prazno ciljno bazo** (nobena tabela razen
+  `schema_migrations` ne sme imeti vrstic — namerno, brez izjeme, glej `_testi/test_obnova.js`). Migracija
+  007 (`007_servisni_admin.sql`) pa v vsako sveže migrirano bazo vstavi servisni račun `agent@outly.si`.
+  Zato takoj po `npm run migrate` na novi (prazni) bazi `users` NI prazna in obnova bo zavrnjena s
+  »Cilj ni prazen«. Pred pravo obnovo (npr. na novi Render bazi) najprej `DELETE FROM users;` (ali samo
+  vrstico `agent@outly.si`) na ciljni bazi — enako počne test. Dolgoročno: migracija 007 sama pravi
+  »Ne pusti ga za vedno« — če se servisni račun kdaj odstrani/premakne izven migracij, ta past odpade sama.
 
 ## Kar nobeno orodje ne ve
 
