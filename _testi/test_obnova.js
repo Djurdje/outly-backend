@@ -159,6 +159,11 @@ async function telo() {
   assert(JSON.stringify(obnovljenKlub.rows[0].bar_prices) === JSON.stringify(izvorniKlub.rows[0].bar_prices), "bar_prices (jsonb) po obnovi enak izvornemu", { obnovljen: obnovljenKlub.rows[0].bar_prices, izvorni: izvorniKlub.rows[0].bar_prices });
   assert(JSON.stringify(obnovljenKlub.rows[0].gallery_urls) === JSON.stringify(izvorniKlub.rows[0].gallery_urls), "gallery_urls (text[]) po obnovi enak izvornemu", { obnovljen: obnovljenKlub.rows[0].gallery_urls, izvorni: izvorniKlub.rows[0].gallery_urls });
 
+  console.log("\n# DATE stolpec po obnovi (date_of_birth se ne sme premakniti za dan)");
+  const izvorniDob = await pool.query("SELECT date_of_birth::text AS d FROM users WHERE email='kupec@outly.si'");
+  const obnovljenDob = await obnovljeniPool.query("SELECT date_of_birth::text AS d FROM users WHERE email='kupec@outly.si'");
+  assert(izvorniDob.rows[0].d && obnovljenDob.rows[0].d === izvorniDob.rows[0].d, "date_of_birth po obnovi enak izvornemu (isti dan)", { obnovljen: obnovljenDob.rows[0], izvorni: izvorniDob.rows[0] });
+
   console.log("\n# (d) zaporedja delujejo: nov uporabnik brez trka s primarnim kljucem");
   let napakaVstavitve = null;
   let novId = null;

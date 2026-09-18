@@ -90,6 +90,28 @@ Postopek ostane tu za primer ponovne postavitve:
 
 Po tem je alarm dvojen: nadzor javi, ko je produkcija pokvarjena, Healthchecks pa, ko je pokvarjen nadzor.
 
+## Varnostne kopije in obnova
+
+Render brezplačna baza **nima kopij**. Edina pot nazaj je logični izvoz `GET /admin/api/export`
+(gumb v admin panelu, vlogo `admin`; JSON vseh tabel v enem posnetku) in skripta `db/obnovi_izvoz.js`,
+ki tak JSON obnovi v **prazno, z migracijami pripravljeno** bazo. Kaj skripta zagotavlja (test `_testi/test_obnova.js`):
+
+- zavrne cilj, ki ni `localhost`, brez izrecne zastavice `--cilj-ni-localhost`; zavrne cilj, ki že ima podatke (brez izjeme);
+- zavrne cilj, katerega seznam migracij ni enak izvozu (obnova v drugačno shemo je nevarna);
+- vstavlja v vrstnem redu tujih ključev z izklopljenimi uporabniškimi sprožilci (`sold_count` se ne šteje dvakrat),
+  nastavi zaporedja, preveri števila vrstic; vse v eni transakciji (ob napaki ostane cilj prazen).
+
+**Postopek obnove v novo bazo (Martinov računalnik, ~10 min):**
+
+1. Nova prazna PostgreSQL 16 baza (Render ali lokalno). Nikoli obstoječa produkcijska.
+2. `export DATABASE_URL=<url nove baze>` → `npm run migrate` (shema + servisni račun iz migracije 007).
+3. `DELETE FROM users WHERE email='agent@outly.si';` (edini seed migracij; izvoz ga že vsebuje — glej past v `STATE.md`).
+4. `node db/obnovi_izvoz.js <izvoz.json> --cilj-ni-localhost` → izpis po tabelah + »Obnova končana«.
+5. Backend preusmeri na novo bazo (Render → Environment → `DATABASE_URL`) in preveri `GET /clubs`, `GET /events`.
+
+Pozor: obnova iz starejšega izvoza **oživi že unovčene vstopnice**, ki so bile skenirane po izvozu — pred dogodkom
+naredi svež izvoz. Izvoz hrani osebne podatke; shrani ga zasebno (`outly/backup/`), nikoli v git.
+
 ## iOS brez Maca — TestFlight (od 16. 9. 2026)
 
 1. Merge v `master` → Actions `Gradnja iOS` (~8–10 min): prevod za simulator (artefakt `Outly-simulator-app` za appetize.io) +

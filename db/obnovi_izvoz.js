@@ -133,8 +133,12 @@ async function glavno() {
     if (tabela === "schema_migrations") continue;
     const r = await client.query(`SELECT count(*)::int AS n FROM "${tabela.replace(/"/g, '""')}"`);
     if (r.rows[0].n > 0) {
+      const namig = tabela === "users"
+        ? "\n  Namig: migracija 007 v vsako svežo bazo vstavi servisni račun agent@outly.si (izvoz ga že vsebuje).\n" +
+          "  Če je to edina vrstica, jo pred obnovo pobriši: DELETE FROM users WHERE email='agent@outly.si';"
+        : "";
       throw new Zavrnitev(
-        `Cilj ni prazen: tabela "${tabela}" že ima ${r.rows[0].n} vrstic. Obnova v bazo, ki ima podatke, je zavrnjena — brez izjeme, ne glede na zastavice.`
+        `Cilj ni prazen: tabela "${tabela}" že ima ${r.rows[0].n} vrstic. Obnova v bazo, ki ima podatke, je zavrnjena — brez izjeme, ne glede na zastavice.${namig}`
       );
     }
   }
