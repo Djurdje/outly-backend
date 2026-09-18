@@ -6,7 +6,7 @@
 #   .github/workflows/**   CI, nadzor produkcije, gradnja iOS (alarm sam)
 #   CLAUDE.md, .claude/**  navodila in agenti (pravila igre)
 #   db/migracije/**        shema baze (nepovratno v produkciji)
-#   placilna/dostopna logika v index.js (requireRole, requireClub, orders, tickets, stripe)
+#   placilna/dostopna logika v index.js (vloge, Stripe/provizija, podpis QR, zaklep zaloge)
 #
 # POZOR: sprozilec je namenoma "pull_request_target", ne "pull_request". Tako se izvede
 # razlicica tega workflowa z veje main, NE tista iz PR-ja — sicer bi PR, ki spremeni to
@@ -60,7 +60,10 @@ jobs:
 
           # 5: placilna in dostopna logika. Testne skripte in dokumenti so izvzeti —
           # tam so te besede normalne in bi oznako zahtevale ob vsakem PR-ju.
-          VZOREC='requireRole|requireClub|stripe|PROVIZIJA|application_fee|orders|tickets'
+          # Vzorec je ozek (odloceno 18. 9. 2026, DECISIONS.md): "orders|tickets" je ustavil
+          # skoraj vsak PR o vstopnicah in Martin bi klikal oznako namesto samodejnega merge-a.
+          # Kar vzorec spusti (npr. filtriranje /me/orders), drzijo invariante I1-I10 s testi.
+          VZOREC='requireRole|requireClub|stripe|PROVIZIJA|application_fee|QR_SECRET|preveriQr|podpisiQr|rezerviraj_zalogo|sprosti_zalogo'
           OBCUTLJIVE_KODE=$(jq -r '
             .[] | select(.filename | test("^(_testi/|docs/|admin/|\\.github/)") | not)
                 | select(.filename | test("\\.(js|sql)$"))
@@ -68,7 +71,7 @@ jobs:
                 | .filename' /tmp/datoteke.json)
           while IFS= read -r p; do
             [ -n "$p" ] || continue
-            dodaj "$p (placilna/dostopna logika: requireRole/requireClub/orders/tickets/stripe)"
+            dodaj "$p (placilna/dostopna logika: vloge, Stripe/provizija, podpis QR, zaklep zaloge)"
           done <<< "$OBCUTLJIVE_KODE"
 
           # Fail-safe: pri zelo velikem diffu GitHub polje "patch" IZPUSTI. Brez tega bi tak

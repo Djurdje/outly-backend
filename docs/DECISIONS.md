@@ -110,6 +110,14 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 - Vsi trije repozitoriji imajo `CLAUDE.md` + `.claude/agents/`; ta datoteka in `STATE.md` (v backend repu) sta skupni
   možgani vseh agentov. Delo teče prek **cloud sej Claude Code** (claude.ai/code, mobilna aplikacija) in PR-jev;
   `main`/`master` sta zaščitena, merge šele po zelenem CI. Neposredno potiskanje v produkcijske veje se opusti.
+- 2026-09-18: **Vzorec workflowa `Zascita` za plačilno/dostopno logiko je ozek**:
+  `requireRole|requireClub|stripe|PROVIZIJA|application_fee|QR_SECRET|preveriQr|podpisiQr|rezerviraj_zalogo|sprosti_zalogo`
+  (brez `orders|tickets`). Razlog: široki vzorec je ustavil skoraj vsak PR o vstopnicah in Martin bi klikal oznako na vsakem
+  backend PR-ju, kar je v nasprotju s samodejnim merge-om (16. 9.). Kar ožji vzorec spusti (npr. filtriranje `/me/orders`),
+  držijo invariante I1–I10 s testi; poti `.github/workflows/**`, `CLAUDE.md`, `.claude/**`, `db/migracije/**` ostanejo pokrite.
+  *vir/dokaz*: PR #29 in #30 in vsi načrtovani PR-ji (vračila, preklic, Stripe) bi se dotaknili besed `orders`/`tickets` ·
+  *velja dokler*: seje tečejo na admin računu `Djurdje` (oznaka je dogovor, ne varovalo) — ob ločenem računu za agenta
+  vzorec ponovno pretehtaj · *nadomeščena z*: —
 - 2026-09-16 (pozneje): **Merge je samodejen.** Od Martinovega ukaza do produkcije brez njegove interakcije: agent odpre PR, počaka na zelen CI,
   PR mergaj, preveri produkcijo. Varovala so CI testi + `qa-reviewer`. Edina izjema: migracije, ki brišejo/spreminjajo produkcijske
   podatke, čakajo Martinov DA. Razlog: Martin hoče upravljati s telefona brez klikanja po GitHubu.
