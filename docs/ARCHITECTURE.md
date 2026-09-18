@@ -68,9 +68,11 @@ Workflow `.github/workflows/nadzor.yml` ima cron `*/15` (vsakih 15 minut) in pre
 **V resnici GitHub ta cron sproži na 4–5 ur** (izmerjeno 17.–18. 9. 2026, glej `STATE.md`, past »GitHub cron«) —
 zato je to globlja preverba, ne hiter alarm.
 
-**Hiter alarm je UptimeRobot** (od 18. 9. 2026, Martinov brezplačni račun, 4 monitorji na 5 min, alarm na Martinov mail):
-`outly-backend-roy3.onrender.com/clubs`, `…/events`, `outly.si`, `zbewqcxnvrwebxonvebx.supabase.co/auth/v1/health`.
-Izpad je viden v ~5–10 min. Kaj UptimeRobot ne vidi: `GET /me/invites` → 401 (pravilo avtentikacije) — to preverja samo workflow.
+**Hiter alarm je UptimeRobot** (od 18. 9. 2026, Martinov brezplačni račun, 3 monitorji na 5 min, alarm na Martinov mail):
+`outly-backend-roy3.onrender.com/clubs`, `…/events`, `outly.si`.
+Izpad je viden v ~5–10 min. Kaj UptimeRobot ne vidi: `GET /me/invites` → 401 (pravilo avtentikacije) in Supabase Auth
+(`/auth/v1/health` brez glave `apikey` vrne 401, brezplačni UptimeRobot glav ne pošilja — lažni alarm 18. 9., glej INCIDENTI) —
+oboje preverja samo workflow.
 Past: prek API-ja na brezplačnem paketu ustvarjanje monitorja ne dela (403 »not allowed with your current plan«), branje in urejanje delata.
 Ob napaki: zagon je rdeč (GitHub pošlje mail), push obvestilo na telefon prek ntfy (`secrets.NTFY_TOPIC`)
 in klic rutine Popravljalec (`secrets.ROUTINE_FIRE_URL`, `ROUTINE_FIRE_TOKEN`).
