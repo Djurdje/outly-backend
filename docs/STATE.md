@@ -46,6 +46,10 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   med required status checks. Do takrat mora agent pred merge-om ročno pogledati **oba** checka, ne samo `Testi`.
 - **`jq` in `^`**: v `jq` je `^` zasidran na cel niz, ne na vrstico — vzorec čez vrstice diffa rabi `(?m)`.
   Brez tega filter tiho ne ujame ničesar in preverba je videti zelena. (Ujeto pri pisanju `zascita.yml`.)
+- **Kako preveriti produkcijo brez izhodnega dostopa** (ker `curl` iz seje ne gre, glej naslednjo past):
+  ročno sproži workflow **`Nadzor produkcije`** na veji `main` z vhodom `test=false` (to je prava preverba,
+  ne simulacija) in preberi korak »Preveri produkcijo« — izpiše `OK <ime> (<status>)` za vseh sedem preverb.
+  Uporabljeno po merge-u PR #27 (18. 9. 2026, zagon 35293761611): vse zeleno.
 - **Seje Popravljalca nimajo izhodnega dostopa**: egress proxy vrne 403 »organization policy« za
   `outly-backend-roy3.onrender.com`, `outly.si`, `supabase.co` in `ntfy.sh`. Neposreden `curl` iz postopka
   v `CLAUDE.md` tam **ni izvedljiv** — stanje produkcije se potrdi posredno prek zgodovine Actions
