@@ -136,6 +136,16 @@ Pred vsakim potiskom iOS kode: `swiftc -parse` na spremenjenih datotekah + neodv
 Figma `XeVmPgY0LDGkNcQGBkNDbg`, stran »App« (id `0:1`). Figma MCP ima dnevno omejitev (Starter) — ogled gre tudi prek
 figma.com v brskalniku (`node-id` v URL). Strani »Admin panel« v Figmi ni (admin je namenoma preprost).
 
+**Design sistem iz kode** (19.–20. 9. 2026): kanvas https://claude.ai/artifact/RjPdz2TMLoF5Cj2zGVB8bm (Martinov račun,
+zaseben; deli prek Share). Table: barve in površine (splet, iOS, admin, pravno), tipografija/radiji/razmiki, komponente,
+analiza neskladij, interaktivni prototip domačega zaslona (Play) in specifikacija stanj. Vir resnice ostaja koda:
+`outly_webpage/styles.css` (`:root`), `outly-app/Outly/Core/Themes/Colors.swift`, `outly-backend/admin/index.html` (`:root`).
+Odprte najdbe iz analize so v Issues (oznaka `agent`).
+
+**iOS navigacija** (od 20. 9., PR #10): `MainTabView` je `ZStack` — `HomeView` spodaj, `SearchView`/`MapView`/`ProfileView`
+kot plasti z lastnim `NavigationStack`, spodnja vrstica `OutlyTabBar` prek `safeAreaInset`. Vsi štirje zasloni so ves čas
+živi (stanje se ohrani), prehod je animacija (blur/scale Home, offset/opacity plasti).
+
 ## Orodja za ročno preverjanje (mapa `outly/` na Martinovem računalniku, niso v repih)
 
 `outly-konzola.html` (klici na backend v živo), `outly-qr-vstopnice.html` (QR za test skenerja),

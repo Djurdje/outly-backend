@@ -54,6 +54,21 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
 ## Znane pasti (aktivne)
 
+- **Swift toolchain v oblačni seji ni dosegljiv** (20. 9.): `download.swift.org` in GitHub *releases* (tudi swiftwasm)
+  vračata 403 prek egress proxyja; `swiftc -parse` iz iOS `CLAUDE.md` tam ni izvedljiv. Nadomestilo: `type-checker`
+  subagent + prevod za simulator na PR-ju (workflow `Gradnja iOS`, ~2 min). Enako velja za `outly.si` in
+  `onrender.com` (glej past zgoraj) — spletno stran po objavi preveri Martin v brskalniku, backend prek ročnega zagona
+  workflowa **Nadzor produkcije** (`workflow_dispatch` na `main`; 20. 9. zagon 29 zelen po docs mergu #33).
+- **Headless preverjanje outly.si v oblaku** (20. 9.): `cdn.jsdelivr.net` (supabase-js UMD) ni dosegljiv, zato
+  `window.supabase` ne obstaja in `auth.js` tiho izpusti ploščo — v Playwright testu je treba **stubati tudi CDN
+  skript** (minimalen `window.supabase.createClient` z `auth.getSession`, `onAuthStateChange`, `rpc`, verižni `from()`),
+  ne samo REST. Playwright: `npm i playwright` v scratchpadu + `executablePath` `/opt/pw-browsers/chromium-*/chrome-linux/chrome`.
+  Skript je zapisan kot skill (`.claude/skills/headless-preverjanje-strani`, čaka `odobril-martin`).
+- **Splet: razred `.points` je kartica točk v profilu** (`auth.js`, centrirana, obrobljena) — razdelek na strani je
+  `pointsSection` / `#points`. Nov razdelek s tem razredom bi podedoval centriranje.
+- **Docs-only merge v `main` vseeno sproži Render deploy** (`npm run migrate && npm start`); nevarnosti ni, a ~60 s
+  restarta backenda se zgodi.
+
 - **GitHub cron `*/15` teče na 4–5 ur, ne na 15 min.** Zagoni `Nadzor produkcije` z dogodkom `schedule` na `main`
   (Actions API, prebrano 18. 9. 2026 01:30 UTC): 17. 9. ob 00:45, 05:42, 10:26, 15:11, 19:02, 22:08 in 18. 9. ob 00:17 UTC —
   sedem zagonov v 24 urah. GitHub razporejene workflowe pri nizki dejavnosti repa zamika brez opozorila. Posledice:
