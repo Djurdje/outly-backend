@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-18.
+Zadnja posodobitev: 2026-09-20.
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -48,9 +48,16 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   (`UserPreferences`, @AppStorage); backend jih ne pozna, sinhronizacije med napravami ni. Če se kdaj želi
   strežniško, je to nov stolpec/pot na `/me` (samo dodajanje). Zvonec na domačem zaslonu šteje **čakajoča vabila
   v ekipo** (`Me.pendingInvites`), ker drugih obvestil (APNs) ni; značka »1« ali »1+«.
-- **20. 9. 2026 (iOS, PR #10):** Sistemski `TabView` je zamenjan z `ZStack` + lastno vrstico `OutlyTabBar`, da je Home
-  pod ostalimi zavihki zamegljen (Martinova zahteva). Če se pojavijo težave z varnim območjem ali tipkovnico, je to
-  prvi osumljenec; vrnitev = revert squash commita `d246bdc`.
+- ~~**20. 9. 2026 (iOS, PR #10):** Sistemski `TabView` je zamenjan z `ZStack` + lastno vrstico `OutlyTabBar`~~ —
+  vrnjeno še isti dan v PR #11 (`6810def`): spet sistemski `TabView`, `OutlyTabBar` umaknjen.
+- **20. 9. 2026 (iOS, PR #12):** Filtri na domačem zaslonu: Distance, Age range in Entry price so drsniki **od–do**
+  s histogramom **dejanske** porazdelitve prihajajočih dogodkov (razdalja do kluba iz lokacije naprave, `min_age`,
+  `ticket_price_cents`); histogram se prilagaja ostalim aktivnim filtrom. `EventFilters` ima zato tudi
+  `minDistanceKm`. Histogram razdalje je prazen brez dovoljenja za lokacijo — to ni hrošč. Stikalo »Use my
+  preferences« ob **izklopu** vrne žanre, razdaljo, starost in ceno na privzete vrednosti (mesto ostane) in si
+  stanje zapomni v filtrih (`izMojihNastavitev`). Vse to je samo v aplikaciji — backend ne pozna filtrov ne preferenc.
+  Kartice dogodkov: cena v modrem gumbu na temno prosojnem pasu; stran dogodka: en sredinski moder okvir s ceno
+  (ozadje 65 %), brez belega gumba »Get tickets« — logika nakupa nespremenjena.
 
 ## Znane pasti (aktivne)
 
@@ -127,3 +134,8 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 ## Način dela od 16. 9. 2026
 
 Cloud seje Claude Code + PR-ji + CI; podrobnosti v `CLAUDE.md`.
+
+- **Od 20. 9. 2026 dela na projektu Luka** (dostop do vseh treh repozitorijev in storitev), na **MacBooku z Xcodom**.
+  To pomeni: iOS gradnjo in preverjanje na napravi/simulatorju lahko naredi lokalno, ne samo prek Actions/TestFlighta.
+  Agent v oblačni seji Xcoda še vedno nima (past »Swift toolchain v oblačni seji ni dosegljiv«) — pravilo
+  »veja + PR + zelen Actions« ostane, lokalni Xcode je dodatna preverba, ne nadomestilo.
