@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-20.
+Zadnja posodobitev: 2026-09-20 (zvečer).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -61,11 +61,11 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
 ## Znane pasti (aktivne)
 
-- **Cloud signing v `Gradnja iOS` porabi en Apple Development certifikat na zagon** (20. 9.): runner je vsakič svež,
-  zasebni ključ se izgubi, Xcode z `-allowProvisioningUpdates` naredi novega. Ko Apple doseže omejitev, arhiv pade z
-  »maximum number of certificates« + »No profiles for 'si.outly.app'« — PR-ji so zeleni (samo prevod), pade samo
-  TestFlight na `master`. Rešitev, ki ne zahteva ročnega brisanja vsakih nekaj gradenj: .p12 v GitHub secrets +
-  uvoz v keychain v workflowu (sprememba podpisovanja → Martin). Glej INCIDENTI 2026-09-20.
+- **TestFlight podpis je odvisen od certifikata v GitHub secrets** (od 20. 9., outly-app PR #13): `IOS_DEV_CERT_P12` +
+  `IOS_DEV_CERT_PASSWORD` (CI-jev lasten »Outly CI« Apple Development certifikat, velja do ~20. 9. 2027). Če ga kdo na
+  developer.apple.com prekliče ali poteče, korak »Podpisan arhiv« pade — PR-ji ostanejo zeleni (samo prevod). Popravek: nov
+  CSR (OpenSSL, tudi na Windowsu) → nov .p12 → zamenjava obeh secrets. Brez teh secrets se TestFlight korak preskoči z
+  opozorilom, ne pade. Zgodovina: DECISIONS (Infrastruktura, 20. 9.), INCIDENTI 2026-09-20.
 - **Swift toolchain v oblačni seji ni dosegljiv** (20. 9.): `download.swift.org` in GitHub *releases* (tudi swiftwasm)
   vračata 403 prek egress proxyja; `swiftc -parse` iz iOS `CLAUDE.md` tam ni izvedljiv. Nadomestilo: `type-checker`
   subagent + prevod za simulator na PR-ju (workflow `Gradnja iOS`, ~2 min). Enako velja za `outly.si` in

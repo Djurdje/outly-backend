@@ -118,6 +118,15 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   *velja dokler*: je račun **Individual** (App Transfer na NEXT DIMENSIONS zahteva nove ključe v secrets in nov dogovor o vlogah)
   in dokler Apple sprejema iOS 26 SDK (`macos-26`).
 - 2026-09-16: iOS PR-ji morajo skozi prevod za simulator v Actions pred merge-om; TestFlight upload samo ob pushu v `master`.
+- 2026-09-20: **Razvojni certifikat za `Gradnja iOS` je v GitHub secrets (`IOS_DEV_CERT_P12` base64 + `IOS_DEV_CERT_PASSWORD`),
+  ne več »Xcode si ga naredi sam«.** Razlog: cloud signing je na vsakem svežem runnerju ustvaril nov Apple Development
+  certifikat (zasebni ključ se z runnerjem izgubi) in po nekaj gradnjah zadel Applovo omejitev — TestFlight je stal.
+  Certifikat je narejen namenoma za CI (»Outly CI«, CSR z OpenSSL na Windowsu, brez Maca), zato ni vezan na noben razvijalčev
+  računalnik. Distribucijski podpis ostaja cloud-managed prek ASC API ključa. Odločil Martin (v pogovoru, 20. 9.).
+  *vir/dokaz*: zagon `Gradnja iOS` #53 rdeč (»maximum number of certificates«), #54 zelen po PR outly-app #13; INCIDENTI 2026-09-20.
+  *velja dokler*: certifikat velja (**eno leto, do ~20. 9. 2027**) in dokler je Apple račun Individual (App Transfer = nov
+  certifikat pod novim teamom). Ob poteku: nov CSR → nov .p12 → zamenjava obeh secrets; postopek v outly-app `CLAUDE.md`.
+  *nadomeščena z*: —
 - Stripe račun odpre Luka za NEXT DIMENSIONS; Connect Express za klube; ključi `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
   na Render nastavi Martin/Luka; webhook `/stripe/webhook`, idempotentnost prek `orders_pi_key`.
   *velja dokler*: je Outly posrednik in ne prodajalec (destination charges).
