@@ -87,6 +87,22 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   a ne 1:1: temna tema, modra `#4C76FF` samo na glavnem gumbu (ne na velikih ploskvah), »prijazno za oči«,
   brez vijolično-modrih prelivov, brez emojijev kot ikon, ena poudarjena stvar na zaslon, 8-pt mreža, SF Symbols.
 - Vsaka kartica mora nekam voditi. Slike vedno `Color.clear.overlay(img.resizable().scaledToFill()).clipped()`.
+- 2026-09-20: **Prenova domačega zaslona iOS** (Martinova specifikacija, outly-app PR #10, build 48): (1) ozadje temno
+  mornariški preliv z mehkima modrima sijema, ki se premikata ob drsenju, brez oblik; (2) Home ostane pod Search/Map/Profile
+  zamegljen in potemnjen, izbrani zaslon pride kot plast (sistemski `TabView` → `ZStack` + `OutlyTabBar`); (3) glava:
+  avatar levo, logo na sredini, zvonec desno z modro značko »1« / »1+«; (4) »Where to?« je en dvodelni okvir: iskanje levo,
+  filter desno, tanko ločilo — filter ni ločen gumb; (5) kartice dogodkov: podatki v spodnjem pasu znotraj plakata
+  (levo zamegljeno naslov + klub · čas, desno modra cena), plakat nespremenjen, kartica nižja; (6) Filtri: City, »Use my
+  preferences« (stikalo naloži žanre, razdaljo, starost, ceno iz profila), žanri, razdalja, starost, cena; modra za aktivna
+  stanja; (7) My Account: Language in Notifications pod novim **Preferences** (My preferences, Notifications, Language),
+  isti slog kot obstoječi podzasloni. *vir/dokaz*: Martinovo naročilo 20. 9. (točke 1–7), design kanvas (ARCHITECTURE →
+  Oblikovanje). *velja dokler*: Martin ne preveri builda 48 na napravi; prehodi z blurom so prvi osumljenec pri težavah.
+- 2026-09-20: Spletna stran ima razdelek **Points** (»Earn points before launch«) med Preview in Waitlist, po Martinovi
+  predlogi plakata; besedilo koristi je Martinovo (glej odločitev o unovčenju točk zgoraj).
+- 2026-09-20: Pravilo »modra samo na glavnem gumbu« se v praksi bere kot **modra je barva poudarka** (aktivni zavihek,
+  izbrani čip, stikalo, cena, fokus), **polna modra ploskev samo na glavnem gumbu**. Pravilo »8-pt mreža« koda ne drži
+  (najpogostejši razmiki 10, 12, 14, 18); nova koda naj sledi obstoječim vrednostim, ne dokumentu. *vir/dokaz*: izvleček
+  design sistema iz kode 19. 9. (kanvas, tabla »Analiza«).
 
 ## Infrastruktura (odločeno 14. 9. 2026 po sestanku z investitorji)
 
