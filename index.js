@@ -351,12 +351,15 @@ app.get("/me", requireAuth, async (req, res) => {
     const v = await pool.query("SELECT COUNT(*)::int AS n FROM club_invites WHERE user_id=$1 AND status='pending'", [req.user.userId]);
     // Čakajoče prošnje za prijateljstvo (migracija 016) — obvestila v aplikaciji.
     const pf = await pool.query("SELECT COUNT(*)::int AS n FROM friend_requests WHERE to_user_id=$1 AND status='pending'", [req.user.userId]);
+    // Neprebrane prejete vstopnice (migracija 017) — obvestilo "X ti je poslal vstopnico".
+    const pv = await pool.query("SELECT COUNT(*)::int AS n FROM ticket_transfers WHERE to_user_id=$1 AND seen_at IS NULL", [req.user.userId]);
     return res.status(200).json({
       ...result.rows[0],
       club_id: k ? k.clubId : null,
       club_role: k ? k.role : null,
       pending_invites: v.rows[0] ? v.rows[0].n : 0,
       pending_friend_requests: pf.rows[0] ? pf.rows[0].n : 0,
+      pending_received_tickets: pv.rows[0] ? pv.rows[0].n : 0,
     });
   } catch (err) {
     console.error(err);
@@ -2420,6 +2423,45 @@ app.get("/business/events/:id/tickets", requireAuth, requireClub(), async (req, 
        WHERE t.event_id = $1 AND e.club_id = $2 ORDER BY t.id LIMIT 1000`, [id, klub]
     );
     return res.json(r.rows.map(t => ({ ...t, qr: qrVstopnice(t) })));
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// GET /me/tickets/received — neprebrana obvestila "X ti je poslal vstopnico" (migracija 017).
+// Samo prejemnik iz zetona (I3); o posiljatelju samo id/username/avatar_url (I11), nikoli e-naslov.
+// Vstopnica sama je v GET /me/tickets — tu je le obvestilo, ki izgine ob POST .../seen.
+app.get("/me/tickets/received", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT tt.id, tt.ticket_id, tt.created_at, e.id AS event_id, e.title AS event_title, e.start_at AS event_start_at,
+              c.name AS club_name, u.id AS from_id, u.username AS from_username, u.avatar_url AS from_avatar_url
+       FROM ticket_transfers tt
+       JOIN tickets t ON t.id = tt.ticket_id
+       JOIN events e ON e.id = t.event_id
+       JOIN clubs c ON c.id = e.club_id
+       LEFT JOIN users u ON u.id = tt.from_user_id
+       WHERE tt.to_user_id = $1 AND tt.seen_at IS NULL
+       ORDER BY tt.created_at DESC LIMIT 50`, [req.user.userId]
+    );
+    return res.json({ received: r.rows.map(x => ({
+      id: x.id, ticket_id: x.ticket_id, created_at: x.created_at,
+      event_id: x.event_id, event_title: x.event_title, event_start_at: x.event_start_at, club_name: x.club_name,
+      from: x.from_id ? { id: x.from_id, username: x.from_username, avatar_url: x.from_avatar_url } : null,
+    })) });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// POST /me/tickets/received/:id/seen — prejemnik je obvestilo videl (dotik v meniju). Idempotentno.
+// Tuje ali neobstojece obvestilo: 404 (ne razkrivamo, da obstaja).
+app.post("/me/tickets/received/:id/seen", requireAuth, async (req, res) => {
+  const id = celoId(req.params.id);
+  if (!id) return res.status(400).send("Invalid id.");
+  try {
+    const r = await pool.query(
+      `UPDATE ticket_transfers SET seen_at = COALESCE(seen_at, NOW()) WHERE id = $1 AND to_user_id = $2 RETURNING id`,
+      [id, req.user.userId]
+    );
+    if (r.rows.length === 0) return res.status(404).send("Not found.");
+    return res.json({ result: "ok" });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 

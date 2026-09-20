@@ -80,6 +80,12 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   simetrično; o tujem uporabniku se razkrije samo id, uporabniško ime in avatar (invarianta I11).
   *vir/dokaz*: Martinovo naročilo v pogovoru 20. 9. (slika »Your crew is going«). *velja dokler*: ni odločeno drugače o
   privzeti vrednosti deljenja načrtov in načinu iskanja (glej STATE, predpostavke 20. 9.). *nadomeščena z*: —
+- 2026-09-21: **Obvestilo o prejeti vstopnici** (Martin): ko prijatelj pošlje vstopnico, prejemnik v meniju obvestil (zvonec)
+  vidi »X sent you a ticket for Y«; dotik odpre Tickets in obvestilo označi kot prebrano. Backend: migracija 017
+  (`ticket_transfers.seen_at`), `GET /me` polje `pending_received_tickets`, `GET /me/tickets/received`,
+  `POST /me/tickets/received/:id/seen`. Prenosi pred migracijo se štejejo za prebrane. Meni obvestil je brez spodnjih
+  gumbov My Clubs / My Friends (oba sta v profilu). *vir/dokaz*: Martinovo naročilo 21. 9. *velja dokler*: ni potisnih
+  obvestil (APNs) — takrat je to isti vir podatkov, samo še push. *nadomeščena z*: —
 - 2026-09-14/15: Stran kluba: slideshow do 3 slik + video kluba (`gallery_urls`, `video_url`, 015); zaslon dogodka po Lukovih navodilih
   (plakat dogodka čez vrh, naslov pod pasico, gumb za nakup prosojen na pasici).
 - 2026-09: Slike klubov v produkciji so ZA DEMO (prave s spletnih strani klubov). Pred pravim zagonom jih zamenjajo slike,

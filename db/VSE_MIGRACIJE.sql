@@ -1106,6 +1106,31 @@ ALTER TABLE users
 
 
 -- =============================================================================
+-- ##  017_obvestilo_prejete_vstopnice.sql
+-- =============================================================================
+-- 017_obvestilo_prejete_vstopnice.sql
+-- Obvestilo "prijatelj ti je poslal vstopnico" v meniju obvestil (Martin, 21. 9. 2026).
+--
+-- ticket_transfers ze belezi vsak prenos (008); manjka samo, ali je prejemnik obvestilo
+-- ze videl. seen_at NULL = neprebrano -> pokaze se v zvoncu (GET /me pending_received_tickets,
+-- GET /me/tickets/received); POST /me/tickets/received/:id/seen ga nastavi.
+--
+-- Obstojeci prenosi (pred to migracijo) se stejejo za prebrane: stolpec se doda z DEFAULT NOW(),
+-- ki napolni stare vrstice, nato se DEFAULT odstrani, da novi prenosi nastanejo z NULL.
+-- Sicer bi vsak, ki je kdaj prejel vstopnico, po deployu dobil star "nov" zvonec.
+
+ALTER TABLE ticket_transfers
+    ADD COLUMN IF NOT EXISTS seen_at TIMESTAMPTZ DEFAULT NOW();
+
+ALTER TABLE ticket_transfers
+    ALTER COLUMN seen_at DROP DEFAULT;
+
+-- Obvestila: "moje neprebrane prejete vstopnice".
+CREATE INDEX IF NOT EXISTS ticket_transfers_to_unseen_idx
+    ON ticket_transfers (to_user_id) WHERE seen_at IS NULL;
+
+
+-- =============================================================================
 -- Vpis v evidenco
 -- =============================================================================
 INSERT INTO schema_migrations (datoteka, odtis) VALUES
@@ -1125,7 +1150,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('013_vabila_v_ekipo.sql', 'b676a9d2808909c0'),
     ('014_cenik_bara.sql', '0fc9fc7042634c43'),
     ('015_galerija_video.sql', '2e3d05936a441dd8'),
-    ('016_prijatelji.sql', '078393adc2e6b232')
+    ('016_prijatelji.sql', '078393adc2e6b232'),
+    ('017_obvestilo_prejete_vstopnice.sql', '2fe7bae5fd92d52e')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
