@@ -64,6 +64,12 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 
 - 2026-09-09/10: **Povabilo prijateljev**: brez nagrad; 1 točka na vabilo, šteje šele ob potrditvi maila povabljenega;
   invite link samo za registrirane uporabnike (nadomešča odločitev z 9. 9., ko je bil link tudi na confirm.html).
+  *nadomeščena z*: 2026-09-20 (del »brez nagrad«); štetje točk in pogoj potrditve maila ostaneta.
+- 2026-09-20: **Točke bodo unovčljive v aplikaciji** — spletna stran (razdelek »Earn points before launch«, outly_webpage PR #5)
+  obljublja: popusti na vstopnice, Outly »kariera« (status), ekskluzivni dostop do dogodkov, »več prihaja«. Zbirajo se zdaj
+  (waitlist, `referred_by` + potrjen mail), unovčijo po zagonu aplikacije. *vir/dokaz*: Martinova predloga plakata in
+  naročilo 20. 9. *velja dokler*: mehanizem unovčenja ni določen — backend točk še ne pozna (živijo v Supabase `waitlist_signups`);
+  kaj točno stane popust/status, koliko točk, je odprta naloga (Martin).
 - 2026-09-10: Registrirani se v javni waitlisti kažejo z delno zakritim imenom + »created a profile«.
 - 2026-09-10: Zavihek Saved umaknjen; **Liked events** je razdelek na domačem zaslonu (nav bar: Home, Search, Map, Profile).
 - 2026-09-14: Gumb **Bar prices** na zaslonu dogodka odpre cenik, ki ga klub sam ureja v aplikaciji (`clubs.bar_prices` JSONB, 014).

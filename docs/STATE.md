@@ -44,6 +44,13 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   odločil »zoži«; ožji vzorec je v `DECISIONS.md` (Način dela).
 - **18. 9. 2026:** Naloge, ki so bile v STATE.md, so razbite na Issues po tem, kdo jih mora narediti,
   ne po področju. Dve nalogi (Stripe) sta zato dve vrstici: račun (Martin) in koda (agent).
+- **20. 9. 2026 (iOS, PR #10):** »My preferences« (žanri, razdalja, starost, cena) so shranjene **samo na napravi**
+  (`UserPreferences`, @AppStorage); backend jih ne pozna, sinhronizacije med napravami ni. Če se kdaj želi
+  strežniško, je to nov stolpec/pot na `/me` (samo dodajanje). Zvonec na domačem zaslonu šteje **čakajoča vabila
+  v ekipo** (`Me.pendingInvites`), ker drugih obvestil (APNs) ni; značka »1« ali »1+«.
+- **20. 9. 2026 (iOS, PR #10):** Sistemski `TabView` je zamenjan z `ZStack` + lastno vrstico `OutlyTabBar`, da je Home
+  pod ostalimi zavihki zamegljen (Martinova zahteva). Če se pojavijo težave z varnim območjem ali tipkovnico, je to
+  prvi osumljenec; vrnitev = revert squash commita `d246bdc`.
 
 ## Znane pasti (aktivne)
 
