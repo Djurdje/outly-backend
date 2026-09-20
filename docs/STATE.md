@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-20 (pozno zvečer).
+Zadnja posodobitev: 2026-09-21 (ponoči).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -35,7 +35,19 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
 ## Predpostavke, ki jih je sprejel agent (brez Martina)
 
-- **20. 9. 2026 (prijatelji, backend PR):** Martin je naročil prijatelje (My friends, prošnje v obvestilih, »Your friends' plans«,
+- **20. 9. 2026 (iOS PR #14, v masterju, build 57):** Profil je vedno **osebni** (slika, ime, My Account), tudi za zaposlene; meni je
+  za vse enak (My Clubs, Tickets, Payment, Support, About). Klubske funkcije (Dashboard, Scan tickets, Events, Team, Edit page)
+  so **pod My Clubs → View** (MyClubDetailView), ne več globalno. »My Clubs« je seznam kartic, a ker backend dovoljuje eno
+  članstvo na uporabnika (DECISIONS »en klub«), kaže 0 ali 1 kartico — če bo kdaj več klubov na osebo, je to backend
+  odločitev, ne UI. Odstranjena izbira žanrov v Personal info. Kartice dogodkov: pas 50 pt, `.ultraThinMaterial.opacity(0.55)`;
+  gumb za vstopnice na dogodku: bela obroba, malenkost večji.
+- **20. 9. 2026 (iOS PR #15, v masterju, build 59) — prijatelji v aplikaciji so ŽIVI:** My Friends v profilu, **zvonec na domačem
+  zaslonu odpre spustni meni** (vabila v ekipo + prošnje za prijateljstvo; prej je vodil na My Clubs), prenos vstopnice z izbiro
+  prijatelja (e-naslov ostane), stikalo »Friends can see my plans« v Preferences, razdelek »Your friends' plans« pod In your area
+  (krogi, Invite more = ShareLink outly.si, View). Na napravi še NI preverjeno (Martin, dva računa).
+- **20. 9. 2026 (odprto):** politika zasebnosti za prijatelje je **osnutek v outly_webpage PR #6** in čaka Martinov DA — aplikacija
+  načrte že deli, politika tega še ne omenja. Ne odlašati.
+- **20. 9. 2026 (prijatelji, backend PR #45, v produkciji):** Martin je naročil prijatelje (My friends, prošnje v obvestilih, »Your friends' plans«,
   prenos vstopnice prijatelju z izbiro iz seznama), na tri vprašanja pa ni odgovoril, zato velja: (1) prijatelja se najde **po
   uporabniškem imenu** (`GET /users/search`, predpona, samo potrjeni računi, največ 10, omejeno na 120/h); (2) stikalo
   `users.share_plans_with_friends` je **privzeto VKLOPLJENO** (sicer bi bil razdelek na domačem zaslonu pri vseh prazen), izklop v
