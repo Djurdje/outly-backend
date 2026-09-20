@@ -349,11 +349,14 @@ app.get("/me", requireAuth, async (req, res) => {
     const k = await klubUporabnika(req.user.userId);
     // Čakajoča vabila v ekipo (migracija 013) — značka na zvoncu v "My clubs".
     const v = await pool.query("SELECT COUNT(*)::int AS n FROM club_invites WHERE user_id=$1 AND status='pending'", [req.user.userId]);
+    // Čakajoče prošnje za prijateljstvo (migracija 016) — obvestila v aplikaciji.
+    const pf = await pool.query("SELECT COUNT(*)::int AS n FROM friend_requests WHERE to_user_id=$1 AND status='pending'", [req.user.userId]);
     return res.status(200).json({
       ...result.rows[0],
       club_id: k ? k.clubId : null,
       club_role: k ? k.role : null,
       pending_invites: v.rows[0] ? v.rows[0].n : 0,
+      pending_friend_requests: pf.rows[0] ? pf.rows[0].n : 0,
     });
   } catch (err) {
     console.error(err);
@@ -419,7 +422,8 @@ app.get("/genres", (req, res) => res.status(200).json({ genres: ZANRI }));
 // Polja, ki jih vrnemo o uporabniku. Na enem mestu, da se GET /me, PATCH /me
 // in PATCH /me/avatar ne razidejo.
 const POLJA_UPORABNIKA = `id, email, username, role, avatar_url, email_verified,
-  phone, phone_verified, date_of_birth, country, genres, onboarded_at, created_at`;
+  phone, phone_verified, date_of_birth, country, genres, onboarded_at, created_at,
+  share_plans_with_friends`;
 
 app.patch("/me", requireAuth, async (req, res) => {
   try {
@@ -510,6 +514,13 @@ app.patch("/me", requireAuth, async (req, res) => {
         return res.status(400).json({ error: "unknown_genres", unknown: neznani, allowed: ZANRI });
       }
       dodaj("genres", izbrani);
+    }
+
+    // --- prijatelji vidijo moje nacrte (migracija 016) ---
+    if (b.share_plans_with_friends !== undefined || b.sharePlansWithFriends !== undefined) {
+      const v = b.share_plans_with_friends ?? b.sharePlansWithFriends;
+      if (typeof v !== "boolean") return res.status(400).send("share_plans_with_friends must be true or false.");
+      dodaj("share_plans_with_friends", v);
     }
 
     if (sets.length === 0) return res.status(400).send("Nothing to update.");
@@ -2419,8 +2430,15 @@ app.get("/business/events/:id/tickets", requireAuth, requireClub(), async (req, 
 app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 30, oknoSekund: 3600 }), async (req, res) => {
   const id = celoId(req.params.id);
   if (!id) return res.status(400).send("Invalid ticket id.");
-  const email = String((req.body || {}).email || "").trim().toLowerCase();
-  if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).send("A valid email is required.");
+  // Prejemnik: { user_id } prijatelja (izbira iz seznama, migracija 016) ALI { email } kot doslej.
+  // Po id sme samo prijatelju — sicer bi se dalo z ugibanjem id-jev posiljati vstopnice
+  // (in izvedeti uporabniska imena) neznancem.
+  const b0 = req.body || {};
+  const prejemnikId = b0.user_id !== undefined ? celoId(b0.user_id) : null;
+  const email = prejemnikId ? "" : String(b0.email || "").trim().toLowerCase();
+  if (b0.user_id !== undefined && !prejemnikId) return res.status(400).send("Invalid user_id.");
+  if (!prejemnikId && (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return res.status(400).send("A valid email is required.");
+  if (prejemnikId && !(await staPrijatelja(req.user.userId, prejemnikId))) return res.status(404).send("You can only send a ticket by user to one of your friends.");
 
   const c = await pool.connect();
   try {
@@ -2440,7 +2458,9 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     if (t.status !== "valid") { await c.query("ROLLBACK"); return res.status(409).send(`Ticket is ${t.status}.`); }
     if (new Date(t.start_at).getTime() <= Date.now()) { await c.query("ROLLBACK"); return res.status(409).send("Event has already started."); }
 
-    const pr = await c.query("SELECT id, email, username, email_verified, starost(date_of_birth) AS leta FROM users WHERE LOWER(email) = $1", [email]);
+    const pr = prejemnikId
+      ? await c.query("SELECT id, email, username, email_verified, starost(date_of_birth) AS leta FROM users WHERE id = $1", [prejemnikId])
+      : await c.query("SELECT id, email, username, email_verified, starost(date_of_birth) AS leta FROM users WHERE LOWER(email) = $1", [email]);
     if (pr.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("No Outly account with this email. Ask your friend to sign up first."); }
     const p = pr.rows[0];
     if (Number(p.id) === Number(req.user.userId)) { await c.query("ROLLBACK"); return res.status(400).send("You already hold this ticket."); }
@@ -2457,13 +2477,13 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     if (u.rows.length === 0) { await c.query("ROLLBACK"); return res.status(409).send("Ticket is no longer valid."); }
     await c.query(
       `INSERT INTO ticket_transfers (ticket_id, from_user_id, to_user_id, to_email, old_serial, new_serial) VALUES ($1,$2,$3,$4,$5,$6)`,
-      [t.id, req.user.userId, p.id, email, t.serial, u.rows[0].serial]
+      [t.id, req.user.userId, p.id, p.email, t.serial, u.rows[0].serial]
     );
     await c.query("COMMIT");
     console.log(`Prenos vstopnice ${t.id}: uporabnik ${req.user.userId} -> ${p.id} (dogodek ${t.event_id})`);
     // Posiljatelj nove kode ne dobi — vstopnica ni vec njegova.
     return res.status(200).json({
-      result: "ok", message: `Ticket sent to ${p.username || email}.`,
+      result: "ok", message: `Ticket sent to ${p.username || p.email}.`,
       ticket: { id: u.rows[0].id, event_id: t.event_id, event_title: t.event_title, status: u.rows[0].status,
                 holder_username: p.username, holder_email: p.email, transferred: true }
     });
@@ -2730,6 +2750,241 @@ app.post("/me/invites/:id/decline", requireAuth, async (req, res) => {
     );
     if (r.rows.length === 0) return res.status(404).send("Invitation not found or no longer pending.");
     return res.json({ invites: await mojaVabila(req.user.userId) });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// ---------------------------
+// PRIJATELJI (migracija 016)
+// ---------------------------
+// "My friends" v profilu, prošnje v obvestilih, "Your friends' plans" na domačem
+// zaslonu, prenos vstopnice prijatelju z izbiro iz seznama. Prijateljstvo je
+// simetrično in shranjeno enkrat (user_a < user_b). O tujem uporabniku se
+// razkrije SAMO id, username in avatar_url — nikoli e-naslov, telefon, rojstvo.
+const POLJA_PRIJATELJA = "u.id, u.username, u.avatar_url";
+
+async function staPrijatelja(a, b) {
+  const r = await pool.query(
+    "SELECT 1 FROM friendships WHERE user_a = LEAST($1::int,$2::int) AND user_b = GREATEST($1::int,$2::int)", [a, b]
+  );
+  return r.rows.length > 0;
+}
+
+async function mojiPrijatelji(userId) {
+  const r = await pool.query(
+    `SELECT ${POLJA_PRIJATELJA}, f.created_at AS since
+       FROM friendships f
+       JOIN users u ON u.id = CASE WHEN f.user_a = $1 THEN f.user_b ELSE f.user_a END
+      WHERE f.user_a = $1 OR f.user_b = $1
+      ORDER BY LOWER(u.username)`, [userId]
+  );
+  return r.rows;
+}
+
+async function mojeProsnje(userId) {
+  const r = await pool.query(
+    `SELECT r.id, r.from_user_id, r.to_user_id, r.created_at,
+            u.id AS other_id, u.username AS other_username, u.avatar_url AS other_avatar_url
+       FROM friend_requests r
+       JOIN users u ON u.id = CASE WHEN r.from_user_id = $1 THEN r.to_user_id ELSE r.from_user_id END
+      WHERE (r.from_user_id = $1 OR r.to_user_id = $1) AND r.status = 'pending'
+      ORDER BY r.created_at DESC`, [userId]
+  );
+  const oblikuj = (x) => ({ id: x.id, created_at: x.created_at, user: { id: x.other_id, username: x.other_username, avatar_url: x.other_avatar_url } });
+  return {
+    incoming: r.rows.filter(x => Number(x.to_user_id) === Number(userId)).map(oblikuj),
+    outgoing: r.rows.filter(x => Number(x.from_user_id) === Number(userId)).map(oblikuj),
+  };
+}
+
+// GET /users/search?q=ime — iskanje po uporabniškem imenu (predpona), samo prijavljeni,
+// največ 10 zadetkov, brez sebe, samo potrjeni računi. Vrne id, username, avatar_url in
+// relation: 'none' | 'friends' | 'request_sent' | 'request_received'. Omejeno, da se
+// imenik ne da izluščiti z avtomatskim iskanjem.
+app.get("/users/search", requireAuth, omeji({ kljuc: "iskanje", najvec: 120, oknoSekund: 3600 }), async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    if (q.length < 2 || q.length > 20 || !/^[a-zA-Z0-9_]+$/.test(q)) return res.status(400).send("q must be 2-20 characters: letters, numbers, underscore.");
+    // '_' je v LIKE nadomestni znak -> ubežimo ga, da "an_" ne najde "ana".
+    const vzorec = q.replace(/_/g, "\\_");
+    const r = await pool.query(
+      `SELECT ${POLJA_PRIJATELJA},
+              EXISTS (SELECT 1 FROM friendships f WHERE f.user_a = LEAST(u.id,$2::int) AND f.user_b = GREATEST(u.id,$2::int)) AS is_friend,
+              (SELECT CASE WHEN r.from_user_id = $2 THEN 'request_sent' ELSE 'request_received' END
+                 FROM friend_requests r
+                WHERE r.status = 'pending'
+                  AND LEAST(r.from_user_id, r.to_user_id) = LEAST(u.id,$2::int)
+                  AND GREATEST(r.from_user_id, r.to_user_id) = GREATEST(u.id,$2::int)
+                LIMIT 1) AS req_relation
+         FROM users u
+        WHERE u.username ILIKE $1 || '%' ESCAPE '\\' AND u.id <> $2 AND u.email_verified
+        ORDER BY (LOWER(u.username) = LOWER($1)) DESC, LOWER(u.username)
+        LIMIT 10`,
+      [vzorec, req.user.userId]
+    );
+    return res.json({ users: r.rows.map(x => ({
+      id: x.id, username: x.username, avatar_url: x.avatar_url,
+      relation: x.is_friend ? "friends" : (x.req_relation || "none"),
+    })) });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// GET /me/friends -> { friends: [...], requests_in: [...], requests_out: [...] }
+app.get("/me/friends", requireAuth, async (req, res) => {
+  try {
+    const p = await mojeProsnje(req.user.userId);
+    return res.json({ friends: await mojiPrijatelji(req.user.userId), requests_in: p.incoming, requests_out: p.outgoing });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// GET /me/friends/plans -> { events: [ {dogodek..., club_name, club_logo_url, friends: [{id, username, avatar_url}]} ] }
+// Prihajajoči objavljeni dogodki, na katere ima vsaj en prijatelj VELJAVNO vstopnico —
+// samo prijatelji, ki imajo vklopljeno share_plans_with_friends (zasebnost, invarianta I11).
+app.get("/me/friends/plans", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `WITH pr AS (
+         SELECT CASE WHEN user_a = $1 THEN user_b ELSE user_a END AS id FROM friendships WHERE user_a = $1 OR user_b = $1
+       ), gredo AS (
+         -- Kdo od prijateljev drži veljavno vstopnico za kateri dogodek (imetnik = prejemnik prenosa, sicer kupec, 008).
+         SELECT t.event_id, ${IMETNIK} AS uid
+           FROM tickets t JOIN orders o ON o.id = t.order_id
+          WHERE t.status = 'valid' AND o.status IN ('paid','partially_refunded')
+            AND ${IMETNIK} IN (SELECT id FROM pr)
+          GROUP BY 1, 2
+       ), po_dogodku AS (
+         SELECT g.event_id,
+                jsonb_agg(jsonb_build_object('id', u.id, 'username', u.username, 'avatar_url', u.avatar_url) ORDER BY LOWER(u.username)) AS friends
+           FROM gredo g JOIN users u ON u.id = g.uid
+          WHERE u.share_plans_with_friends
+          GROUP BY g.event_id
+       )
+       SELECT e.*, cl.name AS club_name, cl.logo_url AS club_logo_url, p.friends
+         FROM (SELECT ${STOLPCI_DOGODKA} FROM events) e
+         JOIN po_dogodku p ON p.event_id = e.id
+         JOIN clubs cl ON cl.id = e.club_id
+        WHERE e.start_at > NOW() AND e.status = 'published' AND NOT cl.hidden
+        ORDER BY e.start_at ASC
+        LIMIT 50`,
+      [req.user.userId]
+    );
+    return res.json({ events: r.rows });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// POST /me/friends/requests — telo: { user_id } ali { username }.
+// 201 { request } ko prošnja čaka; 200 { friend } če je nasprotna prošnja že čakala (takoj prijatelja).
+// 409 already_friends | already_requested; 404 no_account; 400 self.
+app.post("/me/friends/requests", requireAuth, omeji({ kljuc: "prosnja", najvec: 30, oknoSekund: 3600 }), async (req, res) => {
+  const b = req.body || {};
+  let cilj = null;
+  try {
+    if (b.user_id !== undefined) {
+      const id = celoId(b.user_id);
+      if (!id) return res.status(400).send("Invalid user_id.");
+      const r = await pool.query(`SELECT ${POLJA_PRIJATELJA}, u.email_verified FROM users u WHERE u.id = $1`, [id]);
+      cilj = r.rows[0] || null;
+    } else if (typeof b.username === "string") {
+      const ime = b.username.trim();
+      if (!/^[a-zA-Z0-9_]{3,20}$/.test(ime)) return res.status(400).send("Invalid username.");
+      const r = await pool.query(`SELECT ${POLJA_PRIJATELJA}, u.email_verified FROM users u WHERE LOWER(u.username) = LOWER($1)`, [ime]);
+      cilj = r.rows[0] || null;
+    } else return res.status(400).send("user_id or username is required.");
+    if (!cilj || !cilj.email_verified) return res.status(404).json({ error: "no_account", message: "No Outly account with this username." });
+    if (Number(cilj.id) === Number(req.user.userId)) return res.status(400).send("You can't add yourself.");
+    if (await staPrijatelja(req.user.userId, cilj.id)) return res.status(409).json({ error: "already_friends", message: "You are already friends." });
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Nasprotna prošnja že čaka -> sprejmi jo (oba sta hotela isto).
+      const obratna = await client.query(
+        "SELECT id FROM friend_requests WHERE from_user_id = $1 AND to_user_id = $2 AND status = 'pending' FOR UPDATE", [cilj.id, req.user.userId]
+      );
+      if (obratna.rows.length) {
+        await client.query("UPDATE friend_requests SET status='accepted', responded_at=NOW() WHERE id=$1", [obratna.rows[0].id]);
+        await client.query(
+          "INSERT INTO friendships (user_a, user_b) VALUES (LEAST($1::int,$2::int), GREATEST($1::int,$2::int)) ON CONFLICT DO NOTHING",
+          [req.user.userId, cilj.id]
+        );
+        await client.query("COMMIT");
+        return res.status(200).json({ friend: { id: cilj.id, username: cilj.username, avatar_url: cilj.avatar_url }, request: null });
+      }
+      const ins = await client.query(
+        `INSERT INTO friend_requests (from_user_id, to_user_id) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING RETURNING id, created_at`, [req.user.userId, cilj.id]
+      );
+      await client.query("COMMIT");
+      if (ins.rows.length === 0) return res.status(409).json({ error: "already_requested", message: "A request is already pending." });
+      return res.status(201).json({ request: { id: ins.rows[0].id, created_at: ins.rows[0].created_at, user: { id: cilj.id, username: cilj.username, avatar_url: cilj.avatar_url } }, friend: null });
+    } catch (e) {
+      try { await client.query("ROLLBACK"); } catch (_) {}
+      throw e;
+    } finally { client.release(); }
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// POST /me/friends/requests/:id/accept -> { friend }. Samo naslovnik čakajoče prošnje.
+app.post("/me/friends/requests/:id/accept", requireAuth, async (req, res) => {
+  const id = celoId(req.params.id);
+  if (!id) return res.status(400).send("Invalid request id.");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const r = await client.query(
+      `SELECT r.id, r.from_user_id, ${POLJA_PRIJATELJA} FROM friend_requests r JOIN users u ON u.id = r.from_user_id
+        WHERE r.id = $1 AND r.to_user_id = $2 AND r.status = 'pending' FOR UPDATE OF r`, [id, req.user.userId]
+    );
+    if (r.rows.length === 0) { await client.query("ROLLBACK"); return res.status(404).send("Request not found or no longer pending."); }
+    const p = r.rows[0];
+    await client.query(
+      "INSERT INTO friendships (user_a, user_b) VALUES (LEAST($1::int,$2::int), GREATEST($1::int,$2::int)) ON CONFLICT DO NOTHING",
+      [req.user.userId, p.from_user_id]
+    );
+    await client.query("UPDATE friend_requests SET status='accepted', responded_at=NOW() WHERE id=$1", [id]);
+    await client.query("COMMIT");
+    return res.json({ friend: { id: p.id, username: p.username, avatar_url: p.avatar_url } });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    console.error(e); return res.status(500).send("Server error.");
+  } finally { client.release(); }
+});
+
+// POST /me/friends/requests/:id/decline -> { ok: true }. Samo naslovnik.
+app.post("/me/friends/requests/:id/decline", requireAuth, async (req, res) => {
+  try {
+    const id = celoId(req.params.id);
+    if (!id) return res.status(400).send("Invalid request id.");
+    const r = await pool.query(
+      "UPDATE friend_requests SET status='declined', responded_at=NOW() WHERE id=$1 AND to_user_id=$2 AND status='pending' RETURNING id", [id, req.user.userId]
+    );
+    if (r.rows.length === 0) return res.status(404).send("Request not found or no longer pending.");
+    return res.json({ ok: true });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// DELETE /me/friends/requests/:id -> { ok: true }. Pošiljatelj prekliče svojo čakajočo prošnjo.
+app.delete("/me/friends/requests/:id", requireAuth, async (req, res) => {
+  try {
+    const id = celoId(req.params.id);
+    if (!id) return res.status(400).send("Invalid request id.");
+    const r = await pool.query(
+      "UPDATE friend_requests SET status='cancelled', responded_at=NOW() WHERE id=$1 AND from_user_id=$2 AND status='pending' RETURNING id", [id, req.user.userId]
+    );
+    if (r.rows.length === 0) return res.status(404).send("Request not found or no longer pending.");
+    return res.json({ ok: true });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// DELETE /me/friends/:userId -> { ok: true }. Odstrani prijatelja (obojestransko, ker je ena vrstica).
+app.delete("/me/friends/:userId", requireAuth, async (req, res) => {
+  try {
+    const uid = celoId(req.params.userId);
+    if (!uid) return res.status(400).send("Invalid user id.");
+    const r = await pool.query(
+      "DELETE FROM friendships WHERE user_a = LEAST($1::int,$2::int) AND user_b = GREATEST($1::int,$2::int) RETURNING user_a", [req.user.userId, uid]
+    );
+    if (r.rows.length === 0) return res.status(404).send("Not friends.");
+    return res.json({ ok: true });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 

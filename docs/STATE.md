@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-20 (zvečer).
+Zadnja posodobitev: 2026-09-20 (pozno zvečer).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -35,6 +35,13 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
 ## Predpostavke, ki jih je sprejel agent (brez Martina)
 
+- **20. 9. 2026 (prijatelji, backend PR):** Martin je naročil prijatelje (My friends, prošnje v obvestilih, »Your friends' plans«,
+  prenos vstopnice prijatelju z izbiro iz seznama), na tri vprašanja pa ni odgovoril, zato velja: (1) prijatelja se najde **po
+  uporabniškem imenu** (`GET /users/search`, predpona, samo potrjeni računi, največ 10, omejeno na 120/h); (2) stikalo
+  `users.share_plans_with_friends` je **privzeto VKLOPLJENO** (sicer bi bil razdelek na domačem zaslonu pri vseh prazen), izklop v
+  Preferences; (3) »View« odpre seznam dogodkov prijateljev, »Invite more« deli povezavo `https://outly.si` (brez `?ref=` — backend
+  kod za točke ne pozna, živijo v Supabase). Politika zasebnosti (`privacy-app.html`) mora dobiti odstavek o prijateljih —
+  pravni dokument, čaka Martinov DA (ločen PR na spletni strani). Če Martin odloči drugače, so to tri majhne spremembe.
 - **18. 9. 2026:** Healthchecks check naj ima **Period 6 h, Grace 3 h** (ne 15/20 min), dokler nadzor teče na
   GitHubovem cronu — glej past »GitHub cron teče na 4–5 ur«. S 15/20 min bi Healthchecks javljal lažen izpad po vsakem
   zagonu. Nastavitev je v Martinovi Healthchecks konzoli, agent je ne more spremeniti. Kdaj se vrne na 15/20:

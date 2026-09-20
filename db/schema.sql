@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–015, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–016, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -16,7 +16,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict tIh6oJDyOYJZa1kAZitBrxd1Vk7g5pUx8gadCkvZJgL1Uewgl1vbi0fo4mL0299
+\restrict btPB9sRxc4X2jMM4fFFkt06gafbZ1W0DaRU9dHhJ39z3r9Uk1HZVXrSauWizABx
 
 -- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
@@ -31,20 +31,6 @@ SET check_function_bodies = false;
 SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
-
---
--- Name: public; Type: SCHEMA; Schema: -; Owner: -
---
-
--- *not* creating schema, since initdb creates it
-
-
---
--- Name: SCHEMA public; Type: COMMENT; Schema: -; Owner: -
---
-
-COMMENT ON SCHEMA public IS '';
-
 
 --
 -- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -
@@ -374,6 +360,54 @@ ALTER SEQUENCE public.events_id_seq OWNED BY public.events.id;
 
 
 --
+-- Name: friend_requests; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.friend_requests (
+    id integer NOT NULL,
+    from_user_id integer NOT NULL,
+    to_user_id integer NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    responded_at timestamp with time zone,
+    CONSTRAINT friend_requests_not_self_chk CHECK ((from_user_id <> to_user_id)),
+    CONSTRAINT friend_requests_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'accepted'::text, 'declined'::text, 'cancelled'::text])))
+);
+
+
+--
+-- Name: friend_requests_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.friend_requests_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: friend_requests_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.friend_requests_id_seq OWNED BY public.friend_requests.id;
+
+
+--
+-- Name: friendships; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.friendships (
+    user_a integer NOT NULL,
+    user_b integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT friendships_order_chk CHECK ((user_a < user_b))
+);
+
+
+--
 -- Name: orders; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -534,6 +568,7 @@ CREATE TABLE public.users (
     genres text[] DEFAULT '{}'::text[] NOT NULL,
     onboarded_at timestamp with time zone,
     supabase_uid uuid,
+    share_plans_with_friends boolean DEFAULT true NOT NULL,
     CONSTRAINT users_country_chk CHECK (((country IS NULL) OR (country ~ '^[A-Z]{2}$'::text))),
     CONSTRAINT users_dob_chk CHECK (((date_of_birth IS NULL) OR ((date_of_birth < CURRENT_DATE) AND (date_of_birth > (CURRENT_DATE - '120 years'::interval))))),
     CONSTRAINT users_email_chk CHECK ((POSITION(('@'::text) IN (email)) > 1)),
@@ -595,6 +630,13 @@ ALTER TABLE ONLY public.creator_applications ALTER COLUMN id SET DEFAULT nextval
 --
 
 ALTER TABLE ONLY public.events ALTER COLUMN id SET DEFAULT nextval('public.events_id_seq'::regclass);
+
+
+--
+-- Name: friend_requests id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.friend_requests ALTER COLUMN id SET DEFAULT nextval('public.friend_requests_id_seq'::regclass);
 
 
 --
@@ -679,6 +721,22 @@ ALTER TABLE ONLY public.event_favorites
 
 ALTER TABLE ONLY public.events
     ADD CONSTRAINT events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: friend_requests friend_requests_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.friend_requests
+    ADD CONSTRAINT friend_requests_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: friendships friendships_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.friendships
+    ADD CONSTRAINT friendships_pkey PRIMARY KEY (user_a, user_b);
 
 
 --
@@ -803,6 +861,27 @@ CREATE INDEX events_club_start_idx ON public.events USING btree (club_id, start_
 --
 
 CREATE INDEX events_start_idx ON public.events USING btree (start_at);
+
+
+--
+-- Name: friend_requests_pending_uniq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX friend_requests_pending_uniq ON public.friend_requests USING btree (LEAST(from_user_id, to_user_id), GREATEST(from_user_id, to_user_id)) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: friend_requests_to_pending_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX friend_requests_to_pending_idx ON public.friend_requests USING btree (to_user_id) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: friendships_user_b_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX friendships_user_b_idx ON public.friendships USING btree (user_b);
 
 
 --
@@ -1029,6 +1108,38 @@ ALTER TABLE ONLY public.events
 
 
 --
+-- Name: friend_requests friend_requests_from_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.friend_requests
+    ADD CONSTRAINT friend_requests_from_user_id_fkey FOREIGN KEY (from_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: friend_requests friend_requests_to_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.friend_requests
+    ADD CONSTRAINT friend_requests_to_user_id_fkey FOREIGN KEY (to_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: friendships friendships_user_a_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.friendships
+    ADD CONSTRAINT friendships_user_a_fkey FOREIGN KEY (user_a) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: friendships friendships_user_b_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.friendships
+    ADD CONSTRAINT friendships_user_b_fkey FOREIGN KEY (user_b) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: orders orders_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1112,5 +1223,5 @@ ALTER TABLE ONLY public.tickets
 -- PostgreSQL database dump complete
 --
 
-\unrestrict tIh6oJDyOYJZa1kAZitBrxd1Vk7g5pUx8gadCkvZJgL1Uewgl1vbi0fo4mL0299
+\unrestrict btPB9sRxc4X2jMM4fFFkt06gafbZ1W0DaRU9dHhJ39z3r9Uk1HZVXrSauWizABx
 

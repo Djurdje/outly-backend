@@ -73,6 +73,13 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 - 2026-09-10: Registrirani se v javni waitlisti kažejo z delno zakritim imenom + »created a profile«.
 - 2026-09-10: Zavihek Saved umaknjen; **Liked events** je razdelek na domačem zaslonu (nav bar: Home, Search, Map, Profile).
 - 2026-09-14: Gumb **Bar prices** na zaslonu dogodka odpre cenik, ki ga klub sam ureja v aplikaciji (`clubs.bar_prices` JSONB, 014).
+- 2026-09-20: **Prijatelji v aplikaciji** (Martin): »My friends« v profilu (pod My Clubs), prošnje za prijateljstvo v obvestilih,
+  razdelek **»Your friends' plans«** na domačem zaslonu (pod In your area: avatarji prijateljev, »Invite more«, »View«) in prenos
+  vstopnice **prijatelju iz seznama** namesto vpisa e-naslova (e-naslov ostane kot druga pot). Backend: migracija 016
+  (`friend_requests`, `friendships`, `users.share_plans_with_friends`), poti `/users/search`, `/me/friends*`. Prijateljstvo je
+  simetrično; o tujem uporabniku se razkrije samo id, uporabniško ime in avatar (invarianta I11).
+  *vir/dokaz*: Martinovo naročilo v pogovoru 20. 9. (slika »Your crew is going«). *velja dokler*: ni odločeno drugače o
+  privzeti vrednosti deljenja načrtov in načinu iskanja (glej STATE, predpostavke 20. 9.). *nadomeščena z*: —
 - 2026-09-14/15: Stran kluba: slideshow do 3 slik + video kluba (`gallery_urls`, `video_url`, 015); zaslon dogodka po Lukovih navodilih
   (plakat dogodka čez vrh, naslov pod pasico, gumb za nakup prosojen na pasici).
 - 2026-09: Slike klubov v produkciji so ZA DEMO (prave s spletnih strani klubov). Pred pravim zagonom jih zamenjajo slike,
