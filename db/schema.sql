@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–017, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–018, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -16,7 +16,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict tpqolp5DWcgkDmY6f542iRgA2FD2mbiFSOVx5KHzWQcDuf0brsQ8daUpTVjTvCe
+\restrict 3ZG8lgCdDNsnjlrK66MBVfTKTCzwRfx17w1UMguY1cx9IaRnx8X1YZRzmSUkPqc
 
 -- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
@@ -685,14 +685,6 @@ ALTER TABLE ONLY public.club_members
 
 
 --
--- Name: club_members club_members_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.club_members
-    ADD CONSTRAINT club_members_user_id_key UNIQUE (user_id);
-
-
---
 -- Name: clubs clubs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -813,6 +805,20 @@ CREATE INDEX club_invites_user_pending_idx ON public.club_invites USING btree (u
 --
 
 CREATE INDEX club_members_club_idx ON public.club_members USING btree (club_id, role);
+
+
+--
+-- Name: club_members_club_user_uniq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX club_members_club_user_uniq ON public.club_members USING btree (club_id, user_id);
+
+
+--
+-- Name: club_members_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_members_user_idx ON public.club_members USING btree (user_id, created_at);
 
 
 --
@@ -1231,5 +1237,5 @@ ALTER TABLE ONLY public.tickets
 -- PostgreSQL database dump complete
 --
 
-\unrestrict tpqolp5DWcgkDmY6f542iRgA2FD2mbiFSOVx5KHzWQcDuf0brsQ8daUpTVjTvCe
+\unrestrict 3ZG8lgCdDNsnjlrK66MBVfTKTCzwRfx17w1UMguY1cx9IaRnx8X1YZRzmSUkPqc
 

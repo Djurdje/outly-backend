@@ -52,10 +52,16 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 - 2026-09-11: iOS uporablja **tanek REST odjemalec za GoTrue** (`SupabaseAuth.swift`), ne supabase-swift (brez Xcoda ni paketov).
   *velja dokler*: nimamo Maca/Xcoda za dodajanje paketov (isti pogoj kot Stripe Checkout).
 - 2026-09: **En program za uporabnike in klube.** Vloge `user | business | admin` uveljavlja strežnik; aplikacija kaže drug obraz.
-- 2026-09-11: Ekipa kluba: lastnik (`clubs.owner_user_id`) + člani `manager | doorman` (`club_members`); uporabnik je v največ
-  eni ekipi; vratar sme samo skenirati in gledati vstopnice dogodka. Član nastane šele ob sprejemu vabila (`club_invites`, 013).
-- 2026-09: **En klub na poslovni račun.** *velja dokler*: nihče od strank ne vodi dveh lokalov
-  (`klubUporabnika()` vzame prvi klub — veriga lokalov to odločitev odpre).
+- 2026-09-11: Ekipa kluba: lastnik (`clubs.owner_user_id`) + člani `manager | doorman` (`club_members`); ~~uporabnik je v največ
+  eni ekipi~~; vratar sme samo skenirati in gledati vstopnice dogodka. Član nastane šele ob sprejemu vabila (`club_invites`, 013).
+- 2026-09-21: **Ena oseba je lahko v ekipi več klubov** (Luka; nadomešča »največ ena ekipa« iz 11. 9.): vratar iz K4 dobi in
+  sprejme vabilo tudi iz Cirkusa; vloga velja po klubu. Migracija 018 (`UNIQUE (club_id, user_id)` namesto `UNIQUE (user_id)`).
+  Kateri klub aplikacija misli, pove z glavo **`X-Outly-Club: <id>`** (ali `?club_id=`); brez nje backend vzame prvo (najstarejše)
+  članstvo — star odjemalec dela naprej. `GET /me` dobi seznam `clubs` (id, ime, logo, vloga); `club_id`/`club_role` ostaneta.
+  Lastnik kluba še vedno ne more biti član druge ekipe (ima klubski profil). Sprejem vabila drugih vabil več ne zavrne.
+  *vir/dokaz*: Lukovo naročilo 21. 9. (»mora biti tako, da lahko povabiš isto osebo v več klubov«). *velja dokler*: — *nadomeščena z*: —
+- 2026-09: **En klub na poslovni račun** (lastnik ima en klub). *velja dokler*: nihče od strank ne vodi dveh lokalov
+  (`klubUporabnika()` vzame prvi klub — veriga lokalov to odločitev odpre). Ne meša se z zaposlenimi: ti so od 21. 9. lahko v več ekipah.
 - 2026-09-08: **Admin panel je spletna stran v `outly-backend/admin/`**, preprosta, v slogu konzole, brez Figme. Prvi admin je Martin.
 - 2026-09-08: Servisni admin račun `agent@outly.si` za agentova dejanja v produkciji (geslo ima Martin; nikoli v datotekah).
   *velja dokler*: agent res potrebuje admin pravice v produkciji — ko jih ne, se račun degradira (naloga v Issues).

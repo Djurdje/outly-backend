@@ -288,12 +288,35 @@ function requireRole(...allowed) {
 // Lastnik: clubs.owner_user_id -> 'owner'. Član ekipe: club_members ->
 // 'manager' ali 'doorman'. Vsak uporabnik ima največ en klub.
 // Vrne null, če uporabnik nima kluba.
-async function klubUporabnika(userId) {
-  const l = await pool.query("SELECT id FROM clubs WHERE owner_user_id=$1 LIMIT 1", [userId]);
-  if (l.rows.length) return { clubId: l.rows[0].id, role: "owner" };
-  const m = await pool.query("SELECT club_id, role FROM club_members WHERE user_id=$1 LIMIT 1", [userId]);
+// Od migracije 018 je oseba lahko v vec ekipah: `zeljeni` (glava X-Outly-Club ali ?club_id=)
+// izbere klub; brez njega prvo clanstvo (najstarejse), da star odjemalec dela kot prej.
+async function klubUporabnika(userId, zeljeni = null) {
+  const l = await pool.query("SELECT id FROM clubs WHERE owner_user_id=$1 ORDER BY id LIMIT 1", [userId]);
+  if (l.rows.length && (!zeljeni || Number(l.rows[0].id) === Number(zeljeni))) return { clubId: l.rows[0].id, role: "owner" };
+  const m = zeljeni
+    ? await pool.query("SELECT club_id, role FROM club_members WHERE user_id=$1 AND club_id=$2", [userId, zeljeni])
+    : await pool.query("SELECT club_id, role FROM club_members WHERE user_id=$1 ORDER BY created_at, id LIMIT 1", [userId]);
   if (m.rows.length) return { clubId: m.rows[0].club_id, role: m.rows[0].role };
   return null;
+}
+
+// Vsa clanstva uporabnika (lastnistvo + ekipe) za GET /me `clubs` — aplikacija kaze seznam My Clubs.
+async function klubiUporabnika(userId) {
+  const r = await pool.query(
+    `SELECT c.id AS club_id, c.name AS club_name, c.logo_url AS club_logo_url, 'owner' AS role, 0 AS vrstni
+       FROM clubs c WHERE c.owner_user_id = $1
+     UNION ALL
+     SELECT c.id, c.name, c.logo_url, m.role, 1
+       FROM club_members m JOIN clubs c ON c.id = m.club_id WHERE m.user_id = $1
+     ORDER BY 5, 1`, [userId]
+  );
+  return r.rows.map(x => ({ club_id: x.club_id, club_name: x.club_name, club_logo_url: x.club_logo_url || "", role: x.role }));
+}
+
+// Klub, ki ga zeli odjemalec: glava X-Outly-Club ali ?club_id= (celo stevilo), sicer null.
+function zeljeniKlub(req) {
+  const v = req.get("x-outly-club") || (req.query && req.query.club_id) || "";
+  return celoId(v);
 }
 
 // Middleware za poslovne poti: req.klub = { clubId, role }.
@@ -305,8 +328,11 @@ function requireClub(...vloge) {
   return async (req, res, next) => {
     try {
       if (!req.user) return res.status(401).send("Unauthorized.");
-      let k = await klubUporabnika(req.user.userId);
+      const zeljeni = zeljeniKlub(req);
+      let k = await klubUporabnika(req.user.userId, zeljeni);
       if (!k) {
+        // Izrecno zahtevan klub, v katerem uporabnik ni: 404 (ne razkrivamo, ali obstaja).
+        if (zeljeni) return res.status(404).send("Club not found.");
         if (req.user.role === "admin") k = { clubId: null, role: "admin" };
         else if (req.user.role === "business") return res.status(404).send("Club not found.");
         else return res.status(403).send("Forbidden.");
@@ -353,10 +379,13 @@ app.get("/me", requireAuth, async (req, res) => {
     const pf = await pool.query("SELECT COUNT(*)::int AS n FROM friend_requests WHERE to_user_id=$1 AND status='pending'", [req.user.userId]);
     // Neprebrane prejete vstopnice (migracija 017) — obvestilo "X ti je poslal vstopnico".
     const pv = await pool.query("SELECT COUNT(*)::int AS n FROM ticket_transfers WHERE to_user_id=$1 AND seen_at IS NULL", [req.user.userId]);
+    // Vsa clanstva (migracija 018): club_id/club_role ostaneta prvo clanstvo za stare odjemalce.
+    const klubi = await klubiUporabnika(req.user.userId);
     return res.status(200).json({
       ...result.rows[0],
       club_id: k ? k.clubId : null,
       club_role: k ? k.role : null,
+      clubs: klubi,
       pending_invites: v.rows[0] ? v.rows[0].n : 0,
       pending_friend_requests: pf.rows[0] ? pf.rows[0].n : 0,
       pending_received_tickets: pv.rows[0] ? pv.rows[0].n : 0,
@@ -2685,10 +2714,10 @@ app.post("/business/team", requireAuth, requireClub("owner", "manager"), async (
       const svoj = Number(jeLastnik.rows[0].id) === Number(klub);
       return res.status(409).json({ error: "is_owner", message: svoj ? "This user owns the club." : "This user already owns another club." });
     }
-    const ze = await pool.query("SELECT club_id, role FROM club_members WHERE user_id=$1", [clan.id]);
+    // Od 018: clanstvo v drugem klubu ne moti — samo ce je ze v TEJ ekipi.
+    const ze = await pool.query("SELECT role FROM club_members WHERE user_id=$1 AND club_id=$2", [clan.id, klub]);
     if (ze.rows.length) {
-      const tu = Number(ze.rows[0].club_id) === Number(klub);
-      return res.status(409).json({ error: "already_member", message: tu ? `Already in the team as ${ze.rows[0].role}.` : "This user is already in another club's team." });
+      return res.status(409).json({ error: "already_member", message: `Already in the team as ${ze.rows[0].role}.` });
     }
     const caka = await pool.query("SELECT id FROM club_invites WHERE club_id=$1 AND user_id=$2 AND status='pending'", [klub, clan.id]);
     if (caka.rows.length) {
@@ -2764,15 +2793,15 @@ app.post("/me/invites/:id/accept", requireAuth, async (req, res) => {
     const v = i.rows[0];
     const lastnik = await client.query("SELECT id FROM clubs WHERE owner_user_id=$1 LIMIT 1", [req.user.userId]);
     if (lastnik.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "is_owner", message: "You own a club and can't join another team." }); }
-    const clan = await client.query("SELECT club_id FROM club_members WHERE user_id=$1", [req.user.userId]);
-    if (clan.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "already_member", message: "You are already in a club team. Leave it first." }); }
+    // Od 018: sme biti v vec ekipah; blokira samo clanstvo v TEM klubu. Vabila drugih klubov ostanejo cakajoca.
+    const clan = await client.query("SELECT club_id FROM club_members WHERE user_id=$1 AND club_id=$2", [req.user.userId, v.club_id]);
+    if (clan.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "already_member", message: "You are already in this club's team." }); }
 
     await client.query(
       "INSERT INTO club_members (club_id, user_id, role, invited_by_user_id) VALUES ($1,$2,$3,$4)",
       [v.club_id, req.user.userId, v.role, v.invited_by_user_id]
     );
     await client.query("UPDATE club_invites SET status='accepted', responded_at=NOW() WHERE id=$1", [id]);
-    await client.query("UPDATE club_invites SET status='declined', responded_at=NOW() WHERE user_id=$1 AND status='pending'", [req.user.userId]);
     await client.query("COMMIT");
     return res.json({ club: { id: v.club_id, name: v.name, logo_url: v.logo_url }, role: v.role, invites: [] });
   } catch (e) {
@@ -3033,7 +3062,11 @@ app.delete("/me/friends/:userId", requireAuth, async (req, res) => {
 // DELETE /business/team/me — član sam zapusti ekipo (tudi vratar).
 app.delete("/business/team/me", requireAuth, async (req, res) => {
   try {
-    const r = await pool.query("DELETE FROM club_members WHERE user_id=$1 RETURNING club_id", [req.user.userId]);
+    // Od 018: z glavo X-Outly-Club (ali ?club_id=) zapusti samo ta klub; brez nje vsa clanstva (star odjemalec).
+    const zeljeni = zeljeniKlub(req);
+    const r = zeljeni
+      ? await pool.query("DELETE FROM club_members WHERE user_id=$1 AND club_id=$2 RETURNING club_id", [req.user.userId, zeljeni])
+      : await pool.query("DELETE FROM club_members WHERE user_id=$1 RETURNING club_id", [req.user.userId]);
     if (r.rows.length === 0) return res.status(404).send("You are not in a club team.");
     return res.status(204).send();
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
