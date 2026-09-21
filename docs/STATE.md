@@ -90,6 +90,12 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
 ## Znane pasti (aktivne)
 
+- **GitHub »Budgets and alerts« ima privzeto proračun 0 $ za Actions s »Stop usage: Yes«** (najdeno 21. 9. 2026, Luka):
+  ob porabljeni brezplačni kvoti (2 000 min) se ustavi **vse** — tudi backend `Testi` (merge v produkcijo brez zelenega CI ni
+  mogoč) in `Nadzor produkcije` (izpad nevidno). 21. 9. spremenjeno na **20 $/mesec** (Stop usage ostane Yes kot varovalo,
+  realna poraba ~5–15 $). Proračun se šteje na obračunski cikel (1. v mesecu); poraba pred nastavitvijo se ne šteje.
+  Ostali štirje (Codespaces, Packages, Git LFS, AI Credit) namerno ostanejo 0 $.
+
 - **TestFlight podpis je odvisen od certifikata v GitHub secrets** (od 20. 9., outly-app PR #13): `IOS_DEV_CERT_P12` +
   `IOS_DEV_CERT_PASSWORD` (CI-jev lasten »Outly CI« Apple Development certifikat, velja do ~20. 9. 2027). Če ga kdo na
   developer.apple.com prekliče ali poteče, korak »Podpisan arhiv« pade — PR-ji ostanejo zeleni (samo prevod). Popravek: nov
@@ -166,6 +172,19 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   »preverjeno s parse + pregledom tipov, na napravi ne«. Kaj čaka na napravo, je v #18.
 
 ## Način dela od 16. 9. 2026
+
+- **Od 21. 9. 2026 — varčevanje z macOS minutami GitHub Actions** (Luka, ker je kvota 2 000 min/mesec pri 90 %;
+  macOS se šteje ×10, nad kvoto ~0,08 $/pravo minuto). Dogovor, dokler ne pride Xcode Cloud (čaka Martina, glej spodaj):
+  1. **En merge v `master` na delovni dan** oz. na zaključen sklop (danes: 4 točke skupaj v enem PR-ju). Vsak merge = build
+     pri testerjih (~10 min macOS = 100 min kvote).
+  2. **Push na PR vejo šele, ko je sklop končan in pregledan s `type-checker`** — cilj en push na PR (vsak push = ~4 min = 40 kvote).
+  3. Vmesni pushi (da se delo ne izgubi) in commiti, ki spreminjajo samo dokumentacijo, s **`[skip ci]`** v sporočilu commita;
+     zadnji push pred merge-om brez tega, da je PR zelen.
+  4. Backend PR-ji so Linux (×1) — tam ni treba varčevati.
+  5. Meja: ne zbirati več kot en dan ali več nepovezanih stvari v en PR (če na telefonu ne dela, se ne ve, kaj je krivo).
+  Ko bo Martin nazaj: PR v `gradnja.yml` (preklic zastarelih gradenj `concurrency`, PR gradnja samo ob spremembi Swift/projekta) —
+  rabi `odobril-martin`; in **Xcode Cloud** samo za `master` → TestFlight (25 h/mesec brezplačno v Developer Programu,
+  PR prevod ostane na GitHubu, da agent vidi dnevnike). Rabi Martinov Apple ID (Individual račun nima članov ekipe).
 
 Cloud seje Claude Code + PR-ji + CI; podrobnosti v `CLAUDE.md`.
 
