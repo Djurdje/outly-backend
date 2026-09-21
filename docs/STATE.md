@@ -51,6 +51,15 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   da ne pade sto starih zvoncev. Meni obvestil nima več nog My Clubs / My Friends. iOS z novimi polji dela tudi na starem
   backendu (privzete vrednosti, napaka poti → prazen seznam); **backend PR mora biti v produkciji pred merge-om iOS PR-ja
   v master**, sicer testerji obvestil ne vidijo (ne pade). Backend PR rabi oznako `odobril-martin` (`db/migracije/**`).
+- **21. 9. 2026 (iOS, Luka, Martin na dopustu) — predpostavke v PR-ju outly-app #17:** (1) lastnikov profil je klubski
+  (DECISIONS 21. 9.); ce Martin odloci drugace, se v `ProfileView` odstrani veja `jeLastnik` (ena vrstica). (2) Prazna
+  stanja: lastnik brez kluba → obrazec `ClubSetupView`, ki klice `POST /clubs`; backend na `GET /business/clubs/me`
+  brez kluba vrne 404/403 — aplikacija oboje bere kot »ni kluba«. (3) Nov zaslon NE sme uporabiti
+  `.background(Color.black…)`, ampak `.outlyOzadje()` (sicer v zavihku Search/Profile prekrije zamegljen Home).
+  (4) Friends plans: aplikacija dodatno odstrani podvojene in pretekle dogodke (`vsi`), ceprav jih streznik ze filtrira —
+  Luka je na buildu 62 videl podvojen dogodek in mrtev »Join them« (podvojen id v ForEach); vzrok na strezniku ni
+  potrjen (posnetka ni bilo). Ce se ponovi, preveri `GET /me/friends/plans` za dva zapisa z istim `id`.
+  (5) Naslov »Friends' plans« → »Friends plans« (Luka: apostrof moti); stari kljuc v Localizable.xcstrings ostane neuporabljen.
 - **21. 9. 2026 (iOS, oblikovanje):** »Invite more« na domačem zaslonu je 65 % (krog 42 pt, napis 11 pt, ne 9 — Apple HIG
   spodnja meja), napis moder. »View« pri Your friends' plans odpre prenovljen zaslon: gumbi All + po en na prijatelja
   (izbrani moder), kartica z zatemnjenim plakatom, avatarji, »Join them« (nakup) in »View event«. My friends: moder gumb
@@ -90,6 +99,11 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
 ## Znane pasti (aktivne)
 
+- **`[skip ci]` na backend PR-ju blokira merge** (21. 9. 2026, PR #51): GitHub preskoči `Testi` (dogodek `pull_request`),
+  `Zascita` (`pull_request_target`) pa teče; zaščita veje `main` zahteva `Testi`, zato PR ostane »Expected — waiting«.
+  Backend testi so Linux in stanejo ~1 min — `[skip ci]` tam ni vreden nič. Popravek: nov push brez oznake.
+  **GitHub oznako išče v celotnem sporočilu commita, ne samo v prvi vrstici** — tudi stavek »past: [skip ci] …« v opisu
+  jo sproži (zgodilo se 21. 9., dvakrat). V sporočilih commitov to oznako omenjaj samo opisno, brez oglatih oklepajev.
 - **GitHub »Budgets and alerts« ima privzeto proračun 0 $ za Actions s »Stop usage: Yes«** (najdeno 21. 9. 2026, Luka):
   ob porabljeni brezplačni kvoti (2 000 min) se ustavi **vse** — tudi backend `Testi` (merge v produkcijo brez zelenega CI ni
   mogoč) in `Nadzor produkcije` (izpad nevidno). 21. 9. spremenjeno na **20 $/mesec** (Stop usage ostane Yes kot varovalo,
@@ -178,8 +192,8 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   1. **En merge v `master` na delovni dan** oz. na zaključen sklop (danes: 4 točke skupaj v enem PR-ju). Vsak merge = build
      pri testerjih (~10 min macOS = 100 min kvote).
   2. **Push na PR vejo šele, ko je sklop končan in pregledan s `type-checker`** — cilj en push na PR (vsak push = ~4 min = 40 kvote).
-  3. Vmesni pushi (da se delo ne izgubi) in commiti, ki spreminjajo samo dokumentacijo, s **`[skip ci]`** v sporočilu commita;
-     zadnji push pred merge-om brez tega, da je PR zelen.
+  3. Vmesni pushi (da se delo ne izgubi) na **iOS** veji s **`[skip ci]`** v sporočilu commita; zadnji push pred
+     merge-om brez tega, da je PR zelen. **Na backendu `[skip ci]` NE uporabljaj** (past spodaj).
   4. Backend PR-ji so Linux (×1) — tam ni treba varčevati.
   5. Meja: ne zbirati več kot en dan ali več nepovezanih stvari v en PR (če na telefonu ne dela, se ne ve, kaj je krivo).
   Ko bo Martin nazaj: PR v `gradnja.yml` (preklic zastarelih gradenj `concurrency`, PR gradnja samo ob spremembi Swift/projekta) —
