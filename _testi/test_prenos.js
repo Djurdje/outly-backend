@@ -118,6 +118,34 @@ async function api(method, path, token, body) {
   assert(priCenetu && priCenetu.transferred === true && priCenetu.holder_id === (await pool.query("SELECT id FROM users WHERE email='cene@outly.si'")).rows[0].id,
     "vstopnica pri Cenetu ima transferred=true in pravilen holder_id", priCenetu);
 
+  console.log("\n# Obvestilo o prejeti vstopnici (migracija 017): prejemnik vidi, kdo mu je poslal");
+  r = await api("GET", "/me", T.cene);
+  assert(r.body.pending_received_tickets === 1, "cene: /me pending_received_tickets = 1", r.body.pending_received_tickets);
+  r = await api("GET", "/me", T.ana);
+  assert(r.body.pending_received_tickets === 0, "ana (posiljatelj): pending_received_tickets = 0", r.body.pending_received_tickets);
+  r = await api("GET", "/me/tickets/received", T.cene);
+  assert(r.status === 200 && Array.isArray(r.body.received) && r.body.received.length === 1, "GET /me/tickets/received: 1 neprebrana", r.body);
+  const prejeta = r.body.received[0];
+  assert(prejeta.ticket_id === vstopnicaAna && prejeta.event_title === "Prenosljiv", "prejeta ima ticket_id in event_title", prejeta);
+  assert(prejeta.from && prejeta.from.username === "ana" && prejeta.from.email === undefined && prejeta.to_email === undefined,
+    "posiljatelj samo id/username/avatar_url, brez e-naslovov", prejeta);
+  r = await api("GET", "/me/tickets/received", T.ana);
+  assert(r.status === 200 && r.body.received.length === 0, "ana nima prejetih", r.body);
+  r = await api("POST", `/me/tickets/received/${prejeta.id}/seen`, T.ana);
+  assert(r.status === 404, "ana ne more oznaciti Cenetovega obvestila -> 404", r.status);
+  r = await api("POST", `/me/tickets/received/${prejeta.id}/seen`, T.cene);
+  assert(r.status === 200, "cene oznaci kot prebrano -> 200", r.body);
+  r = await api("GET", "/me/tickets/received", T.cene);
+  assert(r.body.received.length === 0, "po oznaki seznam prazen", r.body);
+  r = await api("GET", "/me", T.cene);
+  assert(r.body.pending_received_tickets === 0, "cene: pending_received_tickets = 0 po oznaki", r.body.pending_received_tickets);
+  r = await api("POST", `/me/tickets/received/${prejeta.id}/seen`, T.cene);
+  assert(r.status === 200, "ponovna oznaka je neskodljiva -> 200", r.status);
+  r = await api("POST", `/me/tickets/received/abc/seen`, T.cene);
+  assert(r.status === 400, "neveljaven id obvestila -> 400", r.status);
+  r = await api("GET", "/me/tickets/received", null);
+  assert(r.status === 401, "prejete brez zetona -> 401", r.status);
+
   console.log("\n# Ponovni prenos (ana ni vec imetnik) -> 404");
   r = await api("POST", `/tickets/${vstopnicaAna}/transfer`, T.ana, { email: "bor@outly.si" });
   assert(r.status === 404, "ana po prenosu ni vec imetnik -> 404 na ponovni poskus", r.status);

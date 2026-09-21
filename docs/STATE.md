@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-21 (ponoči).
+Zadnja posodobitev: 2026-09-21.
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -45,6 +45,16 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   zaslonu odpre spustni meni** (vabila v ekipo + prošnje za prijateljstvo; prej je vodil na My Clubs), prenos vstopnice z izbiro
   prijatelja (e-naslov ostane), stikalo »Friends can see my plans« v Preferences, razdelek »Your friends' plans« pod In your area
   (krogi, Invite more = ShareLink outly.si, View). Na napravi še NI preverjeno (Martin, dva računa).
+- **21. 9. 2026 (backend migracija 017 + iOS, isti dan):** obvestilo »X sent you a ticket« je **v aplikaciji vezano na
+  dotik**: prebrano postane šele, ko uporabnik vrstico v meniju obvestil tapne (ne ob odprtju menija). Do takrat šteje
+  na zvoncu. Obstoječi prenosi ob deployu dobijo `seen_at = NOW()` (migracija doda stolpec z DEFAULT in ga nato odstrani),
+  da ne pade sto starih zvoncev. Meni obvestil nima več nog My Clubs / My Friends. iOS z novimi polji dela tudi na starem
+  backendu (privzete vrednosti, napaka poti → prazen seznam); **backend PR mora biti v produkciji pred merge-om iOS PR-ja
+  v master**, sicer testerji obvestil ne vidijo (ne pade). Backend PR rabi oznako `odobril-martin` (`db/migracije/**`).
+- **21. 9. 2026 (iOS, oblikovanje):** »Invite more« na domačem zaslonu je 65 % (krog 42 pt, napis 11 pt, ne 9 — Apple HIG
+  spodnja meja), napis moder. »View« pri Your friends' plans odpre prenovljen zaslon: gumbi All + po en na prijatelja
+  (izbrani moder), kartica z zatemnjenim plakatom, avatarji, »Join them« (nakup) in »View event«. My friends: moder gumb
+  »Add friends« odpre list z iskanjem (iskanje ni več na seznamu); poslana prošnja = obrobljen pil »Requested«, dotik prekliče.
 - **20. 9. 2026 (odprto):** politika zasebnosti za prijatelje je **osnutek v outly_webpage PR #6** in čaka Martinov DA — aplikacija
   načrte že deli, politika tega še ne omenja. Ne odlašati.
 - **20. 9. 2026 (prijatelji, backend PR #45, v produkciji):** Martin je naročil prijatelje (My friends, prošnje v obvestilih, »Your friends' plans«,

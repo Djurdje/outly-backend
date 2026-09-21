@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–016, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–017, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -16,7 +16,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict btPB9sRxc4X2jMM4fFFkt06gafbZ1W0DaRU9dHhJ39z3r9Uk1HZVXrSauWizABx
+\restrict tpqolp5DWcgkDmY6f542iRgA2FD2mbiFSOVx5KHzWQcDuf0brsQ8daUpTVjTvCe
 
 -- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
@@ -484,7 +484,8 @@ CREATE TABLE public.ticket_transfers (
     to_email text NOT NULL,
     old_serial uuid NOT NULL,
     new_serial uuid NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    seen_at timestamp with time zone
 );
 
 
@@ -927,6 +928,13 @@ CREATE INDEX ticket_transfers_ticket_idx ON public.ticket_transfers USING btree 
 
 
 --
+-- Name: ticket_transfers_to_unseen_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ticket_transfers_to_unseen_idx ON public.ticket_transfers USING btree (to_user_id) WHERE (seen_at IS NULL);
+
+
+--
 -- Name: tickets_event_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1223,5 +1231,5 @@ ALTER TABLE ONLY public.tickets
 -- PostgreSQL database dump complete
 --
 
-\unrestrict btPB9sRxc4X2jMM4fFFkt06gafbZ1W0DaRU9dHhJ39z3r9Uk1HZVXrSauWizABx
+\unrestrict tpqolp5DWcgkDmY6f542iRgA2FD2mbiFSOVx5KHzWQcDuf0brsQ8daUpTVjTvCe
 
