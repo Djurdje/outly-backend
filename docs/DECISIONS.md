@@ -80,6 +80,24 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   simetrično; o tujem uporabniku se razkrije samo id, uporabniško ime in avatar (invarianta I11).
   *vir/dokaz*: Martinovo naročilo v pogovoru 20. 9. (slika »Your crew is going«). *velja dokler*: ni odločeno drugače o
   privzeti vrednosti deljenja načrtov in načinu iskanja (glej STATE, predpostavke 20. 9.). *nadomeščena z*: —
+- 2026-09-21: **Profil lastnika kluba je klubski, profil zaposlenih osebni** (Luka, Martin na dopustu): racun z vlogo
+  `business` (lastnik) v zavihku Profile vidi logo in ime kluba, »Edit your page«, Dashboard, Events, My team, Settings
+  (Club info, Password and security, Switch to personal account) — brez Tickets/My friends/My Clubs, ker je racun za
+  klub, ne za zuranje; preklop na osebni obraz je mozen (in nazaj v My Account). Zaposleni (manager, vratar) imajo
+  se naprej osebni profil in svoj klub pod My Clubs (Martin, 20. 9., ostane). Sveze odobren lastnik brez kluba dobi
+  obrazec (ime, logo, naslov, mesto, zanri, starost) → `POST /clubs`, klub je takoj na Home. »Withdraw« iz Figme se
+  ne gradi (Stripe, glej zgoraj). *vir/dokaz*: Lukovo narocilo 21. 9. + Figma »settings«. *velja dokler*: Martin ne
+  potrdi ali odloci drugace (odstopa od njegove odlocitve 20. 9. samo pri lastniku). *nadomeščena z*: —
+- 2026-09-21: **Samo dva sloga vrstic v aplikaciji** (Luka): `OutlyMenuRowButton` (ikona + naslov, cela vrstica gumb)
+  in `OutlyInfoCardButton` (naslov kartice, ikona, vrednost, moder Edit, opomba). `OutlySettingsRow` in lokalna
+  `vrstica` v MyClubDetailView sta odstranjeni; stikala ostanejo `OutlySettingsToggleRow`. *vir/dokaz*: Luka 21. 9.
+  (posnetki treh razlicnih gumbov). *velja dokler*: — *nadomeščena z*: —
+- 2026-09-21: **»Kot Revolut«: Search in Profile lezita nad zamegljenim, zamrznjenim domacim zaslonom** (Luka).
+  Sistemska spodnja vrstica ostane (Martin, 20. 9., PR #11); ucinek je narejen s posnetkom zaslona ob preklopu
+  zavihka (`UIApplication.posnetekZaslona`, `HomeSnapshotBackground`) in okoljem `prosojnoOzadje`, ki vsem zaslonom
+  v teh dveh zavihkih (tudi potisnjenim) vzame crno ozadje (`.outlyOzadje()` namesto `.background(Color.black)`).
+  Map ostane pravi zemljevid. *vir/dokaz*: Luka 21. 9. *velja dokler*: Martin ne rece drugace (20. 9. je zavrnil
+  lastno vrstico, ne ucinka). *nadomeščena z*: —
 - 2026-09-21: **Obvestilo o prejeti vstopnici** (Martin): ko prijatelj pošlje vstopnico, prejemnik v meniju obvestil (zvonec)
   vidi »X sent you a ticket for Y«; dotik odpre Tickets in obvestilo označi kot prebrano. Backend: migracija 017
   (`ticket_transfers.seen_at`), `GET /me` polje `pending_received_tickets`, `GET /me/tickets/received`,
