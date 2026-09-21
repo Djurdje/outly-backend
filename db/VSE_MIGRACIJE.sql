@@ -1131,6 +1131,23 @@ CREATE INDEX IF NOT EXISTS ticket_transfers_to_unseen_idx
 
 
 -- =============================================================================
+-- ##  018_vec_klubov_na_osebo.sql
+-- =============================================================================
+-- 018_vec_klubov_na_osebo.sql
+-- Ena oseba je lahko v ekipi VEC klubov (Luka, 21. 9. 2026): vratar ali manager, ki dela v K4,
+-- dobi in sprejme vabilo tudi iz Cirkusa. Do zdaj je bila omejitev UNIQUE (user_id) iz 009
+-- ("en klub, da je 'moj klub' enolicen"). Zdaj je enolicen par (club_id, user_id); kateri klub
+-- zeli aplikacija, pove z glavo X-Outly-Club (ali ?club_id=) — brez nje backend vzame prvo
+-- clanstvo, kot doslej (star odjemalec dela naprej).
+-- Lastnik kluba se vedno ne more biti clan druge ekipe (preverja index.js).
+
+ALTER TABLE club_members DROP CONSTRAINT IF EXISTS club_members_user_id_key;
+
+CREATE UNIQUE INDEX IF NOT EXISTS club_members_club_user_uniq ON club_members (club_id, user_id);
+CREATE INDEX IF NOT EXISTS club_members_user_idx ON club_members (user_id, created_at);
+
+
+-- =============================================================================
 -- Vpis v evidenco
 -- =============================================================================
 INSERT INTO schema_migrations (datoteka, odtis) VALUES
@@ -1151,7 +1168,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('014_cenik_bara.sql', '0fc9fc7042634c43'),
     ('015_galerija_video.sql', '2e3d05936a441dd8'),
     ('016_prijatelji.sql', '078393adc2e6b232'),
-    ('017_obvestilo_prejete_vstopnice.sql', '2fe7bae5fd92d52e')
+    ('017_obvestilo_prejete_vstopnice.sql', '2fe7bae5fd92d52e'),
+    ('018_vec_klubov_na_osebo.sql', '226ee7c11f6e9c9d')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

@@ -40,6 +40,11 @@ function uuid(n) { return `00000000-0000-4000-8000-${String(n).padStart(12, "0")
 let ok = 0, fail = 0;
 function assert(cond, msg, extra) { if (cond) { ok++; console.log("  ✓", msg); } else { fail++; console.log("  ✗", msg, extra !== undefined ? JSON.stringify(extra) : ""); } }
 
+async function apiH(method, path, token, body, headers) {
+  const r = await fetch(BASE + path, { method, headers: { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}), ...(headers || {}) }, body: body ? JSON.stringify(body) : undefined });
+  const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = t; }
+  return { status: r.status, body: j };
+}
 async function api(method, path, token, body) {
   const r = await fetch(BASE + path, { method, headers: { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
   const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = t; }
@@ -112,13 +117,33 @@ async function api(method, path, token, body) {
   r = await api("POST", `/me/invites/${inviteId}/accept`, T.ana);
   assert(r.status === 200 && r.body.club && r.body.club.name === "Pure Club" && r.body.role === "manager", "accept -> klub Pure Club, vloga manager", r.body);
   r = await api("GET", "/me", T.ana);
-  assert(r.body.club_role === "manager" && r.body.pending_invites === 0, "/me: club_role manager, pending_invites 0 (drugo vabilo zavrnjeno)", r.body);
-  const st = await pool.query("SELECT id, status FROM club_invites ORDER BY id");
-  assert(st.rows[0].status === "accepted" && st.rows[1].status === "declined", "statusa: accepted, declined", st.rows);
+  assert(r.body.club_role === "manager" && r.body.pending_invites === 1, "/me: club_role manager, drugo vabilo SE CAKA (018: vec klubov)", r.body);
+  assert(Array.isArray(r.body.clubs) && r.body.clubs.length === 1 && r.body.clubs[0].club_name === "Pure Club" && r.body.clubs[0].role === "manager", "/me: clubs = [Pure Club/manager]", r.body.clubs);
   r = await api("POST", `/me/invites/${inviteId}/accept`, T.ana);
   assert(r.status === 404, "ponovni accept -> 404", r.status);
+
+  console.log("\n# 018: ista oseba v DVEH ekipah, izbira kluba z glavo X-Outly-Club");
   r = await api("POST", `/me/invites/${invite2}/accept`, T.ana);
-  assert(r.status === 404, "accept ze zavrnjenega -> 404", r.status);
+  assert(r.status === 200 && r.body.club && r.body.club.name === "Drugi Klub" && r.body.role === "doorman", "ana sprejme se vabilo drugega kluba -> 200 (vratarka)", r.body);
+  r = await api("GET", "/me", T.ana);
+  assert(r.body.clubs.length === 2 && r.body.club_role === "manager" && r.body.pending_invites === 0, "/me: 2 kluba, club_role = prvo clanstvo (manager)", r.body);
+  const drugiId = r.body.clubs.find(c => c.club_name === "Drugi Klub").club_id;
+  r = await api("GET", "/business/clubs/me", T.ana);
+  assert(r.status === 200 && r.body.name === "Pure Club" && r.body.my_role === "manager", "brez glave: prvi klub (Pure Club, manager)", r.body);
+  r = await apiH("GET", "/business/clubs/me", T.ana, null, { "X-Outly-Club": String(drugiId) });
+  assert(r.status === 200 && r.body.name === "Drugi Klub" && r.body.my_role === "doorman", "z glavo X-Outly-Club: Drugi Klub, doorman", r.body);
+  r = await api("GET", `/business/clubs/me?club_id=${drugiId}`, T.ana);
+  assert(r.status === 200 && r.body.name === "Drugi Klub", "?club_id= deluje enako kot glava", r.body);
+  r = await apiH("GET", "/business/clubs/me", T.ana, null, { "X-Outly-Club": "999999" });
+  assert(r.status === 404, "glava s klubom, kjer ni clanica -> 404", r.status);
+  r = await apiH("POST", "/events", T.ana, { title: "X", startAt: new Date(Date.now() + 86400000).toISOString(), ticketPriceCents: 0, capacity: 10, minAge: 0 }, { "X-Outly-Club": String(drugiId) });
+  assert(r.status === 403, "kot vratarka v Drugem Klubu ne sme ustvariti dogodka -> 403 (vloga po klubu)", r.status);
+  r = await apiH("DELETE", "/business/team/me", T.ana, null, { "X-Outly-Club": String(drugiId) });
+  assert(r.status === 204, "zapusti samo Drugi Klub -> 204", r.status);
+  r = await api("GET", "/me", T.ana);
+  assert(r.body.clubs.length === 1 && r.body.clubs[0].club_name === "Pure Club", "/me: ostane samo Pure Club", r.body.clubs);
+  const st = await pool.query("SELECT id, status FROM club_invites ORDER BY id");
+  assert(st.rows[0].status === "accepted" && st.rows[1].status === "accepted", "statusa vabil: accepted, accepted", st.rows);
 
   r = await api("GET", "/business/team", T.lastnik);
   assert(r.body.members.length === 2 && r.body.members[1].role === "manager" && r.body.invites.length === 0, "ekipa: lastnik + manager, brez cakajocih", r.body);
@@ -146,9 +171,11 @@ async function api(method, path, token, body) {
   r = await api("POST", "/business/team", T.lastnik, { email: "bor@outly.si", role: "doorman" });
   assert(r.status === 201, "po zavrnitvi ga lahko povabi znova -> 201", r.status);
 
-  console.log("\n# Clan ne more sprejeti se enega vabila; lastnik ne more");
+  console.log("\n# Clana istega kluba ni mogoce povabiti se enkrat; drugi klub ga LAHKO; lastnika ne");
+  r = await api("POST", "/business/team", T.lastnik, { email: "ana@outly.si", role: "doorman" });
+  assert(r.status === 409 && r.body.error === "already_member", "Ana je ze v Pure Clubu -> 409 already_member", r.body);
   r = await api("POST", "/business/team", T.drugi, { email: "ana@outly.si", role: "doorman" });
-  assert(r.status === 409 && r.body.error === "already_member", "Ana je ze clanica -> 409 already_member", r.body);
+  assert(r.status === 201, "Drugi Klub lahko Ano (clanico Pure Cluba) povabi znova -> 201", r.status);
   r = await api("POST", "/business/team", T.drugi, { email: "lastnik@outly.si", role: "doorman" });
   assert(r.status === 409 && r.body.error === "is_owner", "lastnika ne more povabiti -> 409 is_owner", r.body);
 

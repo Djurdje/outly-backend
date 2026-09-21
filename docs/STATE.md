@@ -51,6 +51,10 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   da ne pade sto starih zvoncev. Meni obvestil nima več nog My Clubs / My Friends. iOS z novimi polji dela tudi na starem
   backendu (privzete vrednosti, napaka poti → prazen seznam); **backend PR mora biti v produkciji pred merge-om iOS PR-ja
   v master**, sicer testerji obvestil ne vidijo (ne pade). Backend PR rabi oznako `odobril-martin` (`db/migracije/**`).
+- **21. 9. 2026 (backend migracija 018, več klubov na osebo):** aplikacija pošlje glavo `X-Outly-Club` samo tam, kjer uporabnik
+  izbere klub (My Clubs → View); vsi drugi poslovni klici brez glave dobijo **prvo (najstarejše) članstvo**, kot doslej. Past:
+  če ima oseba dve ekipi in aplikacija glave ne pošlje, ureja napačen klub tiho, brez napake — zato iOS nastavi
+  `APIClient.currentClubId` ob vstopu v klub in ga ob izhodu pobriše. `DELETE /business/team/me` brez glave zapusti VSE ekipe.
 - **21. 9. 2026 (iOS, Luka, Martin na dopustu) — predpostavke v PR-ju outly-app #17:** (1) lastnikov profil je klubski
   (DECISIONS 21. 9.); ce Martin odloci drugace, se v `ProfileView` odstrani veja `jeLastnik` (ena vrstica). (2) Prazna
   stanja: lastnik brez kluba → obrazec `ClubSetupView`, ki klice `POST /clubs`; backend na `GET /business/clubs/me`
