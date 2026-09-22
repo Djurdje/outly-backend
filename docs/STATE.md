@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-21.
+Zadnja posodobitev: 2026-09-22 (po seji 21. 9. z Luko).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -32,6 +32,32 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
+
+## Kje smo (21. 9. 2026, seja z Luko — Martin na dopustu)
+
+Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta razdelek se ob naslednjem sklopu prepiše.
+
+- **Backend `main`** (Render, preverjeno z Nadzorom produkcije): migraciji **017** (obvestilo o prejeti vstopnici, PR #49) in
+  **018** (ena oseba v več ekipah, glava `X-Outly-Club`, `GET /me` polje `clubs`, PR #52). Dokumenti: PR #50, #51.
+- **iOS `master` = TestFlight build 66** (PR #16, #17, #18 v enem dnevu): meni obvestil brez nog + vrstica »X sent you a ticket«;
+  »Invite more« 65 % in moder; Friends plans na novo (gumbi All/prijatelj samo pri ≥ 2 prijateljih, brez podvojenih/preteklih,
+  kartica z Join them / View event); My friends z gumbom »Add friends« in listom za iskanje; **lastnikov profil je klubski**
+  (OwnerProfileView, ClubSetupView za lastnika brez kluba); samo dva sloga vrstic; **Search/Profile nad zamegljenim Home**
+  (drugi poskus — v buildu 64 je bil črn, ker NavigationStack prekrije ZStack; zdaj vsak zaslon riše `.outlyOzadje()` sam);
+  Club info in sprememba gesla prek lista; My Clubs kaže vse klube (018), View nastavi `IzbraniKlub`.
+- **Na napravi (Luka, build 66) še NI potrjeno:** zamegljeno ozadje pod Search/Profile in globlje; vabilo osebe, ki je že v
+  K4, v drug klub + My Clubs z dvema kartama; Friends plans z dvema prijateljema; Club info brez zastoja. Build 64 je Luka
+  preveril: lastnikov profil dela (glava je bila prevelika → popravljeno v 66), Friends plans se je »ne odziva« (vzrok: en
+  sam prijatelj → All = fedo; v 66 gumbov pri enem prijatelju ni).
+- **Čaka Martina:** (1) **push obvestila na telefon (APNs)** — Luka jih pričakuje; koda ni napisana, ker rabi APNs ključ iz
+  Martinovega Developer računa in vklop Push Notifications pri podpisu; brez njega se ne da testirati. (2) Xcode Cloud za
+  `master` → TestFlight (rabi Martinov Apple ID). (3) PR za `gradnja.yml` (concurrency + filter poti, oznaka). (4) potrditev
+  treh odločitev z 21. 9. v DECISIONS (lastnikov profil, dva sloga vrstic, Revolut učinek) in »več klubov na osebo«.
+- **GitHub Actions:** proračun za Actions je 20 $/mesec (bil 0 $ s Stop usage = da → past spodaj). Dogovor o varčevanju
+  z macOS minutami je v razdelku »Način dela«.
+- **Odprte najdbe brez posnetka:** Luka je na buildu 64 videl »pretekel dogodek« v Friends plans (Rock Night, pet. 25. 9. —
+  ni pretekel; datum seje je bil pon. 21. 9.) in »podvojen dogodek« (v 66 aplikacija podvojene id-je izloči; strežnik jih
+  ne bi smel vračati — če se ponovi, preveri `GET /me/friends/plans`).
 
 ## Predpostavke, ki jih je sprejel agent (brez Martina)
 
