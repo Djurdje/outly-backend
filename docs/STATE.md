@@ -68,15 +68,17 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   spodnja meja), napis moder. »View« pri Your friends' plans odpre prenovljen zaslon: gumbi All + po en na prijatelja
   (izbrani moder), kartica z zatemnjenim plakatom, avatarji, »Join them« (nakup) in »View event«. My friends: moder gumb
   »Add friends« odpre list z iskanjem (iskanje ni več na seznamu); poslana prošnja = obrobljen pil »Requested«, dotik prekliče.
-- **20. 9. 2026 (odprto):** politika zasebnosti za prijatelje je **osnutek v outly_webpage PR #6** in čaka Martinov DA — aplikacija
-  načrte že deli, politika tega še ne omenja. Ne odlašati.
+- **22. 9. 2026 (zaprto):** politika zasebnosti **2.2** (razdelek »Prijatelji v aplikaciji«, podlagi prijatelji/načrti, vrstica za
+  App Store) je **živa na outly.si/privacy-app** — outly_webpage PR #6, Martin dal DA v pogovoru 22. 9. Stikalo za deljenje
+  načrtov ostane privzeto vklopljeno. Past: iz oblaka outly.si ni dosegljiv (egress), vsebino strani po objavi preveri Martin
+  ali workflow `nadzor.yml` (ta preverja samo `/` in `/terms`).
 - **20. 9. 2026 (prijatelji, backend PR #45, v produkciji):** Martin je naročil prijatelje (My friends, prošnje v obvestilih, »Your friends' plans«,
   prenos vstopnice prijatelju z izbiro iz seznama), na tri vprašanja pa ni odgovoril, zato velja: (1) prijatelja se najde **po
   uporabniškem imenu** (`GET /users/search`, predpona, samo potrjeni računi, največ 10, omejeno na 120/h); (2) stikalo
   `users.share_plans_with_friends` je **privzeto VKLOPLJENO** (sicer bi bil razdelek na domačem zaslonu pri vseh prazen), izklop v
   Preferences; (3) »View« odpre seznam dogodkov prijateljev, »Invite more« deli povezavo `https://outly.si` (brez `?ref=` — backend
-  kod za točke ne pozna, živijo v Supabase). Politika zasebnosti (`privacy-app.html`) mora dobiti odstavek o prijateljih —
-  pravni dokument, čaka Martinov DA (ločen PR na spletni strani). Če Martin odloči drugače, so to tri majhne spremembe.
+  kod za točke ne pozna, živijo v Supabase). Politika zasebnosti (`privacy-app.html`) odstavek o prijateljih ima od
+  22. 9. (različica 2.2, outly_webpage PR #6). Če Martin odloči drugače, so to tri majhne spremembe (in popravek politike).
 - **18. 9. 2026:** Healthchecks check naj ima **Period 6 h, Grace 3 h** (ne 15/20 min), dokler nadzor teče na
   GitHubovem cronu — glej past »GitHub cron teče na 4–5 ur«. S 15/20 min bi Healthchecks javljal lažen izpad po vsakem
   zagonu. Nastavitev je v Martinovi Healthchecks konzoli, agent je ne more spremeniti. Kdaj se vrne na 15/20:
