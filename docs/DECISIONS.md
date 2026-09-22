@@ -173,6 +173,27 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   *vir/dokaz*: pogoji uporabe GitHub Pages (prepoved komercialne rabe). *velja dokler*: stran nima builda in
   je vse v repu javno (zato v repu nič internega).
 
+- 2026-09-22: **Dogodek ima stanje `ended`; posnetek dogodka samo na treh najbolj popularnih.** Dogodek je končan, ko
+  mine `end_at`, in če ga klub ni vpisal, `start_at + 8 h` (klubski večer se ne konča ob uri začetka). Novo polje odgovora
+  `lifecycle` (`upcoming` | `live` | `ended`); staro `time_status` ostane nespremenjeno, ker ga berejo aplikacije na telefonih.
+  Končani dogodki izpadejo iz `GET /me/friends/plans` (dogodek, ki nocoj teče, ostane). Na končan dogodek sme klub naložiti
+  **posnetek** (`recap_video_url`), ki na strani kluba zamenja plakat — a samo na **treh** najbolj popularnih končanih dogodkih
+  kluba (po prodanih vstopnicah), sicer bi stran kluba nalagala poljubno mnogo videov. Meja je na strežniku (invarianta **I12**).
+  Odločil Martin (v pogovoru, 22. 9.).
+  *vir/dokaz*: `_testi/test_sledenje.js`, invarianta I12 v ARCHITECTURE ·
+  *velja dokler*: je posnetek na Cloudinaryju in ga stran kluba predvaja samodejno (z ročnim zagonom bi bila meja 3 lahko višja) ·
+  *nadomeščena z*: —
+- 2026-09-22: **Klubu se sledi (Follow), ne lajka.** Na strani kluba je gumb **Follow** in ob imenu število sledilcev;
+  sledilec dobi obvestilo, ko klub objavi dogodek (`club_follows`, `club_event_notifications`, migracija 019).
+  Srček (priljubljeno) ostane **samo na dogodkih** — lajkanja kluba ni in ne bo, ker bi bili dve skoraj enaki dejanji
+  na istem zaslonu in nobeno ne bi bilo jasno. Odločil Martin (v pogovoru, 22. 9.).
+  *vir/dokaz*: `_testi/test_sledenje.js` · *velja dokler*: ni potisnih obvestil (APNs); ko bodo, sledenje postane
+  tudi naročnina na push, ne samo na zvonec · *nadomeščena z*: —
+- 2026-09-22: **Stran kluba kaže slideshow, ne pasice.** Pasica (`banner_url`) se iz urejanja kluba umakne; stolpec v bazi
+  in polje v odgovoru **ostaneta** (stari odjemalci, obstoječi klubi brez galerije še naprej vidijo pasico prek
+  `APIClub.slideshowUrls`). Novi klubi nalagajo samo slideshow (do 3 slike). Odločil Martin (v pogovoru, 22. 9.).
+  *velja dokler*: obstaja vsaj en klub, ki ima pasico in nima galerije · *nadomeščena z*: —
+
 ## Način dela (odločeno 16. 9. 2026)
 
 - Vsi trije repozitoriji imajo `CLAUDE.md` + `.claude/agents/`; ta datoteka in `STATE.md` (v backend repu) sta skupni
