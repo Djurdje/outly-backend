@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–018, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–019, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -16,7 +16,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 3ZG8lgCdDNsnjlrK66MBVfTKTCzwRfx17w1UMguY1cx9IaRnx8X1YZRzmSUkPqc
+\restrict MwGeEHf57T7NYRZBlSW0xHzDadLmGFaY4nRC8dxv0My3h9JDORifvZ9GoIAspUG
 
 -- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
@@ -106,6 +106,50 @@ $$;
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
+
+--
+-- Name: club_event_notifications; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.club_event_notifications (
+    id integer NOT NULL,
+    user_id integer NOT NULL,
+    event_id integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    seen_at timestamp with time zone
+);
+
+
+--
+-- Name: club_event_notifications_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.club_event_notifications_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: club_event_notifications_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.club_event_notifications_id_seq OWNED BY public.club_event_notifications.id;
+
+
+--
+-- Name: club_follows; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.club_follows (
+    club_id integer NOT NULL,
+    user_id integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
 
 --
 -- Name: club_invites; Type: TABLE; Schema: public; Owner: -
@@ -327,6 +371,7 @@ CREATE TABLE public.events (
     vat_rate numeric(4,3),
     sales_open_at timestamp with time zone,
     sales_close_at timestamp with time zone,
+    recap_video_url text DEFAULT ''::text NOT NULL,
     CONSTRAINT events_capacity_chk CHECK (((capacity IS NULL) OR (capacity > 0))),
     CONSTRAINT events_end_chk CHECK (((end_at IS NULL) OR (end_at > start_at))),
     CONSTRAINT events_min_age_chk CHECK (((min_age >= 0) AND (min_age <= 99))),
@@ -599,6 +644,13 @@ ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
 
 
 --
+-- Name: club_event_notifications id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_event_notifications ALTER COLUMN id SET DEFAULT nextval('public.club_event_notifications_id_seq'::regclass);
+
+
+--
 -- Name: club_invites id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -666,6 +718,30 @@ ALTER TABLE ONLY public.tickets ALTER COLUMN id SET DEFAULT nextval('public.tick
 --
 
 ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+
+
+--
+-- Name: club_event_notifications club_event_notifications_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_event_notifications
+    ADD CONSTRAINT club_event_notifications_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: club_event_notifications club_event_notifications_uniq; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_event_notifications
+    ADD CONSTRAINT club_event_notifications_uniq UNIQUE (user_id, event_id);
+
+
+--
+-- Name: club_follows club_follows_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_follows
+    ADD CONSTRAINT club_follows_pkey PRIMARY KEY (club_id, user_id);
 
 
 --
@@ -784,6 +860,20 @@ CREATE UNIQUE INDEX ca_email_open_key ON public.creator_applications USING btree
 --
 
 CREATE INDEX ca_status_created_idx ON public.creator_applications USING btree (status, created_at);
+
+
+--
+-- Name: club_event_notifications_unseen_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_event_notifications_unseen_idx ON public.club_event_notifications USING btree (user_id) WHERE (seen_at IS NULL);
+
+
+--
+-- Name: club_follows_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_follows_user_idx ON public.club_follows USING btree (user_id, created_at DESC);
 
 
 --
@@ -1018,6 +1108,38 @@ CREATE TRIGGER orders_sprosti AFTER UPDATE OF status ON public.orders FOR EACH R
 
 
 --
+-- Name: club_event_notifications club_event_notifications_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_event_notifications
+    ADD CONSTRAINT club_event_notifications_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE CASCADE;
+
+
+--
+-- Name: club_event_notifications club_event_notifications_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_event_notifications
+    ADD CONSTRAINT club_event_notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: club_follows club_follows_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_follows
+    ADD CONSTRAINT club_follows_club_id_fkey FOREIGN KEY (club_id) REFERENCES public.clubs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: club_follows club_follows_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_follows
+    ADD CONSTRAINT club_follows_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: club_invites club_invites_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1237,5 +1359,5 @@ ALTER TABLE ONLY public.tickets
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 3ZG8lgCdDNsnjlrK66MBVfTKTCzwRfx17w1UMguY1cx9IaRnx8X1YZRzmSUkPqc
+\unrestrict MwGeEHf57T7NYRZBlSW0xHzDadLmGFaY4nRC8dxv0My3h9JDORifvZ9GoIAspUG
 

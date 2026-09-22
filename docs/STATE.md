@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-22 (po seji 21. 9. z Luko).
+Zadnja posodobitev: 2026-09-22 (sledenje klubom, stanje dogodka `ended`, posnetek dogodka).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -32,6 +32,30 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
+
+## Kje smo (22. 9. 2026, seja z Martinom)
+
+Sklop »sledenje klubom + ended dogodki + popravki zaslonov«. Backend PR in iOS PR sta parna; iOS brez novega
+backenda ne pade (vsa nova polja imajo privzetke), samo gumb Follow in posnetki ne delajo.
+
+- **Backend (migracija 019, ta PR — čaka Martinovo oznako `odobril-martin`, ker se dotakne `db/migracije/**`):**
+  - `club_follows` + `PUT|DELETE /clubs/:id/follow`, `GET /me/clubs/following`; `followers_count` v vseh odgovorih
+    kluba, `is_following` v `GET /clubs/:id` (pot ima zdaj `neobveznaPrijava`).
+  - `club_event_notifications` + `GET /me/club-events`, `POST /me/club-events/:id/seen`, `pending_club_events` v `GET /me`.
+    Obvestilo nastane ob `POST /events` s `status=published` in ob `PATCH`, ki dogodek prvič objavi.
+  - Dogodek: novo polje `lifecycle` (`upcoming` | `live` | `ended`) in `recap_video_url`; `time_status` NEspremenjen.
+  - `GET /events?clubId=X&popular=true` → do 3 končani dogodki po `sold_count` (brez okna 7 dni, ki velja za `upcoming=false`).
+  - `GET /business/events` ima `recap_allowed` (namig aplikaciji; pravilo uveljavi `PATCH /events/:id`).
+  - `GET /me/friends/plans` odslej izloči **končane** dogodke (prej vse, ki so se začeli) — dogodek, ki nocoj teče, ostane.
+- **Predpostavke agenta (Martin jih ni izrecno potrdil):**
+  1. »Konec« brez vpisanega `end_at` je **začetek + 8 h**. Če se izkaže za prekratko/predolgo, se spremeni na enem mestu
+     (`KONEC_DOGODKA` v `index.js`) — a takrat se spremeni tudi, kaj je »popular«.
+  2. »Popular« = po **prodanih vstopnicah** (`sold_count`), ob izenačenju najnovejši. Klub, ki vstopnic ne prodaja prek
+     Outlyja, ima vse pri 0 → popularni so trije najnovejši končani.
+  3. `?popular=true` pokaže končane dogodke **starejše od 7 dni** (staro okno velja naprej za `?upcoming=false`).
+     Brez tega posnetek dogodka izgine teden po dogodku, kar izniči namen.
+  4. Obvestilo o novem dogodku je samo **zvonec v aplikaciji**; potisnega obvestila (APNs) še ni (čaka Martinov ključ).
+- **Na napravi še NI potrjeno** nič od tega sklopa.
 
 ## Kje smo (21. 9. 2026, seja z Luko — Martin na dopustu)
 

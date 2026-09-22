@@ -379,6 +379,15 @@ app.get("/me", requireAuth, async (req, res) => {
     const pf = await pool.query("SELECT COUNT(*)::int AS n FROM friend_requests WHERE to_user_id=$1 AND status='pending'", [req.user.userId]);
     // Neprebrane prejete vstopnice (migracija 017) — obvestilo "X ti je poslal vstopnico".
     const pv = await pool.query("SELECT COUNT(*)::int AS n FROM ticket_transfers WHERE to_user_id=$1 AND seen_at IS NULL", [req.user.userId]);
+    // Neprebrana obvestila "klub, ki mu slediš, je objavil dogodek" (migracija 019).
+    const pk = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM club_event_notifications n
+        JOIN events e ON e.id = n.event_id
+        JOIN clubs c ON c.id = e.club_id
+       WHERE n.user_id=$1 AND n.seen_at IS NULL
+         AND e.status='published' AND NOT c.hidden`,
+      [req.user.userId]
+    );
     // Vsa clanstva (migracija 018): club_id/club_role ostaneta prvo clanstvo za stare odjemalce.
     const klubi = await klubiUporabnika(req.user.userId);
     return res.status(200).json({
@@ -389,6 +398,7 @@ app.get("/me", requireAuth, async (req, res) => {
       pending_invites: v.rows[0] ? v.rows[0].n : 0,
       pending_friend_requests: pf.rows[0] ? pf.rows[0].n : 0,
       pending_received_tickets: pv.rows[0] ? pv.rows[0].n : 0,
+      pending_club_events: pk.rows[0] ? pk.rows[0].n : 0,
     });
   } catch (err) {
     console.error(err);
@@ -714,7 +724,8 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 // treba tu dodati zavestno.
 const JAVNI_STOLPCI_KLUBA = `id, owner_user_id, name, logo_url, banner_url, description,
   contact_email, contact_phone, instagram, website, address, city, country,
-  lat, lng, min_age, genres, created_at, bar_prices, gallery_urls, video_url`;
+  lat, lng, min_age, genres, created_at, bar_prices, gallery_urls, video_url,
+  (SELECT COUNT(*)::int FROM club_follows cf WHERE cf.club_id = clubs.id) AS followers_count`;
 
 // Cenik bara (migracija 014): seznam postavk, ki ga klub ureja v celoti.
 // Vrne ocisceno kopijo ali niz z napako. Cene v centih, kot pri vstopnicah.
@@ -817,14 +828,25 @@ app.get("/clubs/map", async (req, res) => {
   }
 });
 
-app.get("/clubs/:id", async (req, res) => {
+// neobveznaPrijava: brez zetona pot dela naprej (javna stran kluba), z zetonom pove
+// se `is_following` — da gumb Follow ob odprtju ne utripa iz "Follow" v "Following".
+app.get("/clubs/:id", neobveznaPrijava, async (req, res) => {
   try {
     if (!/^\d+$/.test(req.params.id)) return res.status(400).send("Invalid club id.");
     const r = await pool.query(
       `SELECT ${JAVNI_STOLPCI_KLUBA} FROM clubs WHERE id=$1 AND hidden = FALSE`, [req.params.id]
     );
     if (r.rows.length === 0) return res.status(404).send("Club not found.");
-    res.json(r.rows[0]);
+
+    let sledim = false;
+    if (req.user) {
+      const f = await pool.query(
+        "SELECT 1 FROM club_follows WHERE club_id=$1 AND user_id=$2",
+        [req.params.id, req.user.userId]
+      );
+      sledim = f.rowCount > 0;
+    }
+    res.json({ ...r.rows[0], is_following: sledim });
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
@@ -885,6 +907,111 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
+  }
+});
+
+// ---------------------------
+// SLEDENJE KLUBU (migracija 019)
+// ---------------------------
+// "Follow" na strani kluba: sledilec dobi obvestilo, ko klub objavi dogodek.
+// Obe poti sta idempotentni (dvakrat follow = en zapis, unfollow brez sledenja = 200),
+// da gumb v aplikaciji ob podvojenem dotiku ne pokaze napake.
+// Lajkanja kluba ni: srcek ostane samo na dogodkih (event_favorites, migracija 012).
+async function steviloSledilcev(clubId) {
+  const r = await pool.query("SELECT COUNT(*)::int AS n FROM club_follows WHERE club_id=$1", [clubId]);
+  return r.rows[0] ? r.rows[0].n : 0;
+}
+
+// Klub mora obstajati in ne sme biti skrit (skritega klub javno ni, zato mu ni mogoce slediti).
+async function vidnoKlubId(req, res) {
+  if (!/^\d+$/.test(req.params.id)) { res.status(400).send("Invalid club id."); return null; }
+  const r = await pool.query("SELECT id FROM clubs WHERE id=$1 AND hidden = FALSE", [req.params.id]);
+  if (r.rows.length === 0) { res.status(404).send("Club not found."); return null; }
+  return r.rows[0].id;
+}
+
+app.put("/clubs/:id/follow", requireAuth, async (req, res) => {
+  try {
+    const clubId = await vidnoKlubId(req, res);
+    if (!clubId) return;
+    await pool.query(
+      "INSERT INTO club_follows (club_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+      [clubId, req.user.userId]
+    );
+    return res.status(200).json({ following: true, followers_count: await steviloSledilcev(clubId) });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+app.delete("/clubs/:id/follow", requireAuth, async (req, res) => {
+  try {
+    const clubId = await vidnoKlubId(req, res);
+    if (!clubId) return;
+    await pool.query("DELETE FROM club_follows WHERE club_id=$1 AND user_id=$2", [clubId, req.user.userId]);
+    return res.status(200).json({ following: false, followers_count: await steviloSledilcev(clubId) });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// Katerim klubom sledim. `ids` je tu zato, da aplikaciji ni treba brati celih klubov,
+// ko hoce samo vedeti, ali je gumb "Following".
+app.get("/me/clubs/following", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT ${JAVNI_STOLPCI_KLUBA} FROM clubs
+        WHERE hidden = FALSE
+          AND id IN (SELECT club_id FROM club_follows WHERE user_id=$1)
+        ORDER BY name LIMIT 200`,
+      [req.user.userId]
+    );
+    return res.status(200).json({ ids: r.rows.map(c => c.id), clubs: r.rows });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// Neprebrana obvestila "klub, ki mu slediš, je objavil dogodek" (zvonec na domacem zaslonu).
+// Odpovedani dogodki in skriti klubi izpadejo — obvestilo o necem, cesar ni vec, je smet.
+app.get("/me/club-events", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT n.id, n.created_at, n.event_id,
+              e.title AS event_title, e.start_at, e.poster_url,
+              c.id AS club_id, c.name AS club_name, c.logo_url AS club_logo_url
+         FROM club_event_notifications n
+         JOIN events e ON e.id = n.event_id
+         JOIN clubs c ON c.id = e.club_id
+        WHERE n.user_id = $1 AND n.seen_at IS NULL
+          AND e.status = 'published' AND NOT c.hidden
+        ORDER BY n.created_at DESC
+        LIMIT 50`,
+      [req.user.userId]
+    );
+    return res.status(200).json({ notifications: r.rows });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// Obvestilo prebrano. Samo lastnik obvestila (WHERE user_id iz zetona) — tuje se ne da oznaciti.
+app.post("/me/club-events/:id/seen", requireAuth, async (req, res) => {
+  try {
+    if (!/^\d+$/.test(req.params.id)) return res.status(400).send("Invalid notification id.");
+    const r = await pool.query(
+      "UPDATE club_event_notifications SET seen_at = NOW() WHERE id=$1 AND user_id=$2 AND seen_at IS NULL RETURNING id",
+      [req.params.id, req.user.userId]
+    );
+    // Ze prebrano ali tuje -> 200, da dvojni dotik v aplikaciji ne pokaze napake.
+    return res.status(200).json({ seen: r.rowCount > 0 });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
   }
 });
 
@@ -1075,6 +1202,12 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
 // ---------------------------
 // EVENTS (updated: upcoming true/false + time_status + ticket fields)
 // ---------------------------
+// Kdaj je dogodek KONCAN (Martin, 22. 9. 2026). Klubski vecer se skoraj nikoli ne konca
+// ob uri zacetka, konca pa klubi pogosto ne vpisejo — zato: konec, ce je vpisan, sicer
+// zacetek + 8 h. Ta izraz je en sam vir resnice za "ended" (stanje dogodka, nacrti
+// prijateljev, dovoljenje za posnetek) — ce se spremeni, se spremeni na enem mestu.
+const KONEC_DOGODKA = `COALESCE(end_at, start_at + INTERVAL '8 hours')`;
+
 // Stolpci dogodka na enem mestu (javni GET /events, GET /events/:id, GET /business/events).
 const STOLPCI_DOGODKA = `
         id,
@@ -1104,16 +1237,32 @@ const STOLPCI_DOGODKA = `
         CASE
           WHEN start_at > NOW() THEN 'coming_soon'
           ELSE 'popular'
-        END AS time_status`;
+        END AS time_status,
+        -- Posnetek "kako je bilo" na koncanem dogodku (migracija 019). Prazen niz = brez videa.
+        recap_video_url,
+        -- Stanje dogodka (migracija 019). DODANO polje: time_status ostane, kot je bil,
+        -- ker ga aplikacije na telefonih se berejo (pravilo "spremembe API-ja so samo dodajanje").
+        -- upcoming = se ni zacel | live = tece | ended = koncan.
+        CASE
+          WHEN ${KONEC_DOGODKA} <= NOW() THEN 'ended'
+          WHEN start_at > NOW() THEN 'upcoming'
+          ELSE 'live'
+        END AS lifecycle`;
 
 // Vsi dogodki lastnega kluba, tudi osnutki in odpovedani. Samo za lastnika.
 app.get("/business/events", requireAuth, requireClub(), async (req, res) => {
   try {
     if (!req.klub.clubId) return res.status(404).send("Club not found.");
 
+    // recap_allowed pove aplikaciji, na katerem dogodku sme klub ponuditi nalaganje
+    // posnetka: koncan IN med tremi najbolj popularnimi (migracija 019). Isto pravilo
+    // uveljavi PATCH /events/:id — to je samo zato, da aplikaciji ni treba ugibati.
+    const top = await popularniDogodkiKluba(req.klub.clubId);
     const r = await pool.query(
-      `SELECT ${STOLPCI_DOGODKA} FROM events WHERE club_id=$1 ORDER BY start_at DESC LIMIT 500`,
-      [req.klub.clubId]
+      `SELECT e.*, (e.id = ANY($2::int[])) AS recap_allowed
+         FROM (SELECT ${STOLPCI_DOGODKA} FROM events WHERE club_id=$1) e
+        ORDER BY e.start_at DESC LIMIT 500`,
+      [req.klub.clubId, top]
     );
     return res.status(200).json(r.rows);
   } catch (e) {
@@ -1122,9 +1271,43 @@ app.get("/business/events", requireAuth, requireClub(), async (req, res) => {
   }
 });
 
+// Koliko koncanih dogodkov kluba je "popular" (in sme imeti posnetek). Luka/Martin, 22. 9. 2026:
+// na strani kluba so vidni najvec trije — vec videov bi stran nalagalo brez konca.
+const NAJVEC_POPULARNIH = 3;
+
+// Top N koncanih objavljenih dogodkov kluba: po prodanih vstopnicah, ob izenacenju najnovejsi.
+// Vrne seznam id-jev (prvi je najbolj popularen).
+async function popularniDogodkiKluba(clubId, najvec = NAJVEC_POPULARNIH) {
+  const r = await pool.query(
+    `SELECT id FROM events
+      WHERE club_id = $1 AND status = 'published' AND ${KONEC_DOGODKA} <= NOW()
+      ORDER BY sold_count DESC, start_at DESC
+      LIMIT $2`,
+    [clubId, najvec]
+  );
+  return r.rows.map(x => x.id);
+}
+
 app.get("/events", async (req, res) => {
   try {
-    const { clubId, upcoming } = req.query;
+    const { clubId, upcoming, popular } = req.query;
+
+    // ?clubId=..&popular=true -> najvec 3 koncani dogodki kluba po prodanih vstopnicah
+    // (stran kluba, razdelek "Popular"). Brez omejitve na 7 dni, ki velja za ?upcoming=false:
+    // posnetek dogodka je smiseln tudi cez mesec dni. Nova pot, stara ostane nespremenjena.
+    if (popular === "true") {
+      if (!clubId || !/^\d+$/.test(String(clubId))) return res.status(400).send("popular=true requires clubId.");
+      const skriti = await pool.query("SELECT 1 FROM clubs WHERE id=$1 AND hidden", [clubId]);
+      if (skriti.rowCount > 0) return res.json([]);
+      const ids = await popularniDogodkiKluba(clubId);
+      if (ids.length === 0) return res.json([]);
+      const r = await pool.query(
+        `SELECT ${STOLPCI_DOGODKA} FROM events WHERE id = ANY($1::int[])
+          ORDER BY sold_count DESC, start_at DESC`,
+        [ids]
+      );
+      return res.json(r.rows);
+    }
 
     const params = [];
     const where = [];
@@ -1261,12 +1444,31 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
       ]
     );
 
+    // Sledilci kluba dobijo obvestilo (migracija 019). Samo objavljeni dogodki:
+    // osnutka in odpovedanega ni smisla oznanjati. Napaka pri obvescanju NE sme
+    // podreti ustvarjanja dogodka — ta je ze v bazi.
+    if (r.rows[0].status === "published") {
+      try { await obvestiSledilce(r.rows[0].id, clubId); }
+      catch (e) { console.error("Obvescanje sledilcev ni uspelo:", e.message); }
+    }
+
     res.status(201).json(r.rows[0]);
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
   }
 });
+
+// Vsakemu sledilcu kluba vstavi obvestilo o dogodku. UNIQUE (user_id, event_id) poskrbi,
+// da ponovna objava (draft -> published -> draft -> published) ne podvoji zvonca.
+async function obvestiSledilce(eventId, clubId) {
+  await pool.query(
+    `INSERT INTO club_event_notifications (user_id, event_id)
+     SELECT f.user_id, $1 FROM club_follows f WHERE f.club_id = $2
+     ON CONFLICT (user_id, event_id) DO NOTHING`,
+    [eventId, clubId]
+  );
+}
 
 // Ali je migracija 002 (placila) ze pognana? Od nje naprej se racun ne sme
 // vec trdo izbrisati, ker so narocila racunovodski dokumenti.
@@ -1291,7 +1493,8 @@ async function dogodekZaUrejanje(req, res) {
   if (!/^\d+$/.test(req.params.id)) { res.status(400).send("Invalid event id."); return null; }
 
   const r = await pool.query(
-    `SELECT e.id, e.club_id, e.status, c.owner_user_id
+    `SELECT e.id, e.club_id, e.status, c.owner_user_id,
+            (COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') <= NOW()) AS je_koncan
      FROM events e JOIN clubs c ON c.id = e.club_id
      WHERE e.id = $1`,
     [req.params.id]
@@ -1325,7 +1528,30 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
       currency:           b.currency,
       ticket_url:         b.ticketUrl        ?? b.ticket_url,
       capacity:           b.capacity,
+      // Posnetek koncanega dogodka (migracija 019). Prazen niz = odstrani.
+      recap_video_url:    b.recapVideoUrl    ?? b.recap_video_url,
     };
+
+    // Posnetek sme dobiti SAMO koncan dogodek, ki je med tremi najbolj popularnimi
+    // dogodki svojega kluba (po prodanih vstopnicah). Brez te meje bi stran kluba
+    // nalagala poljubno mnogo videov — zato je meja na strezniku, ne samo v aplikaciji.
+    if (dovoljeno.recap_video_url !== undefined) {
+      const v = String(dovoljeno.recap_video_url ?? "").trim();
+      if (v !== "" && !(v.length <= 500 && /^https:\/\/\S+$/.test(v))) {
+        return res.status(400).send("recapVideoUrl must be an https URL.");
+      }
+      if (v !== "") {
+        if (!d.je_koncan) return res.status(400).send("Recap video can only be added to an event that has ended.");
+        const top = await popularniDogodkiKluba(d.club_id);
+        if (!top.map(Number).includes(Number(d.id))) {
+          return res.status(400).json({
+            error: "not_top_event",
+            message: `Recap video is allowed only on the club's top ${NAJVEC_POPULARNIH} past events by tickets sold.`,
+          });
+        }
+      }
+      dovoljeno.recap_video_url = v;
+    }
 
     if (dovoljeno.capacity !== undefined && dovoljeno.capacity !== null) {
       const c = Number(dovoljeno.capacity);
@@ -1356,6 +1582,13 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
       `UPDATE events SET ${sets.join(", ")} WHERE id = $${vrednosti.length} RETURNING *`,
       vrednosti
     );
+
+    // Dogodek je sele zdaj postal objavljen -> sledilci kluba dobijo obvestilo (migracija 019).
+    if (d.status !== "published" && r.rows[0].status === "published") {
+      try { await obvestiSledilce(r.rows[0].id, d.club_id); }
+      catch (e) { console.error("Obvescanje sledilcev ni uspelo:", e.message); }
+    }
+
     return res.status(200).json(r.rows[0]);
   } catch (e) {
     console.error(e);
@@ -2933,7 +3166,8 @@ app.get("/me/friends/plans", requireAuth, async (req, res) => {
          FROM (SELECT ${STOLPCI_DOGODKA} FROM events) e
          JOIN po_dogodku p ON p.event_id = e.id
          JOIN clubs cl ON cl.id = e.club_id
-        WHERE e.start_at > NOW() AND e.status = 'published' AND NOT cl.hidden
+        WHERE COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') > NOW()
+          AND e.status = 'published' AND NOT cl.hidden
         ORDER BY e.start_at ASC
         LIMIT 50`,
       [req.user.userId]
