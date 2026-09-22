@@ -38,7 +38,8 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 Sklop »sledenje klubom + ended dogodki + popravki zaslonov«. Backend PR in iOS PR sta parna; iOS brez novega
 backenda ne pade (vsa nova polja imajo privzetke), samo gumb Follow in posnetki ne delajo.
 
-- **Backend (migracija 019, ta PR — čaka Martinovo oznako `odobril-martin`, ker se dotakne `db/migracije/**`):**
+- **Backend (migracija 019) je v produkciji** — PR #55 združen 22. 9. 2026 ~21:15 UTC (oznaka `odobril-martin`: Martin),
+  Render deploy uspel, `Nadzor produkcije` zagon #54 na `main` `7757193` zelen. Kaj je novega:
   - `club_follows` + `PUT|DELETE /clubs/:id/follow`, `GET /me/clubs/following`; `followers_count` v vseh odgovorih
     kluba, `is_following` v `GET /clubs/:id` (pot ima zdaj `neobveznaPrijava`).
   - `club_event_notifications` + `GET /me/club-events`, `POST /me/club-events/:id/seen`, `pending_club_events` v `GET /me`.
@@ -55,7 +56,14 @@ backenda ne pade (vsa nova polja imajo privzetke), samo gumb Follow in posnetki 
   3. `?popular=true` pokaže končane dogodke **starejše od 7 dni** (staro okno velja naprej za `?upcoming=false`).
      Brez tega posnetek dogodka izgine teden po dogodku, kar izniči namen.
   4. Obvestilo o novem dogodku je samo **zvonec v aplikaciji**; potisnega obvestila (APNs) še ni (čaka Martinov ključ).
-- **Na napravi še NI potrjeno** nič od tega sklopa.
+- **iOS PR #19** (outly-app) združen takoj za backendom → TestFlight build. **Na napravi še NI potrjeno** nič od tega sklopa;
+  seznam, kaj naj Martin preveri, je v opisu PR-ja #19.
+- **Past (oblačna seja Claude Code):** omrežna politika oblačne seje **blokira `onrender.com`** (403 na CONNECT prek agent
+  proxyja) in `download.swift.org`. Posledici: (1) produkcije po deployu se iz seje ne da preveriti s `curl` — namesto tega
+  ročno sproži workflow `Nadzor produkcije` (`workflow_dispatch` na `main`, teče ~12 s) in preberi rezultat; (2) `swiftc -parse`
+  za iOS ni mogoč — prevod preveri workflow `Gradnja iOS` na PR-ju (korak »Prevedi za simulator«), pred tem neodvisen pregled
+  tipov. Zelen `Nadzor` pove, da produkcija odgovarja, **ne pa**, da streže ravno novo kodo (Render ob neuspelem deployu pusti
+  staro instanco) — če je dvom, preveri novo polje v odgovoru (npr. `followers_count` v `GET /clubs`) s telefona ali z računalnika.
 
 ## Kje smo (21. 9. 2026, seja z Luko — Martin na dopustu)
 
