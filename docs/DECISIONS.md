@@ -189,6 +189,14 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   na istem zaslonu in nobeno ne bi bilo jasno. Odločil Martin (v pogovoru, 22. 9.).
   *vir/dokaz*: `_testi/test_sledenje.js` · *velja dokler*: ni potisnih obvestil (APNs); ko bodo, sledenje postane
   tudi naročnina na push, ne samo na zvonec · *nadomeščena z*: —
+- 2026-09-23: **"I'm in" / zanimanje za dogodek.** Uporabnik na dogodku oznaci "I'm in" (zanimanje); prijatelji
+  to vidijo poleg tistih, ki dogodek ze imajo vstopnico ("going"). "Going" se NE shranjuje — izpelje se iz
+  veljavne vstopnice (isti mehanizem kot v `GET /me/friends/plans` od 20. 9.); shranjuje se samo "interested"
+  (`event_interest`, migracija 020). `PUT|DELETE /events/:id/interest`, `GET /events/:id` (`my_plan`,
+  `friends_going`, `friends_interested`), `GET /me/friends/plans` (novo polje `interested`, unija dogodkov),
+  `GET /me/plans`. Zasebnost enaka kot pri "going" (invarianta I11): samo prijatelji s
+  `share_plans_with_friends = true`. Odlocil Martin (v pogovoru, 23. 9.).
+  *vir/dokaz*: Martinov pogovor 23. 9., `_testi/test_zanimanje.js` (38 testov) · *velja dokler*: — · *nadomeščena z*: —
 - 2026-09-22: **Stran kluba kaže slideshow, ne pasice.** Pasica (`banner_url`) se iz urejanja kluba umakne; stolpec v bazi
   in polje v odgovoru **ostaneta** (stari odjemalci, obstoječi klubi brez galerije še naprej vidijo pasico prek
   `APIClub.slideshowUrls`). Novi klubi nalagajo samo slideshow (do 3 slike). Odločil Martin (v pogovoru, 22. 9.).

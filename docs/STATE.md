@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-22 (sledenje klubom, stanje dogodka `ended`, posnetek dogodka).
+Zadnja posodobitev: 2026-09-23 ("I'm in" / zanimanje za dogodek).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -32,6 +32,44 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
+
+## Kje smo (23. 9. 2026, "I'm in" / zanimanje za dogodek)
+
+Martin je 23. 9. 2026 narocil: na dogodku lahko uporabnik oznaci "I'm in" (zanimanje), prijatelji to vidijo
+poleg tistih, ki dogodek ze imajo vstopnico ("going"). Backend (migracija 020, `_testi/test_zanimanje.js`, 38 testov, vsi zeleni):
+
+- Nova tabela `event_interest (user_id, event_id, created_at)`, PK `(user_id, event_id)`, indeks po `event_id`.
+  "Going" se **ne shranjuje nikjer** — izpelje se iz veljavne vstopnice, isti `IMETNIK` izraz kot v
+  `/me/friends/plans` od 20. 9. Shranjuje se SAMO "interested".
+- `PUT /events/:id/interest` (requireAuth): dogodek mora biti published, klub ne hidden, dogodek se ne sme
+  biti koncal (isti pogoj `KONEC_DOGODKA` kot povsod drugod) — sicer 404 (ne obstaja/ni objavljen/klub skrit)
+  ali 409 `{ error: "event_ended" }` (koncan). `INSERT ... ON CONFLICT DO NOTHING` (idempotentno).
+  Odgovor `{ plan: "going" | "interested" }` — "going", ce ima uporabnik ze veljavno vstopnico (vstopnica
+  prevlada, zanimanje se sicer vseeno zapise v bazo, a se v odgovorih ne kaze locено od going).
+- `DELETE /events/:id/interest` (requireAuth): izbrise vrstico (idempotentno), `{ plan: "going" | null }`.
+- `GET /events/:id` ima zdaj `neobveznaPrijava` (kot `GET /clubs/:id` od 22. 9.): novi polji `my_plan`
+  (`"going" | "interested" | null`, brez zetona `null`), `friends_going` in `friends_interested`
+  (`[{id, username, avatar_url}]`, samo prijatelji s `share_plans_with_friends = true`, invarianta I11;
+  brez zetona prazna seznama). Prijatelj z vstopnico IN zanimanjem je samo v `friends_going`.
+- `GET /me/friends/plans`: obstojece polje `friends` (= going) **nespremenjeno**. Novo polje `interested`
+  (prijatelji SAMO z zanimanjem, isti I11 filter) in `my_plan` na vsakem dogodku. Dogodki, kjer ima vsaj en
+  prijatelj SAMO zanimanje (brez ikogar going), so zdaj tudi v seznamu (unija `going ∪ interested`, `UNION` CTE).
+  Filtri ostanejo: `published`, klub ne `hidden`, dogodek se ni koncal.
+- `GET /me/plans` (requireAuth, novo): `{ events: [dogodek..., club_name, club_logo_url, my_plan] }` — moji
+  lastni prihajajoci dogodki (going ali interested), za profil. Po `start_at` narascajoce.
+- **Predpostavke agenta (Martin jih ni izrecno potrdil):** (1) "going" ostaja izpeljan iz vstopnice, ne
+  shranjen — ce se kdaj izkaze, da je treba "going" tudi rocno oznaciti (npr. brez nakupa), je to nov stolpec/
+  stanje, ne sprememba tega mehanizma. (2) Brisanje zanimanja ob nakupu vstopnice ni potrebno: vrstica v
+  `event_interest` ostane, a se v odgovorih ne kaze vec locено (my_plan postane "going", oseba izgine iz
+  `friends_interested`/`interested` in se pojavi v `friends_going`/`friends`) — ni razloga za DELETE ob
+  nakupu. (3) Zanimanje za dogodek, ki se medtem koncal, ostane v `event_interest` (ni cistilnega opravila) —
+  PUT na ze koncan dogodek vrne 409, obstojece vrstice pa preprosto izpadejo iz odgovorov (filter
+  `KONEC_DOGODKA > NOW()` v `/me/friends/plans` in `/me/plans`; `GET /events/:id` ostane berljiv tudi za
+  koncane dogodke, samo `my_plan` na njem se lahko kaze "interested", ce je uporabnik oznacil zanimanje pred
+  koncem — to ni hrošč, samo zgodovinski podatek).
+- iOS: parni PR v `outly-app` (ista seja 23. 9.: gumb "I'm in" na dogodku, vrstica prijateljev, Friends plans po
+  dogodkih z going/interested) nastaja hkrati; vsa nova polja imajo v iOS privzetke, zato iOS na starem backendu ne
+  pade — backend PR naj bo v produkciji PRED merge-om iOS PR-ja v master (isti vzorec kot 21. 9., migracija 017).
 
 ## Kje smo (22. 9. 2026, seja z Martinom)
 

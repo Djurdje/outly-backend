@@ -1188,6 +1188,26 @@ CREATE INDEX IF NOT EXISTS club_event_notifications_unseen_idx
 ALTER TABLE events
     ADD COLUMN IF NOT EXISTS recap_video_url TEXT NOT NULL DEFAULT '';
 
+-- 020_zanimanje_za_dogodek.sql
+-- "I'm in" / zanimanje za dogodek (Martin, 23. 9. 2026).
+--
+-- Uporabnik na dogodku lahko oznaci "I'm in" (zanimanje), prijatelji to vidijo poleg
+-- tistih, ki dogodek ze imajo vstopnico ("going"). "Going" se NE shranjuje nikjer -
+-- izpelje se iz veljavne vstopnice (isto kot v GET /me/friends/plans, IMETNIK v index.js).
+-- Shranjuje se SAMO "interested": ena vrstica na par (dogodek, uporabnik).
+--
+-- Nic od tega ne spreminja obstojecih podatkov: ena nova tabela.
+
+CREATE TABLE IF NOT EXISTS event_interest (
+    user_id    INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    event_id   INTEGER     NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, event_id)
+);
+
+-- "Kdo je zainteresiran za ta dogodek" (stran dogodka, friends plans).
+CREATE INDEX IF NOT EXISTS event_interest_event_idx ON event_interest (event_id);
+
 
 -- =============================================================================
 -- Vpis v evidenco
@@ -1212,7 +1232,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('016_prijatelji.sql', '078393adc2e6b232'),
     ('017_obvestilo_prejete_vstopnice.sql', '2fe7bae5fd92d52e'),
     ('018_vec_klubov_na_osebo.sql', '226ee7c11f6e9c9d'),
-    ('019_sledenje_kluba_in_posnetek.sql', 'e380b074b039b2ba')
+    ('019_sledenje_kluba_in_posnetek.sql', 'e380b074b039b2ba'),
+    ('020_zanimanje_za_dogodek.sql', '906b6071fb3c3151')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
