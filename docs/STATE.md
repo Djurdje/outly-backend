@@ -67,9 +67,16 @@ poleg tistih, ki dogodek ze imajo vstopnico ("going"). Backend (migracija 020, `
   `KONEC_DOGODKA > NOW()` v `/me/friends/plans` in `/me/plans`; `GET /events/:id` ostane berljiv tudi za
   koncane dogodke, samo `my_plan` na njem se lahko kaze "interested", ce je uporabnik oznacil zanimanje pred
   koncem — to ni hrošč, samo zgodovinski podatek).
-- iOS: parni PR v `outly-app` (ista seja 23. 9.: gumb "I'm in" na dogodku, vrstica prijateljev, Friends plans po
-  dogodkih z going/interested) nastaja hkrati; vsa nova polja imajo v iOS privzetke, zato iOS na starem backendu ne
-  pade — backend PR naj bo v produkciji PRED merge-om iOS PR-ja v master (isti vzorec kot 21. 9., migracija 017).
+- **Backend PR #57 je v produkciji** (merge 23. 9. ~20:58 UTC, oznaka odobril-martin: Martin; Nadzor produkcije zagon #61
+  na `main` `cbb9d11` zelen). **iOS PR #22** (outly-app) zdruzen takoj za njim (~21:00 UTC) -> TestFlight build. Vsebina iOS:
+  krozno razkritje Home <-> Search/Profile, gumb->krog->kljukica pri prenosu (z vprasanjem) in nakupu (brez), sij na enem
+  gumbu na zaslon, "I'm in" na dogodku, Friends plans kot vrstice po dogodku, View z Going/Interested. **Na napravi se NI
+  potrjeno nic od tega** — seznam za Martina je v opisu PR-ja #22 (7 tock, tudi slovenski prevodi "gresta", "jih zanima").
+- Odlocitve Martina 23. 9. (pogovor): nakup BREZ vprasanja pred placilom, prenos Z vprasanjem; moder gumb z belo kljukico
+  (ne bel z modro); sij samo na gumbih, ki prinasajo nakup ali rast (Buy, Join them, Follow, Invite more, prijava), nikoli na
+  opravilnih gumbih. Odprto iz iste seje (ni izbrano, ostane za naslednji krog): seznam piljenja P1-P21 (hrosci "Free" pri
+  nil ceni, VALID v slovenscini, mnozine, prazna stanja, dvojni dotik, poenotenje radijev/gumbov) in animacije 1-15
+  (skeletoni, fade-in slik, stil pritiska, haptika, zaporedno pojavljanje sekcij).
 
 ## Kje smo (22. 9. 2026, seja z Martinom)
 
