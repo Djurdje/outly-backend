@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–019, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–020, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -16,7 +16,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict MwGeEHf57T7NYRZBlSW0xHzDadLmGFaY4nRC8dxv0My3h9JDORifvZ9GoIAspUG
+\restrict xWNGypMM4FdxxnoCBKU1rUac9KXeJFkigYp7OJ37RsPVx1zteClIyBRCk0OteO1
 
 -- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
@@ -341,6 +341,17 @@ ALTER SEQUENCE public.creator_applications_id_seq OWNED BY public.creator_applic
 --
 
 CREATE TABLE public.event_favorites (
+    user_id integer NOT NULL,
+    event_id integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: event_interest; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.event_interest (
     user_id integer NOT NULL,
     event_id integer NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
@@ -785,6 +796,14 @@ ALTER TABLE ONLY public.event_favorites
 
 
 --
+-- Name: event_interest event_interest_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_interest
+    ADD CONSTRAINT event_interest_pkey PRIMARY KEY (user_id, event_id);
+
+
+--
 -- Name: events events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -944,6 +963,13 @@ CREATE UNIQUE INDEX clubs_stripe_account_key ON public.clubs USING btree (stripe
 --
 
 CREATE INDEX event_favorites_event_idx ON public.event_favorites USING btree (event_id);
+
+
+--
+-- Name: event_interest_event_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX event_interest_event_idx ON public.event_interest USING btree (event_id);
 
 
 --
@@ -1236,6 +1262,22 @@ ALTER TABLE ONLY public.event_favorites
 
 
 --
+-- Name: event_interest event_interest_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_interest
+    ADD CONSTRAINT event_interest_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE CASCADE;
+
+
+--
+-- Name: event_interest event_interest_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_interest
+    ADD CONSTRAINT event_interest_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: events events_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1359,5 +1401,5 @@ ALTER TABLE ONLY public.tickets
 -- PostgreSQL database dump complete
 --
 
-\unrestrict MwGeEHf57T7NYRZBlSW0xHzDadLmGFaY4nRC8dxv0My3h9JDORifvZ9GoIAspUG
+\unrestrict xWNGypMM4FdxxnoCBKU1rUac9KXeJFkigYp7OJ37RsPVx1zteClIyBRCk0OteO1
 

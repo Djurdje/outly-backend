@@ -1346,7 +1346,9 @@ app.get("/events", async (req, res) => {
   }
 });
 
-app.get("/events/:id", async (req, res) => {
+// neobveznaPrijava: brez zetona pot dela naprej (javna stran dogodka), z zetonom pove
+// se moj_plan in nacrte prijateljev (glej ZANIMANJE ZA DOGODEK spodaj, migracija 020).
+app.get("/events/:id", neobveznaPrijava, async (req, res) => {
   try {
     if (!/^\d+$/.test(req.params.id)) return res.status(400).send("Invalid event id.");
     const r = await pool.query(
@@ -1357,10 +1359,110 @@ app.get("/events/:id", async (req, res) => {
     );
 
     if (r.rows.length === 0) return res.status(404).send("Event not found.");
-    res.json(r.rows[0]);
+    const dogodek = r.rows[0];
+
+    let my_plan = null;
+    let friends_going = [];
+    let friends_interested = [];
+    if (req.user) {
+      my_plan = await mojNacrtNaDogodku(req.params.id, req.user.userId);
+      const f = await pool.query(
+        `WITH pr AS (
+           SELECT CASE WHEN user_a=$2 THEN user_b ELSE user_a END AS id
+             FROM friendships WHERE user_a=$2 OR user_b=$2
+         ), gredo AS (
+           SELECT DISTINCT ${IMETNIK} AS uid
+             FROM tickets t JOIN orders o ON o.id=t.order_id
+            WHERE t.event_id=$1 AND t.status='valid' AND o.status IN ('paid','partially_refunded')
+              AND ${IMETNIK} IN (SELECT id FROM pr)
+         ), zanimajo AS (
+           -- Oseba z vstopnico IN v event_interest je samo v gredo (going), ne dvakrat.
+           SELECT ei.user_id AS uid FROM event_interest ei
+            WHERE ei.event_id=$1 AND ei.user_id IN (SELECT id FROM pr)
+              AND ei.user_id NOT IN (SELECT uid FROM gredo)
+         )
+         SELECT
+           (SELECT COALESCE(jsonb_agg(jsonb_build_object('id', u.id, 'username', u.username, 'avatar_url', u.avatar_url) ORDER BY LOWER(u.username)), '[]'::jsonb)
+              FROM gredo g JOIN users u ON u.id = g.uid WHERE u.share_plans_with_friends) AS friends_going,
+           (SELECT COALESCE(jsonb_agg(jsonb_build_object('id', u.id, 'username', u.username, 'avatar_url', u.avatar_url) ORDER BY LOWER(u.username)), '[]'::jsonb)
+              FROM zanimajo z JOIN users u ON u.id = z.uid WHERE u.share_plans_with_friends) AS friends_interested`,
+        [req.params.id, req.user.userId]
+      );
+      friends_going = f.rows[0].friends_going;
+      friends_interested = f.rows[0].friends_interested;
+    }
+
+    res.json({ ...dogodek, my_plan, friends_going, friends_interested });
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
+  }
+});
+
+// ---------------------------
+// ZANIMANJE ZA DOGODEK / "I'm in" (migracija 020)
+// ---------------------------
+// Uporabnik na dogodku oznaci "I'm in" (zanimanje). "Going" se NE shranjuje - izpelje
+// se iz veljavne vstopnice (isti IMETNIK kot v /me/friends/plans). Shranjuje se SAMO
+// "interested" (event_interest). Odlocil Martin, 23. 9. 2026.
+
+// Ali ima uporabnik veljavno vstopnico ali zanimanje za dogodek -> 'going' | 'interested' | null.
+async function mojNacrtNaDogodku(eventId, userId) {
+  const g = await pool.query(
+    `SELECT 1 FROM tickets t JOIN orders o ON o.id=t.order_id
+      WHERE t.event_id=$1 AND t.status='valid' AND o.status IN ('paid','partially_refunded')
+        AND ${IMETNIK}=$2 LIMIT 1`,
+    [eventId, userId]
+  );
+  if (g.rowCount > 0) return "going";
+  const i = await pool.query("SELECT 1 FROM event_interest WHERE event_id=$1 AND user_id=$2", [eventId, userId]);
+  return i.rowCount > 0 ? "interested" : null;
+}
+
+// Dogodek mora obstajati, biti objavljen, klub ne skrit in dogodek se ne sme biti koncan
+// (isti pogoj kot povsod drugod, KONEC_DOGODKA). Vrne id ali sama poslje napako in vrne null.
+async function veljavenDogodekZaNacrt(id, res) {
+  if (!/^\d+$/.test(String(id))) { res.status(400).send("Invalid event id."); return null; }
+  const r = await pool.query(
+    `SELECT e.id, e.status, c.hidden, (${KONEC_DOGODKA} <= NOW()) AS ended
+       FROM events e JOIN clubs c ON c.id = e.club_id
+      WHERE e.id = $1`,
+    [id]
+  );
+  if (r.rows.length === 0 || r.rows[0].status !== "published" || r.rows[0].hidden) {
+    res.status(404).send("Event not found.");
+    return null;
+  }
+  if (r.rows[0].ended) {
+    res.status(409).json({ error: "event_ended", message: "This event has already ended." });
+    return null;
+  }
+  return r.rows[0].id;
+}
+
+app.put("/events/:id/interest", requireAuth, async (req, res) => {
+  try {
+    const id = await veljavenDogodekZaNacrt(req.params.id, res);
+    if (!id) return;
+    await pool.query(
+      "INSERT INTO event_interest (event_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+      [id, req.user.userId]
+    );
+    return res.status(200).json({ plan: await mojNacrtNaDogodku(id, req.user.userId) });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+app.delete("/events/:id/interest", requireAuth, async (req, res) => {
+  try {
+    if (!/^\d+$/.test(String(req.params.id))) return res.status(400).send("Invalid event id.");
+    await pool.query("DELETE FROM event_interest WHERE event_id=$1 AND user_id=$2", [req.params.id, req.user.userId]);
+    return res.status(200).json({ plan: await mojNacrtNaDogodku(req.params.id, req.user.userId) });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
   }
 });
 
@@ -3140,9 +3242,11 @@ app.get("/me/friends", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
-// GET /me/friends/plans -> { events: [ {dogodek..., club_name, club_logo_url, friends: [{id, username, avatar_url}]} ] }
-// Prihajajoči objavljeni dogodki, na katere ima vsaj en prijatelj VELJAVNO vstopnico —
+// GET /me/friends/plans -> { events: [ {dogodek..., club_name, club_logo_url, friends: [...], interested: [...], my_plan} ] }
+// Prihajajoči objavljeni dogodki, na katere ima vsaj en prijatelj VELJAVNO vstopnico (polje
+// "friends", nespremenjeno = "going") ALI zanimanje (novo polje "interested", migracija 020) —
 // samo prijatelji, ki imajo vklopljeno share_plans_with_friends (zasebnost, invarianta I11).
+// Prijatelj z vstopnico IN zanimanjem je samo v "friends" (going), ne v obeh.
 app.get("/me/friends/plans", requireAuth, async (req, res) => {
   try {
     const r = await pool.query(
@@ -3161,15 +3265,74 @@ app.get("/me/friends/plans", requireAuth, async (req, res) => {
            FROM gredo g JOIN users u ON u.id = g.uid
           WHERE u.share_plans_with_friends
           GROUP BY g.event_id
+       ), zanimajo AS (
+         -- Zanimanje (event_interest, 020) prijateljev, ki za ta dogodek NIMAJO ze vstopnice.
+         SELECT ei.event_id, ei.user_id AS uid
+           FROM event_interest ei
+          WHERE ei.user_id IN (SELECT id FROM pr)
+            AND NOT EXISTS (SELECT 1 FROM gredo g WHERE g.event_id = ei.event_id AND g.uid = ei.user_id)
+       ), po_dogodku_zanimanje AS (
+         SELECT z.event_id,
+                jsonb_agg(jsonb_build_object('id', u.id, 'username', u.username, 'avatar_url', u.avatar_url) ORDER BY LOWER(u.username)) AS interested
+           FROM zanimajo z JOIN users u ON u.id = z.uid
+          WHERE u.share_plans_with_friends
+          GROUP BY z.event_id
+       ), dogodki AS (
+         SELECT event_id FROM po_dogodku
+         UNION
+         SELECT event_id FROM po_dogodku_zanimanje
        )
-       SELECT e.*, cl.name AS club_name, cl.logo_url AS club_logo_url, p.friends
-         FROM (SELECT ${STOLPCI_DOGODKA} FROM events) e
-         JOIN po_dogodku p ON p.event_id = e.id
+       SELECT e.*, cl.name AS club_name, cl.logo_url AS club_logo_url,
+              COALESCE(p.friends, '[]'::jsonb) AS friends,
+              COALESCE(z.interested, '[]'::jsonb) AS interested,
+              CASE
+                WHEN EXISTS (SELECT 1 FROM tickets t JOIN orders o ON o.id = t.order_id
+                              WHERE t.event_id = e.id AND t.status = 'valid' AND o.status IN ('paid','partially_refunded')
+                                AND ${IMETNIK} = $1) THEN 'going'
+                WHEN EXISTS (SELECT 1 FROM event_interest ei2 WHERE ei2.event_id = e.id AND ei2.user_id = $1) THEN 'interested'
+                ELSE NULL
+              END AS my_plan
+         FROM dogodki d
+         JOIN (SELECT ${STOLPCI_DOGODKA} FROM events) e ON e.id = d.event_id
+         LEFT JOIN po_dogodku p ON p.event_id = e.id
+         LEFT JOIN po_dogodku_zanimanje z ON z.event_id = e.id
          JOIN clubs cl ON cl.id = e.club_id
         WHERE COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') > NOW()
           AND e.status = 'published' AND NOT cl.hidden
         ORDER BY e.start_at ASC
         LIMIT 50`,
+      [req.user.userId]
+    );
+    return res.json({ events: r.rows });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// GET /me/plans -> { events: [ {dogodek..., club_name, club_logo_url, my_plan} ] }
+// Moji lastni prihajajoci dogodki (going ali interested), za profil ("I'm in" + vstopnice).
+app.get("/me/plans", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `WITH going AS (
+         SELECT DISTINCT t.event_id
+           FROM tickets t JOIN orders o ON o.id = t.order_id
+          WHERE t.status = 'valid' AND o.status IN ('paid','partially_refunded') AND ${IMETNIK} = $1
+       ), interested AS (
+         SELECT event_id FROM event_interest WHERE user_id = $1
+       ), moji AS (
+         SELECT event_id FROM going
+         UNION
+         SELECT event_id FROM interested
+       )
+       SELECT e.*, cl.name AS club_name, cl.logo_url AS club_logo_url,
+              CASE WHEN g.event_id IS NOT NULL THEN 'going' ELSE 'interested' END AS my_plan
+         FROM moji m
+         JOIN (SELECT ${STOLPCI_DOGODKA} FROM events) e ON e.id = m.event_id
+         JOIN clubs cl ON cl.id = e.club_id
+         LEFT JOIN going g ON g.event_id = e.id
+        WHERE COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') > NOW()
+          AND e.status = 'published' AND NOT cl.hidden
+        ORDER BY e.start_at ASC
+        LIMIT 200`,
       [req.user.userId]
     );
     return res.json({ events: r.rows });
