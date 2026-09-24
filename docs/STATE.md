@@ -178,6 +178,12 @@ Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta r
   spodnja meja), napis moder. »View« pri Your friends' plans odpre prenovljen zaslon: gumbi All + po en na prijatelja
   (izbrani moder), kartica z zatemnjenim plakatom, avatarji, »Join them« (nakup) in »View event«. My friends: moder gumb
   »Add friends« odpre list z iskanjem (iskanje ni več na seznamu); poslana prošnja = obrobljen pil »Requested«, dotik prekliče.
+- **24. 9. 2026 (zaprto, outly_webpage PR #7, Martin dal DA in preveril v brskalniku):** pogoji **1.1** (prenos vstopnice,
+  veljajo tudi za splet), politika zasebnosti **2.3** SL+EN (I'm in, priljubljeni, sledenje klubom, ekipa kluba, waitlist/tocke,
+  piskotki; razdelek »Podatki v App Storu« umaknjen — tabela je v git zgodovini outly_webpage, commit 3b4675d). Registracija na
+  spletu ima obvezno kljukico 15+ in pogoji, v Supabase `user_metadata` gresta `terms_version` in `terms_accepted_at`
+  (registracija v aplikaciji tega ne zapise). **Nova sprememba pogojev = dvigni `TERMS_VERSION` v `auth.js`.**
+  Nova funkcija, ki zbira ali kaze osebne podatke (kot I'm in), = popravek politike zasebnosti, sicer spet zaostane.
 - **22. 9. 2026 (zaprto):** politika zasebnosti **2.2** (razdelek »Prijatelji v aplikaciji«, podlagi prijatelji/načrti, vrstica za
   App Store) je **živa na outly.si/privacy-app** — outly_webpage PR #6, Martin dal DA v pogovoru 22. 9. Stikalo za deljenje
   načrtov ostane privzeto vklopljeno. Past: iz oblaka outly.si ni dosegljiv (egress), vsebino strani po objavi preveri Martin
@@ -236,10 +242,9 @@ Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta r
   subagent + prevod za simulator na PR-ju (workflow `Gradnja iOS`, ~2 min). Enako velja za `outly.si` in
   `onrender.com` (glej past zgoraj) — spletno stran po objavi preveri Martin v brskalniku, backend prek ročnega zagona
   workflowa **Nadzor produkcije** (`workflow_dispatch` na `main`; 20. 9. zagon 29 zelen po docs mergu #33).
-- **Headless preverjanje outly.si v oblaku** (20. 9.): `cdn.jsdelivr.net` (supabase-js UMD) ni dosegljiv, zato
-  `window.supabase` ne obstaja in `auth.js` tiho izpusti ploščo — v Playwright testu je treba **stubati tudi CDN
-  skript** (minimalen `window.supabase.createClient` z `auth.getSession`, `onAuthStateChange`, `rpc`, verižni `from()`),
-  ne samo REST. Playwright: `npm i playwright` v scratchpadu + `executablePath` `/opt/pw-browsers/chromium-*/chrome-linux/chrome`.
+- **Headless preverjanje outly.si v oblaku** (20. 9., posodobljeno 24. 9.): od outly_webpage PR #7 se supabase-js in pisava
+  Inter strezeta z outly.si (`vendor/`, `assets/fonts/`), ne z jsDelivr/Google — stub CDN skripta ni vec potreben, stubati je
+  treba samo Supabase REST/Auth (`*.supabase.co`). Playwright: `npm i playwright` v scratchpadu + `executablePath` `/opt/pw-browsers/chromium-*/chrome-linux/chrome`.
   Skript je zapisan kot skill (`.claude/skills/headless-preverjanje-strani`, čaka `odobril-martin`).
 - **Splet: razred `.points` je kartica točk v profilu** (`auth.js`, centrirana, obrobljena) — razdelek na strani je
   `pointsSection` / `#points`. Nov razdelek s tem razredom bi podedoval centriranje.
