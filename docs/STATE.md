@@ -72,6 +72,13 @@ poleg tistih, ki dogodek ze imajo vstopnico ("going"). Backend (migracija 020, `
   krozno razkritje Home <-> Search/Profile, gumb->krog->kljukica pri prenosu (z vprasanjem) in nakupu (brez), sij na enem
   gumbu na zaslon, "I'm in" na dogodku, Friends plans kot vrstice po dogodku, View z Going/Interested. **Na napravi se NI
   potrjeno nic od tega** — seznam za Martina je v opisu PR-ja #22 (7 tock, tudi slovenski prevodi "gresta", "jih zanima").
+- **24. 9. (iOS PR #23, v masterju -> TestFlight):** Martin je build s #22 pregledal in obrnil tri stvari: (1) krozno razkritje
+  zavihkov zamenjano s prehodom "kot Revolut" (Home se zamegli na mestu, Profile/Search zraste iz avatarja oz. polja Where to?
+  40 % -> 100 %, nazaj se skrci; Search <-> Profile navaden preklop; mehanizem: env vrednost `vstopZavihka` v `.outlyOzadje()`,
+  `VstopZavihka.swift`); (2) Friends plans nazaj s krogi prijateljev, vse 15 % manjse (krogi kazejo going = moder rob in
+  interested = bel rob; View z Going/Interested ostane); (3) srcki/Liked events odstranjeni iz UI ("I'm in" jih je prevzel),
+  na Home razdelek **Going events** (`GET /me/plans`). Backend pot za priljubljene (`event_favorites`) ostane, aplikacija je
+  ne klice vec — kandidat za odstranitev po enem TestFlight ciklu. Na napravi se NI potrjeno.
 - Odlocitve Martina 23. 9. (pogovor): nakup BREZ vprasanja pred placilom, prenos Z vprasanjem; moder gumb z belo kljukico
   (ne bel z modro); sij samo na gumbih, ki prinasajo nakup ali rast (Buy, Join them, Follow, Invite more, prijava), nikoli na
   opravilnih gumbih. Odprto iz iste seje (ni izbrano, ostane za naslednji krog): seznam piljenja P1-P21 (hrosci "Free" pri
