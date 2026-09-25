@@ -35,6 +35,12 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
 ## Kje smo (25. 9. 2026, "Check activity" na plosci)
 
+- **Stanje 25. 9. ~22:15 UTC:** backend PR #61 (migracija 021) je v produkciji (Nadzor #74 zelen na `abffc94`); iOS PR #25
+  (prenova nadzorne plosce: graf po obdobjih kot Figma, povzetek 2x2, Check activity, Staff activity s skeni, Event performance
+  max 4 + View all, Recent sales ven, stetje ogledov) zdruzen takoj za njim -> TestFlight. Prej isti dan iOS PR #24 (prehod
+  zavihkov brez cukanja - blur z zive vsebine ven; Home "Interested events" samo z I'm in; Friends plans krogi 57 pt, View
+  nazaj na starega). Na napravi se NI potrjeno; privzeto obdobje grafa "By month" (Martin lahko obrne na By year).
+
 Backend (migracija 021, `_testi/test_aktivnost.js`, 55 testov, vsi zeleni, se NI v produkciji — cakamo na PR/merge):
 
 - Nova tabela `view_counts` (dnevni stevec ogledov, brez osebnih podatkov). `POST /views` (javna, brez zetona,
