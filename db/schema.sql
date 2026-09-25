@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–020, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–021, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -11,12 +11,11 @@
 -- (in ta glava nazaj na vrh). Prejsnja rocna rekonstrukcija je bila zastarela
 -- (ni imela orders/tickets/refresh_tokens/...) — zato zdaj izvoz.
 -- =============================================================================
-
 --
 -- PostgreSQL database dump
 --
 
-\restrict xWNGypMM4FdxxnoCBKU1rUac9KXeJFkigYp7OJ37RsPVx1zteClIyBRCk0OteO1
+\restrict ePcRIC3pBzfKnF9Nd6hAzeMPtujBfRzu97CLEdw7EqcYAbv3b4VM2mquPoS35sM
 
 -- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
@@ -655,6 +654,18 @@ ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
 
 
 --
+-- Name: view_counts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.view_counts (
+    club_id integer NOT NULL,
+    event_id integer,
+    day date NOT NULL,
+    count integer DEFAULT 0 NOT NULL
+);
+
+
+--
 -- Name: club_event_notifications id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -1120,6 +1131,13 @@ CREATE UNIQUE INDEX users_username_lower_key ON public.users USING btree (lower(
 
 
 --
+-- Name: view_counts_uniq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX view_counts_uniq ON public.view_counts USING btree (club_id, COALESCE(event_id, 0), day);
+
+
+--
 -- Name: orders orders_rezerviraj; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -1398,8 +1416,24 @@ ALTER TABLE ONLY public.tickets
 
 
 --
+-- Name: view_counts view_counts_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.view_counts
+    ADD CONSTRAINT view_counts_club_id_fkey FOREIGN KEY (club_id) REFERENCES public.clubs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: view_counts view_counts_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.view_counts
+    ADD CONSTRAINT view_counts_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE CASCADE;
+
+
+--
 -- PostgreSQL database dump complete
 --
 
-\unrestrict xWNGypMM4FdxxnoCBKU1rUac9KXeJFkigYp7OJ37RsPVx1zteClIyBRCk0OteO1
+\unrestrict ePcRIC3pBzfKnF9Nd6hAzeMPtujBfRzu97CLEdw7EqcYAbv3b4VM2mquPoS35sM
 

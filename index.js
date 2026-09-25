@@ -1247,7 +1247,9 @@ const STOLPCI_DOGODKA = `
           WHEN ${KONEC_DOGODKA} <= NOW() THEN 'ended'
           WHEN start_at > NOW() THEN 'upcoming'
           ELSE 'live'
-        END AS lifecycle`;
+        END AS lifecycle,
+        -- Koliko oseb je oznacilo "I'm in" (migracija 020). DODANO polje.
+        (SELECT COUNT(*)::int FROM event_interest ei WHERE ei.event_id = events.id) AS interested_count`;
 
 // Vsi dogodki lastnega kluba, tudi osnutki in odpovedani. Samo za lastnika.
 app.get("/business/events", requireAuth, requireClub(), async (req, res) => {
@@ -1460,6 +1462,49 @@ app.delete("/events/:id/interest", requireAuth, async (req, res) => {
     if (!/^\d+$/.test(String(req.params.id))) return res.status(400).send("Invalid event id.");
     await pool.query("DELETE FROM event_interest WHERE event_id=$1 AND user_id=$2", [req.params.id, req.user.userId]);
     return res.status(200).json({ plan: await mojNacrtNaDogodku(req.params.id, req.user.userId) });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server error.");
+  }
+});
+
+// ---------------------------
+// OGLEDI / "Check activity" (migracija 021)
+// ---------------------------
+// Javna pot brez zetona (kliknejo tudi neprijavljeni obiskovalci) — omejena po IP, da ene
+// naprave ne moreta napihniti stevila. GDPR: view_counts nima IP-ja, uporabnika ne casa
+// posameznega klika, samo agregiran dnevni stevec. Neveljaven id -> 204 tiho (aplikacija
+// klic po odprtju zaslona sprozi "fire and forget" in ne sme dobiti napake, ki bi jo prikazala).
+app.post("/views", omeji({ kljuc: "ogled", najvec: 600, oknoSekund: 3600 }), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const eventId = b.event_id !== undefined ? celoId(b.event_id) : null;
+    const clubIdVhod = b.club_id !== undefined ? celoId(b.club_id) : null;
+    if (!eventId && !clubIdVhod) return res.status(204).end();
+
+    let clubId = null;
+    let dogodekId = null;
+    if (eventId) {
+      const r = await pool.query(
+        `SELECT e.id, e.club_id FROM events e JOIN clubs c ON c.id = e.club_id
+          WHERE e.id = $1 AND c.hidden = FALSE`,
+        [eventId]
+      );
+      if (r.rows.length === 0) return res.status(204).end();
+      clubId = r.rows[0].club_id;
+      dogodekId = r.rows[0].id;
+    } else {
+      const r = await pool.query("SELECT id FROM clubs WHERE id=$1 AND hidden = FALSE", [clubIdVhod]);
+      if (r.rows.length === 0) return res.status(204).end();
+      clubId = r.rows[0].id;
+    }
+
+    await pool.query(
+      `INSERT INTO view_counts (club_id, event_id, day, count) VALUES ($1, $2, CURRENT_DATE, 1)
+       ON CONFLICT (club_id, COALESCE(event_id, 0), day) DO UPDATE SET count = view_counts.count + 1`,
+      [clubId, dogodekId]
+    );
+    return res.status(204).end();
   } catch (e) {
     console.error(e);
     return res.status(500).send("Server error.");
@@ -2726,11 +2771,42 @@ async function mojKlubId(req) {
 }
 
 // GET /business/sales — povzetek prodaje lastnega kluba, po dogodkih, zadnja naročila.
+// Graf prodaje po obdobjih (Martin, 25. 9. 2026), poleg obstojecega sales_by_day (14 dni,
+// star odjemalec ostane nespremenjen). week/month = dnevni kosi, year = mesecni kosi —
+// vsi koraki vkljuceni tudi brez prodaje (0), da graf ne preskakuje dni/mesecev.
+async function serijaProdaje(klub, range) {
+  if (range === "year") {
+    const r = await pool.query(
+      `SELECT to_char(d.mesec, 'YYYY-MM') AS bucket,
+              COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
+              COALESCE(SUM(o.quantity),0)::int AS tickets
+         FROM generate_series(date_trunc('month', CURRENT_DATE - INTERVAL '11 months'),
+                               date_trunc('month', CURRENT_DATE), '1 month') AS d(mesec)
+         LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded')
+              AND o.created_at >= d.mesec AND o.created_at < d.mesec + INTERVAL '1 month'
+        GROUP BY d.mesec ORDER BY d.mesec`, [klub]
+    );
+    return r.rows;
+  }
+  const dni = range === "month" ? 29 : 6; // month: zadnjih 30 dni, week: zadnjih 7 dni.
+  const r = await pool.query(
+    `SELECT to_char(d.dan, 'YYYY-MM-DD') AS bucket,
+            COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
+            COALESCE(SUM(o.quantity),0)::int AS tickets
+       FROM generate_series((CURRENT_DATE - $2 * INTERVAL '1 day')::date, CURRENT_DATE, '1 day') AS d(dan)
+       LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded')
+            AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
+      GROUP BY d.dan ORDER BY d.dan`, [klub, dni]
+  );
+  return r.rows;
+}
+
 app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
-    const [povzetek, poDogodkih, zadnja, poDnevih] = await Promise.all([
+    const range = ["week", "month", "year"].includes(req.query.range) ? req.query.range : null;
+    const [povzetek, poDogodkih, zadnja, poDnevih, serija] = await Promise.all([
       pool.query(
         `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
@@ -2745,7 +2821,9 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
         `SELECT e.id, e.title, e.start_at, e.poster_url, e.status, e.ticket_price_cents, e.capacity, e.sold_count,
                 COALESCE(SUM(o.total_cents) FILTER (WHERE o.status IN ('paid','partially_refunded')),0)::int AS gross_cents,
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.status IN ('paid','partially_refunded')),0)::int AS tickets_sold,
-                (SELECT COUNT(*)::int FROM tickets t WHERE t.event_id = e.id AND t.status = 'used') AS checked_in
+                (SELECT COUNT(*)::int FROM tickets t WHERE t.event_id = e.id AND t.status = 'used') AS checked_in,
+                -- Koliko oseb je oznacilo "I'm in" na tem dogodku (migracija 020). DODANO polje.
+                (SELECT COUNT(*)::int FROM event_interest ei WHERE ei.event_id = e.id) AS interested_count
          FROM events e LEFT JOIN orders o ON o.event_id = e.id
          WHERE e.club_id = $1 GROUP BY e.id ORDER BY e.start_at DESC LIMIT 100`, [klub]),
       pool.query(
@@ -2761,15 +2839,19 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
          LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded')
               AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
          GROUP BY d.dan ORDER BY d.dan`, [klub]),
+      // Novo, samo ce je ?range= navedеn — DODANO polje, star odjemalec (brez range) ga ne dobi.
+      range ? serijaProdaje(klub, range) : Promise.resolve(null),
     ]);
-    return res.json({
+    const odgovor = {
       mode: testniNacinPlacil() ? "test" : "live",
       fee_percent: PROVIZIJA_ODSTOTEK,
       summary: povzetek.rows[0],
       events: poDogodkih.rows,
       recent_orders: zadnja.rows,
       sales_by_day: poDnevih.rows,
-    });
+    };
+    if (range) odgovor.series = serija;
+    return res.json(odgovor);
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
@@ -3483,6 +3565,88 @@ app.delete("/business/team/:userId", requireAuth, requireClub("owner", "manager"
     }
     await pool.query("DELETE FROM club_members WHERE club_id=$1 AND user_id=$2", [klub, uid]);
     return res.json(await odgovorEkipe(req, klub));
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// ---------------------------
+// "Check activity" na nadzorni plosci (migracija 021, Martin 25. 9. 2026)
+// ---------------------------
+// GET /business/activity — kliki na profil/dogodke (view_counts), sledilci, aktivnost ekipe
+// (skeni po clanu). Samo lastnik/manager; vratar tuje stevilke skenov ne vidi (I5).
+app.get("/business/activity", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  try {
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    const [klikiProfil, klikiDogodki, sledilci, ekipa] = await Promise.all([
+      pool.query(
+        `SELECT COALESCE(SUM(count),0)::int AS vsi,
+                COALESCE(SUM(count) FILTER (WHERE day > CURRENT_DATE - INTERVAL '7 days'),0)::int AS n7d
+         FROM view_counts WHERE club_id = $1 AND event_id IS NULL`, [klub]),
+      pool.query(
+        `SELECT COALESCE(SUM(count),0)::int AS vsi,
+                COALESCE(SUM(count) FILTER (WHERE day > CURRENT_DATE - INTERVAL '7 days'),0)::int AS n7d
+         FROM view_counts WHERE club_id = $1 AND event_id IS NOT NULL`, [klub]),
+      pool.query(
+        `SELECT COUNT(*)::int AS vsi,
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days')::int AS n7d
+         FROM club_follows WHERE club_id = $1`, [klub]),
+      pool.query(
+        `WITH ekipa AS (
+           SELECT u.id AS user_id, u.username, u.avatar_url, 'owner' AS role
+             FROM clubs c JOIN users u ON u.id = c.owner_user_id WHERE c.id = $1
+           UNION ALL
+           SELECT u.id, u.username, u.avatar_url, m.role
+             FROM club_members m JOIN users u ON u.id = m.user_id WHERE m.club_id = $1
+         )
+         SELECT e.user_id AS id, e.username, e.avatar_url, e.role,
+                COALESCE(s.scans, 0)::int AS scans,
+                COALESCE(s.scans_7d, 0)::int AS scans_7d
+           FROM ekipa e
+           LEFT JOIN (
+             SELECT t.used_by_user_id AS uid, COUNT(*)::int AS scans,
+                    COUNT(*) FILTER (WHERE t.used_at > NOW() - INTERVAL '7 days')::int AS scans_7d
+               FROM tickets t JOIN events ev ON ev.id = t.event_id
+              WHERE ev.club_id = $1 AND t.status = 'used'
+              GROUP BY t.used_by_user_id
+           ) s ON s.uid = e.user_id
+          ORDER BY scans DESC, e.username`, [klub]
+      ),
+    ]);
+    return res.json({
+      clicks_profile: klikiProfil.rows[0].vsi,
+      clicks_profile_7d: klikiProfil.rows[0].n7d,
+      clicks_events: klikiDogodki.rows[0].vsi,
+      clicks_events_7d: klikiDogodki.rows[0].n7d,
+      followers_count: sledilci.rows[0].vsi,
+      followers_new_7d: sledilci.rows[0].n7d,
+      staff: ekipa.rows,
+    });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// GET /business/team/:userId/scans — po dogodkih, koliko je ta clan ekipe skeniral (samo
+// dogodki z vsaj enim skenom). 404, ce oseba ni v ekipi tega kluba (ne razkrivamo obstoja).
+app.get("/business/team/:userId/scans", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  try {
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    const uid = celoId(req.params.userId);
+    if (!uid) return res.status(400).send("Invalid user id.");
+    const clan = await pool.query(
+      `SELECT 1 FROM clubs WHERE id = $1 AND owner_user_id = $2
+       UNION ALL
+       SELECT 1 FROM club_members WHERE club_id = $1 AND user_id = $2`,
+      [klub, uid]
+    );
+    if (clan.rows.length === 0) return res.status(404).send("Member not found.");
+    const r = await pool.query(
+      `SELECT e.id, e.title, e.start_at, e.poster_url, COUNT(*)::int AS scans
+         FROM tickets t JOIN events e ON e.id = t.event_id
+        WHERE e.club_id = $1 AND t.used_by_user_id = $2 AND t.status = 'used'
+        GROUP BY e.id HAVING COUNT(*) > 0 ORDER BY e.start_at DESC`,
+      [klub, uid]
+    );
+    return res.json({ events: r.rows });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 

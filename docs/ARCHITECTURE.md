@@ -39,6 +39,17 @@ outly.si (statika, Cloudflare Pages) ──▶ Supabase (Auth + waitlist RPC)
                                      └──▶ Express /me, /creator-applications (isti žeton kot aplikacija)
 ```
 
+## Check activity (migracija 021, 25. 9. 2026)
+
+`POST /views` (javna, brez zetona, omeji 600/h po IP) steje ogled profila kluba (`event_id` NULL) ali
+dogodka (`club_id` se prepise iz dogodka) v `view_counts` — en agregiran stevec na (klub, dogodek-ali-profil,
+dan). **Tabela ne vsebuje IP-ja, uporabnika ali casa posameznega klika — samo stevilko.** Neveljaven id ali
+skrit klub -> 204 tiho, brez zapisa. `GET /business/activity` (owner/manager) sesteje te stevce (skupaj in
+zadnjih 7 dni) ter doda sledilce in aktivnost ekipe (skeni po clanu, iz `tickets.used_by_user_id`).
+`GET /business/team/:userId/scans` vrne dogodke, na katerih je ta clan skeniral. `GET /business/sales`
+dobi neobvezen `?range=week|month|year` -> `series` (dnevni/mesecni kosi grafa prodaje) in
+`events[].interested_count` (iz `event_interest`, migracija 020); brez `range` je odgovor nespremenjen.
+
 ## Poslovne invariante
 
 Stvari, ki se ne smejo zgoditi NIKOLI. Vsaka ima mehanizem v kodi, ki jo zagotavlja, in test, ki pade, če

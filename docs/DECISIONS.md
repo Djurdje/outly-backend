@@ -197,6 +197,15 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   `GET /me/plans`. Zasebnost enaka kot pri "going" (invarianta I11): samo prijatelji s
   `share_plans_with_friends = true`. Odlocil Martin (v pogovoru, 23. 9.).
   *vir/dokaz*: Martinov pogovor 23. 9., `_testi/test_zanimanje.js` (38 testov) · *velja dokler*: — · *nadomeščena z*: —
+- 2026-09-25: **"Check activity" na nadzorni plosci kluba.** Nova tabela `view_counts` (migracija 021):
+  agregiran dnevni stevec klikov na profil kluba in na dogodke, brez IP-ja, brez uporabnika, brez casa
+  posameznega klika — GDPR: samo stevilka. `POST /views` je javna pot (brez zetona, omejena po IP na
+  600/h), neveljaven ali skrit cilj tiho vrne 204 brez zapisa. `GET /business/activity` (owner/manager):
+  kliki na profil/dogodke (skupaj in zadnjih 7 dni), sledilci in aktivnost ekipe (skeni po clanu).
+  `GET /business/team/:userId/scans`: skeni clana po dogodkih. `GET /business/sales` dobi neobvezen
+  `?range=week|month|year` -> polje `series` (dnevni/mesecni kosi, vsi vkljuceni tudi z 0) in `events[].interested_count`;
+  brez `range` je odgovor nespremenjen (star odjemalec). Odlocil Martin (v pogovoru, 25. 9.).
+  *vir/dokaz*: Martinov pogovor 25. 9., `_testi/test_aktivnost.js` (55 testov) · *velja dokler*: — · *nadomeščena z*: —
 - 2026-09-22: **Stran kluba kaže slideshow, ne pasice.** Pasica (`banner_url`) se iz urejanja kluba umakne; stolpec v bazi
   in polje v odgovoru **ostaneta** (stari odjemalci, obstoječi klubi brez galerije še naprej vidijo pasico prek
   `APIClub.slideshowUrls`). Novi klubi nalagajo samo slideshow (do 3 slike). Odločil Martin (v pogovoru, 22. 9.).
