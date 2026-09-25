@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-23 ("I'm in" / zanimanje za dogodek).
+Zadnja posodobitev: 2026-09-25 ("Check activity" na nadzorni plosci kluba).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -32,6 +32,29 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
+
+## Kje smo (25. 9. 2026, "Check activity" na plosci)
+
+Backend (migracija 021, `_testi/test_aktivnost.js`, 55 testov, vsi zeleni, se NI v produkciji — cakamo na PR/merge):
+
+- Nova tabela `view_counts` (dnevni stevec ogledov, brez osebnih podatkov). `POST /views` (javna, brez zetona,
+  omeji 600/h po IP): `{ club_id }` ali `{ event_id }` (club_id se pri dogodku vzame iz njega); neveljaven id
+  ali skrit klub -> 204 tiho, brez zapisa.
+- `GET /business/activity` (owner/manager): kliki profil/dogodki (skupaj + 7d), sledilci (+7d novi), staff
+  s skeni po clanu (owner + club_members, urejeno po scans DESC).
+- `GET /business/team/:userId/scans`: dogodki, na katerih je ta clan skeniral (samo z >0 skeni). 404, ce
+  oseba ni v ekipi kluba.
+- `GET /business/sales?range=week|month|year`: novo polje `series` (week/month = dnevni kosi zadnjih 7/30
+  dni, year = mesecni kosi zadnjih 12 mesecev, vsi kosi vkljuceni tudi z 0). Brez `range` odgovor NESPREMENJEN
+  (`sales_by_day` ostane, kot je bil). `events[].interested_count` (iz `event_interest`, migracija 020) je
+  dodano vedno, ne samo z `range`.
+- **Predpostavka agenta:** ogledi se stejejo od dneva vklopa naprej — `view_counts` je prazna tabela do
+  produkcijskega deploya te migracije, torej bo `clicks_profile`/`clicks_events` na zacetku 0 za vse klube,
+  ne glede na dejansko starost profila. To ni hrošc, samo posledica tega, da prej ni bilo stevca.
+- iOS/spletna stran: nova polja so samo dodajanje (nova pot `/views`, nova polja `series`, `interested_count`,
+  nove poti `/business/activity` in `/business/team/:userId/scans`) — obstojeci odjemalci jih preprosto ne
+  klicejo. Ko bo klub-nadzorna plosca na strani ali v aplikaciji dobila graf/"Check activity", jo je treba
+  vezati na te tri poti (glej `docs/ARCHITECTURE.md`, razdelek »Check activity«).
 
 ## Kje smo (23. 9. 2026, "I'm in" / zanimanje za dogodek)
 
