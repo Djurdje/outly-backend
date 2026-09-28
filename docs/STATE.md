@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-25 ("Check activity" na nadzorni plosci kluba).
+Zadnja posodobitev: 2026-09-28 (izmisljeni demo klubi, migracija 022).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -328,10 +328,14 @@ Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta r
 
 ## Kar nobeno orodje ne ve
 
-- **Slike klubov v produkciji so ZA DEMO** (vzete s spletnih strani klubov). Pred pravim zagonom jih morajo
-  zamenjati slike, ki jih dajo klubi sami — z dovoljenjem. Tega ne pove noben test.
-- Demo podatki: 5 klubov (Cirkus, K4, Cvetličarna, Square, Nebo), ~15 dogodkov, kupec `gost@outly.si`,
-  admin `martin…`, servisni `agent@outly.si`.
+- **Demo klubi so od migracije 022 IZMISLJENI** (Martin, 28. 9. 2026): HALOGEN (prej K4), Nocturne (prej Nebo),
+  Bazen (prej Square), Orbita (prej Cirkus), Kovačnica (prej Cvetličarna) — isti `id`, lastnik, ekipa in sledilci,
+  po 3 dogodki (okt.–nov. 2026). Slike, videi in plakati so generirani in gostijo na `https://outly.si/demo/<klub>/`
+  (repo `outly_webpage`, mapa `demo/`) — **brisanje te mape podre slike v aplikaciji**. Instagram, spletna stran in
+  telefon so prazni namerno (izmisljen naslov bi kazal na tuj pravi racun); e-naslovi `…@demo.outly.si` ne dostavijo.
+  Stari dogodki z vstopnicami so ostali (RESTRICT) z naslovom »<klub> Session«. Po 14. 11. 2026 demo klubi nimajo
+  vec prihajajocih dogodkov — nove doda klub v aplikaciji ali nova migracija.
+- Demo podatki: 5 zgornjih klubov, kupec `gost@outly.si`, admin `martin…`, servisni `agent@outly.si`.
 - **»Dela« pomeni: zelen Actions IN Martin preveril na napravi.** Dokler drugega ni, se piše
   »preverjeno s parse + pregledom tipov, na napravi ne«. Kaj čaka na napravo, je v #18.
 
