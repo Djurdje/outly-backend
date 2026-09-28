@@ -1356,6 +1356,56 @@ BEGIN
 END $$;
 
 
+-- 023_logotipi_demo_klubov.sql
+-- Logotipi demo klubov (Martin, 28. 9. 2026): klubi iz migracije 022 dobijo svoje logotipe
+-- namesto slik pravih klubov. Slike gostuje outly.si (repo outly_webpage, assets/clubs/*.jpg,
+-- Cloudflare Pages). Po imenu kluba; klubi z drugim imenom ostanejo nespremenjeni.
+-- Na prazni bazi ne naredi nicesar.
+
+
+UPDATE clubs c SET logo_url = v.url
+FROM (VALUES
+  ('Velvet',  'https://outly.si/assets/clubs/velvet.jpg'),
+  ('Nexus',   'https://outly.si/assets/clubs/nexus.jpg'),
+  ('Mirage',  'https://outly.si/assets/clubs/mirage.jpg'),
+  ('Mansion', 'https://outly.si/assets/clubs/mansion.jpg'),
+  ('Olie',    'https://outly.si/assets/clubs/olie.jpg')
+) AS v(ime, url)
+WHERE c.name = v.ime;
+
+
+-- 024_dogodki_velvet.sql
+-- Trije prihajajoci dogodki kluba Velvet s plakati od Martina (28. 9. 2026). Plakati gostujejo
+-- na outly.si (repo outly_webpage, assets/events/*.jpg). Datumi so tisti, ki so natisnjeni na
+-- plakatih (12. 10. 2026, 26. 4. 2027, 21. 6. 2027 ob 22:00 po ljubljanskem casu).
+-- Vstavi samo, ce klub Velvet obstaja in dogodka z istim naslovom se nima (na prazni bazi nic).
+
+
+INSERT INTO events (club_id, title, description, poster_url, start_at, end_at, min_age, genres, status,
+                    ticket_price_cents, currency, capacity, sold_count)
+SELECT c.id, v.naslov, v.opis, v.plakat,
+       v.zacetek AT TIME ZONE 'Europe/Ljubljana',
+       (v.zacetek + INTERVAL '6 hours') AT TIME ZONE 'Europe/Ljubljana',
+       18, v.zanri, 'published', v.cena, 'EUR', v.kapaciteta, 0
+FROM clubs c
+CROSS JOIN (VALUES
+  ('Velvet Nights',
+   'Good music, good people. House, R&B and club classics all night. Line up: Lea More, Marko V., Nina Kay.',
+   'https://outly.si/assets/events/velvet-nights.jpg', TIMESTAMP '2026-10-12 22:00',
+   ARRAY['house', 'rnb'], 1500, 500),
+  ('Crni Cerak - Live koncert',
+   'Live concert of Crni Cerak at Velvet Night Club. Table reservations by phone.',
+   'https://outly.si/assets/events/crni-cerak.jpg', TIMESTAMP '2027-06-21 22:00',
+   ARRAY['rap', 'balkan'], 2500, 600),
+  ('Lumen - Live koncert',
+   'Live concert of Lumen. Support: DJ Raze and DJ Timo.',
+   'https://outly.si/assets/events/lumen.jpg', TIMESTAMP '2027-04-26 22:00',
+   ARRAY['pop', 'balkan'], 2000, 500)
+) AS v(naslov, opis, plakat, zacetek, zanri, cena, kapaciteta)
+WHERE c.name = 'Velvet'
+  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.club_id = c.id AND e.title = v.naslov);
+
+
 -- =============================================================================
 -- Vpis v evidenco
 -- =============================================================================
@@ -1382,7 +1432,9 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('019_sledenje_kluba_in_posnetek.sql', 'e380b074b039b2ba'),
     ('020_zanimanje_za_dogodek.sql', '906b6071fb3c3151'),
     ('021_ogledi.sql', 'a24647735231d9f6'),
-    ('022_demo_klubi.sql', 'dc0d8adf9b16a53d')
+    ('022_demo_klubi.sql', 'dc0d8adf9b16a53d'),
+    ('023_logotipi_demo_klubov.sql', '296ae1e700e67adb'),
+    ('024_dogodki_velvet.sql', '6b94fdf7df63dbcc')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
