@@ -334,7 +334,9 @@ Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta r
   (prej Cirkus, K4, Cvetličarna, Square, Nebo; Velvet = klub, ki je imel najvec dogodkov). Telefoni `+386 1 620 41 x0` in
   e-naslovi `@example.com` so lazni, naslovi/koordinate izmisljeni v centru Ljubljane. Logotipi so od migracije 023 lastni
   (Martin, 28. 9.; gostuje outly.si `assets/clubs/*.jpg` v repu outly_webpage — **najprej objava slik, nato migracija**).
-  **Galerije in plakati so se vedno slike pravih klubov** — zamenjati jih je treba prek »Edit your page«. Migracija 022 je
+  Velvet ima od migracije 024 se tri prihajajoce dogodke s plakati od Martina (Velvet Nights 12. 10. 2026, Lumen 26. 4. 2027,
+  Crni Cerak 21. 6. 2027; plakati na outly.si `assets/events/`). Na plakatih pise »sobota«, datumi pa so ponedeljki.
+  **Galerije in ostali plakati so se vedno slike pravih klubov** — zamenjati jih je treba prek »Edit your page«. Migracija 022 je
   vsakemu dopolnila dogodke do 3 koncanih + 3 prihajajocih (do 20.–24. 2. 2027, naslov »… @ Ime«). Kupec `gost@outly.si`,
   admin `martin…`, servisni `agent@outly.si`.
 - **»Dela« pomeni: zelen Actions IN Martin preveril na napravi.** Dokler drugega ni, se piše

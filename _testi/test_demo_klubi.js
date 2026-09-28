@@ -32,6 +32,7 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
   .split("\n").filter(v => !/^\s*(BEGIN|COMMIT)\s*;\s*$/i.test(v)).join("\n");
 const SQL = brezTransakcije("022_demo_klubi.sql");
 const SQL_LOGOTIPI = brezTransakcije("023_logotipi_demo_klubov.sql");
+const SQL_VELVET = brezTransakcije("024_dogodki_velvet.sql");
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
@@ -117,6 +118,15 @@ const SQL_LOGOTIPI = brezTransakcije("023_logotipi_demo_klubov.sql");
     assert(logo[ime] === `https://outly.si/assets/clubs/${dat}.jpg`, `${ime}: logotip ${dat}.jpg`, logo[ime]);
   }
   assert(logo["Sesti"] === "https://example.com/star.png", "6. klub ohrani svoj logotip", logo["Sesti"]);
+
+  console.log("\n# Migracija 024: dogodki Velvet s plakati");
+  await pool.query("BEGIN"); await pool.query(SQL_VELVET); await pool.query("COMMIT");
+  await pool.query("BEGIN"); await pool.query(SQL_VELVET); await pool.query("COMMIT");
+  const vd = (await pool.query("SELECT e.title, e.poster_url, e.start_at, e.status, e.genres FROM events e JOIN clubs c ON c.id=e.club_id WHERE c.name='Velvet' AND e.poster_url LIKE 'https://outly.si/assets/events/%' ORDER BY e.start_at")).rows;
+  assert(vd.length === 3, "Velvet ima 3 dogodke s plakati z outly.si (tudi po drugem zagonu)", vd.map(e => e.title));
+  assert(vd.map(e => e.title).join("|") === "Velvet Nights|Lumen - Live koncert|Crni Cerak - Live koncert", "vrstni red po datumu", vd.map(e => e.title));
+  assert(new Date(vd[0].start_at).toISOString() === "2026-10-12T20:00:00.000Z", "Velvet Nights 12. 10. 2026 ob 22:00 CEST", vd[0].start_at);
+  assert(vd.every(e => e.status === "published" && e.genres.every(g => ["house", "rnb", "rap", "balkan", "pop"].includes(g))), "objavljeni, veljavni zanri", vd);
 
   console.log("\n# Javne poti");
   const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
