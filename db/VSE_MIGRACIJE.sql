@@ -1356,6 +1356,24 @@ BEGIN
 END $$;
 
 
+-- 023_logotipi_demo_klubov.sql
+-- Logotipi demo klubov (Martin, 28. 9. 2026): klubi iz migracije 022 dobijo svoje logotipe
+-- namesto slik pravih klubov. Slike gostuje outly.si (repo outly_webpage, assets/clubs/*.jpg,
+-- Cloudflare Pages). Po imenu kluba; klubi z drugim imenom ostanejo nespremenjeni.
+-- Na prazni bazi ne naredi nicesar.
+
+
+UPDATE clubs c SET logo_url = v.url
+FROM (VALUES
+  ('Velvet',  'https://outly.si/assets/clubs/velvet.jpg'),
+  ('Nexus',   'https://outly.si/assets/clubs/nexus.jpg'),
+  ('Mirage',  'https://outly.si/assets/clubs/mirage.jpg'),
+  ('Mansion', 'https://outly.si/assets/clubs/mansion.jpg'),
+  ('Olie',    'https://outly.si/assets/clubs/olie.jpg')
+) AS v(ime, url)
+WHERE c.name = v.ime;
+
+
 -- =============================================================================
 -- Vpis v evidenco
 -- =============================================================================
@@ -1382,7 +1400,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('019_sledenje_kluba_in_posnetek.sql', 'e380b074b039b2ba'),
     ('020_zanimanje_za_dogodek.sql', '906b6071fb3c3151'),
     ('021_ogledi.sql', 'a24647735231d9f6'),
-    ('022_demo_klubi.sql', 'dc0d8adf9b16a53d')
+    ('022_demo_klubi.sql', 'dc0d8adf9b16a53d'),
+    ('023_logotipi_demo_klubov.sql', '296ae1e700e67adb')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

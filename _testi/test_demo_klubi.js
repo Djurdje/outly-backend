@@ -6,6 +6,7 @@
  * obstojeci dogodki, narocila in vstopnice ostanejo. Drugi zagon ne doda nicesar.
  * Zagon (lokalno, PG16, baza z vsemi migracijami):
  *   DATABASE_URL="postgres://postgres:postgres@localhost:5432/outly" node _testi/test_demo_klubi.js
+ * Nato migracija 023: Velvet..Olie dobijo logotip z outly.si/assets/clubs, 6. klub ne.
  * Backend na 3121 (brez prijave - samo javne poti).
  */
 const fs = require("fs");
@@ -27,8 +28,10 @@ async function api(p) {
 }
 
 // Isto kot migrate.js: brez vrstic BEGIN;/COMMIT; (zavijemo sami).
-const SQL = fs.readFileSync(path.join(__dirname, "..", "db", "migracije", "022_demo_klubi.sql"), "utf8")
+const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db", "migracije", ime), "utf8")
   .split("\n").filter(v => !/^\s*(BEGIN|COMMIT)\s*;\s*$/i.test(v)).join("\n");
+const SQL = brezTransakcije("022_demo_klubi.sql");
+const SQL_LOGOTIPI = brezTransakcije("023_logotipi_demo_klubov.sql");
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
@@ -106,6 +109,15 @@ const SQL = fs.readFileSync(path.join(__dirname, "..", "db", "migracije", "022_d
   const n2 = (await pool.query("SELECT COUNT(*)::int AS n FROM events")).rows[0].n;
   assert(n1 === n2, "stevilo dogodkov enako po drugem zagonu", [n1, n2]);
 
+  console.log("\n# Migracija 023: logotipi");
+  await pool.query("UPDATE clubs SET logo_url='https://example.com/star.png'");
+  await pool.query("BEGIN"); await pool.query(SQL_LOGOTIPI); await pool.query("COMMIT");
+  const logo = Object.fromEntries((await pool.query("SELECT name, logo_url FROM clubs")).rows.map(r => [r.name, r.logo_url]));
+  for (const [ime, dat] of [["Velvet", "velvet"], ["Nexus", "nexus"], ["Mirage", "mirage"], ["Mansion", "mansion"], ["Olie", "olie"]]) {
+    assert(logo[ime] === `https://outly.si/assets/clubs/${dat}.jpg`, `${ime}: logotip ${dat}.jpg`, logo[ime]);
+  }
+  assert(logo["Sesti"] === "https://example.com/star.png", "6. klub ohrani svoj logotip", logo["Sesti"]);
+
   console.log("\n# Javne poti");
   const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
@@ -113,6 +125,8 @@ const SQL = fs.readFileSync(path.join(__dirname, "..", "db", "migracije", "022_d
   let r = await api("/clubs");
   const seznam = Array.isArray(r.body) ? r.body : (r.body.clubs || []);
   assert(r.status === 200 && seznam.some(c => c.name === "Velvet" && c.contact_phone === "+386 1 620 41 10"), "GET /clubs vrne Velvet s telefonom", r.status);
+  const velvet = seznam.find(c => c.name === "Velvet") || {};
+  assert((velvet.logo_url ?? velvet.logoUrl) === "https://outly.si/assets/clubs/velvet.jpg", "GET /clubs vrne Velvetov logotip", velvet.logo_url ?? velvet.logoUrl);
   for (const id of [1, 2, 3, 4, 5]) {
     r = await api(`/events?clubId=${id}&popular=true`);
     assert(r.status === 200 && r.body.length === 3, `GET /events?clubId=${id}&popular=true -> 3`, r.body.length);
