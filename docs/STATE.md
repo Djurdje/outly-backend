@@ -330,7 +330,11 @@ Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta r
 
 - **Slike klubov v produkciji so ZA DEMO** (vzete s spletnih strani klubov). Pred pravim zagonom jih morajo
   zamenjati slike, ki jih dajo klubi sami — z dovoljenjem. Tega ne pove noben test.
-- Demo podatki: 5 klubov (Cirkus, K4, Cvetličarna, Square, Nebo), ~15 dogodkov, kupec `gost@outly.si`,
+- Demo podatki: 5 klubov, od migracije 022 (28. 9. 2026) z **izmisljenimi imeni** Velvet, Nexus, Mirage, Mansion, Olie
+  (prej Cirkus, K4, Cvetličarna, Square, Nebo; Velvet = klub, ki je imel najvec dogodkov). Telefoni `+386 1 620 41 x0` in
+  e-naslovi `@example.com` so lazni, naslovi/koordinate izmisljeni v centru Ljubljane. **Logotipi, galerije in plakati so se
+  vedno slike pravih klubov** (npr. logo K4 pod imenom Nexus) — zamenjati jih je treba prek »Edit your page«. Migracija 022 je
+  vsakemu dopolnila dogodke do 3 koncanih + 3 prihajajocih (do 20.–24. 2. 2027, naslov »… @ Ime«). Kupec `gost@outly.si`,
   admin `martin…`, servisni `agent@outly.si`.
 - **»Dela« pomeni: zelen Actions IN Martin preveril na napravi.** Dokler drugega ni, se piše
   »preverjeno s parse + pregledom tipov, na napravi ne«. Kaj čaka na napravo, je v #18.

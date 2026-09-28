@@ -227,3 +227,8 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 - 2026-09-16 (pozneje): **Merge je samodejen.** Od Martinovega ukaza do produkcije brez njegove interakcije: agent odpre PR, počaka na zelen CI,
   PR mergaj, preveri produkcijo. Varovala so CI testi + `qa-reviewer`. Edina izjema: migracije, ki brišejo/spreminjajo produkcijske
   podatke, čakajo Martinov DA. Razlog: Martin hoče upravljati s telefona brez klikanja po GitHubu.
+- 2026-09-28: **Demo klubi dobijo izmisljena imena, ne brisejo se** (Martin). Najprej je narocil brisanje vseh klubov in 5 novih,
+  isti dan preklical: obstojece klube se preimenuje (Velvet = najvec dogodkov, nato Nexus, Mirage, Mansion, Olie), izpolni vse
+  podatke (opis, telefon, naslov v centru LJ, zanr balkan, cenik) in dopolni dogodke do 3 koncanih + 3 prihajajocih. Narocila,
+  vstopnice in obstojeci dogodki ostanejo. Migracija 022. *vir/dokaz*: pogovor 28. 9. 2026. *velja dokler*: pravi klubi ne
+  podpisejo in ne vnesejo svojih podatkov. *nadomescena z*: —
