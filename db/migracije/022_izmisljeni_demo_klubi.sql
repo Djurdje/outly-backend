@@ -166,11 +166,11 @@ Doors 22:00 · 21+ · Smart-casual',
     k_id := NULL;
 
     -- Square -> Bazen
-    SELECT COUNT(*) INTO n FROM clubs WHERE lower(name) LIKE '%square%';
+    SELECT COUNT(*) INTO n FROM clubs WHERE lower(name) ~ '\msquare\M';
     IF n > 1 THEN
         RAISE EXCEPTION '022: ime "Square" ustreza % klubom - ne vem, katerega zamenjati', n;
     END IF;
-    SELECT id INTO k_id FROM clubs WHERE lower(name) LIKE '%square%';
+    SELECT id INTO k_id FROM clubs WHERE lower(name) ~ '\msquare\M';
     IF k_id IS NULL THEN
         RAISE NOTICE '022: klub "Square" ne obstaja - preskocen';
     ELSE
@@ -235,11 +235,11 @@ Doors 23:00 · 18+',
     k_id := NULL;
 
     -- Cirkus -> Orbita
-    SELECT COUNT(*) INTO n FROM clubs WHERE lower(name) LIKE '%cirkus%';
+    SELECT COUNT(*) INTO n FROM clubs WHERE lower(name) ~ '\mcirkus\M';
     IF n > 1 THEN
         RAISE EXCEPTION '022: ime "Cirkus" ustreza % klubom - ne vem, katerega zamenjati', n;
     END IF;
-    SELECT id INTO k_id FROM clubs WHERE lower(name) LIKE '%cirkus%';
+    SELECT id INTO k_id FROM clubs WHERE lower(name) ~ '\mcirkus\M';
     IF k_id IS NULL THEN
         RAISE NOTICE '022: klub "Cirkus" ne obstaja - preskocen';
     ELSE
@@ -293,7 +293,7 @@ Doors 22:00 · 18+ · Free entry before 23:00',
 DJs: Retro Rok · Synthia
 Doors 22:00 · 18+',
              'https://outly.si/demo/orbita/events/neon-80s.jpg',
-             '2026-10-24T22:00:00+02:00', '2026-10-25T05:00:00+02:00', 18, ARRAY['80s', 'pop']::text[], 'published', 1000, 'EUR', 1200),
+             '2026-10-24T22:00:00+02:00', '2026-10-25T05:00:00+01:00', 18, ARRAY['80s', 'pop']::text[], 'published', 1000, 'EUR', 1200),
             (k_id, 'Halloween: Lost in Space', 'Orbita''s Halloween party goes to outer space: costume contest at 01:00, space-themed decor across both rooms and pop hits from the 90s to today.
 
 DJs: DJ Pixel · Retro Rok · Maja Flash
