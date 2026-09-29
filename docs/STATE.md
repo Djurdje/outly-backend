@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-29 (spletna aplikacija, faza 5).
+Zadnja posodobitev: 2026-09-29 (spletna aplikacija, QR skener).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -32,6 +32,18 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
+
+## Kje smo (29. 9. 2026, spletna aplikacija - QR skener vstopnic)
+
+- **outly_webpage PR #18**: skener tudi na spletu (DECISIONS 29. 9., nadomesti "samo iOS"): `/app/business/:klub/scan` za vse
+  vloge, rocni "Check in" pri vstopnicah dogodka. Kamera getUserMedia; dekodiranje BarcodeDetector (Chrome Android) ali jsQR
+  (Safari/Firefox, `vendor/jsqr-1.4.0.mjs`). Testirano v headless Chromiumu s ponarejeno kamero (y4m s QR); **na napravi NI
+  preverjeno** - posebej iPhone Safari (jsQR, hitrost branja) in Android Chrome.
+- **Past:** `POST /business/tickets/scan` ima na spletu casovno mejo 30 s. Ce odgovor ne pride, je strezik vstopnico morda
+  ze vpisal - skener vratarju to pove; ponovni sken vrne ALREADY SCANNED z uro `used_at`. Backend nima idempotentnega skena.
+- **Opomba:** `/business/events/:id/tickets` vrne podpisan `qr` vseh vstopnic vsem vlogam v klubu (iOS enako); splet ga hrani
+  samo v pomnilniku (ni v DOM), rabi ga za rocni "Check in".
+- Osnutek politike zasebnosti posodobljen (kamera za skener) - se vedno caka na Martinov DA.
 
 ## Kje smo (29. 9. 2026, spletna aplikacija - faza 5: PWA, hitrost, dostopnost)
 
