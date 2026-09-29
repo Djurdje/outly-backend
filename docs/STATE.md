@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-29 (spletna aplikacija, faza 1).
+Zadnja posodobitev: 2026-09-29 (spletna aplikacija, faza 3).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -32,6 +32,24 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
+
+## Kje smo (29. 9. 2026, spletna aplikacija - faza 3: zemljevid)
+
+- **outly_webpage PR #15**: `/app/map` (MapLibre GL 5.24 + Protomaps, temni slog), oznake iz `GET /clubs/map`, kartica
+  kluba, moja lokacija na gumb, mini zemljevid na dogodku in klubu; brez WebGL seznam klubov po razdalji. Na napravi NI preverjeno.
+- **Podatki zemljevida so v repu outly_webpage** (`karta/*.pmtiles`, ~40 MB), brez tujih streznikov ploscic:
+  `slovenija.pmtiles` = cela Slovenija do z10 (ceste, kraji), `ljubljana.pmtiles` in `maribor.pmtiles` = ulice z11-15.
+  Izrez iz gradnje Protomaps 20260929 naredi workflow na veji `karta-izrez` (outly_webpage) - `build.protomaps.com` in
+  Geofabrik sta iz oblacnega okolja agenta blokirana, GitHub Actions ju doseze.
+- **Omejitev:** Cloudflare Pages dovoli najvec 25 MiB na datoteko, zato ulic cele Slovenije ni. Klub zunaj LJ/MB se prikaze
+  na z12 (ceste, brez ulic). Ko bo klub drugje: nov izrez mesta (workflow + vnos v `MESTA` v `webapp/js/karta.js`) ali
+  cela Slovenija (~300-500 MB) na **Cloudflare R2** - to vklopi Martin (brezplacno do 10 GB).
+- **Past:** pmtiles bere z HTTP Range (206). Ce streznik vrne 200 s celo datoteko, zemljevid ostane brez ploscic
+  (napaka "content-length exceeding request"). Iz oblaka agenta sta outly.si in *.pages.dev blokirana - Range se preveri
+  z GitHub Actions (zacasna veja `preveri-range` v outly_webpage, curl -r na predogled PR-ja).
+- **Past:** MapLibre 5 nima vec `maplibregl.supported()` - preverba `!supported` je vedno vrnila "ni WebGL". In MapLibrov
+  CSS (nalozen pozneje) prepise `position` platna - pravila zemljevida imajo zato visjo specificnost (`.karta.maplibregl-map`).
+- Pripis "(c) OpenStreetMap" mora ostati viden (ODbL), tudi na mini zemljevidu.
 
 ## Kje smo (29. 9. 2026, spletna aplikacija - faza 2)
 
