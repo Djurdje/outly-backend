@@ -134,6 +134,12 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   stanja; (7) My Account: Language in Notifications pod novim **Preferences** (My preferences, Notifications, Language),
   isti slog kot obstoječi podzasloni. *vir/dokaz*: Martinovo naročilo 20. 9. (točke 1–7), design kanvas (ARCHITECTURE →
   Oblikovanje). *velja dokler*: Martin ne preveri builda 48 na napravi; prehodi z blurom so prvi osumljenec pri težavah.
+- 2026-09-29: **Prehod Home <-> Search/Profile ostane "kot Revolut", a animira posnetke zaslona, ne zive vsebine**
+  (agent, po Martinovi prijavi "steka / 15 fps"). Videz enak (vsebina raste iz polja "Where to?" oz. avatarja, Home se
+  zamegli), izvedba: zamrznjene slike (outly-app #34, #35). Sistemski prehod bi bil vedno gladek, a bi opustil Martinovo
+  izbiro — brez njegovega DA se ne menja. *vir/dokaz*: Martinov posnetek zaslona 29. 9. (casi slicic), Martin na napravi
+  po #34: "veliko bolje" · *velja dokler*: Martin ne rece, da je se vedno premalo gladko (takrat predlagaj sistemski
+  prehod) · *nadomeščena z*: —
 - 2026-09-20: Spletna stran ima razdelek **Points** (»Earn points before launch«) med Preview in Waitlist, po Martinovi
   predlogi plakata; besedilo koristi je Martinovo (glej odločitev o unovčenju točk zgoraj).
 - 2026-09-20: Pravilo »modra samo na glavnem gumbu« se v praksi bere kot **modra je barva poudarka** (aktivni zavihek,

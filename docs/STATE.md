@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-25 ("Check activity" na nadzorni plosci kluba).
+Zadnja posodobitev: 2026-09-29 (tekocnost iOS aplikacije: preklop zavihkov, drsenje, slike).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -32,6 +32,21 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
+
+## Kje smo (29. 9. 2026, tekocnost iOS aplikacije)
+
+- Martin: hiter preklop Home/Search je zamrznil aplikacijo (crn zaslon ~10 s), navigacija "steka". Zdruzeno v `master`
+  (vsak -> TestFlight): outly-app **#31** (preklop zavihka takoj, nov dotik prekine prehod; prej je Search/Profile -> Home
+  cakal na `withAnimation` completion in vsebina je lahko ostala na prosojnosti 0 = crn zaslon), **#32** (odmik drsenja
+  Home ni vec `@State`; predpomnilnik `DateParsing`; `distanceFilter` 100 m; vecji `URLCache`), **#33** (`OutlyAsyncImage`
+  namesto `AsyncImage` povsod; sija v ozadju Home brez `.blur`), **#34** (Home -> Search/Profile animira posnetek cilja,
+  ne zive vsebine), **#35** (posnetek Search/Profile se shrani ob odhodu na Home, naslednji prehod ga uporabi takoj).
+- Martin na napravi (po #34): "ni najbolj smooth, ampak veliko bolje". Po #35 se NI preverjeno na napravi.
+- Diagnoza #35 je iz Martinovega posnetka zaslona (Drive -> ffmpeg -> casi slicic, glej "Kar nobeno orodje ne ve"):
+  od dotika do zacetka rasti je bilo ~200 ms zamrznjenega Home; rast sama ~40 fps.
+- **Krsitev dogovora o macOS minutah:** 29. 9. je bilo 5 merge-ov v `master` (5 TestFlight gradenj) namesto enega na dan
+  (razdelek "Nacin dela"). Razlog: Martin je vsak build sproti preverjal na telefonu in narekoval naslednji korak.
+  Ce se to ponovi, vprasaj Martina, ali naj se vmesni koraki zbirajo na veji.
 
 ## Kje smo (25. 9. 2026, "Check activity" na plosci)
 
@@ -250,6 +265,25 @@ Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta r
 
 ## Znane pasti (aktivne)
 
+- **iOS: `AsyncImage` ne uporabljaj — vedno `OutlyAsyncImage`** (Core/Components, od outly-app #33, 29. 9. 2026). Isti klici
+  (`{ phase in }` ali `{ img in } placeholder: { }`). `AsyncImage` nima pomnilnika dekodiranih slik in plakat v polni
+  locljivosti dekodira na glavni niti ob vsakem pojavu kartice -> zatikanje pri drsenju. `OutlyAsyncImage` pomanjsa na 1200 px
+  v ozadju (ImageIO) in hrani v `NSCache`. Predpomni po URL-ju: slika na istem URL-ju z novo vsebino bi ostala stara —
+  Cloudinary da vsakemu nalaganju nov `public_id`, zato danes ni problema; ce se to spremeni, dodaj URL-ju razlicico.
+- **iOS: vrednosti, ki se spreminjajo vsak frame (drsenje, okvirji, GeometryReader), NE v `@State` velikega pogleda**
+  (outly-app #31/#32). `@State scrollOffset` v `HomeView` je ob vsakem framu drsenja znova izracunal ves domaci zaslon z
+  vsemi seznami; `@State` okvirjev v `MainTabView` je izrisal vse stiri zavihke. Vzorec: referenca brez opazovanja
+  (`IzvoriRazkritja`) ali majhen `ObservableObject`, ki ga opazuje samo podpogled (`DrsenjeHome` -> `HomeOzadje`).
+  `MainTabView` ne sme opazovati `SessionStore` (vsaka objava `me` bi izrisala vse zavihke) — `SessionStore.refreshMe`
+  objavi `me` samo ob spremembi (`Me: Equatable`).
+- **iOS: racunane lastnosti, ki razcleni datum (`APIEvent.startDate`), so klicane tisockrat na izris** (razvrscanje).
+  `DateParsing.parseBackendDate` ima od #32 predpomnilnik; `DateFormatter` ne ustvarjaj v racunani lastnosti — uporabi
+  `DateParsing.oblikovalnik("vzorec")`.
+- **iOS: prehodi med zavihki animirajo SLIKE (posnetke), ne zive vsebine** (#34/#35). Skala/prosojnost cez cel ziv zaslon
+  (UIKit polje, seznam, steklena navigacijska vrstica) je bila na telefonu "kot 15 fps". Posnetek zavihka: `UIWindow.
+  posnetekIzbranegaZavihka` v `MainTabView.swift` (predpostavi, da je `TabView` na `UITabBarController`; ce ni, prehod pade
+  na navaden zabris). Prvi Home -> Search po zagonu (ali po odhodu s Searcha drugam kot na Home) caka ~100 ms na zajem.
+
 - **`[skip ci]` na backend PR-ju blokira merge** (21. 9. 2026, PR #51): GitHub preskoči `Testi` (dogodek `pull_request`),
   `Zascita` (`pull_request_target`) pa teče; zaščita veje `main` zahteva `Testi`, zato PR ostane »Expected — waiting«.
   Backend testi so Linux in stanejo ~1 min — `[skip ci]` tam ni vreden nič. Popravek: nov push brez oznake.
@@ -327,6 +361,14 @@ Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta r
   »Ne pusti ga za vedno« — če se servisni račun kdaj odstrani/premakne izven migracij, ta past odpade sama.
 
 ## Kar nobeno orodje ne ve
+
+- **Video s telefona lahko agent analizira** (29. 9. 2026): Martin nalozi posnetek zaslona na Google Drive racuna
+  `bozicmartin7@gmail.com` (nanj je vezan Drive konektor), nastavi "Anyone with the link", agent ga prenese s
+  `curl "https://drive.usercontent.google.com/download?id=<ID>&export=download&confirm=t"` (domeni `drive.google.com` in
+  `drive.usercontent.google.com` je Martin 29. 9. dodal v omrezne nastavitve okolja). Drive konektor sam datoteke ne more
+  prenesti (vrne jo v pogovor, omejitev ~100 KB). ffmpeg: `pip download imageio-ffmpeg` (wheel ima binarko). iOS snema
+  slicico samo ob spremembi zaslona, zato so luknje v `pts_time` zastoji. Po analizi video lokalno pobrisi in Martina
+  spomni, naj povezavo vrne na "Restricted".
 
 - **Slike klubov v produkciji so ZA DEMO** (vzete s spletnih strani klubov). Pred pravim zagonom jih morajo
   zamenjati slike, ki jih dajo klubi sami — z dovoljenjem. Tega ne pove noben test.
