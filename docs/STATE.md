@@ -41,7 +41,10 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   Home ni vec `@State`; predpomnilnik `DateParsing`; `distanceFilter` 100 m; vecji `URLCache`), **#33** (`OutlyAsyncImage`
   namesto `AsyncImage` povsod; sija v ozadju Home brez `.blur`), **#34** (Home -> Search/Profile animira posnetek cilja,
   ne zive vsebine), **#35** (posnetek Search/Profile se shrani ob odhodu na Home, naslednji prehod ga uporabi takoj).
-- Martin na napravi (po #34): "ni najbolj smooth, ampak veliko bolje". Po #35 se NI preverjeno na napravi.
+- Martin na napravi (po #34): "ni najbolj smooth, ampak veliko bolje". **#35-#38 so videz pokvarili** (Martin: "ni vec una
+  animacija"; posnetek po #38: vsebina sploh ni rasla, Search je skocil v enem framu). **#39 vrne prehod na #33 (rast zive
+  vsebine) brez animirane prosojnosti** — Martinov posnetek po #39: prehod se zacne takoj ob dotiku, rast ~0,3 s,
+  slicice na 17-25 ms (40-60 fps; snemalnik zaslona zapise najvec 60), brez zastojev, videz kot prvotno.
 - Diagnoza #35 je iz Martinovega posnetka zaslona (Drive -> ffmpeg -> casi slicic, glej "Kar nobeno orodje ne ve"):
   od dotika do zacetka rasti je bilo ~200 ms zamrznjenega Home; rast sama ~40 fps.
 - **Krsitev dogovora o macOS minutah:** 29. 9. je bilo 5 merge-ov v `master` (5 TestFlight gradenj) namesto enega na dan
@@ -279,10 +282,12 @@ Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta r
 - **iOS: racunane lastnosti, ki razcleni datum (`APIEvent.startDate`), so klicane tisockrat na izris** (razvrscanje).
   `DateParsing.parseBackendDate` ima od #32 predpomnilnik; `DateFormatter` ne ustvarjaj v racunani lastnosti — uporabi
   `DateParsing.oblikovalnik("vzorec")`.
-- **iOS: prehodi med zavihki animirajo SLIKE (posnetke), ne zive vsebine** (#34/#35). Skala/prosojnost cez cel ziv zaslon
-  (UIKit polje, seznam, steklena navigacijska vrstica) je bila na telefonu "kot 15 fps". Posnetek zavihka: `UIWindow.
-  posnetekIzbranegaZavihka` v `MainTabView.swift` (predpostavi, da je `TabView` na `UITabBarController`; ce ni, prehod pade
-  na navaden zabris). Prvi Home -> Search po zagonu (ali po odhodu s Searcha drugam kot na Home) caka ~100 ms na zajem.
+- **iOS: prehod Home -> Search/Profile NE animira posnetka zaslona** (#34-#38, vrnjeno z #39). Posnetek vsebuje zamegljeno
+  ozadje, zato raste "kartica" namesto vsebine; izlocanje ozadja iz posnetka (CoreImage razlika + prag, #38) je na napravi
+  odstranilo VSO vsebino. Deluje: ziva vsebina raste s `scaleEffect` (VstopZavihka), **brez animirane prosojnosti**
+  (`prosojnost: 1` — animirana prosojnost cez cel ziv zaslon je bila najdrazji del), pojavljanje nosi oster posnetek Home,
+  ki nad vsem pojema (ZabrisSloj). Brez Maca/simulatorja animacij ne spreminjaj na slepo — pred merge-om prosi za posnetek
+  zaslona (glej "Kar nobeno orodje ne ve").
 
 - **`[skip ci]` na backend PR-ju blokira merge** (21. 9. 2026, PR #51): GitHub preskoči `Testi` (dogodek `pull_request`),
   `Zascita` (`pull_request_target`) pa teče; zaščita veje `main` zahteva `Testi`, zato PR ostane »Expected — waiting«.

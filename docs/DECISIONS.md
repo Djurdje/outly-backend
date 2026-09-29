@@ -139,7 +139,12 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   zamegli), izvedba: zamrznjene slike (outly-app #34, #35). Sistemski prehod bi bil vedno gladek, a bi opustil Martinovo
   izbiro — brez njegovega DA se ne menja. *vir/dokaz*: Martinov posnetek zaslona 29. 9. (casi slicic), Martin na napravi
   po #34: "veliko bolje" · *velja dokler*: Martin ne rece, da je se vedno premalo gladko (takrat predlagaj sistemski
-  prehod) · *nadomeščena z*: —
+  prehod) · *nadomeščena z*: 2026-09-29 (pozneje), spodaj.
+- 2026-09-29 (pozneje): **Prehod Home -> Search/Profile animira ZIVO vsebino (samo skala), ne posnetka** (outly-app #39).
+  Posnetki (#34-#38) so spremenili videz "kot Revolut" (Martin dvakrat: "ni una animacija k je bla prej"). Ziva vsebina
+  raste brez animirane prosojnosti, oster Home pojema nad njo. *vir/dokaz*: Martinova posnetka zaslona po #38 (vsebina ni
+  rasla) in po #39 (takojsen zacetek, 40-60 fps, pravi videz) · *velja dokler*: Martin ne rece, da je premalo gladko
+  (takrat predlagaj sistemski prehod) · *nadomeščena z*: —
 - 2026-09-20: Spletna stran ima razdelek **Points** (»Earn points before launch«) med Preview in Waitlist, po Martinovi
   predlogi plakata; besedilo koristi je Martinovo (glej odločitev o unovčenju točk zgoraj).
 - 2026-09-20: Pravilo »modra samo na glavnem gumbu« se v praksi bere kot **modra je barva poudarka** (aktivni zavihek,
