@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-29 (spletna aplikacija, faza 3).
+Zadnja posodobitev: 2026-09-29 (spletna aplikacija, faza 4).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -32,6 +32,16 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
+
+## Kje smo (29. 9. 2026, spletna aplikacija - faza 4: poslovni del)
+
+- **outly_webpage PR #16**: poslovni obraz kot iOS, brez QR skenerja (DECISIONS 29. 9.): profil lastnika (+ preklop osebni/klubski,
+  shranjeno v brskalniku), nastavitev prvega kluba, My Clubs -> klub (vratar samo opomba + izstop), nadzorna plosca (graf SVG),
+  skeniranja clana, dogodki (nov/urejanje/posnetek/brisanje), ekipa (vabila), podatki kluba, cenik, lokacija s klikom na zemljevid.
+  Poti `/app/business/:klub/...`; vsak klic poslje klub v glavi `X-Outly-Club` (namesto globalnega IzbraniKlub na iOS), zato
+  globoka povezava/osvezitev velja za pravi klub. Novih poti v backendu ni bilo treba. Na napravi NI preverjeno.
+- **Past (backend, obstojeca):** `klubUporabnika(uid, zeljeni)` za lastnika z VEC klubi vrne samo prvega (`ORDER BY id LIMIT 1`);
+  lastnik z drugim klubom v glavi `X-Outly-Club` dobi 404. Danes ima vsak lastnik en klub - ob drugem klubu to popraviti.
 
 ## Kje smo (29. 9. 2026, spletna aplikacija - faza 3: zemljevid)
 

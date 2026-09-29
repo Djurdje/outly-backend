@@ -139,6 +139,11 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   (brez placljivega geokoderja; Martin: "okej"). *velja dokler*: kolicina ploscic ali Cloudflare pogoji tega ne onemogocijo.
 - 2026-09-29: **Politika zasebnosti za spletno aplikacijo**: agent pripravi predlog (localStorage, lokacija na gumb, kamera za
   skener, service worker), objava sele po Martinovem DA na konkretno besedilo.
+- 2026-09-29: **QR skener vstopnic je SAMO v iOS aplikaciji, ne v spletni** (Martin: "qr skener bo samo mozen na aplikaciji ne
+  prek webappa"). Splet v fazi 4 kaze poslovni del brez skenerja in brez rocnega "Check in"; vstopnice dogodka so samo za ogled,
+  vratar na spletu vidi samo opombo. Posledica: politika zasebnosti za splet ne omenja kamere; `POST /business/tickets/scan`
+  klice samo iOS. Spreminja nacrt faz zgoraj ("4 poslovni obraz + skener" -> brez skenerja).
+  *vir/dokaz*: Martinovo sporocilo v pogovoru 29. 9. 2026 · *velja dokler*: Martin ne rece drugace · *nadomeščena z*: —
 
 ## Oblikovanje
 
