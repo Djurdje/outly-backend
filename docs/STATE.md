@@ -33,6 +33,14 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
 
+## Past: Cloudflare Browser Cache TTL (29. 9. 2026)
+
+- Cloudflare zone ima Browser Cache TTL = 4 h: vse staticne datoteke outly.si dobijo `max-age=14400` in `_headers`
+  `Cache-Control: no-cache` NE velja (preverjeno z curl). HTML ima `max-age=0`. Posledica: po objavi brskalnik do 4 h
+  pomesa stare in nove datoteke. Spletna aplikacija se od PR #19 brani sama (SW `no-cache`, `webapp/zagon.js`).
+  **Priporocilo Martinu:** Cloudflare -> Caching -> Browser Cache TTL = "Respect Existing Headers" (nastavitev racuna,
+  odloci Martin). Do takrat to velja tudi za landing (`script.js`, `auth.js` ...): po spremembi lahko do 4 h stari.
+
 ## Kje smo (29. 9. 2026, spletna aplikacija - QR skener vstopnic)
 
 - **outly_webpage PR #18**: skener tudi na spletu (DECISIONS 29. 9., nadomesti "samo iOS"): `/app/business/:klub/scan` za vse
