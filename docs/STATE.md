@@ -46,6 +46,13 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 - **Predpostavke agenta:** (1) prehod "kot Revolut" na spletu za zdaj ni narejen - zasloni se pojavijo s kratkim fade+scale
   (transform/opacity); pravi prehod pride, ko ga Martin pogleda na telefonu. (2) Zvonec in prijatelji na Home pridejo v fazi 2.
   (3) Nakup je v fazi 1 (ne 2), ker je "povezava -> kupi -> vstopnica" glavni razlog za spletno aplikacijo.
+- **Najdbe pregleda (qa-reviewer), odprte za pozneje:** (1) CSP velja samo za `/app`, seja (localStorage) pa je skupna z
+  vsem outly.si - XSS na landingu bi prebral zeton; landing danes `innerHTML` uporablja pravilno (escapeHtml), CSP za `/*`
+  pride s fazo 5. (2) `img-src https:`: plakat/logo sme biti poljuben https URL (backend ga ne omeji na Cloudinary) - IP
+  obiskovalca gre k tretji strani; dolgorocno backend dovoli samo nas Cloudinary ali proxy. (3) Backend: `ticket_url`
+  (POST/PATCH /events) in `website`/`logo_url` kluba nimata preverbe sheme - splet jih filtrira (`varenUrl`), iOS ne;
+  dodati `^https://` na strezniku. (4) `JAVNI_STOLPCI_KLUBA` vsebuje `owner_user_id` (javni `GET /clubs`) - po I4 ne sodi ven.
+  (5) Nakup nima idempotencnega kljuca: prekinjen POST ob hladnem zagonu lahko ustvari narocilo, ki ga uporabnik ne vidi.
 - **Past:** pravilo `/app/* /app/index.html 200` v `_redirects` velja tudi, ce na poti obstaja datoteka - zato je koda v `webapp/`.
   Ce produkcija na `/app/event/1` ne vrne lupine (npr. Cloudflare preusmeri `index.html`), je to prvi osumljenec.
 
