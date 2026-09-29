@@ -37,16 +37,17 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
 - **outly_webpage PR #15**: `/app/map` (MapLibre GL 5.24 + Protomaps, temni slog), oznake iz `GET /clubs/map`, kartica
   kluba, moja lokacija na gumb, mini zemljevid na dogodku in klubu; brez WebGL seznam klubov po razdalji. Na napravi NI preverjeno.
-- **Podatki zemljevida so v repu outly_webpage** (`karta/*.pmtiles`, ~40 MB), brez tujih streznikov ploscic:
-  `slovenija.pmtiles` = cela Slovenija do z10 (ceste, kraji), `ljubljana.pmtiles` in `maribor.pmtiles` = ulice z11-15.
-  Izrez iz gradnje Protomaps 20260929 naredi workflow na veji `karta-izrez` (outly_webpage) - `build.protomaps.com` in
-  Geofabrik sta iz oblacnega okolja agenta blokirana, GitHub Actions ju doseze.
-- **Omejitev:** Cloudflare Pages dovoli najvec 25 MiB na datoteko, zato ulic cele Slovenije ni. Klub zunaj LJ/MB se prikaze
-  na z12 (ceste, brez ulic). Ko bo klub drugje: nov izrez mesta (workflow + vnos v `MESTA` v `webapp/js/karta.js`) ali
-  cela Slovenija (~300-500 MB) na **Cloudflare R2** - to vklopi Martin (brezplacno do 10 GB).
-- **Past:** pmtiles bere z HTTP Range (206). Ce streznik vrne 200 s celo datoteko, zemljevid ostane brez ploscic
-  (napaka "content-length exceeding request"). Iz oblaka agenta sta outly.si in *.pages.dev blokirana - Range se preveri
-  z GitHub Actions (zacasna veja `preveri-range` v outly_webpage, curl -r na predogled PR-ja).
+- **Podatki zemljevida so v repu outly_webpage** kot staticne ploscice `karta/v20260929/{slo,mesta}/{z}/{x}/{y}.pbf`
+  (gzip, ~42 MB, ~1400 datotek) + `seznam.json`: `slo` = cela Slovenija do z10 (ceste, kraji), `mesta` = ulice z11-15 v
+  Ljubljani in Mariboru. Izrez (.pmtiles) iz gradnje Protomaps 20260929 naredi workflow na veji `karta-izrez` (outly_webpage;
+  `build.protomaps.com` in Geofabrik sta iz oblaka agenta blokirana, GitHub Actions ju doseze), v ploscice ga razpakira
+  `karta/razpakiraj.mjs`.
+- **Past (Cloudflare Pages):** zahtevo HTTP Range ignorira in vrne 200 s celo datoteko (preverjeno 29. 9. 2026 z GitHub
+  Actions na predogledu PR #15). Zato `.pmtiles` na Pages NE dela - samo staticne ploscice. Iz oblaka agenta sta outly.si in
+  `*.pages.dev` blokirana; predogled se preveri z zacasnim workflowom (veja `preveri-range` v outly_webpage).
+- **Omejitev:** ulic cele Slovenije ni (Pages: najvec 20.000 datotek na objavo; cela Slovenija do z15 jih ima vec kot 20.000).
+  Klub zunaj LJ/MB se prikaze na z12 (ceste, brez ulic). Ko bo klub drugje: izrez tega mesta dodati v `mesta/` (+ `MESTA`
+  v `webapp/js/karta.js`) ali cela Slovenija na **Cloudflare R2** (Range podpira; vklopi Martin, brezplacno do 10 GB).
 - **Past:** MapLibre 5 nima vec `maplibregl.supported()` - preverba `!supported` je vedno vrnila "ni WebGL". In MapLibrov
   CSS (nalozen pozneje) prepise `position` platna - pravila zemljevida imajo zato visjo specificnost (`.karta.maplibregl-map`).
 - Pripis "(c) OpenStreetMap" mora ostati viden (ODbL), tudi na mini zemljevidu.
