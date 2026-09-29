@@ -143,7 +143,16 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   prek webappa"). Splet v fazi 4 kaze poslovni del brez skenerja in brez rocnega "Check in"; vstopnice dogodka so samo za ogled,
   vratar na spletu vidi samo opombo. Posledica: politika zasebnosti za splet ne omenja kamere; `POST /business/tickets/scan`
   klice samo iOS. Spreminja nacrt faz zgoraj ("4 poslovni obraz + skener" -> brez skenerja).
-  *vir/dokaz*: Martinovo sporocilo v pogovoru 29. 9. 2026 · *velja dokler*: Martin ne rece drugace · *nadomeščena z*: —
+  *vir/dokaz*: Martinovo sporocilo v pogovoru 29. 9. 2026 · *velja dokler*: Martin ne rece drugace · *nadomeščena z*: odlocitev
+  "QR skener tudi na spletu" (29. 9. 2026, spodaj)
+- 2026-09-29 (kasneje isti dan): **QR skener vstopnic je TUDI v spletni aplikaciji** (Martin: "dodej se za skeniranje qr kod
+  ker mogoce bo tisti na vratih imel androida in ne bo mogel naloziti aplikacije"). Nadomesti zgornjo odlocitev.
+  Splet: `/app/business/:klub/scan` za vse vloge v klubu (tudi vratar), rocni "Check in" pri vstopnicah dogodka (kot iOS).
+  Kamera v brskalniku (getUserMedia), dekodiranje na napravi (BarcodeDetector ali jsQR) - na strezik gre samo vsebina kode
+  prek obstojecega `POST /business/tickets/scan`; backend nespremenjen. Politika zasebnosti za splet mora omeniti kamero
+  (osnutek posodobljen).
+  *vir/dokaz*: Martinovo sporocilo v pogovoru 29. 9. 2026; outly_webpage PR #18 · *velja dokler*: Martin ne rece drugace ·
+  *nadomeščena z*: —
 
 ## Oblikovanje
 

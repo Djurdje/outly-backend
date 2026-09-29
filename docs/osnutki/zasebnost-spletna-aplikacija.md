@@ -12,7 +12,8 @@ Kaj spletna aplikacija dejansko počne (preverjeno v kodi `outly_webpage`, faze 
 - lokacija: samo na gumb »Use my location«, ostane v brskalniku, na strežnik ne gre;
 - zemljevid: podatki OpenStreetMap (prek Protomaps) z naše domene outly.si — noben ponudnik zemljevidov ne dobi zahtev;
 - lastnik kluba lokacijo kluba označi s klikom na zemljevid (koordinate kluba so že navedene med podatki poslovnih računov);
-- kamere spletna aplikacija ne uporablja (skener vstopnic je samo v aplikaciji Outly);
+- kamera: samo na zaslonu »Scan tickets« za osebje kluba (od 29. 9. 2026, PR #18); brskalnik vpraša za dovoljenje,
+  slika se obdela na napravi, na strežnik gre samo vsebina QR kode vstopnice; ob odhodu z zaslona se kamera ugasne;
 - brez piškotkov, analitike, oglasnih pikslov; knjižnice in pisava z naše domene;
 - slike in videi se nalagajo neposredno s strežnikov Cloudinary (že navedenega obdelovalca), kot v aplikaciji.
 
@@ -36,6 +37,14 @@ spletno stran outly.si«
 > na strežnik in je ne shranjujemo; ostane v brskalniku, dokler je stran odprta. Dostop lahko kadarkoli prekličeš v
 > nastavitvah brskalnika. Zemljevid v spletni aplikaciji uporablja podatke OpenStreetMap, ki jih strežemo z naše
 > domene — zahteve za zemljevid ne gredo k nobenemu drugemu ponudniku.
+
+**Kamera (skener vstopnic za osebje klubov) — dodaj odstavek tam, kjer politika opisuje kamero v aplikaciji
+(če takega razdelka ni, nov kratek razdelek):**
+
+> Osebje kluba (lastnik, manager, vratar) lahko v spletni aplikaciji skenira vstopnice na vratih. Brskalnik za kamero
+> vpraša šele, ko odpreš zaslon »Scan tickets«. Slika kamere se obdela samo na tvoji napravi — ne snemamo je, ne
+> shranjujemo in ne pošiljamo nikamor; na naš strežnik gre samo vsebina QR kode vstopnice, da preverimo, ali je veljavna.
+> Ko zaslon zapustiš, se kamera ugasne. Dostop lahko kadarkoli prekličeš v nastavitvah brskalnika.
 
 **§8 Spletna stran: piškotki in zunanje vsebine — nadomesti seznam lokalne shrambe:**
 
@@ -80,6 +89,13 @@ ker zemljevid gostimo sami.)
 > to our servers or stored; it stays in your browser while the page is open. You can revoke access in your browser
 > settings at any time. The web app’s map uses OpenStreetMap data served from our own domain — map requests do not go
 > to any other provider.
+
+**Camera (ticket scanner for club staff) — add:**
+
+> Club staff (owner, manager, door staff) can scan tickets at the door in the web app. Your browser asks for the
+> camera only when you open the “Scan tickets” screen. The camera image is processed only on your device — it is not
+> recorded, stored or sent anywhere; only the content of the ticket’s QR code is sent to our server to check that the
+> ticket is valid. The camera turns off when you leave the screen. You can revoke access in your browser settings.
 
 **Local storage — replace the list:**
 
