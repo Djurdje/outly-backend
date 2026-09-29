@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-29 (spletna aplikacija, faza 4).
+Zadnja posodobitev: 2026-09-29 (spletna aplikacija, faza 5).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -32,6 +32,21 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
+
+## Kje smo (29. 9. 2026, spletna aplikacija - faza 5: PWA, hitrost, dostopnost)
+
+- **outly_webpage PR #17**: PWA (manifest, service worker `/webapp/sw.js` z glavo `Service-Worker-Allowed: /app/` -
+  preverjeno na Cloudflare predogledu), leno nalaganje (zasloni, prevodi SL, QR, supabase-js za goste), modulepreload,
+  dostopnost (axe-core), CLS 0. Merjeno (slow 4G, 4x CPU, stub API): LCP Home 2,8 s prvi / 1,6 s ponovni obisk.
+  Pravi LCP v produkciji dodatno odvisen od odziva backenda na Renderju (hladni zagon) - ni izmerjeno.
+- **Osnutek politike zasebnosti** za spletno aplikacijo: `docs/osnutki/zasebnost-spletna-aplikacija.md` - NI objavljen,
+  caka na Martinov DA (pravni dokument). Popravi tudi netocno alinejo §11 (zeton v brskalniku ni v "varni shrambi sistema").
+- **Kontrast:** bel napis na modrem gumbu (#4C76FF) ima kontrast 3,35-3,93 (WCAG AA zahteva 4,5). Barva znamke -
+  sprememba samo po Martinu. Modro BESEDILO je na spletu svetlejse (#6A8CFF), polna modra ostane.
+- **Ideja (izven obsega faz 1-5):** push obvestila v namesceni PWA (iOS 16.4+) - rabi Web Push na backendu (VAPID
+  kljuci, tabela narocnin); iOS aplikacija ima svoje. Se ni odloceno.
+- **Past:** `position:fixed` znotraj animiranega `.okvir` (animacija s transform) je med prehodom vezan na okvir in ob
+  koncu poskoci (CLS 0,84 na Home) - ozadje Home je zato izven okvirja.
 
 ## Kje smo (29. 9. 2026, spletna aplikacija - faza 4: poslovni del)
 
