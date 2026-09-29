@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-29 (spletna aplikacija, faza 1).
+Zadnja posodobitev: 2026-09-29 (spletna aplikacija, faza 3).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -32,6 +32,25 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
+
+## Kje smo (29. 9. 2026, spletna aplikacija - faza 3: zemljevid)
+
+- **outly_webpage PR #15**: `/app/map` (MapLibre GL 5.24 + Protomaps, temni slog), oznake iz `GET /clubs/map`, kartica
+  kluba, moja lokacija na gumb, mini zemljevid na dogodku in klubu; brez WebGL seznam klubov po razdalji. Na napravi NI preverjeno.
+- **Podatki zemljevida so v repu outly_webpage** kot staticne ploscice `karta/v20260929/{slo,mesta}/{z}/{x}/{y}.pbf`
+  (gzip, ~42 MB, ~1400 datotek) + `seznam.json`: `slo` = cela Slovenija do z10 (ceste, kraji), `mesta` = ulice z11-15 v
+  Ljubljani in Mariboru. Izrez (.pmtiles) iz gradnje Protomaps 20260929 naredi workflow na veji `karta-izrez` (outly_webpage;
+  `build.protomaps.com` in Geofabrik sta iz oblaka agenta blokirana, GitHub Actions ju doseze), v ploscice ga razpakira
+  `karta/razpakiraj.mjs`.
+- **Past (Cloudflare Pages):** zahtevo HTTP Range ignorira in vrne 200 s celo datoteko (preverjeno 29. 9. 2026 z GitHub
+  Actions na predogledu PR #15). Zato `.pmtiles` na Pages NE dela - samo staticne ploscice. Iz oblaka agenta sta outly.si in
+  `*.pages.dev` blokirana; predogled se preveri z zacasnim workflowom (veja `preveri-range` v outly_webpage).
+- **Omejitev:** ulic cele Slovenije ni (Pages: najvec 20.000 datotek na objavo; cela Slovenija do z15 jih ima vec kot 20.000).
+  Klub zunaj LJ/MB se prikaze na z12 (ceste, brez ulic). Ko bo klub drugje: izrez tega mesta dodati v `mesta/` (+ `MESTA`
+  v `webapp/js/karta.js`) ali cela Slovenija na **Cloudflare R2** (Range podpira; vklopi Martin, brezplacno do 10 GB).
+- **Past:** MapLibre 5 nima vec `maplibregl.supported()` - preverba `!supported` je vedno vrnila "ni WebGL". In MapLibrov
+  CSS (nalozen pozneje) prepise `position` platna - pravila zemljevida imajo zato visjo specificnost (`.karta.maplibregl-map`).
+- Pripis "(c) OpenStreetMap" mora ostati viden (ODbL), tudi na mini zemljevidu.
 
 ## Kje smo (29. 9. 2026, spletna aplikacija - faza 2)
 
