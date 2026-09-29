@@ -33,6 +33,21 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
 
+## Kje smo (29. 9. 2026, spletna aplikacija - faza 2)
+
+- Martin 29. 9.: "nadaljuj s fazo 2 in trenutno ne se dajat webapp v javno uporabo, da lahko jaz prvo vse preverim".
+  Spletna aplikacija je na `outly.si/app` dosegljiva samo z neposrednim URL-jem (ni povezave z landinga, `noindex`).
+  **Gumba na outly.si ne dodajaj, dokler Martin ne rece** - to je hkrati "javna objava".
+- **outly_webpage PR #13 (faza 2)**: profil kot iOS, My Account (osebni podatki, avatar prek Cloudinary, geslo, deljenje
+  nacrtov, My preferences samo v brskalniku, brisanje racuna, prosnja za poslovni racun), prijatelji (iskanje, prosnje),
+  Friends plans (Home + zaslon), zvonec z obvestili, prenos vstopnice, My Clubs + vabila (orodja kluba so faza 4).
+  Nove poti v backendu niso bile potrebne. Na napravi NI preverjeno (headless: 65 preverjanj).
+- **Past (splet):** `PATCH /me` vrne samo `POLJA_UPORABNIKA` (brez `clubs`, `pending_*`) - odjemalec mora zdruziti s
+  trenutnim profilom ali znova poklicati `GET /me` (iOS po avatarju klice `GET /me`).
+- **Past (backend, odprto):** omejevalnik `omeji({kljuc:"prosnja"})` si delita `POST /creator-applications` (5/h) in
+  `POST /me/friends/requests` (30/h) - kljuc je `prosnja:<ip>`, zato po 5 prosnjah za prijateljstvo prosnja za poslovni
+  racun z istega IP-ja dobi 429. Popravek: locena kljuca (backend PR, samo sprememba kljuca).
+
 ## Kje smo (29. 9. 2026, spletna aplikacija - faza 1)
 
 - Martin je izbral: A (outly.si/app, isti repo, brez builda), Protomaps, klik na zemljevid za lokacijo kluba, cene javne, gumb na
