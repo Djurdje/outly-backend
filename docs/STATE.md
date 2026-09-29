@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-29 (tekocnost iOS aplikacije: preklop zavihkov, drsenje, slike).
+Zadnja posodobitev: 2026-09-29 (spletna aplikacija, faza 1).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -32,6 +32,22 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
+
+## Kje smo (29. 9. 2026, spletna aplikacija - faza 1)
+
+- Martin je izbral: A (outly.si/app, isti repo, brez builda), Protomaps, klik na zemljevid za lokacijo kluba, cene javne, gumb na
+  outly.si na koncu (DECISIONS 29. 9.). Prebran `outly-backend` main `ac7617a`.
+- **outly_webpage PR (faza 1)**: `app/index.html` + `webapp/` + `vendor/` (Preact 10.29.8, htm 3.1.1, qrcode-generator 2.0.4,
+  ikone Lucide). Zasloni: prijava/registracija/koda/pozabljeno geslo, onboarding (datum rojstva, drzava, zanri), Home z vsemi
+  razdelki iOS razen "Your friends' plans" in zvonca (faza 2), filtri, Search, dogodek (I'm in, cena, VIP, cenik), klub
+  (slideshow, Follow, video, kontakti), vsi dogodki, zanr, "Interested events", nakup v testnem nacinu + vstopnice s QR, profil
+  (osnovno), jezik en/sl. Map zavihek do faze 3 kaze seznam klubov po razdalji. **Na napravi se NI preverjeno** - preverjeno s
+  headless Chromium in stubom (38 preverjanj, sirine 393/360/1280, CSP brez krsitev).
+- **Predpostavke agenta:** (1) prehod "kot Revolut" na spletu za zdaj ni narejen - zasloni se pojavijo s kratkim fade+scale
+  (transform/opacity); pravi prehod pride, ko ga Martin pogleda na telefonu. (2) Zvonec in prijatelji na Home pridejo v fazi 2.
+  (3) Nakup je v fazi 1 (ne 2), ker je "povezava -> kupi -> vstopnica" glavni razlog za spletno aplikacijo.
+- **Past:** pravilo `/app/* /app/index.html 200` v `_redirects` velja tudi, ce na poti obstaja datoteka - zato je koda v `webapp/`.
+  Ce produkcija na `/app/event/1` ne vrne lupine (npr. Cloudflare preusmeri `index.html`), je to prvi osumljenec.
 
 ## Kje smo (29. 9. 2026, tekocnost iOS aplikacije)
 

@@ -118,6 +118,28 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   aplikacija to jasno kaže. Ob nastavitvi ključa testna pot vrne 503.
   *velja dokler*: `STRIPE_SECRET_KEY` ni nastavljen na Renderju — takrat se ta pot izklopi sama, brez spremembe kode.
 
+- 2026-09-29: **Spletna aplikacija (PWA) na `outly.si/app`, v repozitoriju `outly_webpage`, brez builda** (Martin, izbira A).
+  Isti backend, baza in prijava kot iOS - nov odjemalec za ljudi brez aplikacije (deljena povezava na dogodek) in za Android
+  (Android aplikacije ni). Preact + htm kot ES moduli, gostovani v `vendor/`; vse `/app/*` streze ena lupina (`_redirects`).
+  Posledica: ena domena = ena seja z outly.si (prijava velja na strani in v spletni aplikaciji), en deploy (Cloudflare Pages),
+  pravilo "brez builda" ostane. Zavrnjena B: nov repo z Vite/TypeScript na `app.outly.si` (nov deploy, poddomena, locena seja).
+  Faze: 1 ogrodje + prijava + Home/Search/dogodek/klub (+ nakup v testnem nacinu in vstopnice s QR), 2 profil/prijatelji/obvestila,
+  3 zemljevid, 4 poslovni obraz + skener, 5 PWA do konca. Gumb "Open web app" na outly.si in pametni banner za iOS: na koncu.
+  *vir/dokaz*: Martinov odgovor v pogovoru 29. 9. 2026 (tocke 1-7), specifikacija zaslonov iOS -> API v opisu outly_webpage PR ·
+  *velja dokler*: spletna aplikacija ne preraste nacina brez builda (npr. vec razvijalcev, potreba po tipih) - takrat znova B ·
+  *nadomeščena z*: —
+- 2026-09-29: **Prijava v spletni aplikaciji s kodo iz maila, kot iOS** (ne s povezavo). Zato Supabase Redirect URL-ji za `/app`
+  niso potrebni (Martin: "naredi, kar je logicno"). Registracija ima kljukico 15+ in pogoje (kot outly.si, `terms_version`).
+  *velja dokler*: Supabase mail vsebuje kodo (`{{ .Token }}`) - brez nje bi iOS in splet obstala.
+- 2026-09-29: **Neprijavljeni v spletni aplikaciji vidijo klube, dogodke in cene** (Martin: DA). Backend jih ze vraca javno;
+  "I'm in", Follow in nakup zahtevajo prijavo (po prijavi uporabnik ostane na istem dogodku).
+- 2026-09-29: **Zemljevid na spletu: Protomaps (PMTiles), gostimo sami** (Martin: "probaj protomaps"), ne MapTiler/Stadia (brezplacno
+  samo nekomercialno; 25 $ oz. 20 $ na mesec). OSM javni strežnik ploscic za aplikacije ni dovoljen. Kje bo datoteka (repo/R2),
+  se odloci v fazi 3; ce rabi Cloudflare R2, ga vklopi Martin. Lokacijo kluba lastnik na spletu oznaci s klikom na zemljevid
+  (brez placljivega geokoderja; Martin: "okej"). *velja dokler*: kolicina ploscic ali Cloudflare pogoji tega ne onemogocijo.
+- 2026-09-29: **Politika zasebnosti za spletno aplikacijo**: agent pripravi predlog (localStorage, lokacija na gumb, kamera za
+  skener, service worker), objava sele po Martinovem DA na konkretno besedilo.
+
 ## Oblikovanje
 
 - Figma datoteka `XeVmPgY0LDGkNcQGBkNDbg` (stran »App«, ~147 zaslonov 393×852) je merodajna za postavitev,
