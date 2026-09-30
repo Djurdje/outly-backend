@@ -1,0 +1,60 @@
+# Stresni test produkcije (samo rocni zagon): N hkratnih "uporabnikov" za S sekund bere javne
+# GET poti (/clubs, /events, /search, podrobnosti kluba in dogodka). Brez prijave in brez pisanja
+# v bazo, zato ne spremeni nobenih podatkov; javne GET poti nimajo omejevalnika (429).
+# Namen: preveriti, ali trenutni Render paketa (web service + baza) zdrzita obremenitev,
+# npr. po preklopu baze na placljiv paket. Referenca: 11. 9. 2026 616 req/s pri 40 vzporednih.
+# Poganjaj ob mirnem casu (ne med dogodkom): med testom je produkcija za prave uporabnike pocasnejsa.
+name: Stresni test
+
+on:
+  workflow_dispatch:
+    inputs:
+      vzporedno:
+        description: "Hkratni uporabniki (1-100)"
+        default: "40"
+      sekunde:
+        description: "Trajanje v sekundah (5-120)"
+        default: "30"
+      potrdi:
+        description: "Vpisi DA - test obremeni PRODUKCIJO"
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stres
+  cancel-in-progress: false
+
+jobs:
+  stres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Potrditev
+        if: github.event.inputs.potrdi != 'DA'
+        run: |
+          echo "::error::Za zagon vpisi DA v polje 'potrdi'."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Stresni test
+        env:
+          VZPOREDNO: ${{ github.event.inputs.vzporedno }}
+          SEKUNDE: ${{ github.event.inputs.sekunde }}
+        run: node _orodja/stres.js https://outly-backend-roy3.onrender.com "$VZPOREDNO" "$SEKUNDE"
+
+      - name: Produkcija po testu
+        if: always()
+        run: |
+          sleep 5
+          for pot in /clubs /events; do
+            s=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 "https://outly-backend-roy3.onrender.com$pot")
+            echo "$pot -> $s"
+            [ "$s" = "200" ] || { echo "::error::$pot vrne $s po testu"; exit 1; }
+          done

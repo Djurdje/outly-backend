@@ -33,6 +33,15 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
 
+## Stresni test produkcije (30. 9. 2026)
+
+- Workflow `Stresni test` (`.github/workflows/stres.yml`, samo rocni zagon, polje `potrdi` = `DA`) pozene
+  `_orodja/stres.js`: N vzporednih bere javne GET poti (`/clubs`, `/events`, `/search`, podrobnosti kluba/dogodka)
+  S sekund. Brez prijave in brez pisanja v bazo. Pade, ce je napak > 1 % ali p95 > 2000 ms. Porocilo v povzetku zagona.
+- Namen: po preklopu Render baze na placljiv paket (0.1c-256mb, #12) preveriti, da zmogljivost zadosca.
+  Referenca 11. 9. 2026: 616 req/s pri 40 vzporednih. Poganjaj ob mirnem casu (med testom je produkcija pocasnejsa).
+- Ne pokrije: nakupa vstopnic (pisanje v bazo, zaklep zaloge) - ta konica ob odprtju prodaje ni izmerjena.
+
 ## Past: Cloudflare Browser Cache TTL (29. 9. 2026)
 
 - Cloudflare zone ima Browser Cache TTL = 4 h: vse staticne datoteke outly.si dobijo `max-age=14400` in `_headers`
