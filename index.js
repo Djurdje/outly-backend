@@ -354,6 +354,25 @@ app.get("/", (req, res) => {
   res.send("Outly backend OK");
 });
 
+// Render Health Check Path: Render novo kodo spusti v promet sele, ko ta pot vrne 2xx.
+// Preveri tudi bazo (SELECT 1) - backend brez baze ne streze nicesar. Omejeno na 3 s,
+// da zaseden pool (connectionTimeoutMillis 10 s) ne zadrzi odgovora cez Renderjev rok.
+app.get("/healthz", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  let casovnik;
+  try {
+    await Promise.race([
+      pool.query("SELECT 1"),
+      new Promise((_, zavrni) => { casovnik = setTimeout(() => zavrni(new Error("timeout")), 3000); }),
+    ]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(503).json({ ok: false });
+  } finally {
+    clearTimeout(casovnik);
+  }
+});
+
 // Admin panel: statična stran v mapi admin/ (en HTML + JS, brez ogrodja).
 // Sama stran ne razkrije ničesar — vsi podatki pridejo prek poti /admin/api/*,
 // ki zahtevajo vlogo admin.

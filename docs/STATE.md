@@ -43,7 +43,10 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   Referenca 616 req/s (11. 9.) je bila izmerjena drugace in ni primerljiva. Kriterij za vecji paket: CPU dlje casa > 70 % ali RAM blizu 512 MB.
 - **Odprto (Martin):** IP allow list baze je `0.0.0.0/0` (»everywhere«) - baza je dosegljiva z interneta z geslom.
   Ce zunanjega dostopa nihce ne rabi, ga v Render -> outly-db -> Networking omeji (backend jo doseze interno).
-  `healthCheckPath` storitve je prazen - Render ob deployu ne preveri, ali nova koda odgovarja.
+  `healthCheckPath` storitve je prazen - Render ob deployu ne preveri, ali nova koda odgovarja. Pot `GET /healthz`
+  (200 `{ok:true}` / 503 ob nedosegljivi bazi, test `_testi/test_zdravje.js`) je v kodi od 30. 9.; **Martin** jo vpise v
+  Render -> outly-backend -> Settings -> Health Check Path = `/healthz`. Posledica: Render ob izpadu baze (tudi med
+  preklopom paketa) instanco lahko ponovno zazene - to ni skodljivo, le v logih je vec vrstic.
 - Workflow `Stresni test` (`.github/workflows/stres.yml`, samo rocni zagon, polje `potrdi` = `DA`) pozene
   `_orodja/stres.js`: N vzporednih bere javne GET poti (`/clubs`, `/events`, `/search`, podrobnosti kluba/dogodka)
   S sekund. Brez prijave in brez pisanja v bazo. Pade, ce je napak > 1 % ali p95 > 2000 ms. Porocilo v povzetku zagona.
