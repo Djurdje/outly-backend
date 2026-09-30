@@ -41,12 +41,15 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   od 0,5, RAM ~65 MB; baza CPU ~0. Na Free (test #2): 98,6 req/s, p95 705 ms.
   **Past pri branju:** test drzi 40 hkratnih zahtevkov, zato req/s ~ 40 / p50 - meri zakasnitev runner -> Frankfurt, ne kapacitete.
   Referenca 616 req/s (11. 9.) je bila izmerjena drugace in ni primerljiva. Kriterij za vecji paket: CPU dlje casa > 70 % ali RAM blizu 512 MB.
-- **Odprto (Martin):** IP allow list baze je `0.0.0.0/0` (»everywhere«) - baza je dosegljiva z interneta z geslom.
-  Ce zunanjega dostopa nihce ne rabi, ga v Render -> outly-db -> Networking omeji (backend jo doseze interno).
-  `healthCheckPath` storitve je prazen - Render ob deployu ne preveri, ali nova koda odgovarja. Pot `GET /healthz`
-  (200 `{ok:true}` / 503 ob nedosegljivi bazi, test `_testi/test_zdravje.js`) je v kodi od 30. 9.; **Martin** jo vpise v
-  Render -> outly-backend -> Settings -> Health Check Path = `/healthz`. Posledica: Render ob izpadu baze (tudi med
-  preklopom paketa) instanco lahko ponovno zazene - to ni skodljivo, le v logih je vec vrstic.
+- **Zunanji dostop do baze zaprt (30. 9. 2026, 15:57 UTC, Martin):** outly-db -> Networking -> PostgreSQL Inbound IP Rules
+  = prazen seznam (prej `0.0.0.0/0`). Backend se povezuje prek notranjega omrezja (v logih baze samo `10.x`), zato ga
+  pravilo ne zadeva; pravili na ravni workspacea in okolja (`0.0.0.0/0`) ostaneta - veljata tudi za web servis, ne zapiraj.
+  **Posledica:** psql / pgAdmin z External Database URL ne dela vec. Za tak dostop v bazo dodaj svoj IP (in ga potem
+  odstrani) ali uporabi Render Shell. Obnova iz izvoza (ARCHITECTURE, »Varnostne kopije«) gre v NOVO bazo in je to ne zadeva.
+- **Health check (30. 9. 2026):** Render -> outly-backend -> Health Check Path = `/healthz` (200 `{ok:true}` / 503 ob
+  nedosegljivi bazi, test `_testi/test_zdravje.js`). Render novo kodo spusti v promet sele, ko odgovori; deploy ob
+  nastavitvi poti je uspel. Renderjevi interni klici health checka NISO v request logih - prazni logi so pricakovani.
+  Ob izpadu baze Render instanco lahko ponovno zazene - neskodljivo.
 - Workflow `Stresni test` (`.github/workflows/stres.yml`, samo rocni zagon, polje `potrdi` = `DA`) pozene
   `_orodja/stres.js`: N vzporednih bere javne GET poti (`/clubs`, `/events`, `/search`, podrobnosti kluba/dogodka)
   S sekund. Brez prijave in brez pisanja v bazo. Pade, ce je napak > 1 % ali p95 > 2000 ms. Porocilo v povzetku zagona.
