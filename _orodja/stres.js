@@ -1,4 +1,5 @@
 // Stresni test produkcije: samo javne GET poti (brez prijave, brez pisanja v bazo).
+// /search zahteva q z vsaj 2 znaki (sicer 400) - zato q=lj.
 // Uporaba: node _orodja/stres.js [osnova] [vzporedno] [sekunde]
 //   osnova     privzeto https://outly-backend-roy3.onrender.com
 //   vzporedno  stevilo hkratnih "uporabnikov" (1-100), privzeto 40 (kot test 11. 9. 2026)
@@ -28,7 +29,7 @@ async function poizvedi(pot) {
 
 async function main() {
   // Ogrevanje (Render hladni zagon) in izbira ID-jev za podrobne strani.
-  const poti = ["/clubs", "/events", "/events?upcoming=true", "/search?q=a"];
+  const poti = ["/clubs", "/events", "/events?upcoming=true", "/search?q=lj"];
   try {
     const kl = await (await fetch(osnova + "/clubs", { signal: AbortSignal.timeout(60000) })).json();
     const k = Array.isArray(kl) ? kl : kl.clubs || [];
