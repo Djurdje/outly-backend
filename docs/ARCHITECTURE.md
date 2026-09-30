@@ -16,10 +16,12 @@ Stara/neaktivna: `slon3studio/outly-ios`, `Djurdje/Outly` — ne uporabljaj.
 
 ## Produkcija
 
-- **Backend**: `https://outly-backend-roy3.onrender.com` (Render, Martinov račun »My Workspace«),
-  storitev `srv-d5fuiovgi27c73e4boq0`; admin panel `/admin/`.
-- **Baza**: Render PostgreSQL 16 `outly-db` (`dpg-daf7vav40ujc73a28g8g-a`, Frankfurt). Dosegljiva samo z Renderja
-  (`DATABASE_URL` v okolju storitve). Izvoz: `GET /admin/api/export` (gumb v admin panelu).
+- **Backend**: `https://outly-backend-roy3.onrender.com` (Render, Martinov račun »My Workspace«,
+  prijava `outlyit@gmail.com`), storitev `srv-d5fuiovgi27c73e4boq0`, paket **Starter `0.5c-512mb`** (7 $/mesec, od 30. 9. 2026);
+  admin panel `/admin/`.
+- **Baza**: Render PostgreSQL 16 `outly-db` (`dpg-daf7vav40ujc73a28g8g-a`, Frankfurt), paket **`0.1c-256mb`**
+  (6 $/mesec, 1 GB disk, od 30. 9. 2026; brez izteka). `DATABASE_URL` je v okolju storitve vpisan ročno (ne »from database«).
+  Render IP allow list baze je `0.0.0.0/0` (zunanji dostop z geslom je mogoč) — glej STATE. Izvoz: `GET /admin/api/export` (gumb v admin panelu).
 - **Identiteta**: Supabase Auth, projekt `zbewqcxnvrwebxonvebx` (skupen za aplikacijo in spletno stran).
   Supabase hrani tudi waitlist spletne strani (tabele `waitlist_signups`, `waitlist_public`, `creator_applications`, RPC-ji, pg_cron).
 - **E-pošta**: aplikacija/backend → **Resend** (`noreply@outly.si`, domena verificirana, brezplačno 3.000/mesec);

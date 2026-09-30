@@ -27,7 +27,8 @@ in stvari, ki jih nobeno orodje ne ve.
 
 Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
-1. **Render baza na plačljivi paket pred 7. 10. 2026** — po tem datumu se izbriše (#12).
+1. ~~**Render baza na plačljivi paket pred 7. 10. 2026** (#12)~~ — narejeno 30. 9. 2026: `outly-db` na `0.1c-256mb` (6 $),
+   `outly-backend` na Starter `0.5c-512mb` (7 $); preverjeno prek Render API (plan, status available).
 2. Stripe račun (#16) blokira tehnično plačilno pot (#19).
 3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
@@ -35,11 +36,19 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 
 ## Stresni test produkcije (30. 9. 2026)
 
+- **Paketa Render od 30. 9. 2026** (baza `0.1c-256mb`, web Starter `0.5c-512mb`, skupaj 13 $/mesec, workspace Hobby 0 $).
+  Stresni test #3 (40 vzporednih, 30 s, GitHub runner): 132,6 req/s, p50 293 ms, p95 502 ms, 0 % napak; web CPU vrh ~34 %
+  od 0,5, RAM ~65 MB; baza CPU ~0. Na Free (test #2): 98,6 req/s, p95 705 ms.
+  **Past pri branju:** test drzi 40 hkratnih zahtevkov, zato req/s ~ 40 / p50 - meri zakasnitev runner -> Frankfurt, ne kapacitete.
+  Referenca 616 req/s (11. 9.) je bila izmerjena drugace in ni primerljiva. Kriterij za vecji paket: CPU dlje casa > 70 % ali RAM blizu 512 MB.
+- **Odprto (Martin):** IP allow list baze je `0.0.0.0/0` (»everywhere«) - baza je dosegljiva z interneta z geslom.
+  Ce zunanjega dostopa nihce ne rabi, ga v Render -> outly-db -> Networking omeji (backend jo doseze interno).
+  `healthCheckPath` storitve je prazen - Render ob deployu ne preveri, ali nova koda odgovarja.
 - Workflow `Stresni test` (`.github/workflows/stres.yml`, samo rocni zagon, polje `potrdi` = `DA`) pozene
   `_orodja/stres.js`: N vzporednih bere javne GET poti (`/clubs`, `/events`, `/search`, podrobnosti kluba/dogodka)
   S sekund. Brez prijave in brez pisanja v bazo. Pade, ce je napak > 1 % ali p95 > 2000 ms. Porocilo v povzetku zagona.
 - Namen: po preklopu Render baze na placljiv paket (0.1c-256mb, #12) preveriti, da zmogljivost zadosca.
-  Referenca 11. 9. 2026: 616 req/s pri 40 vzporednih. Poganjaj ob mirnem casu (med testom je produkcija pocasnejsa).
+  Poganjaj ob mirnem casu (med testom je produkcija pocasnejsa).
 - Ne pokrije: nakupa vstopnic (pisanje v bazo, zaklep zaloge) - ta konica ob odprtju prodaje ni izmerjena.
 
 ## Past: Cloudflare Browser Cache TTL (29. 9. 2026)
