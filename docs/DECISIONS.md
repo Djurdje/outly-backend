@@ -196,6 +196,9 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   in ta izračun zmogljivosti.
 - Render baza → plačljivi paket **pred 7. 10. 2026** (brezplačna se izbriše; januarja se je to že zgodilo).
   *velja dokler*: 7. 10. 2026 — po tem datumu ni več odločitev, ampak izgubljena baza.
+  **Izvedeno 30. 9. 2026** (Martin): baza `0.1c-256mb` (6 $), web service Starter `0.5c-512mb` (7 $). Za webapp (`outly.si/app`)
+  dodatnega gostovanja ni treba: statika na Cloudflare Pages, API isti backend.
+  *vir/dokaz*: Stresni test #2/#3 (baza CPU ~0, RAM ~20 %; web CPU ~34 % na Starterju, 0 % napak), Render API.
 - 2026-09-16: Apple Developer: Martin ima **Individual račun**; pozneje App Transfer na NEXT DIMENSIONS. Bundle ID `si.outly.app`,
   ime v App Store Connect »Outly - Nightlife« (»Outly« zasedeno). **Distribucija samo prek TestFlighta** (podpis v GitHub Actions s cloud
   signing, API ključ v secrets, nič v repu); Sideloadly/AltServer se opustita. Runner `macos-26`; `MARKETING_VERSION` dviguje Martin.
