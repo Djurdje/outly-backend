@@ -34,6 +34,18 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
 
+## Spremljanje napak (30. 9. 2026)
+
+- **Backend:** Render logi (`list_logs` na `srv-d5fuiovgi27c73e4boq0`, filter `*rror*`) in dogodki storitve - brez Sentryja.
+  Request logov (statusov 500) Render za to storitev ne vrne; vidne so samo napake, ki jih koda izpise.
+- **Spletna aplikacija:** Sentry, organizacija `outly-hd` (EU, de.sentry.io), projekt `outly-webapp`; `webapp/porocilo.js`
+  (outly_webpage PR #20). Brez SDK, samo outly.si, najvec 5 dogodkov na nalaganje, DSN omejen na 100/uro.
+  »Prevent Storing of IP Addresses« je vklopljen (preverjeno: dogodek brez IP). Politika zasebnosti 2.4 (Martinov DA 30. 9.).
+  Ob dvigu `RAZLICICA` v `webapp/sw.js` uskladi `RAZLICICA` v `porocilo.js`.
+- **iOS:** se ni v Sentryju - sesutja zbira TestFlight.
+- **Odprto pred javnim zagonom:** Brevo (Supabase Auth SMTP: potrditve, kode za prijavo) je na paketu Free = **300 mailov/dan**.
+  Ob vec prijavah na dan kode ne pridejo in prijava ne dela. Odloci Martin (placljiv paket ali drug ponudnik).
+
 ## Stresni test produkcije (30. 9. 2026)
 
 - **Paketa Render od 30. 9. 2026** (baza `0.1c-256mb`, web Starter `0.5c-512mb`, skupaj 13 $/mesec, workspace Hobby 0 $).
