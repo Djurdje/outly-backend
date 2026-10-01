@@ -11,7 +11,9 @@ const app = express();
 app.set("trust proxy", 1);
 
 app.use(cors());
-app.use(express.json());
+// Privzeta omejitev telesa (100 kB) povsod, razen pri paketu skenov brez povezave (do 500 elementov, ima svoj razčlenjevalnik).
+const jsonPrivzeti = express.json();
+app.use((req, res, next) => (req.path === "/business/tickets/scan-batch" ? next() : jsonPrivzeti(req, res, next)));
 
 // BIGINT (OID 20) pride iz pg kot niz ("1"); orders.id in tickets.id sta BIGSERIAL
 // in aplikacija ju dekodira kot Int. Vrednosti so daleč pod 2^53, zato je varno.
@@ -2578,24 +2580,74 @@ function testniNacinPlacil() {
 
 // Koda QR: podpisan JSON, da jo skener preveri tudi brez omrežja (opomba 3 v 002).
 // Skrivnost je QR_SECRET, sicer JWT_SECRET. Zamenjava skrivnosti razveljavi vse kode.
+//
+// Dve obliki (spremembe API-ja so samo dodajanje, kode na telefonih morajo delovati naprej):
+//   v1 (stara): base64url(JSON).HMAC-SHA256[:32]      — preveri samo strežnik (skrivnost je samo tu)
+//   v2 (nova):  o2.base64url(JSON).base64url(Ed25519) — podpis preveri kdorkoli z JAVNIM ključem
+//               (GET /business/scan-key), zato skener na vratih deluje tudi brez povezave (issue #86).
+// v2: podpisano je besedilo "o2.<base64url(JSON)>" (UTF-8), podpis je 64 B surovo. Telo: { v:2, t:serial, e:event_id, i:ustvarjena, k:kid }.
+// Ključni par je izpeljan deterministično iz skrivnosti (HKDF), zato nove okoljske spremenljivke ni:
+// kdor ima skrivnost, lahko ponareja (tako kot pri v1); kdor ima samo javni ključ, ne more.
+const QR_V2_PREDPONA = "o2";
+const QR_V2_HKDF_INFO = "outly-qr-ed25519-v1";
+const ED25519_PKCS8_PREDPONA = Buffer.from("302e020100300506032b657004220420", "hex");
 function qrSkrivnost() { return process.env.QR_SECRET || process.env.JWT_SECRET || ""; }
 function podpisiQr(telo) {
   const b = Buffer.from(JSON.stringify(telo)).toString("base64url");
   const s = crypto.createHmac("sha256", qrSkrivnost()).update(b).digest("base64url").slice(0, 32);
   return `${b}.${s}`;
 }
+// Ključni par v2: izračunan enkrat (ob zagonu); če se skrivnost spremeni med procesom (testi), se izračuna znova.
+let qrKljuciPredpomnjeni = null;
+function qrKljuci() {
+  const skrivnost = qrSkrivnost();
+  if (qrKljuciPredpomnjeni && qrKljuciPredpomnjeni.skrivnost === skrivnost) return qrKljuciPredpomnjeni;
+  const seme = Buffer.from(crypto.hkdfSync("sha256", Buffer.from(skrivnost, "utf8"), Buffer.alloc(0), QR_V2_HKDF_INFO, 32));
+  const zasebni = crypto.createPrivateKey({ key: Buffer.concat([ED25519_PKCS8_PREDPONA, seme]), format: "der", type: "pkcs8" });
+  const javni = crypto.createPublicKey(zasebni);
+  const javniSurov = Buffer.from(javni.export({ format: "jwk" }).x, "base64url"); // 32 B
+  const kid = crypto.createHash("sha256").update(javniSurov).digest("base64url").slice(0, 11);
+  qrKljuciPredpomnjeni = { skrivnost, zasebni, javni, javniSurov, kid };
+  return qrKljuciPredpomnjeni;
+}
+function podpisiQrV2(telo) {
+  const k = qrKljuci();
+  const b = Buffer.from(JSON.stringify({ ...telo, k: k.kid })).toString("base64url");
+  const sporocilo = `${QR_V2_PREDPONA}.${b}`;
+  const s = crypto.sign(null, Buffer.from(sporocilo, "utf8"), k.zasebni).toString("base64url");
+  return `${sporocilo}.${s}`;
+}
+const QR_NAJVEC_ZNAKOV = 1024;
+// preveriQr NIKOLI ne vrže izjeme (vrne null): koda je vhod neznane osebe na vratih, ena zlonamerna koda ne sme podreti
+// ne /scan ne celega paketa v scan-batch. Primerjava podpisa v1 je po BAJTIH (dolžina v znakih != dolžina v bajtih, npr. "é" x 32).
 function preveriQr(koda) {
-  if (typeof koda !== "string") return null;
-  const deli = koda.trim().split(".");
-  if (deli.length !== 2) return null;
-  const [b, s] = deli;
-  const pricakovan = crypto.createHmac("sha256", qrSkrivnost()).update(b).digest("base64url").slice(0, 32);
-  if (s.length !== pricakovan.length || !crypto.timingSafeEqual(Buffer.from(s), Buffer.from(pricakovan))) return null;
-  try { return JSON.parse(Buffer.from(b, "base64url").toString("utf8")); } catch (_) { return null; }
+  try {
+    if (typeof koda !== "string" || koda.length > QR_NAJVEC_ZNAKOV) return null;
+    const deli = koda.trim().split(".");
+    if (deli.length === 3 && deli[0] === QR_V2_PREDPONA) {
+      const [, b, s] = deli;
+      if (!/^[A-Za-z0-9_-]+$/.test(b) || !/^[A-Za-z0-9_-]{86}$/.test(s)) return null;
+      if (!crypto.verify(null, Buffer.from(`${QR_V2_PREDPONA}.${b}`, "utf8"), qrKljuci().javni, Buffer.from(s, "base64url"))) return null;
+      const t = JSON.parse(Buffer.from(b, "base64url").toString("utf8"));
+      return t && t.v === 2 ? t : null;
+    }
+    if (deli.length !== 2) return null;
+    const [b, s] = deli;
+    const pricakovan = Buffer.from(crypto.createHmac("sha256", qrSkrivnost()).update(b).digest("base64url").slice(0, 32), "utf8");
+    const dobljen = Buffer.from(s, "utf8");
+    if (dobljen.length !== pricakovan.length || !crypto.timingSafeEqual(dobljen, pricakovan)) return null;
+    return JSON.parse(Buffer.from(b, "base64url").toString("utf8"));
+  } catch (_) { return null; }
 }
+// Nove kode so v2 (Ed25519). Stare v1 kode (HMAC) preveriQr še sprejme, dokler jih imajo uporabniki na telefonih.
 function qrVstopnice(t) {
-  return podpisiQr({ v: 1, t: t.serial, e: t.event_id, i: Math.floor(new Date(t.created_at).getTime() / 1000) });
+  return podpisiQrV2({ v: 2, t: t.serial, e: t.event_id, i: Math.floor(new Date(t.created_at).getTime() / 1000) });
 }
+try {
+  qrKljuci();
+  // Vedenja NE spreminjamo (zavrnitev bi lahko ustavila skeniranje v produkciji), samo glasno opozorimo.
+  if (qrSkrivnost().length < 32) console.error(`OPOZORILO: QR_SECRET (ali rezervna JWT_SECRET) je ${qrSkrivnost() ? "krajsa od 32 znakov" : "prazna"} - QR kode vstopnic so ponarejljive (kdor ugane skrivnost, izdela veljavne kode). Nastavi nakljucno skrivnost z vsaj 32 znaki (npr. openssl rand -base64 48); to razveljavi vse obstojece QR kode.`);
+} catch (e) { console.error("QR ključ ni na voljo:", e.message); }
 function javnaRef() {
   // 8 znakov brez zamenljivih (0/O, 1/I): OUT-7K3M9QPX
   const abc = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -3086,6 +3138,185 @@ app.post("/business/tickets/scan", requireAuth, requireClub(), async (req, res) 
     }
     return res.status(200).json({ result: "ok", message: "Welcome in.", ticket: { ...t, ...u.rows[0] } });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// ---------------------------
+// SKEN BREZ POVEZAVE (issue #86, 1. 10. 2026)
+// ---------------------------
+// Skener na vratih ne sme pasti nikoli. Zato telefon vstopnice preveri SAM: (1) podpis kode v2 z javnim ključem
+// (GET /business/scan-key), (2) seznam vstopnic dogodka, ki ga prenese vnaprej (GET /business/events/:id/scan-list),
+// (3) skene, opravljene brez povezave, pošlje naknadno (POST /business/tickets/scan-batch, idempotentno).
+// Strežnik ostane razsodnik: dvojni sken iste vstopnice z dveh telefonov da NA STREŽNIKU samo en "ok" (invarianta I14).
+
+// GET /business/scan-key — javni ključ za preverjanje kod v2 (vse vloge v klubu, tudi vratar).
+app.get("/business/scan-key", requireAuth, requireClub(), (req, res) => {
+  const k = qrKljuci();
+  return res.json({
+    alg: "Ed25519", kid: k.kid, public_key: k.javniSurov.toString("base64url"),
+    qr_format: `${QR_V2_PREDPONA}.<base64url(JSON)>.<base64url(signature)>; signed message = "${QR_V2_PREDPONA}.<base64url(JSON)>" (UTF-8)`,
+  });
+});
+
+// GET /business/events/:id/scan-list — vstopnice plačanih naročil dogodka za preverjanje brez povezave.
+// Brez e-naslovov in drugih osebnih podatkov (samo uporabniško ime imetnika, ki ga skener pokaže pri sprejemu).
+// `transferred_serials`: stari serial-i prenesenih vstopnic — koda s takim serialom NE velja več (I7).
+// ETag: osveževanje vsakih nekaj minut pri 1000+ telefonih ne sme vsakič vleči celega seznama (If-None-Match -> 304).
+app.get("/business/events/:id/scan-list", requireAuth, requireClub(), async (req, res) => {
+  try {
+    const id = celoId(req.params.id);
+    if (!id) return res.status(400).json({ error: "invalid_id", message: "Invalid event id." });
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).json({ error: "not_found", message: "Club not found." });
+    const ev = await pool.query("SELECT id, club_id FROM events WHERE id = $1", [id]);
+    if (ev.rows.length === 0 || Number(ev.rows[0].club_id) !== Number(klub)) {
+      return res.status(404).json({ error: "not_found", message: "Event not found." });
+    }
+    const [vst, prenosi] = await Promise.all([
+      pool.query(
+        `SELECT t.serial, t.status, t.used_at, (o.table_id IS NOT NULL) AS is_vip, o.table_label, o.package_name,
+                hu.username AS holder_username
+         FROM tickets t JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK}
+         WHERE t.event_id = $1 AND o.status IN ('paid','partially_refunded')
+         ORDER BY t.id`, [id]),
+      pool.query(
+        `SELECT tt.old_serial FROM ticket_transfers tt JOIN tickets t ON t.id = tt.ticket_id
+         WHERE t.event_id = $1 ORDER BY tt.id`, [id]),
+    ]);
+    const kid = qrKljuci().kid;
+    const tickets = vst.rows.map(t => ({
+      serial: t.serial, status: t.status, used_at: t.used_at, is_vip: t.is_vip, table_label: t.table_label || null,
+      package_name: t.package_name || null, holder_username: t.holder_username || null,
+    }));
+    const transferred_serials = prenosi.rows.map(x => x.old_serial);
+    const etag = 'W/"' + crypto.createHash("sha256").update(JSON.stringify([kid, tickets, transferred_serials])).digest("base64url").slice(0, 27) + '"';
+    res.set("ETag", etag);
+    res.set("Cache-Control", "private, no-cache");
+    return res.json({ event_id: id, generated_at: new Date().toISOString(), kid, tickets, transferred_serials });
+  } catch (e) { console.error(e); return res.status(500).json({ error: "server_error", message: "Server error." }); }
+});
+
+// POST /business/tickets/scan-batch — skeni, opravljeni brez povezave. Telo: { scans: [{ client_scan_id, qr | serial, scanned_at, device_id }] }.
+// Za vsak element ista pravila kot POST /business/tickets/scan; en element = en atomaren stavek (brez skupne transakcije),
+// zato ena slaba koda ne podre paketa. Odgovor ima rezultat za VSAK element, v istem vrstnem redu.
+// Idempotentnost brez migracije: v tickets.scan_device ostane zaznamek "batch|<device_id>|<client_scan_id>". Ista kombinacija
+// na že uporabljeni vstopnici je ponovitev paketa (-> "ok" z izvirnim used_at); drug zaznamek je pravi dvojni sken (-> "already_used").
+const SKEN_BATCH_NAJVEC = 500;
+const SKEN_NAJZGODNEJE_MS = Date.UTC(2020, 0, 1);
+const SKEN_REZERVA_PRED_ZACETKOM_MS = 12 * 3600 * 1000; // vrata se odprejo pred zacetkom dogodka
+const SKEN_ID_VZOREC = /^[A-Za-z0-9._:-]{1,64}$/;
+const SERIAL_VZOREC = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const jsonVelik = express.json({ limit: "1mb" });
+app.post("/business/tickets/scan-batch", requireAuth, requireClub(), jsonVelik, async (req, res) => {
+  try {
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).json({ error: "not_found", message: "Club not found." });
+    const b = req.body || {};
+    if (!Array.isArray(b.scans)) return res.status(400).json({ error: "invalid_scans", message: "scans must be an array." });
+    if (b.scans.length > SKEN_BATCH_NAJVEC) {
+      return res.status(400).json({ error: "too_many_scans", message: `At most ${SKEN_BATCH_NAJVEC} scans per request.` });
+    }
+    const n = b.scans.length;
+    const rezultati = new Array(n);
+    const dela = [];
+    for (let i = 0; i < n; i++) {
+      const cidZaNapako = b.scans[i] && typeof b.scans[i].client_scan_id === "string" ? b.scans[i].client_scan_id : null;
+      try {
+      const it = b.scans[i];
+      const o = it && typeof it === "object" && !Array.isArray(it) ? it : {};
+      const cid = typeof o.client_scan_id === "string" && SKEN_ID_VZOREC.test(o.client_scan_id) ? o.client_scan_id : null;
+      const dev = typeof (o.device_id ?? b.device_id) === "string" && SKEN_ID_VZOREC.test(o.device_id ?? b.device_id) ? (o.device_id ?? b.device_id) : null;
+      const neveljavno = () => { rezultati[i] = { client_scan_id: cid, serial: null, result: "invalid", used_at: null }; };
+      if (!cid || !dev) { neveljavno(); continue; }
+      let serial = null, evId = null;
+      if (typeof o.qr === "string") {
+        const v = preveriQr(o.qr);
+        if (!v || !v.t) { neveljavno(); continue; }
+        serial = String(v.t); evId = v.e;
+      } else if (typeof o.serial === "string") serial = o.serial.trim();
+      if (!serial || !SERIAL_VZOREC.test(serial)) { neveljavno(); continue; }
+      serial = serial.toLowerCase();
+      // scanned_at: samo razsoden razpon (Date.parse sprejme tudi leto 0000 ali +010000, PostgreSQL ne -> trajen "error"); sicer NOW().
+      const ms = typeof o.scanned_at === "string" ? Date.parse(o.scanned_at) : NaN;
+      const kdaj = Number.isFinite(ms) && ms >= SKEN_NAJZGODNEJE_MS && ms <= Date.now() + 24 * 3600 * 1000 ? new Date(ms).toISOString() : null;
+      dela.push({ i, cid, serial, evId, kdaj, zaznamek: `batch|${dev}|${cid}` });
+      } catch (e) {
+        // Varovalo za posamezen element: napaka pri enem ne podre paketa.
+        console.error("scan-batch priprava elementa:", e.message);
+        rezultati[i] = { client_scan_id: cidZaNapako, serial: null, result: "invalid", used_at: null };
+      }
+    }
+
+    // Vse vstopnice paketa naenkrat; za serial-e, ki jih ni, še zgodovina prenosov (stara koda -> "transferred").
+    const serijski = [...new Set(dela.map(d => d.serial))];
+    const vrstice = new Map();
+    const prenesene = new Map();
+    if (serijski.length) {
+      const r = await pool.query(
+        `SELECT t.id, t.serial, t.status, t.used_at, t.used_by_user_id, t.scan_device, t.event_id, t.created_at, e.club_id, e.start_at, o.status AS order_status
+         FROM tickets t JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = t.order_id
+         WHERE t.serial = ANY($1::uuid[])`, [serijski]);
+      for (const t of r.rows) vrstice.set(t.serial, t);
+      const neznani = serijski.filter(s => !vrstice.has(s));
+      if (neznani.length) {
+        const p = await pool.query(
+          `SELECT tt.old_serial, e.club_id FROM ticket_transfers tt JOIN tickets t ON t.id = tt.ticket_id JOIN events e ON e.id = t.event_id
+           WHERE tt.old_serial = ANY($1::uuid[])`, [neznani]);
+        for (const x of p.rows) prenesene.set(x.old_serial, x.club_id);
+      }
+    }
+
+    const iso = (d) => (d ? new Date(d).toISOString() : null);
+    // Ponovitev paketa = isti zaznamek (device_id + client_scan_id) IN isti uporabnik. Zaznamek izbere odjemalec, zato bi brez
+    // preverjanja uporabnika drug clan ekipe z istim parom dobil napacen "ok". Odjemalec naj device_id in client_scan_id generira nakljucno (UUID).
+    const jePonovitev = (v, d) => v.scan_device === d.zaznamek && v.used_by_user_id !== null && Number(v.used_by_user_id) === Number(req.user.userId);
+    for (const d of dela) {
+      let rez;
+      try {
+        const t = vrstice.get(d.serial);
+        if (!t) {
+          const k = prenesene.get(d.serial);
+          rez = { result: k !== undefined && Number(k) === Number(klub) ? "transferred" : "unknown", used_at: null };
+        } else if (Number(t.club_id) !== Number(klub)) rez = { result: "wrong_club", used_at: null };
+        else if (d.evId !== undefined && d.evId !== null && Number(d.evId) !== Number(t.event_id)) rez = { result: "invalid", used_at: null };
+        else if (!["paid", "partially_refunded"].includes(t.order_status)) rez = { result: "unpaid", used_at: null };
+        else if (t.status === "used") rez = { result: jePonovitev(t, d) ? "ok" : "already_used", used_at: iso(t.used_at) };
+        else if (t.status !== "valid") rez = { result: t.status, used_at: null };
+        else {
+          // used_at = ura na telefonu, če je razumna: ne v prihodnosti, ne pred nastankom vstopnice, ne prej kot 12 h pred začetkom dogodka.
+          // Pogoj serial = $4 kot pri /scan: prenos med branjem in pisanjem da vstopnici nov serial, stara koda ne sme več veljati.
+          const u = await pool.query(
+            `UPDATE tickets SET status = 'used',
+                    used_at = CASE WHEN $5::timestamptz IS NOT NULL AND $5::timestamptz <= NOW()
+                                    AND $5::timestamptz >= GREATEST(created_at, $6::timestamptz)
+                                   THEN $5::timestamptz ELSE NOW() END,
+                    used_by_user_id = $2, scan_device = $3
+             WHERE id = $1 AND status = 'valid' AND serial = $4::uuid RETURNING used_at`,
+            [t.id, req.user.userId, d.zaznamek, d.serial, d.kdaj, new Date(new Date(t.start_at).getTime() - SKEN_REZERVA_PRED_ZACETKOM_MS).toISOString()]);
+          if (u.rows.length) {
+            t.status = "used"; t.scan_device = d.zaznamek; t.used_at = u.rows[0].used_at; t.used_by_user_id = req.user.userId;
+            rez = { result: "ok", used_at: iso(t.used_at) };
+          } else {
+            // Med branjem in pisanjem je vstopnico nekdo spremenil: preberi dejansko stanje.
+            const z = await pool.query("SELECT serial, status, used_at, used_by_user_id, scan_device FROM tickets WHERE id = $1", [t.id]);
+            const s = z.rows[0];
+            if (!s || s.serial !== d.serial) rez = { result: "transferred", used_at: null };
+            else if (s.status === "used") {
+              t.status = "used"; t.scan_device = s.scan_device; t.used_at = s.used_at; t.used_by_user_id = s.used_by_user_id;
+              rez = { result: jePonovitev(s, d) ? "ok" : "already_used", used_at: iso(s.used_at) };
+            } else rez = { result: s.status, used_at: null };
+          }
+        }
+      } catch (e) {
+        // Napaka pri enem elementu (npr. baza) ne podre paketa; odjemalec element obdrži v vrsti in ga poskusi znova.
+        console.error("scan-batch element:", e.message);
+        rez = { result: "error", used_at: null };
+      }
+      rezultati[d.i] = { client_scan_id: d.cid, serial: d.serial, ...rez };
+    }
+    const stevilo = (r) => rezultati.filter(x => x.result === r).length;
+    console.log(`Sken-batch: klub ${klub}, uporabnik ${req.user.userId}: ${n} skenov, ok ${stevilo("ok")}, already_used ${stevilo("already_used")}, transferred ${stevilo("transferred")}, error ${stevilo("error")}`);
+    return res.status(200).json({ results: rezultati });
+  } catch (e) { console.error(e); return res.status(500).json({ error: "server_error", message: "Server error." }); }
 });
 
 // ---------------------------

@@ -282,6 +282,12 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   in polje v odgovoru **ostaneta** (stari odjemalci, obstoječi klubi brez galerije še naprej vidijo pasico prek
   `APIClub.slideshowUrls`). Novi klubi nalagajo samo slideshow (do 3 slike). Odločil Martin (v pogovoru, 22. 9.).
   *velja dokler*: obstaja vsaj en klub, ki ima pasico in nima galerije · *nadomeščena z*: —
+- 2026-10-01: **Sken brez povezave: QR v2 z Ed25519, ključ izpeljan iz `QR_SECRET`** (Martinova zahteva: sken na vratih ne sme pasti
+  nikoli, 1000+ hkratnih uporabnikov; issue #86). HMAC za preverjanje na telefonu ne pride v poštev (skrivnost bi morala biti na telefonu).
+  Zato podpis z javnim ključem; ključni par je HKDF iz obstoječe skrivnosti (brez nove spremenljivke, brez Martinovega dela), stare kode v1
+  veljajo naprej. Strežnik ostane razsodnik (`scan-batch`); dva telefona brez povezave lahko spustita isto vstopnico — sprejeto tveganje.
+  *vir/dokaz*: issue #86, backend PR "Sken brez povezave", `_testi/test_sken_brez_povezave.js` · *velja dokler*: — (rotacija ključa =
+  zamenjava `QR_SECRET`, razveljavi vse kode) · *nadomeščena z*: —
 
 ## Način dela (odločeno 16. 9. 2026)
 

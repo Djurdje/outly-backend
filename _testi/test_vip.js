@@ -68,12 +68,14 @@ async function nakup(eid, mid, tok, body) {
 }
 
 // HMAC preverjanje QR podpisa (QR_SECRET="test").
+// Koda v2 (Ed25519): podpis se preveri z javnim kljucem, izpeljanim iz QR_SECRET=test (HKDF, kot streznik).
+const QR_JAVNI = crypto.createPublicKey(crypto.createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"),
+  Buffer.from(crypto.hkdfSync("sha256", Buffer.from("test"), Buffer.alloc(0), "outly-qr-ed25519-v1", 32))]), format: "der", type: "pkcs8" }));
 function preveriQr(qr) {
   const deli = String(qr).split(".");
-  if (deli.length !== 2) return null;
-  const [b, s] = deli;
-  const pricakovan = crypto.createHmac("sha256", "test").update(b).digest("base64url").slice(0, 32);
-  return s === pricakovan ? JSON.parse(Buffer.from(b, "base64url").toString("utf8")) : null;
+  if (deli.length !== 3 || deli[0] !== "o2") return null;
+  return crypto.verify(null, Buffer.from(`${deli[0]}.${deli[1]}`, "utf8"), QR_JAVNI, Buffer.from(deli[2], "base64url"))
+    ? JSON.parse(Buffer.from(deli[1], "base64url").toString("utf8")) : null;
 }
 
 const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db", "migracije", ime), "utf8")
