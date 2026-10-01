@@ -160,9 +160,9 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   (N = sedezi mize), vsaka s svojo QR kodo, in jih z obstojecim prenosom razdeli prijateljem. Vratar/bar ob skenu in v seznamu
   rezervacij vidi VIP, mizo in paket. Placilo kot pri vstopnicah (testni nacin, takoj `paid`). Urejevalnik tlorisa je SAMO na
   spletu (iOS ga nima, pride pozneje). Backend: migraciji 025 (shema, invarianta I13) in 026 (demo tloris, 6-10 miz in 4-6 paketov
-  za Velvet, Nexus, Mirage, Mansion, Olie), poti `GET /events/:id/vip`, `POST /events/:id/tables/:tableId/orders`,
+  za Velvet, Nexus, Mirage, Mansion, Olie; 026 NI samo INSERT: vstavi mize in pakete, na obstojecih vrsticah pa izpolni nova stolpca `clubs.floor_plan` NULL -> tloris in `events.vip_enabled` FALSE -> TRUE), poti `GET /events/:id/vip`, `POST /events/:id/tables/:tableId/orders`,
   `GET|PUT /business/vip`, `GET|PUT /business/events/:id/vip` (ARCHITECTURE, razdelek "VIP mize").
-  *vir/dokaz*: Martinovo narocilo v pogovoru 1. 10. 2026, `_testi/test_vip.js` (206 trditev), invarianta I13 ·
+  *vir/dokaz*: Martinovo narocilo v pogovoru 1. 10. 2026, `_testi/test_vip.js` (251 trditev), invarianta I13 ·
   *velja dokler*: ni drugace odloceno; ko pride Stripe, nakup mize dobi PaymentIntent kot vstopnice (isti mehanizem) ·
   *nadomeščena z*: —
 - 2026-10-01: **Predpostavke agenta pri VIP mizah** (iz specifikacije; Martin jih ni izrecno odlocil, spremeni jih lahko brez

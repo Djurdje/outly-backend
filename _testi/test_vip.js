@@ -474,7 +474,7 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
   r = await api("GET", `/business/events/${E1}/vip`, T.lastnik);
   assert(r.body.tables.some(t => t.id === M1 && t.booking), "arhivirana miza z rezervacijo je na seznamu dogodka", r.body.tables.map(t => t.id));
   r = await api("GET", `/events/${E1}/vip`);
-  assert(!r.body.tables.some(t => t.id === M1), "javno arhivirana miza ni na seznamu", r.body.tables.map(t => t.id));
+  assert(r.body.tables.find(t => t.id === M1) && r.body.tables.find(t => t.id === M1).available === false, "javno: arhivirana miza z prodajo na tem dogodku ostane na seznamu kot zasedena", r.body.tables.map(t => [t.id, t.available]));
   await pool.query("UPDATE club_tables SET archived_at=NULL WHERE id=$1", [M1]);
 
   console.log("\n# Prodaja: tables_sold, tickets_sold brez miz, gross z mizami");
@@ -539,6 +539,108 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
   assert((await pool.query("SELECT sold_count FROM events WHERE id=$1", [E1])).rows[0].sold_count === 3, "sold_count = 3 (1 + 2 navadne, mize ne stejejo)");
   await pool.query("UPDATE orders SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [r.body.order.id]);
   assert((await pool.query("SELECT sold_count FROM events WHERE id=$1", [E1])).rows[0].sold_count === 1, "preklic navadnega narocila sprosti zalogo (sold_count 1)");
+
+  console.log("\n# Popravki po pregledu: arhivirana rezervirana miza, javni seznam, potrditev cene");
+  await restart();
+  // (1) Arhivirana miza z rezervacijo na dogodku: GET jo vrne (archived: true), PUT dogodka z vsemi mizami iz GET ne sme pasti.
+  r = await nakup(E1, M3novi, T.bor, { package_id: P1 });
+  assert(r.status === 201, "bor kupi M3 na E1 (za test izklopa prodane mize)", r.body);
+  const klubVip = (await api("GET", "/business/vip", T.lastnik)).body;
+  r = await api("PUT", "/business/vip", T.lastnik, { plan: klubVip.plan, tables: klubVip.tables.filter(t => t.id !== M1), packages: klubVip.packages });
+  assert(r.status === 200 && !r.body.tables.some(t => t.id === M1), "klub arhivira rezervirano mizo M1", r.body);
+  r = await api("GET", `/business/events/${E1}/vip`, T.doorman);
+  const arhM1 = r.body.tables.find(t => t.id === M1);
+  assert(arhM1 && arhM1.booking && arhM1.archived === true && r.body.tables.filter(t => t.id !== M1).every(t => t.archived === false), "GET /business/events/:id/vip: arhivirana miza z rezervacijo ima archived true, ostale false", r.body.tables.map(t => [t.id, t.archived]));
+  const vseMize = r.body.tables.map(t => ({ table_id: t.id, price_cents: t.price_cents, disabled: t.disabled }));
+  r = await api("PUT", `/business/events/${E1}/vip`, T.lastnik, { enabled: true, tables: vseMize });
+  assert(r.status === 200 && r.body.tables.some(t => t.id === M1 && t.booking), "PUT dogodka z vsemi mizami iz GET (tudi arhivirano) -> 200", r.body);
+  r = await api("PUT", `/business/events/${E1}/vip`, T.lastnik, { enabled: true, tables: [{ table_id: mizaDrugega.id }] });
+  assert(r.status === 400, "tuja miza se vedno -> 400", r.body);
+  // (5) Prodana miza, ki jo klub izklopi (ali arhivira), ostane v javnem seznamu kot zasedena.
+  r = await api("PUT", `/business/events/${E1}/vip`, T.lastnik, { enabled: true, tables: [{ table_id: M3novi, disabled: true }] });
+  assert(r.status === 200, "klub izklopi prodano mizo M3 na dogodku", r.status);
+  r = await api("GET", `/events/${E1}/vip`);
+  const jM3 = r.body.tables.find(t => t.id === M3novi), jM1 = r.body.tables.find(t => t.id === M1), jM2 = r.body.tables.find(t => t.id === M2);
+  assert(jM3 && jM3.available === false && jM1 && jM1.available === false, "javno: prodana + izklopljena in prodana + arhivirana miza ostaneta z available false", r.body.tables.map(t => [t.id, t.available]));
+  assert(!jM2, "javno: izklopljena NEprodana miza je se vedno skrita", r.body.tables.map(t => t.id));
+  assert(r.body.tables.every(t => t.available === false) && r.body.enabled === true, "enabled ostane true (kupci vidijo Booked)", r.body.tables.length);
+  r = await nakup(E1, M3novi, T.cene, { package_id: P1 });
+  assert(r.status === 404, "izklopljene (prodane) mize se ne da kupiti -> 404", r.body);
+  await api("PUT", `/business/events/${E1}/vip`, T.lastnik, { enabled: true, tables: [{ table_id: M3novi, disabled: false }] });
+  await pool.query("UPDATE club_tables SET archived_at=NULL WHERE id=$1", [M1]);
+
+  // (2) Potrditev cene: expected_price_cents.
+  const EPR = await dogodek(1, "Potrditev cene", "10 days");
+  await api("PUT", `/business/events/${EPR}/vip`, T.lastnik, { enabled: true });
+  const cenaM1 = (await api("GET", `/events/${EPR}/vip`)).body.tables.find(t => t.id === M1).price_cents;
+  for (const slab of ["30000", 1.5, -1, true]) {
+    r = await nakup(EPR, M1, T.ana, { package_id: P1, expected_price_cents: slab });
+    assert(r.status === 400, `expected_price_cents ${JSON.stringify(slab)} -> 400`, r.body);
+  }
+  r = await nakup(EPR, M1, T.ana, { package_id: P1, expected_price_cents: cenaM1 - 1 });
+  assert(r.status === 409 && r.body === "The table price has changed.", "expected_price_cents != cena -> 409 The table price has changed.", r.body);
+  assert((await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE event_id=$1", [EPR])).rows[0].n === 0, "zavrnjena potrditev cene ne pusti narocila");
+  await api("PUT", `/business/events/${EPR}/vip`, T.lastnik, { enabled: true, tables: [{ table_id: M1, price_cents: cenaM1 + 1000 }] });
+  r = await nakup(EPR, M1, T.ana, { package_id: P1, expected_price_cents: cenaM1 });
+  assert(r.status === 409, "klub je med tem dvignil ceno -> stara potrjena cena -> 409", r.body);
+  r = await nakup(EPR, M1, T.ana, { package_id: P1, expected_price_cents: cenaM1 + 1000 });
+  assert(r.status === 201 && r.body.order.total_cents === cenaM1 + 1000, "expected_price_cents == cena -> 201 po tej ceni", r.body);
+  r = await nakup(EPR, M2, T.ana, { package_id: P1, expected_price_cents: null });
+  assert(r.status === 201, "expected_price_cents null (ali brez polja) deluje kot prej", r.body);
+
+  // (3) Osamljen surrogat (neveljaven UTF-16) -> 400, ne 500.
+  const kl = (await api("GET", "/business/vip", T.lastnik)).body;
+  const surr = "\ud800";
+  for (const [opis, spremeni] of [
+    ["oznaka mize", b => { b.tables[0].label = "T" + surr; }],
+    ["oznaka elementa tlorisa", b => { b.plan.elements[0].label = surr; }],
+    ["ime paketa", b => { b.packages[0].name = "P" + surr; }],
+    ["opis paketa", b => { b.packages[0].description = surr + "x"; }],
+    ["obrnjen surrogat", b => { b.tables[0].label = "\udc00T"; }],
+  ]) {
+    const b = JSON.parse(JSON.stringify({ plan: kl.plan, tables: kl.tables, packages: kl.packages }));
+    spremeni(b);
+    r = await api("PUT", "/business/vip", T.lastnik, b);
+    assert(r.status === 400, `osamljen surrogat (${opis}) -> 400`, [r.status, r.body]);
+  }
+  { const b = JSON.parse(JSON.stringify({ plan: kl.plan, tables: kl.tables, packages: kl.packages }));
+    b.packages[0].description = "Party 🎉";
+    r = await api("PUT", "/business/vip", T.lastnik, b);
+    assert(r.status === 200 && r.body.packages[0].description === "Party 🎉", "veljaven par surrogatov (emoji) se shrani", r.status);
+    b.packages[0].description = kl.packages[0].description; await api("PUT", "/business/vip", T.lastnik, b); }
+
+  // (4) Prevelik id (> 2147483647) -> 400, ne 500.
+  const VELIK = 2147483648;
+  const velikiId = [
+    ["GET", `/events/${VELIK}/vip`, null, undefined], ["POST", `/events/${VELIK}/tables/${M1}/orders`, T.ana, {}],
+    ["POST", `/events/${E1}/tables/${VELIK}/orders`, T.ana, {}], ["POST", `/events/${E1}/tables/${M1}/orders`, T.ana, { package_id: VELIK }],
+    ["GET", `/business/events/${VELIK}/vip`, T.lastnik, undefined], ["PUT", `/business/events/${VELIK}/vip`, T.lastnik, { enabled: true }],
+    ["PUT", `/business/events/${E1}/vip`, T.lastnik, { enabled: true, tables: [{ table_id: VELIK }] }],
+    ["PUT", "/business/vip", T.lastnik, { plan: kl.plan, tables: [{ id: VELIK, label: "Z", x: 0, y: 0, w: 1, h: 1, shape: "rect", seats: 2, price_cents: 1 }], packages: [] }],
+    ["PUT", "/business/vip", T.lastnik, { plan: kl.plan, tables: [], packages: [{ id: VELIK, name: "Z", description: "" }] }],
+  ];
+  for (const [m, pot, tok, telo] of velikiId) {
+    if (m === "POST") { if (nakupov >= 16) await restart(); nakupov++; }
+    r = await api(m, pot, tok, telo);
+    assert(r.status === 400, `prevelik id: ${m} ${pot.replace(String(VELIK), "VELIK")} -> 400 (ne 500)`, [r.status, r.body]);
+  }
+  assert(!/out of range/i.test(log), "v logu ni 'out of range' (napak baze zaradi velikih id-jev)", log.split("\n").filter(l => /out of range/i.test(l)).slice(0, 2));
+
+  // (6) Matrika vlog.
+  for (const [m, pot, telo] of [["GET", "/business/vip"], ["PUT", "/business/vip", kl], ["GET", `/business/events/${E1}/vip`], ["PUT", `/business/events/${E1}/vip`, { enabled: true }]]) {
+    r = await api(m, pot, null, telo);
+    assert(r.status === 401, `brez zetona: ${m} ${pot.replace(String(E1), ":id")} -> 401`, r.status);
+  }
+  r = await api("GET", `/business/events/${E1}/vip`, T.ana);
+  assert(r.status === 403, "navaden uporabnik brez clanstva: GET /business/events/:id/vip -> 403", r.status);
+  r = await api("PUT", `/business/events/${E1}/vip`, T.ana, { enabled: true });
+  assert(r.status === 403, "navaden uporabnik brez clanstva: PUT /business/events/:id/vip -> 403", r.status);
+  await pool.query("UPDATE users SET role='admin' WHERE email='bor@outly.si'");
+  for (const [m, pot, telo] of [["GET", "/business/vip"], ["PUT", "/business/vip", kl], ["GET", `/business/events/${E1}/vip`], ["PUT", `/business/events/${E1}/vip`, { enabled: true }]]) {
+    r = await api(m, pot, T.bor, telo);
+    assert(r.status === 404, `admin brez kluba: ${m} ${pot.replace(String(E1), ":id")} -> 404`, r.status);
+  }
+  await pool.query("UPDATE users SET role='user' WHERE email='bor@outly.si'");
 
   console.log("\n# Migracija 026: demo tloris, mize, paketi");
   await restart();
