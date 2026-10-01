@@ -93,8 +93,14 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 - **Znane omejitve:** (1) dva telefona brez povezave lahko spustita isto vstopnico — strežnik to ugotovi ob sinhronizaciji (`already_used`
   z `used_at` prvega skena); zapisnika konfliktov za nadzorno ploščo ni (rabi tabelo = migracijo, čaka Martinov DA). (2) Vstopnica, kupljena
   po prenosu seznama, ima veljaven podpis, a je ni na seznamu; stara koda prenesene vstopnice ima veljaven podpis — telefon jo zavrne samo,
-  če je njen serial v `transferred_serials` zadnjega prenosa. (3) `used_at` iz telefona strežnik sprejme le v oknu [nastanek vstopnice, zdaj]
-  in ne starejši od 7 dni, sicer NOW().
+  če je njen serial v `transferred_serials` zadnjega prenosa. (3) `used_at` iz telefona strežnik sprejme le v oknu [največ(nastanek vstopnice, začetek dogodka - 12 h), zdaj]
+  in `scanned_at` med letoma 2020 in zdaj + 1 dan, sicer NOW().
+- **Pogodba za odjemalca (scan-batch):** `device_id` in `client_scan_id` morata biti **naključna (UUID)**: `device_id` se ustvari enkrat na
+  namestitev, `client_scan_id` na vsak sken. Ponovitev paketa strežnik prepozna po paru (`device_id`, `client_scan_id`) IN istem uporabniku
+  (`used_by_user_id`); predvidljiva imena bi omogočila, da drug član ekipe z istim parom dobi napačen `ok`.
+- **Past (QR_SECRET):** ob zagonu backend z `console.error` opozori, če je `QR_SECRET` (ali rezervna `JWT_SECRET`) prazna ali krajša od 32 znakov.
+  Vedenje se NI spremenilo (zavrnitev bi lahko ustavila skeniranje); ali je skrivnost na Renderju nastavljena, ni znano — vprašanje za Martina
+  (Render → Environment → `QR_SECRET`; zamenjava razveljavi vse obstoječe QR kode).
 - Dostop: `scan-key` in `scan-list` vidijo vse vloge v klubu (tudi vratar) — vratar tako dobi seznam imen imetnikov vstopnic; e-naslovov ni.
 - Testi: `_testi/test_sken_brez_povezave.js` (v `npm test`). `test_vstopnice.js` in `test_vip.js` preverjata kode v2 z javnim ključem.
 

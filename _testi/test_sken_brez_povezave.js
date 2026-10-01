@@ -86,6 +86,9 @@ function kodaV1(serial, eventId, secret = "test") {
   let r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Sken A", startAt: cezDan, ticketPriceCents: 1500, capacity: 100, minAge: 0 });
   assert(r.status === 201, "dogodek A (klub 1) ustvarjen", r.body);
   const dogA = r.body.id;
+  // Dogodek A je ob skenih ze zacet (vrata odprta), pri nakupih in prenosih pa se ne (nakup/prenos po zacetku ni mogoc).
+  const odpri = () => pool.query("UPDATE events SET start_at = NOW() + INTERVAL '1 day' WHERE id=$1", [dogA]);
+  const zacni = () => pool.query("UPDATE events SET start_at = NOW() - INTERVAL '1 hour' WHERE id=$1", [dogA]);
   r = await api("POST", "/events", T.drugi, { clubId: 2, title: "Sken B", startAt: cezDan, ticketPriceCents: 1000, capacity: 100, minAge: 0 });
   assert(r.status === 201, "dogodek B (klub 2) ustvarjen", r.body);
   const dogB = r.body.id;
@@ -106,6 +109,7 @@ function kodaV1(serial, eventId, secret = "test") {
 
   // Vstopnice so bile "kupljene" pred dnevi: scanned_at na telefonu mora biti po nastanku vstopnice (casovno okno za used_at).
   await pool.query("UPDATE tickets SET created_at = NOW() - INTERVAL '2 days'");
+  await zacni();
 
   console.log("\n# GET /business/scan-key");
   r = await api("GET", "/business/scan-key", T.vratar);
@@ -276,8 +280,10 @@ function kodaV1(serial, eventId, secret = "test") {
   assert(new Date(r.body.results[12].used_at).getTime() > Date.now() - 5000, "neveljaven scanned_at -> used_at = NOW()", r.body.results[12]);
 
   console.log("\n# scan-batch: casovno okno za used_at");
+  await odpri();
   r = await api("POST", `/events/${dogA}/orders`, T.ana, { quantity: 4 });
   const nove = r.body.tickets;
+  await zacni();
   const prihodnost = new Date(Date.now() + 3600 * 1000).toISOString();
   const pred = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
   const predNastankom = new Date(Date.now() - 2 * 3600 * 1000).toISOString(); // vstopnica je bila ustvarjena sedaj
@@ -294,7 +300,9 @@ function kodaV1(serial, eventId, secret = "test") {
 
   console.log("\n# scan-batch: prenesena vstopnica s staro kodo -> transferred");
   const staraKoda = borove[0].qr, staraSer = borove[0].serial;
+  await odpri();
   r = await api("POST", `/tickets/${borove[0].id}/transfer`, T.bor, { email: "cene@outly.si" });
+  await zacni();
   assert(r.status === 200, "bor prenese vstopnico Cenetu", r.body);
   r = await api("GET", "/me/tickets", T.cene);
   const novaKoda = r.body.find(t => t.id === borove[0].id);
@@ -311,17 +319,21 @@ function kodaV1(serial, eventId, secret = "test") {
   assert(r.body.results[0].result === "wrong_club", "lastnik drugega kluba: vstopnica kluba 1 -> wrong_club", r.body.results[0]);
 
   console.log("\n# scan-batch: neplačano naročilo");
+  await odpri();
   r = await api("POST", `/events/${dogA}/orders`, T.ana, { quantity: 1 });
+  await zacni();
   const nep = r.body.tickets[0];
   await pool.query("UPDATE orders SET status='refunded', refunded_cents=total_cents WHERE id=$1", [r.body.order.id]);
   r = await api("POST", "/business/tickets/scan-batch", T.vratar, { scans: [sken(nep.qr)] });
   assert(r.body.results[0].result === "unpaid", "vstopnica vrnjenega narocila -> unpaid", r.body.results[0]);
 
   console.log("\n# I14: dvojni sken tudi sociasno da en sam ok");
+  await odpri();
   r = await api("POST", `/events/${dogA}/orders`, T.ana, { quantity: 3 });
   const tekma = r.body.tickets;
   r = await api("POST", `/events/${dogA}/orders`, T.ana, { quantity: 6 });
   const tekma2 = r.body.tickets;
+  await zacni();
   await pool.query("UPDATE tickets SET created_at = NOW() - INTERVAL '2 days'");
   // 6 vstopnic x 20 naprav = 120 sociasnih paketov (pool ima 10 povezav, zato se zahtevki res prekrivajo)
   const napadi = [];
@@ -346,7 +358,9 @@ function kodaV1(serial, eventId, secret = "test") {
   assert(stUp === 3, "v bazi so unovcene natanko 3 vstopnice", stUp);
 
   console.log("\n# scan-batch: 500 elementov, telo > 100 kB");
+  await odpri();
   r = await api("POST", `/events/${dogA}/orders`, T.ana, { quantity: 1 });
+  await zacni();
   const velika = r.body.tickets[0];
   const velik = [];
   for (let i = 0; i < 500; i++) velik.push(sken(velika.qr, D1, kdaj(3)));
@@ -360,6 +374,52 @@ function kodaV1(serial, eventId, secret = "test") {
   // ostale poti se vedno imajo privzeto omejitev
   r = await api("POST", "/business/tickets/scan", T.vratar, { serial: "x".repeat(150 * 1024) });
   assert(r.status === 413, "navadne poti: telo > 100 kB -> 413", r.status);
+
+  console.log("\n# Popravki po pregledu PR #91");
+  await odpri();
+  r = await api("POST", `/events/${dogA}/orders`, T.ana, { quantity: 9 });
+  const pp = r.body.tickets;
+  await zacni();
+  await pool.query("UPDATE tickets SET created_at = NOW() - INTERVAL '2 days'");
+
+  // 1 (KRITICNO): v1 koda s podpisom z vec-bajtnimi znaki (32 znakov != 32 B) je vrgla izjemo -> 500 za cel paket
+  const zlobnoTelo = Buffer.from(JSON.stringify({ v: 1, t: pp[0].serial, e: dogA, i: 1 })).toString("base64url");
+  const zlobna = `${zlobnoTelo}.${"\u00e9".repeat(32)}`;
+  r = await api("POST", "/business/tickets/scan", T.vratar, { qr: zlobna });
+  assert(r.status === 400 && r.body.result === "invalid", "1: /scan: v1 s podpisom 'e-ostrivec' x 32 -> 400 invalid (ne 500)", { status: r.status, body: r.body });
+  r = await api("POST", "/business/tickets/scan-batch", T.vratar, { scans: [sken(zlobna), sken(pp[0].qr), sken(zlobna, D2)] });
+  assert(r.status === 200 && r.body.results.map(x => x.result).join() === "invalid,ok,invalid", "1: scan-batch: zlobna koda ne podre paketa (invalid,ok,invalid)", { status: r.status, body: r.body });
+  r = await api("POST", "/business/tickets/scan-batch", T.vratar, { scans: [sken(pp[1].qr)] });
+  assert(r.status === 200 && r.body.results[0].result === "ok", "1: naslednji paket normalno dela (sinhronizacija ni obtičala)", r.body);
+  for (const zlobna2 of [`${zlobnoTelo}.${"\u{1F600}".repeat(16)}`, `${zlobnoTelo}.${"\u00e9".repeat(31)}`, `o2.${zlobnoTelo}.${"\u00e9".repeat(86)}`, `${"\u00e9".repeat(5)}.${"\u00e9".repeat(32)}`]) {
+    const x = await api("POST", "/business/tickets/scan-batch", T.vratar, { scans: [sken(zlobna2)] });
+    assert(x.status === 200 && x.body.results[0].result === "invalid", "1: druga zlobna oblika kode -> invalid", { status: x.status, body: x.body });
+  }
+
+  // 2: idempotentnost velja samo za istega uporabnika; drug clan ekipe z istim parom device_id + client_scan_id dobi already_used
+  const tuj = { client_scan_id: "isti-par-1", qr: pp[2].qr, scanned_at: kdaj(5), device_id: "isti-telefon-1" };
+  r = await api("POST", "/business/tickets/scan-batch", T.vratar, { scans: [tuj] });
+  assert(r.body.results[0].result === "ok", "2: vratar: prvi sken ok", r.body.results[0]);
+  r = await api("POST", "/business/tickets/scan-batch", T.lastnik, { scans: [tuj] });
+  assert(r.body.results[0].result === "already_used", "2: drug clan ekipe z istim device_id + client_scan_id -> already_used (ne ok)", r.body.results[0]);
+  r = await api("POST", "/business/tickets/scan-batch", T.vratar, { scans: [tuj] });
+  assert(r.body.results[0].result === "ok", "2: isti vratar ponovi paket -> se vedno ok", r.body.results[0]);
+
+  // 3: scanned_at, ki ga Date.parse sprejme, PostgreSQL pa ne (leto 0000, +010000) -> prej trajno "error"
+  const slabiCasi = ["0000-01-01T00:00:00Z", "+010000-01-01T00:00:00Z", "9999-12-31T00:00:00Z", "-000001-01-01T00:00:00Z"];
+  r = await api("POST", "/business/tickets/scan-batch", T.vratar, { scans: slabiCasi.map((c, i) => sken(pp[3 + i].qr, D1, c)) });
+  assert(r.status === 200 && r.body.results.every(x => x.result === "ok"), "3: scanned_at izven razsodnega razpona (leto 0, +10000, 9999, -1) -> ok, ne error", r.body.results.map(x => x.result));
+  assert(r.body.results.every(x => Math.abs(new Date(x.used_at).getTime() - Date.now()) < 10000), "3: used_at je v teh primerih NOW()", r.body.results.map(x => x.used_at));
+
+  // 4: spodnja meja used_at = zacetek dogodka - 12 h (dogodek se je zacel pred 1 h -> meja 13 h nazaj), ne 7 dni
+  const pred14h = new Date(Date.now() - 14 * 3600 * 1000).toISOString();
+  const pred12h = new Date(Date.now() - 12 * 3600 * 1000).toISOString();
+  r = await api("POST", "/business/tickets/scan-batch", T.vratar, { scans: [sken(pp[7].qr, D1, pred14h), sken(pp[8].qr, D1, pred12h)] });
+  assert(r.body.results[0].result === "ok" && Math.abs(new Date(r.body.results[0].used_at).getTime() - Date.now()) < 10000, "4: scanned_at 14 h pred zacetkom-minus-rezerva -> NOW (ne 14 h nazaj)", r.body.results[0]);
+  assert(r.body.results[1].result === "ok" && r.body.results[1].used_at === pred12h, "4: scanned_at pred 12 h (znotraj rezerve pred zacetkom) se ohrani", r.body.results[1]);
+
+  // 5: opozorilo ob zagonu, ce je QR_SECRET prazna ali krajsa od 32 znakov (testi tecejo z QR_SECRET=test)
+  assert(/QR_SECRET[^\n]*32/.test(log), "5: ob zagonu je v logu jasno opozorilo o prekratki/prazni QR skrivnosti", log.slice(0, 300));
 
   console.log("\n# Brez e-naslovov in skrivnosti v odgovorih");
   r = await api("GET", "/business/scan-key", T.vratar);
