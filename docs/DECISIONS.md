@@ -153,6 +153,28 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   (osnutek posodobljen).
   *vir/dokaz*: Martinovo sporocilo v pogovoru 29. 9. 2026; outly_webpage PR #18 · *velja dokler*: Martin ne rece drugace ·
   *nadomeščena z*: —
+- 2026-10-01: **VIP mize s tlorisom** (Martin). Klub v spletni aplikaciji (`/app/business/:klub/vip`) enkrat narise tloris (mreza
+  celic; bar, oder, DJ, plesisce, vhod, WC, napis, stena) in mize (oznaka, oblika, 1-20 sedezev, privzeta cena) ter vpise bottle
+  pakete (npr. "Jameson 0,7 l" + "4x Red Bull, 1 l orange juice"); pri vsakem dogodku VIP vklopi, ceno mize po zelji prepise ali
+  mizo izklopi. Kupec na dogodku (splet in iOS) klikne prosto mizo, izbere paket (vstet v ceno mize) in kupi: dobi N VIP vstopnic
+  (N = sedezi mize), vsaka s svojo QR kodo, in jih z obstojecim prenosom razdeli prijateljem. Vratar/bar ob skenu in v seznamu
+  rezervacij vidi VIP, mizo in paket. Placilo kot pri vstopnicah (testni nacin, takoj `paid`). Urejevalnik tlorisa je SAMO na
+  spletu (iOS ga nima, pride pozneje). Backend: migraciji 025 (shema, invarianta I13) in 026 (demo tloris, 6-10 miz in 4-6 paketov
+  za Velvet, Nexus, Mirage, Mansion, Olie), poti `GET /events/:id/vip`, `POST /events/:id/tables/:tableId/orders`,
+  `GET|PUT /business/vip`, `GET|PUT /business/events/:id/vip` (ARCHITECTURE, razdelek "VIP mize").
+  *vir/dokaz*: Martinovo narocilo v pogovoru 1. 10. 2026, `_testi/test_vip.js` (206 trditev), invarianta I13 ·
+  *velja dokler*: ni drugace odloceno; ko pride Stripe, nakup mize dobi PaymentIntent kot vstopnice (isti mehanizem) ·
+  *nadomeščena z*: —
+- 2026-10-01: **Predpostavke agenta pri VIP mizah** (iz specifikacije; Martin jih ni izrecno odlocil, spremeni jih lahko brez
+  posledic za shemo, razen prve): (1) VIP vstopnice **ne stejejo** v `events.capacity` / `sold_count` - mize so lastna zaloga, vsaka
+  miza enkrat na dogodek (I13); razprodan dogodek zato se vedno proda mize. (2) **Paket je obvezen**, ce ima klub vsaj en aktiven
+  paket; klub brez paketov prodaja mize brez paketa (`package_id` NULL). (3) **Okno prodaje mize = isto kot za vstopnice**
+  (objavljen dogodek, klub viden, zacetek v prihodnosti, `sales_open_at` / `sales_close_at`); mize se po zacetku se vidijo
+  (`on_sale: false`), kupiti se ne da. (4) Mize in paketi se **arhivirajo, ne brisejo** (narocila hranijo posnetek imen).
+  (5) `GET /business/sales`: `tickets_sold` steje samo navadne vstopnice, mize posebej (`tables_sold`), `gross_cents` jih
+  vkljucuje; enako v adminovih financah. (6) Provizija 10 % velja tudi za mize. (7) Cena mize je strop 100.000 EUR (tipkarske napake).
+  *vir/dokaz*: specifikacija VIP miz 1. 10. 2026, `_testi/test_vip.js` · *velja dokler*: Martin ne rece drugace ·
+  *nadomeščena z*: —
 
 ## Oblikovanje
 

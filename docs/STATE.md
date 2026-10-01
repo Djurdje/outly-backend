@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-09-29 (spletna aplikacija, QR skener).
+Zadnja posodobitev: 2026-10-01 (VIP mize s tlorisom, backend).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -76,6 +76,33 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   pomesa stare in nove datoteke. Spletna aplikacija se od PR #19 brani sama (SW `no-cache`, `webapp/zagon.js`).
   **Priporocilo Martinu:** Cloudflare -> Caching -> Browser Cache TTL = "Respect Existing Headers" (nastavitev racuna,
   odloci Martin). Do takrat to velja tudi za landing (`script.js`, `auth.js` ...): po spremembi lahko do 4 h stari.
+
+## Kje smo (1. 10. 2026, VIP mize)
+
+- **Backend narejen** (veja `claude/sweet-euler-6ztv3s`, se NE mergan): migraciji `025_vip_mize.sql` (shema + I13) in `026_vip_demo.sql`
+  (demo tloris/mize/paketi za Velvet, Nexus, Mirage, Mansion, Olie + VIP na njihovih prihajajocih objavljenih dogodkih), poti
+  `GET /events/:id/vip`, `POST /events/:id/tables/:tableId/orders`, `GET|PUT /business/vip`, `GET|PUT /business/events/:id/vip`,
+  nova polja `vip_enabled`, `vip_from_cents` (dogodki) in `is_vip`, `table_label`, `table_seats`, `package_name`, `package_description`
+  (vstopnice, narocila, sken; narocila tudi `table_id`), `tables_sold` / `tables_gross_cents` v `/business/sales`. Test `_testi/test_vip.js`.
+  Odlocitev in predpostavke: DECISIONS 1. 10. 2026; invarianta I13 in razdelek "VIP mize" v ARCHITECTURE.
+- **Pred merge-om:** migracija 026 ima `UPDATE` na NOVIH stolpcih (`clubs.floor_plan` NULL -> tloris, `events.vip_enabled` FALSE -> TRUE
+  za prihajajoce dogodke petih demo klubov) - ne briše in ne spreminja obstojecih vrednosti, a po pravilu "UPDATE na podatkih" je
+  odlocitev o merge-u Martinova; PR itak pade brez oznake `odobril-martin` (pot `db/migracije/**`).
+- **Za `web-dev`** (pogodba dogovorjena, poti in imena polj se ne spreminjajo): urejevalnik tlorisa `/app/business/:klub/vip`
+  (`GET|PUT /business/vip`), razdelek VIP tables pri dogodku (`GET|PUT /business/events/:id/vip`), kupec: kartica "VIP & TABLES"
+  (`vip_enabled`, `vip_from_cents`) -> tloris (`GET /events/:id/vip`) -> `POST /events/:id/tables/:tableId/orders` `{ package_id }`.
+  Napake so navadno besedilo kot drugod (`400` paket ni izbran / ni od kluba, `404` miza ni na dogodku, `409` "This table is
+  already booked." / okno prodaje, `403` starost). VIP vstopnica ima `quantity` 1 na naročilu, a N vstopnic v `tickets`.
+- **Za `ios-dev`**: nova polja v modelih z privzeto vrednostjo; seznam rezervacij miz (samo branje) iz `GET /business/events/:id/vip`
+  (vse vloge v klubu); skener: `ticket.is_vip`, `table_label`, `package_name` tudi pri `already_used`; kupec: `GET /events/:id/vip`
+  in nakup mize. Urejevalnika na iOS ni.
+- **Past:** `GET /events/:id` `vip_enabled` je `true` samo, ce je VIP vklopljen IN ima dogodek vsaj eno vklopljeno aktivno mizo
+  (`GET /business/events/:id/vip` `enabled` pa je surova stikalna vrednost dogodka). Nakup mize in nakup vstopnic delita
+  omejevalnik "nakup" (20/uro na IP). `PUT /business/vip` zaklene vrstico kluba z `FOR NO KEY UPDATE` (ne `FOR UPDATE`): nakup mize
+  bere klub prek tujega kljuca in bi se s polnim zaklepom zaciklal (mrtva zanka).
+- **Na napravi / v produkciji NI preverjeno:** nic od klientov (splet, iOS) se ne klice teh poti; backend je preverjen samo s testi
+  (lokalni PG16) in `npm run migrate` na prazni bazi in na bazi s podatki. Neodprto: unovcevanje/vracila miz (poti za vracilo sploh
+  ni - `DELETE /events/:id` z naročili dogodek odpove, mize ostanejo pri kupcih), Stripe pot za mize.
 
 ## Kje smo (29. 9. 2026, spletna aplikacija - QR skener vstopnic)
 

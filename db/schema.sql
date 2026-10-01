@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–021, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–026, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,10 +15,10 @@
 -- PostgreSQL database dump
 --
 
-\restrict ePcRIC3pBzfKnF9Nd6hAzeMPtujBfRzu97CLEdw7EqcYAbv3b4VM2mquPoS35sM
+\restrict dPsY2zX5Wiqx0SVohJbeqs4suVW8S1NhS0nwJLTCEcSbG8pzBe3F75ASkMkckLS
 
--- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
--- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
+-- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
+-- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -56,6 +56,11 @@ DECLARE
     zmogljivost INTEGER;
     zasedeno    INTEGER;
 BEGIN
+    -- VIP miza ima lastno zalogo (I13), navadne vstopnice je ne smejo porabiti ali zaklepati.
+    IF NEW.table_id IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+
     -- FOR UPDATE zaklene vrstico dogodka do konca transakcije.
     SELECT capacity, sold_count INTO zmogljivost, zasedeno
     FROM events WHERE id = NEW.event_id FOR UPDATE;
@@ -80,6 +85,9 @@ CREATE FUNCTION public.sprosti_zalogo() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
+    IF OLD.table_id IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
     IF NEW.status IN ('cancelled','refunded','failed')
        AND OLD.status NOT IN ('cancelled','refunded','failed') THEN
         UPDATE events SET sold_count = GREATEST(0, sold_count - OLD.quantity)
@@ -105,6 +113,43 @@ $$;
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
+
+--
+-- Name: bottle_packages; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.bottle_packages (
+    id integer NOT NULL,
+    club_id integer NOT NULL,
+    name text NOT NULL,
+    description text DEFAULT ''::text NOT NULL,
+    sort smallint DEFAULT 0 NOT NULL,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT bottle_packages_desc_chk CHECK ((char_length(description) <= 200)),
+    CONSTRAINT bottle_packages_name_chk CHECK (((char_length(name) >= 1) AND (char_length(name) <= 60)))
+);
+
+
+--
+-- Name: bottle_packages_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.bottle_packages_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: bottle_packages_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.bottle_packages_id_seq OWNED BY public.bottle_packages.id;
+
 
 --
 -- Name: club_event_notifications; Type: TABLE; Schema: public; Owner: -
@@ -224,6 +269,51 @@ ALTER SEQUENCE public.club_members_id_seq OWNED BY public.club_members.id;
 
 
 --
+-- Name: club_tables; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.club_tables (
+    id integer NOT NULL,
+    club_id integer NOT NULL,
+    label text NOT NULL,
+    x smallint NOT NULL,
+    y smallint NOT NULL,
+    w smallint NOT NULL,
+    h smallint NOT NULL,
+    shape text DEFAULT 'round'::text NOT NULL,
+    seats smallint NOT NULL,
+    price_cents integer NOT NULL,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT club_tables_label_chk CHECK (((char_length(label) >= 1) AND (char_length(label) <= 20))),
+    CONSTRAINT club_tables_pos_chk CHECK (((x >= 0) AND (y >= 0) AND (w >= 1) AND (h >= 1))),
+    CONSTRAINT club_tables_price_chk CHECK ((price_cents >= 0)),
+    CONSTRAINT club_tables_seats_chk CHECK (((seats >= 1) AND (seats <= 20))),
+    CONSTRAINT club_tables_shape_chk CHECK ((shape = ANY (ARRAY['round'::text, 'rect'::text])))
+);
+
+
+--
+-- Name: club_tables_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.club_tables_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: club_tables_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.club_tables_id_seq OWNED BY public.club_tables.id;
+
+
+--
 -- Name: clubs; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -254,6 +344,7 @@ CREATE TABLE public.clubs (
     bar_prices jsonb DEFAULT '[]'::jsonb NOT NULL,
     gallery_urls text[] DEFAULT '{}'::text[] NOT NULL,
     video_url text DEFAULT ''::text NOT NULL,
+    floor_plan jsonb,
     CONSTRAINT clubs_bar_prices_chk CHECK ((jsonb_typeof(bar_prices) = 'array'::text)),
     CONSTRAINT clubs_coords_chk CHECK (((lat IS NULL) = (lng IS NULL))),
     CONSTRAINT clubs_gallery_chk CHECK ((cardinality(gallery_urls) <= 3)),
@@ -358,6 +449,19 @@ CREATE TABLE public.event_interest (
 
 
 --
+-- Name: event_tables; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.event_tables (
+    event_id integer NOT NULL,
+    table_id integer NOT NULL,
+    price_cents integer,
+    disabled boolean DEFAULT false NOT NULL,
+    CONSTRAINT event_tables_price_chk CHECK (((price_cents IS NULL) OR (price_cents >= 0)))
+);
+
+
+--
 -- Name: events; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -382,6 +486,7 @@ CREATE TABLE public.events (
     sales_open_at timestamp with time zone,
     sales_close_at timestamp with time zone,
     recap_video_url text DEFAULT ''::text NOT NULL,
+    vip_enabled boolean DEFAULT false NOT NULL,
     CONSTRAINT events_capacity_chk CHECK (((capacity IS NULL) OR (capacity > 0))),
     CONSTRAINT events_end_chk CHECK (((end_at IS NULL) OR (end_at > start_at))),
     CONSTRAINT events_min_age_chk CHECK (((min_age >= 0) AND (min_age <= 99))),
@@ -487,12 +592,19 @@ CREATE TABLE public.orders (
     paid_at timestamp with time zone,
     cancelled_at timestamp with time zone,
     refunded_cents integer DEFAULT 0 NOT NULL,
+    table_id integer,
+    table_label text,
+    table_seats smallint,
+    package_id integer,
+    package_name text,
+    package_description text,
     CONSTRAINT orders_fee_chk CHECK (((application_fee_cents >= 0) AND (application_fee_cents <= total_cents))),
     CONSTRAINT orders_paid_chk CHECK (((status <> 'paid'::text) OR (paid_at IS NOT NULL))),
     CONSTRAINT orders_price_chk CHECK (((unit_price_cents >= 0) AND (total_cents >= 0))),
     CONSTRAINT orders_qty_chk CHECK (((quantity > 0) AND (quantity <= 20))),
     CONSTRAINT orders_refund_chk CHECK (((refunded_cents >= 0) AND (refunded_cents <= total_cents))),
     CONSTRAINT orders_status_chk CHECK ((status = ANY (ARRAY['pending'::text, 'paid'::text, 'failed'::text, 'cancelled'::text, 'refunded'::text, 'partially_refunded'::text]))),
+    CONSTRAINT orders_table_chk CHECK (((table_id IS NULL) OR ((quantity = 1) AND (table_label IS NOT NULL) AND ((table_seats >= 1) AND (table_seats <= 20))))),
     CONSTRAINT orders_total_chk CHECK ((total_cents = (unit_price_cents * quantity)))
 );
 
@@ -666,6 +778,13 @@ CREATE TABLE public.view_counts (
 
 
 --
+-- Name: bottle_packages id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.bottle_packages ALTER COLUMN id SET DEFAULT nextval('public.bottle_packages_id_seq'::regclass);
+
+
+--
 -- Name: club_event_notifications id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -684,6 +803,13 @@ ALTER TABLE ONLY public.club_invites ALTER COLUMN id SET DEFAULT nextval('public
 --
 
 ALTER TABLE ONLY public.club_members ALTER COLUMN id SET DEFAULT nextval('public.club_members_id_seq'::regclass);
+
+
+--
+-- Name: club_tables id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_tables ALTER COLUMN id SET DEFAULT nextval('public.club_tables_id_seq'::regclass);
 
 
 --
@@ -743,6 +869,14 @@ ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_
 
 
 --
+-- Name: bottle_packages bottle_packages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.bottle_packages
+    ADD CONSTRAINT bottle_packages_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: club_event_notifications club_event_notifications_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -783,6 +917,14 @@ ALTER TABLE ONLY public.club_members
 
 
 --
+-- Name: club_tables club_tables_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_tables
+    ADD CONSTRAINT club_tables_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: clubs clubs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -812,6 +954,14 @@ ALTER TABLE ONLY public.event_favorites
 
 ALTER TABLE ONLY public.event_interest
     ADD CONSTRAINT event_interest_pkey PRIMARY KEY (user_id, event_id);
+
+
+--
+-- Name: event_tables event_tables_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_tables
+    ADD CONSTRAINT event_tables_pkey PRIMARY KEY (event_id, table_id);
 
 
 --
@@ -879,6 +1029,13 @@ ALTER TABLE ONLY public.users
 
 
 --
+-- Name: bottle_packages_club_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX bottle_packages_club_idx ON public.bottle_packages USING btree (club_id) WHERE (archived_at IS NULL);
+
+
+--
 -- Name: ca_email_open_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -942,6 +1099,20 @@ CREATE INDEX club_members_user_idx ON public.club_members USING btree (user_id, 
 
 
 --
+-- Name: club_tables_club_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_tables_club_idx ON public.club_tables USING btree (club_id) WHERE (archived_at IS NULL);
+
+
+--
+-- Name: club_tables_label_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX club_tables_label_key ON public.club_tables USING btree (club_id, lower(label)) WHERE (archived_at IS NULL);
+
+
+--
 -- Name: clubs_created_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -981,6 +1152,13 @@ CREATE INDEX event_favorites_event_idx ON public.event_favorites USING btree (ev
 --
 
 CREATE INDEX event_interest_event_idx ON public.event_interest USING btree (event_id);
+
+
+--
+-- Name: event_tables_table_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX event_tables_table_idx ON public.event_tables USING btree (table_id);
 
 
 --
@@ -1033,6 +1211,13 @@ CREATE INDEX orders_event_idx ON public.orders USING btree (event_id, status);
 
 
 --
+-- Name: orders_miza_dogodek_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX orders_miza_dogodek_key ON public.orders USING btree (event_id, table_id) WHERE ((table_id IS NOT NULL) AND (status = ANY (ARRAY['pending'::text, 'paid'::text, 'partially_refunded'::text])));
+
+
+--
 -- Name: orders_pi_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1044,6 +1229,13 @@ CREATE UNIQUE INDEX orders_pi_key ON public.orders USING btree (stripe_payment_i
 --
 
 CREATE UNIQUE INDEX orders_public_ref_key ON public.orders USING btree (public_ref);
+
+
+--
+-- Name: orders_table_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_table_idx ON public.orders USING btree (table_id) WHERE (table_id IS NOT NULL);
 
 
 --
@@ -1152,6 +1344,14 @@ CREATE TRIGGER orders_sprosti AFTER UPDATE OF status ON public.orders FOR EACH R
 
 
 --
+-- Name: bottle_packages bottle_packages_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.bottle_packages
+    ADD CONSTRAINT bottle_packages_club_id_fkey FOREIGN KEY (club_id) REFERENCES public.clubs(id) ON DELETE CASCADE;
+
+
+--
 -- Name: club_event_notifications club_event_notifications_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1232,6 +1432,14 @@ ALTER TABLE ONLY public.club_members
 
 
 --
+-- Name: club_tables club_tables_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_tables
+    ADD CONSTRAINT club_tables_club_id_fkey FOREIGN KEY (club_id) REFERENCES public.clubs(id) ON DELETE CASCADE;
+
+
+--
 -- Name: clubs clubs_owner_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1296,6 +1504,22 @@ ALTER TABLE ONLY public.event_interest
 
 
 --
+-- Name: event_tables event_tables_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_tables
+    ADD CONSTRAINT event_tables_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE CASCADE;
+
+
+--
+-- Name: event_tables event_tables_table_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_tables
+    ADD CONSTRAINT event_tables_table_id_fkey FOREIGN KEY (table_id) REFERENCES public.club_tables(id) ON DELETE CASCADE;
+
+
+--
 -- Name: events events_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1349,6 +1573,22 @@ ALTER TABLE ONLY public.orders
 
 ALTER TABLE ONLY public.orders
     ADD CONSTRAINT orders_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: orders orders_package_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_package_id_fkey FOREIGN KEY (package_id) REFERENCES public.bottle_packages(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: orders orders_table_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_table_id_fkey FOREIGN KEY (table_id) REFERENCES public.club_tables(id) ON DELETE RESTRICT;
 
 
 --
@@ -1435,5 +1675,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ePcRIC3pBzfKnF9Nd6hAzeMPtujBfRzu97CLEdw7EqcYAbv3b4VM2mquPoS35sM
+\unrestrict dPsY2zX5Wiqx0SVohJbeqs4suVW8S1NhS0nwJLTCEcSbG8pzBe3F75ASkMkckLS
 
