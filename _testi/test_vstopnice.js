@@ -43,13 +43,13 @@ async function api(method, path, token, body) {
 }
 
 // HMAC preverjanje QR podpisa (QR_SECRET="test", glej index.js podpisiQr/preveriQr).
-function preveriQrPodpisLokalno(qr, secret) {
+// Koda v2 (Ed25519): preveri samo z javnim kljucem (kot telefon). Vrne telo ali null.
+function preveriQrV2(qr, javniSurov) {
   const deli = String(qr).split(".");
-  if (deli.length !== 2) return null;
-  const [b, s] = deli;
-  const pricakovan = crypto.createHmac("sha256", secret).update(b).digest("base64url").slice(0, 32);
-  if (s !== pricakovan) return null;
-  return JSON.parse(Buffer.from(b, "base64url").toString("utf8"));
+  if (deli.length !== 3 || deli[0] !== "o2") return null;
+  const javni = crypto.createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), javniSurov]), format: "der", type: "spki" });
+  if (!crypto.verify(null, Buffer.from(`${deli[0]}.${deli[1]}`, "utf8"), javni, Buffer.from(deli[2], "base64url"))) return null;
+  return JSON.parse(Buffer.from(deli[1], "base64url").toString("utf8"));
 }
 
 (async () => {
@@ -192,16 +192,18 @@ function preveriQrPodpisLokalno(qr, secret) {
   const borOrders = (await api("GET", "/me/orders", T.bor)).body.map(o => o.id);
   assert(anaOrders.every(id => !borOrders.includes(id)), "bor ne vidi Aninih narocil (brez prekrivanja id-jev)", { anaOrders, borOrders });
 
-  console.log("\n# GET /me/tickets + QR podpis (HMAC, QR_SECRET=test)");
+  console.log("\n# GET /me/tickets + QR podpis (v2, Ed25519; stare kode v1 pokriva test_sken_brez_povezave.js)");
   r = await api("GET", "/me/tickets", T.ana);
   assert(r.status === 200 && Array.isArray(r.body) && r.body.length > 0, "GET /me/tickets -> seznam vstopnic", r.body);
   const prvaVstopnica = r.body[0];
-  assert(typeof prvaVstopnica.qr === "string" && prvaVstopnica.qr.includes("."), "vstopnica ima QR kodo oblike b64.podpis", prvaVstopnica.qr);
-  const razclenjenQr = preveriQrPodpisLokalno(prvaVstopnica.qr, "test");
-  assert(razclenjenQr !== null, "QR podpis je veljaven glede na QR_SECRET=test (HMAC preverjen lokalno)", prvaVstopnica.qr);
+  assert(typeof prvaVstopnica.qr === "string" && prvaVstopnica.qr.startsWith("o2.") && prvaVstopnica.qr.split(".").length === 3, "vstopnica ima QR kodo oblike o2.telo.podpis", prvaVstopnica.qr);
+  const kljuc = await api("GET", "/business/scan-key", T.lastnik);
+  const javniSurov = Buffer.from(kljuc.body.public_key, "base64url");
+  const razclenjenQr = preveriQrV2(prvaVstopnica.qr, javniSurov);
+  assert(razclenjenQr !== null, "QR podpis je veljaven glede na javni kljuc iz /business/scan-key (Ed25519 preverjen lokalno)", prvaVstopnica.qr);
   assert(razclenjenQr && razclenjenQr.t === prvaVstopnica.serial, "QR vsebuje pravilen serial vstopnice", { razclenjenQr, serial: prvaVstopnica.serial });
-  const ponarejenQr = preveriQrPodpisLokalno(prvaVstopnica.qr, "narobna-skrivnost");
-  assert(ponarejenQr === null, "QR z napacno skrivnostjo se NE preveri (HMAC dela)", ponarejenQr);
+  const ponarejenQr = preveriQrV2(prvaVstopnica.qr, Buffer.from(crypto.generateKeyPairSync("ed25519").publicKey.export({ format: "jwk" }).x, "base64url"));
+  assert(ponarejenQr === null, "QR s tujim javnim kljucem se NE preveri (Ed25519 dela)", ponarejenQr);
 
   console.log("\n# Testni nacin: narocilo je takoj 'paid' s predpono test_");
   const testniPi = await pool.query("SELECT stripe_payment_intent_id, status FROM orders WHERE id=$1", [narocilo1]);

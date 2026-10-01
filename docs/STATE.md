@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-01 (VIP mize s tlorisom, backend).
+Zadnja posodobitev: 2026-10-01 (sken brez povezave, backend).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -76,6 +76,27 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   pomesa stare in nove datoteke. Spletna aplikacija se od PR #19 brani sama (SW `no-cache`, `webapp/zagon.js`).
   **Priporocilo Martinu:** Cloudflare -> Caching -> Browser Cache TTL = "Respect Existing Headers" (nastavitev racuna,
   odloci Martin). Do takrat to velja tudi za landing (`script.js`, `auth.js` ...): po spremembi lahko do 4 h stari.
+
+## Kje smo (1. 10. 2026, sken brez povezave — backend, issue #86)
+
+- **Koda v1 in v2.** v1 = `base64url(JSON).HMAC[:32]` (stara, preveri samo strežnik). v2 = `o2.<base64url(JSON)>.<base64url(Ed25519)>`,
+  podpisano `o2.<base64url(JSON)>`. `qrVstopnice` izdaja v2; `preveriQr` sprejme obe (kode na telefonih ostanejo veljavne). Ključ v2
+  je HKDF iz `QR_SECRET` — **ni nove spremenljivke in ni migracije**. Kdor ima `QR_SECRET`, lahko ponareja (kot pri v1); javni ključ ne omogoča ponarejanja.
+  Past: ob zamenjavi `QR_SECRET` se spremeni tudi javni ključ — telefon mora ključ ob vsaki sinhronizaciji primerjati po `kid`.
+- **Poti:** `GET /business/scan-key`, `GET /business/events/:id/scan-list`, `POST /business/tickets/scan-batch` (oblike v opisu PR-ja
+  in `ARCHITECTURE.md`). Brez migracije: idempotentnost skena brez povezave je zaznamek `batch|<device_id>|<client_scan_id>` v
+  `tickets.scan_device` (stolpec doslej hrani user-agent online skena; nihče ga ne bere).
+- **Odprte naloge za odjemalca (naslednji korak):** `ios-dev` — `QRScannerView`: javni ključ + seznam prenesi vnaprej, preverjaj lokalno,
+  vrsta skenov, sinhronizacija prek `scan-batch`; `web-dev` — `webapp/js/views/posel-skener.js` enako (WebCrypto Ed25519 je v novejših
+  brskalnikih — po spominu Chrome 137+, Safari 17+, Firefox 129+, PREVERI; za starejše je potrebna knjižnica ali samo spletni sken). Koda v2 je ~220 znakov (v1 ~120): QR je gostejši, preveri branje na napravi.
+  **Odjemalca še nista prilagojena**, zato se danes nič ne spremeni: sken je še vedno spleten, `POST /business/tickets/scan` sprejme v1 in v2.
+- **Znane omejitve:** (1) dva telefona brez povezave lahko spustita isto vstopnico — strežnik to ugotovi ob sinhronizaciji (`already_used`
+  z `used_at` prvega skena); zapisnika konfliktov za nadzorno ploščo ni (rabi tabelo = migracijo, čaka Martinov DA). (2) Vstopnica, kupljena
+  po prenosu seznama, ima veljaven podpis, a je ni na seznamu; stara koda prenesene vstopnice ima veljaven podpis — telefon jo zavrne samo,
+  če je njen serial v `transferred_serials` zadnjega prenosa. (3) `used_at` iz telefona strežnik sprejme le v oknu [nastanek vstopnice, zdaj]
+  in ne starejši od 7 dni, sicer NOW().
+- Dostop: `scan-key` in `scan-list` vidijo vse vloge v klubu (tudi vratar) — vratar tako dobi seznam imen imetnikov vstopnic; e-naslovov ni.
+- Testi: `_testi/test_sken_brez_povezave.js` (v `npm test`). `test_vstopnice.js` in `test_vip.js` preverjata kode v2 z javnim ključem.
 
 ## Kje smo (1. 10. 2026, VIP mize)
 
