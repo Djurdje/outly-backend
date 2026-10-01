@@ -1406,6 +1406,241 @@ WHERE c.name = 'Velvet'
   AND NOT EXISTS (SELECT 1 FROM events e WHERE e.club_id = c.id AND e.title = v.naslov);
 
 
+-- 025_vip_mize.sql
+-- VIP mize s tlorisom (Martinovo narocilo 1. 10. 2026, glej docs/DECISIONS.md):
+-- klub enkrat narise tloris (orientacijski elementi + mize) in vpise bottle pakete;
+-- pri vsakem dogodku VIP mize vklopi in po zelji spremeni ceno posamezne mize ali jo izklopi.
+-- Kupec izbere prosto mizo in paket (vstet v ceno mize) in dobi toliko VIP vstopnic, kolikor oseb
+-- sprejme miza; vsaka ima svojo QR kodo, prenos prijateljem je obstojeci.
+--
+-- Samo DODAJANJE: nove tabele, novi stolpci (z NULL ali privzeto vrednostjo), nov indeks in
+-- zamenjava dveh sprozilnih funkcij (CREATE OR REPLACE). Noben obstojeci podatek se ne spremeni.
+--
+--   * clubs.floor_plan     JSONB: { "width": 24, "height": 16, "elements": [ {type,x,y,w,h,label} ] }.
+--                          Mreza celic; vsebino preverja backend (PUT /business/vip), baza samo tip.
+--   * club_tables          mize kluba (polozaj v mrezi, oblika, st. sedezev, privzeta cena v centih).
+--   * bottle_packages      paketi ("Jameson 0,7 l" + opis), vsebovani v ceni mize.
+--   * events.vip_enabled   ali dogodek prodaja VIP mize.
+--   * event_tables         SAMO izjeme po dogodku: cena (prepis) ali izklop mize.
+--   * orders.table_*, package_*   narocilo mize hrani POSNETEK imen (miza/paket se pozneje lahko preimenujeta).
+--
+-- Mize in paketi se NE brisejo, ampak arhivirajo (archived_at): narocila nanje kazejo (ON DELETE RESTRICT).
+--
+-- Invarianta I13: ista miza se na istem dogodku ne proda dvakrat - unikaten delni indeks na orders.
+--
+-- Zaloga: VIP vstopnice NE stejejo v events.capacity / sold_count (mize so lastna zaloga, vsaka miza
+-- enkrat na dogodek). Zato rezerviraj_zalogo() in sprosti_zalogo() narocila z mizo preskocita.
+
+
+ALTER TABLE clubs ADD COLUMN IF NOT EXISTS floor_plan JSONB;
+
+CREATE TABLE IF NOT EXISTS club_tables (
+    id          SERIAL PRIMARY KEY,
+    -- CASCADE je varen: klub z narocili (orders.club_id RESTRICT) se tako ali tako ne da izbrisati.
+    club_id     INTEGER     NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
+    label       TEXT        NOT NULL,
+    x           SMALLINT    NOT NULL,
+    y           SMALLINT    NOT NULL,
+    w           SMALLINT    NOT NULL,
+    h           SMALLINT    NOT NULL,
+    shape       TEXT        NOT NULL DEFAULT 'round',
+    seats       SMALLINT    NOT NULL,
+    price_cents INTEGER     NOT NULL,
+    archived_at TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT club_tables_label_chk CHECK (char_length(label) BETWEEN 1 AND 20),
+    CONSTRAINT club_tables_pos_chk   CHECK (x >= 0 AND y >= 0 AND w >= 1 AND h >= 1),
+    CONSTRAINT club_tables_shape_chk CHECK (shape IN ('round', 'rect')),
+    CONSTRAINT club_tables_seats_chk CHECK (seats BETWEEN 1 AND 20),
+    CONSTRAINT club_tables_price_chk CHECK (price_cents >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS club_tables_club_idx ON club_tables (club_id) WHERE archived_at IS NULL;
+-- Oznaka mize je med aktivnimi mizami kluba unikatna, brez razlike velikih in malih crk.
+CREATE UNIQUE INDEX IF NOT EXISTS club_tables_label_key
+    ON club_tables (club_id, lower(label)) WHERE archived_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS bottle_packages (
+    id          SERIAL PRIMARY KEY,
+    club_id     INTEGER     NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
+    name        TEXT        NOT NULL,
+    description TEXT        NOT NULL DEFAULT '',
+    sort        SMALLINT    NOT NULL DEFAULT 0,
+    archived_at TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT bottle_packages_name_chk CHECK (char_length(name) BETWEEN 1 AND 60),
+    CONSTRAINT bottle_packages_desc_chk CHECK (char_length(description) <= 200)
+);
+
+CREATE INDEX IF NOT EXISTS bottle_packages_club_idx ON bottle_packages (club_id) WHERE archived_at IS NULL;
+
+ALTER TABLE events ADD COLUMN IF NOT EXISTS vip_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS event_tables (
+    event_id    INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    table_id    INTEGER NOT NULL REFERENCES club_tables(id) ON DELETE CASCADE,
+    -- NULL = privzeta cena mize (club_tables.price_cents).
+    price_cents INTEGER,
+    disabled    BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (event_id, table_id),
+    CONSTRAINT event_tables_price_chk CHECK (price_cents IS NULL OR price_cents >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS event_tables_table_idx ON event_tables (table_id);
+
+-- Narocilo mize: quantity = 1, unit_price_cents = total_cents = cena mize, vstopnic = table_seats.
+ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS table_id            INTEGER REFERENCES club_tables(id) ON DELETE RESTRICT,
+    ADD COLUMN IF NOT EXISTS table_label         TEXT,
+    ADD COLUMN IF NOT EXISTS table_seats         SMALLINT,
+    ADD COLUMN IF NOT EXISTS package_id          INTEGER REFERENCES bottle_packages(id) ON DELETE RESTRICT,
+    ADD COLUMN IF NOT EXISTS package_name        TEXT,
+    ADD COLUMN IF NOT EXISTS package_description TEXT;
+
+-- Dodamo samo, ce je se ni (ponovni zagon); obstojeca narocila imajo table_id NULL, zato jih pogoj ne zadene.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'orders_table_chk' AND conrelid = 'orders'::regclass) THEN
+        ALTER TABLE orders ADD CONSTRAINT orders_table_chk CHECK (
+            table_id IS NULL
+            OR (quantity = 1 AND table_label IS NOT NULL AND table_seats BETWEEN 1 AND 20)
+        );
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS orders_table_idx ON orders (table_id) WHERE table_id IS NOT NULL;
+
+-- I13: ista miza se na istem dogodku ne proda dvakrat. Ob hkratnem nakupu druga vstavitev pade
+-- z 23505 (orders_miza_dogodek_key), index.js to prevede v 409. Preklicana/vrnjena/neuspela
+-- narocila mizo sprostijo (niso v pogoju).
+CREATE UNIQUE INDEX IF NOT EXISTS orders_miza_dogodek_key
+    ON orders (event_id, table_id)
+    WHERE table_id IS NOT NULL AND status IN ('pending', 'paid', 'partially_refunded');
+
+-- Sprozilca zaloge (002): narocilo z mizo ne steje v capacity / sold_count.
+CREATE OR REPLACE FUNCTION rezerviraj_zalogo() RETURNS TRIGGER AS $$
+DECLARE
+    zmogljivost INTEGER;
+    zasedeno    INTEGER;
+BEGIN
+    -- VIP miza ima lastno zalogo (I13), navadne vstopnice je ne smejo porabiti ali zaklepati.
+    IF NEW.table_id IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+
+    -- FOR UPDATE zaklene vrstico dogodka do konca transakcije.
+    SELECT capacity, sold_count INTO zmogljivost, zasedeno
+    FROM events WHERE id = NEW.event_id FOR UPDATE;
+
+    IF zmogljivost IS NOT NULL AND zasedeno + NEW.quantity > zmogljivost THEN
+        RAISE EXCEPTION 'Ni dovolj vstopnic: na voljo %, zahtevano %',
+            zmogljivost - zasedeno, NEW.quantity
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    UPDATE events SET sold_count = sold_count + NEW.quantity WHERE id = NEW.event_id;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION sprosti_zalogo() RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.table_id IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.status IN ('cancelled','refunded','failed')
+       AND OLD.status NOT IN ('cancelled','refunded','failed') THEN
+        UPDATE events SET sold_count = GREATEST(0, sold_count - OLD.quantity)
+        WHERE id = OLD.event_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 026_vip_demo.sql
+-- Demo VIP mize (Martinovo narocilo 1. 10. 2026): demo klubi iz migracije 022 (Velvet, Nexus, Mirage,
+-- Mansion, Olie) dobijo tloris (bar, oder, DJ, plesisce, vhod, WC), 6-10 miz in 4-6 bottle paketov,
+-- VIP pa se vklopi na njihovih prihajajocih objavljenih dogodkih - da testerji na telefonu in spletu
+-- takoj vidijo, kako izgleda nakup mize.
+--
+-- Samo ce klub se nima tlorisa (floor_plan IS NULL): klub, ki je tloris ze narisal, ostane nedotaknjen,
+-- ponovni zagon ne naredi nicesar. Klubi z drugim imenom in prazna baza (testi) ostanejo nespremenjeni.
+-- Vstavlja nove vrstice (mize, paketi); na obstojecih vrsticah samo izpolni NOVA stolpca floor_plan
+-- (NULL -> tloris) in events.vip_enabled (privzeto FALSE -> TRUE za prihajajoce dogodke teh klubov).
+--
+-- Mreza 24 x 16: oder zgoraj na sredini z DJ pultom pred njim, plesisce pod njima, bar ob levi steni,
+-- WC zgoraj desno, vhod spodaj, mize ob plesiscu. Cene 200-800 EUR (v centih), 4-10 oseb.
+
+
+DO $$
+DECLARE
+  k RECORD;
+  kid INT;
+  skupaj INT;
+BEGIN
+  FOR k IN
+    SELECT * FROM (VALUES
+      -- ime, stevilo miz (od 10 v predlogi spodaj), stevilo paketov (od 6)
+      ('Velvet',  10, 6),
+      ('Nexus',    8, 5),
+      ('Mirage',   7, 4),
+      ('Mansion',  9, 6),
+      ('Olie',     6, 4)
+    ) AS v(ime, st_miz, st_paketov)
+  LOOP
+    SELECT c.id INTO kid FROM clubs c WHERE c.name = k.ime AND c.floor_plan IS NULL ORDER BY c.id LIMIT 1;
+    CONTINUE WHEN kid IS NULL;
+
+    UPDATE clubs SET floor_plan = '{
+      "width": 24, "height": 16,
+      "elements": [
+        {"type": "stage",      "x": 7,  "y": 0,  "w": 10, "h": 3, "label": ""},
+        {"type": "dj",         "x": 10, "y": 3,  "w": 4,  "h": 2, "label": ""},
+        {"type": "dancefloor", "x": 7,  "y": 6,  "w": 10, "h": 5, "label": ""},
+        {"type": "bar",        "x": 0,  "y": 2,  "w": 3,  "h": 8, "label": ""},
+        {"type": "wc",         "x": 21, "y": 0,  "w": 3,  "h": 3, "label": ""},
+        {"type": "label",      "x": 18, "y": 3,  "w": 5,  "h": 1, "label": "VIP area"},
+        {"type": "entrance",   "x": 9,  "y": 15, "w": 6,  "h": 1, "label": ""}
+      ]
+    }'::jsonb WHERE id = kid;
+
+    INSERT INTO club_tables (club_id, label, x, y, w, h, shape, seats, price_cents)
+    SELECT kid, t.label, t.x, t.y, t.w, t.h, t.shape, t.seats, t.cena
+    FROM (VALUES
+      (1,  'T1',  4,  3,  2, 2, 'round', 4,  20000),
+      (2,  'T2',  4,  6,  2, 2, 'round', 4,  22000),
+      (3,  'T3',  4,  9,  2, 2, 'round', 6,  28000),
+      (4,  'T4',  18, 5,  2, 2, 'round', 6,  30000),
+      (5,  'T5',  18, 8,  2, 2, 'round', 6,  32000),
+      (6,  'T6',  21, 5,  2, 2, 'round', 8,  40000),
+      (7,  'T7',  21, 8,  2, 2, 'round', 8,  45000),
+      (8,  'T8',  8,  12, 3, 2, 'rect',  8,  50000),
+      (9,  'T9',  13, 12, 3, 2, 'rect',  10, 65000),
+      (10, 'T10', 18, 11, 4, 2, 'rect',  10, 80000)
+    ) AS t(zap, label, x, y, w, h, shape, seats, cena)
+    WHERE t.zap <= k.st_miz
+      AND NOT EXISTS (SELECT 1 FROM club_tables ct WHERE ct.club_id = kid);
+
+    INSERT INTO bottle_packages (club_id, name, description, sort)
+    SELECT kid, p.ime, p.opis, p.zap
+    FROM (VALUES
+      (1, 'Jameson 0,7 l',            '4x Red Bull, 1 l orange juice'),
+      (2, 'Absolut Vodka 0,7 l',      '4x Red Bull, 1 l cranberry juice'),
+      (3, 'Jack Daniel''s 0,7 l',     '6x Coca-Cola, ice and lemon'),
+      (4, 'Hennessy VS 0,7 l',        '4x ginger ale, ice and lime'),
+      (5, 'Grey Goose 0,7 l',         '4x Red Bull, 1 l grapefruit juice'),
+      (6, 'Moet & Chandon Brut 0,75 l', 'Strawberries and sparklers')
+    ) AS p(zap, ime, opis)
+    WHERE p.zap <= k.st_paketov
+      AND NOT EXISTS (SELECT 1 FROM bottle_packages bp WHERE bp.club_id = kid);
+
+    UPDATE events SET vip_enabled = TRUE
+     WHERE club_id = kid AND status = 'published' AND start_at > NOW() AND NOT vip_enabled;
+  END LOOP;
+END $$;
+
+
 -- =============================================================================
 -- Vpis v evidenco
 -- =============================================================================
@@ -1434,7 +1669,9 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('021_ogledi.sql', 'a24647735231d9f6'),
     ('022_demo_klubi.sql', 'dc0d8adf9b16a53d'),
     ('023_logotipi_demo_klubov.sql', '296ae1e700e67adb'),
-    ('024_dogodki_velvet.sql', '6b94fdf7df63dbcc')
+    ('024_dogodki_velvet.sql', '6b94fdf7df63dbcc'),
+    ('025_vip_mize.sql', '1f77b768a45d7543'),
+    ('026_vip_demo.sql', '1001dc713416e14d')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
