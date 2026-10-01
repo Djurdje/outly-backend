@@ -171,7 +171,7 @@ function kodaV1(serial, eventId, secret = "test") {
   assert(r.status === 200, "vratar tega kluba -> 200", r.status);
   const seznam = r.body;
   assert(seznam.event_id === dogA && typeof seznam.generated_at === "string" && seznam.kid === kid && Array.isArray(seznam.tickets) && Array.isArray(seznam.transferred_serials), "oblika: event_id, generated_at, kid, tickets, transferred_serials", Object.keys(seznam));
-  assert(seznam.tickets.length === 11, "11 vstopnic placanih narocil (8 + 2 + 1)", seznam.tickets.length);
+  assert(seznam.tickets.length === 11, "11 vstopnic dogodka (8 + 2 + 1), vsa narocila placana", seznam.tickets.length);
   const sA0 = seznam.tickets.find(t => t.serial === anine[0].serial);
   assert(sA0 && sA0.status === "used" && sA0.used_at && sA0.holder_username === "ana" && sA0.is_vip === false, "unovcena vstopnica: status used, used_at, holder_username, is_vip false", sA0);
   assert(Object.keys(sA0).sort().join() === "holder_username,is_vip,package_name,serial,status,table_label,used_at", "tocno ta polja (brez id-jev in e-naslovov)", Object.keys(sA0));
@@ -193,10 +193,30 @@ function kodaV1(serial, eventId, secret = "test") {
   r = await api("GET", `/business/events/999999/scan-list`, T.vratar);
   assert(r.status === 404, "neobstojec dogodek -> 404", r.status);
 
-  // nevplacana/vrnjena narocila izven seznama, delno vrnjena ostanejo (z vrnjeno vstopnico)
+  // vstopnice nevplacanih/vrnjenih narocil so na seznamu s status "unpaid" (koda ima veljaven podpis, zato jo telefon
+  // brez tega zapisa spusti kot "veljavna, ni na seznamu"); delno vrnjena ostanejo (z vrnjeno vstopnico)
   await pool.query("UPDATE orders SET status='refunded', refunded_cents=total_cents WHERE id=$1", [ceneNarocilo]);
   r = await api("GET", `/business/events/${dogA}/scan-list`, T.vratar);
-  assert(r.body.tickets.length === 10 && !r.body.tickets.some(t => t.serial === ceneteva.serial), "vstopnica vrnjenega narocila ni na seznamu", r.body.tickets.length);
+  const cT = r.body.tickets.find(t => t.serial === ceneteva.serial);
+  assert(r.body.tickets.length === 11 && cT && cT.status === "unpaid", "vstopnica vrnjenega narocila JE na seznamu s status unpaid (veljaven podpis, a ne placano)", cT);
+  assert(cT && cT.used_at === null && cT.holder_username === "cene", "unpaid: used_at null, imetnik cene", cT);
+  assert(Object.keys(cT || {}).sort().join() === "holder_username,is_vip,package_name,serial,status,table_label,used_at" && !/@|email/i.test(r.text), "unpaid: ista polja kot drugi, brez e-naslovov");
+  // naročilo v teku (pending) -> unpaid; vstopnica sama void ostane void; po plačilu spet valid
+  const borNar = (await pool.query("SELECT order_id FROM tickets WHERE serial=$1", [borove[1].serial])).rows[0].order_id;
+  await pool.query("UPDATE orders SET status='pending' WHERE id=$1", [borNar]);
+  r = await api("GET", `/business/events/${dogA}/scan-list`, T.vratar);
+  assert(r.body.tickets.find(t => t.serial === borove[1].serial).status === "unpaid", "vstopnica neplacanega (pending) narocila -> unpaid", r.body.tickets.find(t => t.serial === borove[1].serial));
+  await pool.query("UPDATE orders SET status='paid' WHERE id=$1", [borNar]);
+  r = await api("GET", `/business/events/${dogA}/scan-list`, T.vratar);
+  assert(r.body.tickets.find(t => t.serial === borove[1].serial).status === "valid", "po placilu narocila je vstopnica spet valid", r.body.tickets.find(t => t.serial === borove[1].serial));
+  await pool.query("UPDATE tickets SET status='void' WHERE serial=$1", [ceneteva.serial]);
+  r = await api("GET", `/business/events/${dogA}/scan-list`, T.vratar);
+  assert(r.body.tickets.find(t => t.serial === ceneteva.serial).status === "void", "void vstopnica neplacanega narocila ostane void", r.body.tickets.find(t => t.serial === ceneteva.serial));
+  await pool.query("UPDATE tickets SET status='refunded' WHERE serial=$1", [ceneteva.serial]);
+  r = await api("GET", `/business/events/${dogA}/scan-list`, T.vratar);
+  assert(r.body.tickets.find(t => t.serial === ceneteva.serial).status === "refunded", "refunded vstopnica vrnjenega narocila ostane refunded", r.body.tickets.find(t => t.serial === ceneteva.serial));
+  await pool.query("UPDATE tickets SET status='valid' WHERE serial=$1", [ceneteva.serial]);
+  r = await api("GET", `/business/events/${dogA}/scan-list`, T.vratar);
   const etag1 = r.headers.get("etag");
   assert(!!etag1, "odgovor ima ETag", etag1);
   r = await api("GET", `/business/events/${dogA}/scan-list`, T.vratar, null, { "if-none-match": etag1, "cache-control": "max-age=300" });

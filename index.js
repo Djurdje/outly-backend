@@ -3157,7 +3157,9 @@ app.get("/business/scan-key", requireAuth, requireClub(), (req, res) => {
   });
 });
 
-// GET /business/events/:id/scan-list — vstopnice plačanih naročil dogodka za preverjanje brez povezave.
+// GET /business/events/:id/scan-list — VSE vstopnice dogodka za preverjanje brez povezave. Koda vstopnice (podpis v2) je veljavna
+// za vsako naročilo, zato mora biti na seznamu tudi vstopnica vrnjenega/preklicanega/neplačanega naročila: status "unpaid"
+// (odjemalec ga obravnava kot rdeče); če je vstopnica sama refunded ali void, ostane ta status.
 // Brez e-naslovov in drugih osebnih podatkov (samo uporabniško ime imetnika, ki ga skener pokaže pri sprejemu).
 // `transferred_serials`: stari serial-i prenesenih vstopnic — koda s takim serialom NE velja več (I7).
 // ETag: osveževanje vsakih nekaj minut pri 1000+ telefonih ne sme vsakič vleči celega seznama (If-None-Match -> 304).
@@ -3173,10 +3175,12 @@ app.get("/business/events/:id/scan-list", requireAuth, requireClub(), async (req
     }
     const [vst, prenosi] = await Promise.all([
       pool.query(
-        `SELECT t.serial, t.status, t.used_at, (o.table_id IS NOT NULL) AS is_vip, o.table_label, o.package_name,
+        `SELECT t.serial,
+                CASE WHEN o.status IN ('paid','partially_refunded') OR t.status IN ('refunded','void') THEN t.status ELSE 'unpaid' END AS status,
+                t.used_at, (o.table_id IS NOT NULL) AS is_vip, o.table_label, o.package_name,
                 hu.username AS holder_username
          FROM tickets t JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK}
-         WHERE t.event_id = $1 AND o.status IN ('paid','partially_refunded')
+         WHERE t.event_id = $1
          ORDER BY t.id`, [id]),
       pool.query(
         `SELECT tt.old_serial FROM ticket_transfers tt JOIN tickets t ON t.id = tt.ticket_id
