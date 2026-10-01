@@ -30,7 +30,7 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 1. ~~**Render baza na plačljivi paket pred 7. 10. 2026** (#12)~~ — narejeno 30. 9. 2026: `outly-db` na `0.1c-256mb` (6 $),
    `outly-backend` na Starter `0.5c-512mb` (7 $); preverjeno prek Render API (plan, status available).
 2. Stripe račun (#16) blokira tehnično plačilno pot (#19).
-3. Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15) — dokler tega ni, zaščita ne ustavi ničesar.
+3. ~~Oznaka `odobril-martin` + `Zascita` med obvezne checke (#15)~~ — narejeno 1. 10. 2026 (Martin shranil ruleset, agent preveril: obvezna `testi` in `zascita`).
 4. ~~Healthchecks.io račun + secret `HC_URL` (#14)~~ — narejeno 18. 9. 2026 (ping potrjen v zagonu 35294068646).
    Ostane past spodaj: cron nadzora v resnici teče na 4–5 ur, zato mora biti Period/Grace v Healthchecks temu prilagojen.
 
@@ -499,8 +499,9 @@ Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta r
   ki je edini sodelavec repa z vlogo `admin`. Zato so oznaka `odobril-martin`, ruleset za `main` in »agent si oznake ne sme
   dodati sam« **dogovor, ne varovalo**: isti račun lahko oznako doda, ruleset izklopi ali potisne mimo. Trdo postane šele,
   ko seje tečejo prek ločenega računa z vlogo `write` (brez admin) in je ruleset brez izjem za bypass — glej #15.
-- **`Zascita` še ni obvezen check** (#15): rdeč zagon merge-a tehnično ne ustavi, dokler ga Martin ne doda
-  med required status checks. Do takrat mora agent pred merge-om ročno pogledati **oba** checka, ne samo `Testi`.
+- **`Zascita` je obvezen check od 1. 10. 2026** (#15). Ostane past zgoraj: seje tečejo prek istega (admin) računa, zato
+  zaščita ustavi nenamerni merge, ne pa namernega obhoda. V `outly_webpage` in `outly-app` je `Zascita` dodana 1. 10. 2026
+  (PR #23 in #44); v `outly-app` (zasebni repo, brezplačni GitHub) ne more biti obvezna.
 - **`jq` in `^`**: v `jq` je `^` zasidran na cel niz, ne na vrstico — vzorec čez vrstice diffa rabi `(?m)`.
   Brez tega filter tiho ne ujame ničesar in preverba je videti zelena. (Ujeto pri pisanju `zascita.yml`.)
 - **Kako preveriti produkcijo brez izhodnega dostopa** (ker `curl` iz seje ne gre, glej naslednjo past):
