@@ -36,7 +36,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 
 ## Render (od 30. 9. 2026; paketa v ARCHITECTURE, Produkcija)
 
-- **Zmogljivost (lokalno, ne napoved produkcije):** `orodja/obremenitev.mjs` + `_testi/test_obremenitev.js`; z bazo 0,1 CPU je streha javnih poti ~90 req/s (ozko grlo je baza); proti produkciji ni merjeno (#89, I16).
+- **Zmogljivost (lokalno, ne napoved produkcije):** `orodja/obremenitev.mjs` + `_testi/test_obremenitev.js`; z bazo 0,1 CPU je streha javnih poti ~90 req/s (ozko grlo je baza); proti produkciji ni merjeno (#89, I16). **Past (#139, 2. 10.):** NOVA TCP povezava ob navali caka v vrsti sprejemanja za vsemi povezavami pred njo; Node ob zasedeni zanki sprejme ~1 povezavo na obdelan zahtevek (CI: 12 na 250 ms, nova povezava 2,4-3,1 s; jedro ni zavrglo nobene: ListenOverflows/Drops/TCPSynRetrans = 0), vzdrzevana povezava pa ne (sken ~20 ms). Zato test skenira prek vzdrzevane povezave, nova je informativna sonda. Tveganje v produkciji: sken brez proste povezave.
 - **Zunanji dostop do baze je zaprt** (Inbound IP Rules `outly-db` prazne; backend gre po notranjem omrežju, `10.x`). psql /
   pgAdmin z External Database URL ne dela: dodaj svoj IP (in ga odstrani) ali Render Shell. Pravili `0.0.0.0/0` na ravni
   workspacea in okolja ostaneta (veljata tudi za web servis) — ne zapiraj.

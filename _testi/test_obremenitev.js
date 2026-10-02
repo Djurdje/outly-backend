@@ -16,14 +16,16 @@
  *      v bazi tocno 100 vstopnic in narocil, sold_count == capacity, noben kupec dvakrat, nobena zaloga negativna.
  *   3. Med nakupi 3 vratarji vzporedno skenirajo (POST /business/tickets/scan): vsi sken 200, p95 < 500 ms (meja je
  *      sproscena za pocasnejse GitHub runnerje; stara koda ~580-780 ms). 3b: ista navala + 1000 bralcev GET /events hkrati
- *      (p95 skena < 1000 ms, brez 5xx).
+ *      (p95 skena < 1000 ms, brez 5xx). Vsak vratar skenira prek svoje vzdrzevane (keep-alive) povezave; sken z NOVO povezavo
+ *      ob navali caka v vrsti sprejemanja za ~1000 povezavami (~2,5-3 s; issue #139), zato je to samo informativna sonda
+ *      (trditev: 404 unknown, brez meje). Pred/po 3b test izpise stevce jedra (/proc/net/netstat) in casovnico sprejemanja.
  *   4. 300 hkratnih nakupov z mesanimi kolicinami (1-4) za dogodek s kapaciteto 100: sold_count == vsota uspesnih,
  *      <= capacity, nobenega 5xx.
  *   5. Po koncu obremenitve backend takoj odgovarja: p95 20 zaporednih GET /events in 20 skenov < 500 ms.
  * Vrsta, prekinitve, 503 in sprostitev dovoljenja: _testi/test_nakup_vrsta.js.
  */
 const os = require("os"), path = require("path");
-const dc = require("diagnostics_channel"), { monitorEventLoopDelay } = require("perf_hooks");
+const { monitorEventLoopDelay } = require("perf_hooks");
 const crypto = require("crypto");
 const http = require("http");
 const { spawn } = require("child_process");
@@ -72,6 +74,27 @@ async function api(method, path, token, body, ip) {
     return { status: e.name === "TimeoutError" ? "timeout" : "omrezje", body: String(e.message), ms: performance.now() - t0 };
   }
 }
+// Zahtevek prek node:http z IZRECNIM agentom (fetch/undici deli en bazen povezav z vsemi zahtevki testa). `agent` = http.Agent z
+// keepAlive (ena vzdrzevana povezava) ali false (vsak zahtevek odpre NOVO povezavo).
+function apiHttp(agent, method, pot, token, body) {
+  const t0 = performance.now(), podatki = body ? JSON.stringify(body) : null;
+  return new Promise(resolve => {
+    const konec = (status, telo) => resolve({ status, body: telo, ms: performance.now() - t0 });
+    const zahtevek = http.request({
+      host: "127.0.0.1", port: PORT, method, path: pot, agent, timeout: 30000,
+      headers: { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}), ...(podatki ? { "content-length": Buffer.byteLength(podatki) } : {}) },
+    }, odgovor => {
+      const deli = [];
+      odgovor.on("data", d => deli.push(d));
+      odgovor.on("end", () => { const t = Buffer.concat(deli).toString(); let j; try { j = JSON.parse(t); } catch { j = t; } konec(odgovor.statusCode, j); });
+      odgovor.on("error", e => konec("omrezje", String(e.message)));
+    });
+    zahtevek.on("timeout", () => { zahtevek.destroy(); konec("timeout", "timeout"); });
+    zahtevek.on("error", e => konec("omrezje", String(e.message)));
+    if (podatki) zahtevek.write(podatki);
+    zahtevek.end();
+  });
+}
 function percentil(sortirano, p) { return sortirano.length ? sortirano[Math.min(sortirano.length - 1, Math.floor(sortirano.length * p))] : NaN; }
 function steviloPoStatusu(rezultati) { const s = {}; for (const r of rezultati) s[r.status] = (s[r.status] || 0) + 1; return s; }
 const je5xx = r => typeof r.status !== "number" || r.status >= 500;
@@ -107,20 +130,15 @@ function jedroSysctl() {
   }
   return s;
 }
-// Sled zahtevkov skena (odjemalec): undici sporoca ustvaritev zahtevka, pisanje glav (vkljucno z lokalnim vratom vticnice) in
-// prihod odgovora. Skupaj s sledom strezniskega predala (_testi/sled_streznika.js) razdeli cas: cakanje odjemalca / sprejem
-// povezave na strezniku / obdelava / vrnitev. Brez pomena za trditve testa.
+// Sled (samo diagnostika, brez vpliva na trditve): zanka dogodkov odjemalca in dolzina vrste sprejemanja (rx_queue vticnice LISTEN)
+// na vratih backenda, vzorceno na 100 ms; strezniski predal (_testi/sled_streznika.js) belezi sprejete povezave in zasedenost zanke.
 const SLED_STREZNIK = path.join(os.tmpdir(), `outly-sled-obremenitev-${process.pid}.jsonl`);
-const sledSkenov = [], sledZahtevkov = new Map();
-dc.subscribe("undici:request:create", ({ request }) => { if (request.path.includes("/scan")) sledZahtevkov.set(request, { create: Date.now() }); });
-dc.subscribe("undici:client:sendHeaders", ({ request, socket }) => { const r = sledZahtevkov.get(request); if (r) { r.send = Date.now(); r.port = socket.localPort; } });
-dc.subscribe("undici:request:headers", ({ request }) => { const r = sledZahtevkov.get(request); if (r) { r.headers = Date.now(); sledSkenov.push(r); sledZahtevkov.delete(request); } });
 const zankaOdjemalca = monitorEventLoopDelay({ resolution: 10 }); zankaOdjemalca.enable();
 const sledZanke = [];
-const sledVrste = [];   // dolzina vrste sprejemanja (rx_queue vticnice LISTEN) na vratih backenda
+const sledVrste = [];
 function dolzinaVrsteSprejemanja() {
   try {
-    const hex = ":" + PORT.toString(16).toUpperCase().padStart(4, "0");   // Node posluša na :: (tcp6) ali 0.0.0.0 (tcp)
+    const hex = ":" + PORT.toString(16).toUpperCase().padStart(4, "0");   // Node poslusa na :: (tcp6) ali 0.0.0.0 (tcp)
     for (const dat of ["/proc/net/tcp6", "/proc/net/tcp"]) {
       let vrstice; try { vrstice = require("fs").readFileSync(dat, "utf8").split("\n"); } catch { continue; }
       for (const l of vrstice) { const c = l.trim().split(/\s+/); if (c[3] === "0A" && c[1] && c[1].endsWith(hex)) return parseInt(c[4].split(":")[1], 16); }
@@ -128,28 +146,10 @@ function dolzinaVrsteSprejemanja() {
   } catch { /* ni Linux */ }
   return null;
 }
-const sledCasovnik = setInterval(() => {
+setInterval(() => {
   sledZanke.push({ t: Date.now(), max: Math.round(zankaOdjemalca.max / 1e6) }); zankaOdjemalca.reset();
   const v = dolzinaVrsteSprejemanja(); if (v !== null) sledVrste.push({ t: Date.now(), v });
-}, 100);
-sledCasovnik.unref();
-function izpisiSledPocasnih(skeni, meja = 500) {
-  let streznik = [];
-  try { streznik = require("fs").readFileSync(SLED_STREZNIK, "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l)); } catch { /* predala ni */ }
-  const pocasni = sledSkenov.filter(r => r.headers - r.create > meja);
-  if (!pocasni.length) return;
-  const maxV = (a, b, k, vir) => Math.max(0, ...vir.filter(x => x.t >= a && x.t <= b).map(x => x[k]));
-  for (const r of pocasni.slice(0, 6)) {
-    const req = streznik.find(x => x.k === "req" && x.port === r.port && x.t >= r.send - 5);
-    const fin = req && streznik.find(x => x.k === "fin" && x.port === req.port && x.t >= req.t);
-    console.log("  (pocasen sken: " + JSON.stringify({
-      skupajMs: r.headers - r.create, odjemalecCakaMs: r.send - r.create, odPosiljanjaDoStreznikovegaZahtevkaMs: req ? req.t - r.send : null,
-      novaPovezava: req ? req.n === 1 : null, odSprejemaPovezaveDoZahtevkaMs: req && req.connT ? req.t - req.connT : null,
-      streznikObdelavaMs: fin ? fin.ms : null, odOdgovoraDoOdjemalcevihGlavMs: fin ? r.headers - fin.t : null,
-      zankaStreznikaMaxMs: maxV(r.create, r.headers, "max", streznik.filter(x => x.k === "loop")), zankaOdjemalcaMaxMs: maxV(r.create, r.headers, "max", sledZanke),
-      vrstaSprejemanjaMax: maxV(r.create, r.headers, "v", sledVrste) }) + ")");
-  }
-}
+}, 100).unref();
 function razlikaStevcev(pred, po) {
   if (!pred || !po) return null;
   const d = {};
@@ -227,31 +227,40 @@ function razlikaStevcev(pred, po) {
   const izhSort = izhodisce.map(x => x.ms).sort((a, b) => a - b);
   console.log(`  (sken brez obremenitve: p50 ${percentil(izhSort, 0.5).toFixed(1)} ms, max ${izhSort[izhSort.length - 1].toFixed(1)} ms)`);
 
+  // Vsak vratar ima svojo vzdrzevano (keep-alive) povezavo, ki jo drugi zahtevki testa ne morejo prevzeti (issue #139): telefon ali splet
+  // skenira prek ze odprte povezave. Skener s skupnim bazenom fetch je ob zacetku navale 1300 hkratnih zahtevkov ostal brez proste
+  // povezave in odprl NOVO; ta je v vrsti sprejemanja cakala za ~1000 povezavami bralcev/nakupov, Node pa ob zasedeni zanki sprejme
+  // ~1 povezavo na obdelan zahtevek (CI: ~3,1 s, trije skenerji hkrati, p95 skena ~3,15 s; jedro ni zavrglo nobene povezave).
+  const agentiSken = vratarji.map(() => new http.Agent({ keepAlive: true, maxSockets: 1 }));
   let skenovSkupaj = 10;   // izhodiscnih 10 + vsi med navalami
   // Ena navala: 300 hkratnih nakupov za dogodek + (neobvezno) bralci GET /events hkrati + 3 vratarji skenirajo.
   async function navala(dogodek, bralcev) {
     let nakupiKonec = false;
     const tNavale = performance.now();   // zacetek navale; skeni si zapomnijo zamik (diagnostika #139)
     const skeni = [];   // { status, result, ms, zacetek }
-    async function skener(v) {
+    async function skener(v, i) {
       while (!nakupiKonec && kodeSken.length) {
         const zacetek = performance.now() - tNavale;
-        const x = await api("POST", "/business/tickets/scan", v.token, { qr: kodeSken.pop() });
+        const x = await apiHttp(agentiSken[i], "POST", "/business/tickets/scan", v.token, { qr: kodeSken.pop() });
         skeni.push({ status: x.status, result: x.body && x.body.result, ms: x.ms, zacetek });
         await new Promise(rs => setTimeout(rs, bralcev ? 15 : 5));
       }
     }
-    const skenerji = vratarji.map(skener);
+    const skenerji = vratarji.map((v, i) => skener(v, i));
     await new Promise(rs => setTimeout(rs, 100));   // skenerji tecejo, ko se sprozi navala
     const t = performance.now();
     const bralci = Array.from({ length: bralcev }, () => api("GET", "/events?upcoming=true"));   // hkrati z nakupi
+    // Informativno (brez meje): sken z NOVO povezavo ob navali. Nepoznan, a veljaven serial -> 404 "unknown" (isto pot kot sken,
+    // brez porabe kode). Cas pokaze, kako dolgo nova povezava caka v vrsti sprejemanja (glej opombo pri agentiSken).
+    const sonde = bralcev ? vratarji.map(v => apiHttp(false, "POST", "/business/tickets/scan", v.token, { serial: crypto.randomUUID() })) : [];
     const nakupi = await Promise.all(kupci.map((tok, i) => api("POST", `/events/${dogodek}/orders`, tok, { quantity: 1 }, ipUporabnika(i))));
     const trajanje = performance.now() - t;
     nakupiKonec = true;
     await Promise.all(skenerji);
     const bralciRez = await Promise.all(bralci);
+    const sondeRez = await Promise.all(sonde);
     skenovSkupaj += skeni.length;
-    return { nakupi, trajanje, skeni, bralciRez };
+    return { nakupi, trajanje, skeni, bralciRez, sondeRez };
   }
   function preveriSkene(oznaka, skeni, meja = SKEN_MEJA_MS) {
     const ms = skeni.map(x => x.ms).sort((a, b) => a - b);
@@ -295,9 +304,8 @@ function razlikaStevcev(pred, po) {
   const d = await navala(dogodekD, BRALCEV);
   const jedroRazlika = razlikaStevcev(jedroPred, jedroStevci());
   await new Promise(rs => setTimeout(rs, 300));   // predal strezniku zapisuje vsake 250 ms
-  izpisiSledPocasnih(d.skeni);
   try {
-    const sl = require("fs").readFileSync(SLED_STREZNIK, "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l)).filter(x => x.k === "loop" && x.t >= tZacetek3b);
+    const sl = require("fs").readFileSync(SLED_STREZNIK, "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l)).filter(x => x.t >= tZacetek3b);
     console.log(`  (streznik med 3b na 250 ms [sprejetih povezav / zasedenost zanke 0-1 / zastoj ms]: ${sl.map(x => `${x.sprejetih}/${x.elu}/${x.max}`).join(" ")})`);
     console.log(`  (okolje: ${os.cpus().length} CPU, ${(require("fs").readFileSync("/proc/self/limits", "utf8").match(/Max open files\s+(\d+)\s+(\d+)/) || []).slice(1).join("/")} odprtih datotek mehko/trdo, node ${process.version})`);
   } catch { /* ni Linux ali predala */ }
@@ -321,6 +329,9 @@ function razlikaStevcev(pred, po) {
   // Meja 1000 ms: ob 1000 hkratnih velikih odgovorih je eno-nitni Node procesorsko zaseden (na enem jedru p95 ~400 ms) - tu lovimo
   // vrsto za povezavo (sekunde), ne CPU. Natancnejso mejo (500 ms) drzi navala brez bralcev zgoraj.
   preveriSkene("navala + 1000 bralcev", d.skeni, 1000);
+  const sondeMs = d.sondeRez.map(x => Math.round(x.ms));
+  console.log(`  (informativno: sken z NOVO povezavo ob navali ${sondeMs.join(", ")} ms; nova povezava caka v vrsti sprejemanja za povezavami bralcev, vzdrzevana ne)`);
+  assert(d.sondeRez.every(x => x.status === 404 && x.body && x.body.result === "unknown"), "sken z novo povezavo ob navali: odgovor 404 unknown (brez 5xx, brez prekinjene povezave)", d.sondeRez.map(x => x.status));
   const porabljene = await pool.query("SELECT COUNT(*)::int AS n FROM tickets WHERE event_id=$1 AND status='used'", [dogodekB]);
   assert(porabljene.rows[0].n === skenovSkupaj, "v bazi je tocno toliko porabljenih vstopnic, kolikor je bilo skenov", { baza: porabljene.rows[0].n, skenov: skenovSkupaj });
 
