@@ -3862,7 +3862,7 @@ app.get("/business/scan-key", requireAuthSken, requireClubSken(), (req, res) => 
 // ETag: osveževanje vsakih nekaj minut pri 1000+ telefonih ne sme vsakič vleči celega seznama (If-None-Match -> 304).
 app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken(), async (req, res) => {
   try {
-    const id = celoId(req.params.id);
+    const id = celoId4(req.params.id);
     if (!id) return res.status(400).json({ error: "invalid_id", message: "Invalid event id." });
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).json({ error: "not_found", message: "Club not found." });

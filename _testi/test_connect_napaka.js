@@ -269,6 +269,9 @@ const steje = (rez) => rez.reduce((m, r) => (m[r.status] = (m[r.status] || 0) + 
     const pricakovano = (String(uid) === "2147483647" || String(uid) === "999") ? 404 : 400;
     assert(rt.status === pricakovano, `user_id ${uid} -> ${pricakovano} (${pricakovano === 400 ? "izven int4" : "veljaven int4, nista prijatelja"})`, rt);
   }
+  // events.id je int4: id dogodka izven int4 v scan-list je dal 22003 -> 500 (pregled #136); veljavno je 400.
+  const rSl = await api("GET", "/business/events/99999999999/scan-list", U.lastnik);
+  assert(rSl.status === 400, "GET /business/events/99999999999/scan-list -> 400 (izven int4, NE 500)", rSl);
   assert(await zivo(), "GET /clubs -> 200");
   await ustavi();
 
