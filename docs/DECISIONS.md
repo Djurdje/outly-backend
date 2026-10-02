@@ -204,6 +204,9 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   stanja; (7) My Account: Language in Notifications pod novim **Preferences** (My preferences, Notifications, Language),
   isti slog kot obstoječi podzasloni. *vir/dokaz*: Martinovo naročilo 20. 9. (točke 1–7), design kanvas (ARCHITECTURE →
   Oblikovanje). *velja dokler*: Martin ne preveri builda 48 na napravi; prehodi z blurom so prvi osumljenec pri težavah.
+  *nadomeščena z*: točka (2) — 2026-09-20 pozneje: Martin je vrnil **sistemsko spodnjo vrstico** (outly-app PR #11, build 50),
+  `OutlyTabBar` in `ZStack` sta umaknjena; učinek zamegljenega Home se je vrnil 21. 9. kot »Kot Revolut« (prekrivne plasti nad
+  TabViewom, glej zgoraj). Točke (1), (3)–(7) veljajo naprej.
 - 2026-09-29: **Prehod Home <-> Search/Profile ostane "kot Revolut", a animira posnetke zaslona, ne zive vsebine**
   (agent, po Martinovi prijavi "steka / 15 fps"). Videz enak (vsebina raste iz polja "Where to?" oz. avatarja, Home se
   zamegli), izvedba: zamrznjene slike (outly-app #34, #35). Sistemski prehod bi bil vedno gladek, a bi opustil Martinovo
