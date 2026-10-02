@@ -17,6 +17,9 @@
  *   S5  napaka baze v requireClubNa (issue #125): povezava skenPool/glavnega poola je prekinjena SREDI iskanja kluba
  *       (zaklep tabele clubs + pg_terminate_backend) -> sken, scan-list, scan-key in glavna poslovna pot vrnejo 503
  *       Retry-After 5 (NE 500: vratar bi dobil "napako streznika", ne zacasne tezave in preklopa na sken brez povezave).
+ *       Club id izven int4 (?club_id=99999999999) je 404, ne 503/500; programska/podatkovna napaka (manjkajoca tabela) ostane 500.
+ *   S6  trajno zasicen glavni pool (ZDRAVJE_ZASICEN_MS): kratek naval je /healthz 200, neprekinjena zasicenost dlje od meje
+ *       (vse povezave zasedene + zahtevki cakajo) je 503 (Render instanco ponovno zazene), po sprostitvi spet 200.
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -296,6 +299,46 @@ async function api(method, path, token, body, signal) {
   assert(s5e.status === 409 && s5e.body.result === "already_used", "po sprostitvi zaklepa sken spet dela (pool si je opomogel; vstopnica je ze unovcena -> 409 already_used, ne 503/500)", s5e);
   const s5f = await api("GET", "/business/events", U.kupec_a);
   assert(s5f.status === 403, "pravilne napake ostanejo: uporabnik brez kluba -> 403 (ne 503)", s5f);
+  const s5g = await api("GET", "/business/events?club_id=99999999999", U.lastnik);
+  assert(s5g.status === 404, "club_id izven int4 (99999999999) -> 404 Club not found (ne 503/500)", s5g);
+  const s5h = await api("GET", "/business/events?club_id=" + "9".repeat(400), U.lastnik);
+  assert(s5h.status === 404, "club_id s 400 stevkami -> 404", s5h);
+  const s5i = await api("GET", "/business/events?club_id=1", U.lastnik);
+  assert(s5i.status === 200, "veljaven club_id=1 -> 200", s5i.status);
+  // Programska/podatkovna napaka NI zacasna tezava: manjkajoca tabela (42P01) ostane 500, ne 503.
+  await pool.query("ALTER TABLE clubs RENAME TO clubs_skrita");
+  let s5j;
+  try { s5j = await api("GET", "/business/events", U.lastnik); }
+  finally { await pool.query("ALTER TABLE clubs_skrita RENAME TO clubs"); }
+  assert(s5j.status === 500, "napaka sheme (manjkajoca tabela) v iskanju kluba ostane 500 (ne maskirana kot 503)", s5j);
+  assert(/\[klub\] nepricakovana napaka/.test(log), "500 je zapisan v dnevnik s skladom");
+  await ustavi();
+
+  // ---------------------------------------------------------------- S6
+  console.log("\n# S6: trajno zasicen glavni pool -> /healthz 503 (PG_POOL_MAX=1, ZDRAVJE_ZASICEN_MS=2000)");
+  await zagon(3146, { PG_POOL_MAX: "1", PG_CONNECT_TIMEOUT_MS: "4000", ZDRAVJE_ZASICEN_MS: "2000" });
+  const E6 = await dogodek("E6 zaklenjen", 1000);
+  const lk6 = await zakleni(E6);
+  const obvisel6 = api("POST", `/events/${E6}/orders`, U.kupec_c, { quantity: 1 });      // drzi edino povezavo glavnega poola
+  await spi(300);
+  // Stalen tok cakajocih zahtevkov (kot obremenjen strezniki): vedno vsaj eden caka na povezavo.
+  let tok = true; const cakalci = [];
+  (async () => { while (tok) { cakalci.push(api("GET", "/me", U.kupec_d)); await spi(250); } })();
+  await spi(600);
+  const k = await api("GET", "/healthz");
+  assert(k.status === 200 && k.body.ok === true, "kratka zasicenost (< meje): /healthz se vedno 200", k);
+  await spi(2600);
+  const hz503 = await api("GET", "/healthz");
+  assert(hz503.status === 503 && hz503.body.ok === false, "neprekinjena zasicenost dlje od ZDRAVJE_ZASICEN_MS -> /healthz 503", hz503);
+  assert(hz503.body && "commit" in hz503.body, "503 ima polje commit", hz503.body);
+  assert(/\[zdravje\] glavni pool neprekinjeno zasicen/.test(log), "razlog 503 je zapisan v dnevnik");
+  tok = false;
+  await lk6.sprosti();
+  assert((await obvisel6).status === 201, "obvisel nakup se po sprostitvi konca");
+  await Promise.all(cakalci);
+  await spi(700);
+  const po = await api("GET", "/healthz");
+  assert(po.status === 200, "po sprostitvi povezave se zasicenost ponastavi: /healthz spet 200", po);
   await ustavi();
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);

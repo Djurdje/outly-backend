@@ -102,7 +102,24 @@ const skenPool = novPool(PG_SKEN_POOL_MAX, PG_SKEN_CONNECT_TIMEOUT_MS);
 // v njegovi vrsti ne dobi povezave v roku, vrne 503 in Render instanco ponovno zazene - ravno med navalom (issue #117).
 // Ena povezava je dovolj (en SELECT 1 naenkrat; ostali zahtevki za zdravje cakajo kratek rok) in steje proti max_connections
 // baze (glej .env.example). Kratka roka: baza, ki ne odgovori v ~2 s, je za zdravje res nedosegljiva.
-const zdraviPool = novPool(1, 2000, { statement_timeout: 2500, idleTimeoutMillis: 30000 });
+// `query_timeout` je ODJEMALSKI rok: ce povezava obvisi (polodprt TCP, baza je ne zapre), `statement_timeout` na strezniku
+// nikoli ne steče; ob izteku pg poizvedbo zavrne, pool.query pa povezavo UNICI (release(err)), zato naslednji klic dobi novo.
+// Brez tega bi edina povezava obvisela za vedno in /healthz bi ostal 503 tudi po okrevanju (pregled PR #127).
+const zdraviPool = novPool(1, 2000, { statement_timeout: 2500, query_timeout: 2500, idleTimeoutMillis: 30000 });
+
+// Trajna zasicenost glavnega poola (puscanje povezav, obvisele transakcije) JE nezdrava instanca: restart jo popravi.
+// Kratek naval ni: /healthz postane 503 sele, ko je glavni pool NEPREKINJENO zasicen (vse povezave zasedene IN zahtevki cakajo)
+// dlje od ZDRAVJE_ZASICEN_MS. Merjenje v procesu: casovni zig zacetka zasicenosti, ponastavi se ob prvem vzorcu s prosto
+// povezavo ali brez cakajocih. Vzorci: vsakih 500 ms in ob vsakem klicu /healthz.
+const ZDRAVJE_ZASICEN_MS = okoljeCelo("ZDRAVJE_ZASICEN_MS", 120000, 100, 3600000);
+let zasicenOd = null;
+function vzorciZasicenost() {
+  const zasicen = pool.waitingCount > 0 && pool.idleCount === 0;
+  if (!zasicen) zasicenOd = null;
+  else if (zasicenOd === null) zasicenOd = Date.now();
+  return zasicenOd !== null ? Date.now() - zasicenOd : 0;
+}
+setInterval(vzorciZasicenost, 500).unref();
 
 // Hkratnost nakupov (issue #89, obremenitveni test). Nakup drzi povezavo z bazo od BEGIN do COMMIT, vsi nakupi
 // istega dogodka pa se v sprozilcu rezerviraj_zalogo() vrstijo na isti zaklenjeni vrstici. Ob navali (300 kupcev
@@ -636,11 +653,23 @@ function zeljeniKlub(req) {
 // Admin brez lastnega kluba dobi { clubId: null, role: 'admin' } — poti, ki
 // rabijo klub, mu vrnejo 404 kot do zdaj; poti za urejanje dogodkov ga spustijo.
 // Vratar (doorman) sme SAMO skenirati in gledati vstopnice dogodka.
+const INT4_MAX = 2147483647;
+// Napaka povezave/baze (izcrpan pool, prekinjena povezava, izpad, timeout) = zacasna tezava streznika -> 503. Programska ali
+// podatkovna napaka (TypeError, SQLSTATE razreda 22/42 ...) ostane 500 s skladom v dnevniku.
+function jeNapakaPovezave(e) {
+  if (!e || e instanceof TypeError || e instanceof ReferenceError || e instanceof RangeError || e instanceof SyntaxError) return false;
+  const koda = String(e.code || "");
+  if (/^[0-9A-Z]{5}$/.test(koda)) return /^(08|53|57)/.test(koda);       // SQLSTATE: povezava, sredstva, poseg operaterja
+  if (/^E[A-Z_]+$/.test(koda)) return true;                              // ECONNRESET, ETIMEDOUT, ECONNREFUSED, EPIPE, ENOTFOUND ...
+  return !koda && /timeout|timed out|connect|terminated|ended|closed/i.test(String(e.message || ""));  // pg: brez kode
+}
 function requireClubNa(db, vloge) {
   return async (req, res, next) => {
     try {
       if (!req.user) return res.status(401).send("Unauthorized.");
       const zeljeni = zeljeniKlub(req);
+      // Izrecno zahtevan klub izven obsega int4 ne obstaja (poizvedba bi sicer padla z 22003 -> 500).
+      if (zeljeni !== null && zeljeni > INT4_MAX) return res.status(404).send("Club not found.");
       let k = await klubUporabnika(req.user.userId, zeljeni, db);
       if (!k) {
         // Izrecno zahtevan klub, v katerem uporabnik ni: 404 (ne razkrivamo, ali obstaja).
@@ -655,11 +684,15 @@ function requireClubNa(db, vloge) {
       req.klub = k;
       next();
     } catch (e) {
-      // Kot requireAuthNa (I10): napaka baze (izcrpan pool, prekinjena povezava, timeout) je zacasna tezava streznika, ne
-      // napaka zahtevka. Na sken poteh (requireClubSken) mora vratar dobiti 503 + Retry-After (telefon preklopi na sken brez
-      // povezave), ne 500. V tem bloku ni druge kode, ki bi lahko vrgla (zeljeniKlub in vloge so cista logika) - issue #125.
-      console.error("[klub] zacasna napaka pri iskanju kluba:", e && e.message);
-      return res.status(503).set("Retry-After", "5").send("Service temporarily unavailable. Please try again.");
+      // Kot requireAuthNa (I10): napaka povezave/baze (izcrpan pool, prekinjena povezava, timeout) je zacasna tezava streznika,
+      // ne napaka zahtevka. Na sken poteh (requireClubSken) mora vratar dobiti 503 + Retry-After (telefon preklopi na sken brez
+      // povezave), ne 500 (issue #125). Vse drugo (programska/podatkovna napaka) ostane 500 s polnim skladom v dnevniku.
+      if (jeNapakaPovezave(e)) {
+        console.error("[klub] zacasna napaka pri iskanju kluba:", e && e.message);
+        return res.status(503).set("Retry-After", "5").send("Service temporarily unavailable. Please try again.");
+      }
+      console.error("[klub] nepricakovana napaka:", e);
+      return res.status(500).send("Server error.");
     }
   };
 }
@@ -683,12 +716,20 @@ app.get("/healthz", async (req, res) => {
   res.set("Cache-Control", "no-store");
   let casovnik;
   try {
+    const zasicenMs = vzorciZasicenost();
+    if (zasicenMs > ZDRAVJE_ZASICEN_MS) {
+      // Trajno zasicen glavni pool: povezave se ne vracajo (puscanje, obviseli zaklepi) -> naj Render instanco ponovno zazene.
+      console.error(`[zdravje] glavni pool neprekinjeno zasicen ${Math.round(zasicenMs / 1000)} s (meja ${Math.round(ZDRAVJE_ZASICEN_MS / 1000)} s; ` +
+        `povezav ${pool.totalCount}, cakajocih ${pool.waitingCount}) -> 503`);
+      return res.status(503).json({ ok: false, commit: COMMIT_KRATEK });
+    }
     await Promise.race([
       zdraviPool.query("SELECT 1"),
       new Promise((_, zavrni) => { casovnik = setTimeout(() => zavrni(new Error("timeout")), 3000); }),
     ]);
     res.json({ ok: true, commit: COMMIT_KRATEK });
   } catch (e) {
+    console.error("[zdravje] baza ni dosegljiva ->", 503, e && e.message);
     res.status(503).json({ ok: false, commit: COMMIT_KRATEK });
   } finally {
     clearTimeout(casovnik);
