@@ -14,6 +14,7 @@
  *   S3c DETERMINISTICNO: napaka baze (57014) v `await` pred `try` -> 503 + Retry-After, dnevnik [rocnik] (S1/S2 sta odvisna od casovanja).
  *   S3  `await` pred `try`, ki pade z NE-povezavno napako (pool.query z 22003 v staPrijatelja) -> 500 (ne izhod procesa).
  *   S4  skenPool (PG_SKEN_POOL_MAX=1, kratek timeout): 300 vzporednih skenov -> proces zivi, /clubs po koncu 200.
+ *   S4b sken poti: stavek prekinjen (57014) -> 503 + Retry-After (NE 500), S4c enota odgovoriNaNapako, S5 transfer z user_id izven int4 -> 400 (issue #132).
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -132,13 +133,19 @@ const steje = (rez) => rez.reduce((m, r) => (m[r.status] = (m[r.status] || 0) + 
   await ustavi();
 
   // ---------------------------------------------------------------- S3
-  console.log("\n# S3: `await` pred `try` pade z napako, ki NI povezava (22003) -> 500, proces zivi");
-  await zagon(3962, {});
-  let r = await api("POST", "/tickets/1/transfer", U.ana, { user_id: 99999999999999999999 });
-  assert(r.status === 500, "prenos vstopnice z user_id izven int4 (staPrijatelja pred try) -> 500 (ne izhod procesa)", r);
+  console.log("\n# S3: `await` pred `try` pade z napako, ki NI povezava (55P03 lock_timeout, razred 55) -> 500, proces zivi");
+  // Prej je to dal user_id izven int4 (22003 v staPrijatelja); od #132 je to 400 (glej S5), zato ista pot (`staPrijatelja` pred
+  // `try` v prenosu vstopnice) zdaj pade na zaklepu tabele friendships z lock_timeout: SQLSTATE 55P03 NI v razredih 08/53/57.
+  await zagon(3962, { PGOPTIONS: "-c lock_timeout=300" });
+  const borId3 = (await pool.query("SELECT id FROM users WHERE email='bor@outly.si'")).rows[0].id;
+  const zk3 = await pool.connect();
+  await zk3.query("BEGIN"); await zk3.query("LOCK TABLE friendships IN ACCESS EXCLUSIVE MODE");
+  let r = await api("POST", "/tickets/1/transfer", U.ana, { user_id: borId3 });
+  assert(r.status === 500, "prenos vstopnice: napaka, ki ni povezava (55P03, staPrijatelja pred try) -> 500 (ne izhod procesa, ne 503)", r);
   await spi(300);
   assert(!umrl, "proces po napaki ZIVI", umrl);
   assert(log.includes("[rocnik] nepricakovana napaka (POST /tickets/1/transfer)"), "napaka je zapisana s potjo in skladom ([rocnik] nepricakovana napaka)");
+  await zk3.query("ROLLBACK"); zk3.release();
   const slabJson = await fetch(BASE + "/me", { method: "PATCH", headers: { "content-type": "application/json", authorization: "Bearer " + U.ana }, body: "{pokvarjen" }).catch(() => ({ status: "omrezje" }));
   assert(slabJson.status === 400, "pokvarjen JSON ostane 400 (napaka body-parserja gre skozi privzeti obravnavalnik, ne 500/503)", slabJson.status);
   assert(await zivo(), "GET /clubs -> 200");
@@ -198,7 +205,74 @@ const steje = (rez) => rez.reduce((m, r) => (m[r.status] = (m[r.status] || 0) + 
   assert(!umrl, "proces po 300 vzporednih skenih ZIVI", umrl);
   assert(rez.every(x => typeof x.status === "number"), "vsak zahtevek dobi odgovor (brez prekinjenih zvez)", st);
   assert(rez.filter(x => x.status === 503).every(x => x.retryAfter === "5"), "vsak 503 ima Retry-After: 5");
+  assert(rez.every(x => x.status === 404 || x.status === 503), "brez 500: vsak odgovor je 404 (neznana vstopnica) ali 503 (pool zaseden), issue #132", st);
   assert(await zivo(), "po navali GET /clubs -> 200");
+  await ustavi();
+
+  // ---------------------------------------------------------------- S4b
+  // Issue #132: lasten `catch (e) { ...; return res.status(500) }` skenskih poti je napako povezave/baze vrnil kot 500.
+  // DETERMINISTICNO (brez casovanja in brez stetja 503): tabelo `tickets` zaklenemo, PGOPTIONS statement_timeout prekine stavek
+  // skena s 57014 (razred 57 = jeNapakaPovezave) -> pricakujemo 503 + Retry-After 5, nikoli 500. Vsaka pot skena mora imeti
+  // svoj stavek, ki zadene `tickets` PO preverjanju kluba (zaklep tickets ne vpliva na avtentikacijo in iskanje kluba).
+  console.log("\n# S4b: sken poti, stavek nad `tickets` prekinjen (57014) -> 503 + Retry-After 5, NE 500 (#132)");
+  await zagon(3962, { PGOPTIONS: "-c statement_timeout=400" });
+  {
+    const zkt = await pool.connect();
+    await zkt.query("BEGIN"); await zkt.query("LOCK TABLE tickets IN ACCESS EXCLUSIVE MODE");
+    const skenPoti = [
+      ["POST /business/tickets/scan", "POST", "/business/tickets/scan", { serial }],
+      ["POST /business/tickets/scan-batch", "POST", "/business/tickets/scan-batch", { scans: [{ client_scan_id: "s4b-1", device_id: "dev-s4b", serial }] }],
+      ["GET /business/events/1/scan-list", "GET", "/business/events/1/scan-list", null],
+    ];
+    for (const [ime, m, pot, telo] of skenPoti) {
+      const r4 = await api(m, pot, U.lastnik, telo);
+      assert(r4.status === 503 && r4.retryAfter === "5", `${ime}: stavek prekinjen (57014) -> 503 + Retry-After 5 (NE 500)`, r4);
+    }
+    const rKljuc = await api("GET", "/business/scan-key", U.lastnik);
+    assert(rKljuc.status === 200, "GET /business/scan-key ne rabi tickets: 200 tudi med zaklepom", rKljuc);
+    await spi(300);
+    assert(!umrl, "proces ZIVI", umrl);
+    await zkt.query("ROLLBACK"); zkt.release();
+    const rPo = await api("POST", "/business/tickets/scan", U.lastnik, { serial });
+    assert(rPo.status === 404, "po sprostitvi zaklepa sken neznane vstopnice -> 404 (normalno delovanje)", rPo);
+  }
+  await ustavi();
+
+  // Enota: pomocnik odgovoriNaNapako (503 + Retry-After za napake povezave, sicer 500; odgovor ze poslan ne pise dvojnega).
+  console.log("\n# S4c: odgovoriNaNapako (enota)");
+  {
+    const { odgovoriNaNapako } = require("../napaka_povezave");
+    const lazni2 = (headersSent) => ({ headersSent, koda: null, glave: {}, telo: null,
+      status(k) { this.koda = k; return this; }, set(k, v) { this.glave[k] = v; return this; },
+      send(t) { this.telo = t; return this; }, json(t) { this.telo = t; return this; } });
+    const tiho2 = console.error; console.error = () => {};
+    try {
+      let res = lazni2(false); odgovoriNaNapako(res, Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" }), "scan");
+      assert(res.koda === 503 && res.glave["Retry-After"] === "5" && res.telo && res.telo.error === "service_unavailable", "57014 -> 503 + Retry-After 5 + {error:service_unavailable}", res);
+      res = lazni2(false); odgovoriNaNapako(res, new Error("timeout exceeded when trying to connect"), "scan");
+      assert(res.koda === 503 && res.glave["Retry-After"] === "5", "izcrpan pool (napaka brez kode) -> 503");
+      res = lazni2(false); odgovoriNaNapako(res, Object.assign(new Error("value out of range"), { code: "22003" }), "scan");
+      assert(res.koda === 500 && res.telo && res.telo.error === "server_error" && !res.glave["Retry-After"], "22003 -> 500 brez Retry-After");
+      res = lazni2(false); odgovoriNaNapako(res, new TypeError("x"), "scan");
+      assert(res.koda === 500, "TypeError -> 500 (programska napaka ni 503)");
+      res = lazni2(true); odgovoriNaNapako(res, new Error("timeout exceeded when trying to connect"), "scan");
+      assert(res.koda === null && res.telo === null, "odgovor ze poslan: ne pise dvojnega");
+    } finally { console.error = tiho2; }
+  }
+
+  // ---------------------------------------------------------------- S5
+  // Issue #132 (drugi del): user_id izven int4 je dal 22003 -> 500; veljavno je samo 400 (neveljaven id).
+  console.log("\n# S5: POST /tickets/:id/transfer z user_id izven int4 -> 400 (NE 500)");
+  await zagon(3962, {});
+  for (const uid of ["99999999999", 2147483648, 9223372036854775807n.toString(), 2147483647, 999]) {
+    const rt = await api("POST", "/tickets/1/transfer", U.ana, { user_id: uid });
+    const pricakovano = (String(uid) === "2147483647" || String(uid) === "999") ? 404 : 400;
+    assert(rt.status === pricakovano, `user_id ${uid} -> ${pricakovano} (${pricakovano === 400 ? "izven int4" : "veljaven int4, nista prijatelja"})`, rt);
+  }
+  // events.id je int4: id dogodka izven int4 v scan-list je dal 22003 -> 500 (pregled #136); veljavno je 400.
+  const rSl = await api("GET", "/business/events/99999999999/scan-list", U.lastnik);
+  assert(rSl.status === 400, "GET /business/events/99999999999/scan-list -> 400 (izven int4, NE 500)", rSl);
+  assert(await zivo(), "GET /clubs -> 200");
   await ustavi();
 
   await pool.end();

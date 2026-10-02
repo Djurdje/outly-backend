@@ -14,4 +14,19 @@ function jeNapakaPovezave(e) {
   if (koda) return false;
   return /timeout|timed out|connect|terminated|ended|closed/i.test(String(e.message || ""));
 }
-module.exports = { jeNapakaPovezave };
+
+// Skupen odgovor za lasten `catch (e)` poti (issue #132, I10): napaka povezave/baze (izcrpan pool, prekinjena povezava, timeout)
+// je zacasna tezava streznika -> 503 + Retry-After 5 (odjemalec poskusi znova, sken na vratih preklopi na nacin brez povezave);
+// vse drugo (programska/podatkovna napaka) -> 500 s polnim skladom v dnevniku. `kje` je oznaka poti za dnevnik (brez zetonov).
+// Odgovor ze poslan: ne pisemo dvojnega, napako samo zapisemo. Isto merilo kot requireClubNa in napakaRocnik.
+function odgovoriNaNapako(res, e, kje) {
+  const oznaka = kje ? ` (${kje})` : "";
+  if (res.headersSent) { console.error(`[napaka] po poslanem odgovoru${oznaka}:`, (e && e.stack) || e); return; }
+  if (jeNapakaPovezave(e)) {
+    console.error(`[napaka] zacasna napaka povezave z bazo${oznaka}:`, (e && e.message) || e);
+    return res.status(503).set("Retry-After", "5").json({ error: "service_unavailable", message: "Service temporarily unavailable. Please try again." });
+  }
+  console.error(`[napaka] nepricakovana napaka${oznaka}:`, (e && e.stack) || e);
+  return res.status(500).json({ error: "server_error", message: "Server error." });
+}
+module.exports = { jeNapakaPovezave, odgovoriNaNapako };
