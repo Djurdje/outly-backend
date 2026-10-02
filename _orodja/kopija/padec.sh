@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Izhodisce za preverbo padca stevila vrstic (users/orders/tickets). Stevila so poslovna informacija, zato je izhodisce SIFRIRANO
-# (openssl aes-256-cbc, pbkdf2, kljuc BACKUP_STEVILA_KLJUC iz environmenta »kopije«) in hranjeno v ZASEBNEM R2 bucketu:
-#   kopije/stanje/stevila.enc          sifrirana stevila prejsnjega zagona
+# Izhodisce za preverbo padca stevila vrstic (users/orders/tickets): JSON s tremi stevili, hranjen v ZASEBNEM R2 bucketu NESIFRIRANO
+# (odlocitev 2. 10. 2026: stevila vrstic niso osebni podatek, bucket je zaseben, nov kljuc/skrivnost bi bil samo se ena stvar, ki se lahko pokvari;
+# kdor bere bucket, bere tudi kopije, ki pa so sifrirane z BACKUP_GESLO):
+#   kopije/stanje/stevila.json         stevila prejsnjega zagona
 #   kopije/stanje/brez-izhodisca       oznaka: izhodisca ni bilo ze ob prejsnjem zagonu (pisemo ob »stanje«, brisemo ob uspesnem »preveri«)
 # Dva ukaza:
 #   padec.sh stanje             ugotovi, ali je izhodisce berljivo; opozorilo + vrstica v povzetku; v $GITHUB_OUTPUT: izhodisce=1|0, dvakrat=true|false
-#   padec.sh preveri <izvoz>    primerja z izhodiscem (stevila.js padec), izhodisce znova zasifrira in shrani, pobrise oznako
-# Brez izhodisca (prvi zagon, izbrisan objekt, ZAMENJAN KLJUC): opozorilo, izhodisce se nastavi na novo. Ce izhodisca ni 2 zagona
+#   padec.sh preveri <izvoz>    primerja z izhodiscem (stevila.js padec), novo izhodisce shrani, pobrise oznako
+# Brez izhodisca (prvi zagon, izbrisan ali pokvarjen objekt): opozorilo, izhodisce se nastavi na novo. Ce izhodisca ni 2 zagona
 # zapored (oznaka ze obstaja), je zagon rdec. Prvi zagon (v R2 se ni nobene kopije) je dovoljen. Okolje R2_* kot r2.sh.
 set -euo pipefail
 
-: "${BACKUP_STEVILA_KLJUC:?manjka BACKUP_STEVILA_KLJUC}"
 UKAZ="${1:?Uporaba: padec.sh stanje | preveri <izvoz.json>}"
 R2="$(dirname "$0")/r2.sh"
-KLJUC_STEVILA="kopije/stanje/stevila.enc"
+KLJUC_STEVILA="kopije/stanje/stevila.json"
 KLJUC_OZNAKA="kopije/stanje/brez-izhodisca"
 umask 077
 TMP="$(mktemp -d)"
@@ -22,15 +22,14 @@ trap 'rm -rf "$TMP"' EXIT
 povzetek() { [ -n "${GITHUB_STEP_SUMMARY:-}" ] && echo "$1" >> "$GITHUB_STEP_SUMMARY" || true; }
 izhod() { [ -n "${GITHUB_OUTPUT:-}" ] && echo "$1" >> "$GITHUB_OUTPUT" || true; }
 
-# 0 = berljivo (v $TMP/prej.json), 1 = obstaja a se ne da dekodirati, 2 = ni objekta
+# 0 = berljivo (v $TMP/prej.json), 1 = obstaja a ni veljaven JSON, 2 = ni objekta
 preberi() {
   local rc=0
   bash "$R2" exists "$KLJUC_STEVILA" || rc=$?
   [ "$rc" -eq 1 ] && return 2
   [ "$rc" -eq 0 ] || exit 1            # prava napaka R2 (dovoljenja, povezava): zagon naj pade, ne molci
-  bash "$R2" get "$KLJUC_STEVILA" "$TMP/stevila.enc"
-  if openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BACKUP_STEVILA_KLJUC -in "$TMP/stevila.enc" -out "$TMP/prej.json" 2>/dev/null \
-     && jq -e 'type == "object"' "$TMP/prej.json" > /dev/null 2>&1; then
+  bash "$R2" get "$KLJUC_STEVILA" "$TMP/prej.json"
+  if jq -e 'type == "object"' "$TMP/prej.json" > /dev/null 2>&1; then
     return 0
   fi
   rm -f "$TMP/prej.json"
@@ -46,7 +45,7 @@ case "$UKAZ" in
       exit 0
     fi
     if [ "$RC" -eq 1 ]; then
-      RAZLOG="obstaja, a se ne da dekodirati (zamenjan BACKUP_STEVILA_KLJUC ali pokvarjen objekt)"
+      RAZLOG="obstaja, a ni veljaven JSON (pokvarjen objekt)"
     else
       RAZLOG="ni (prvi zagon ali objekt izbrisan)"
     fi
@@ -63,7 +62,7 @@ case "$UKAZ" in
     fi
     ROC=0; bash "$R2" exists "$KLJUC_OZNAKA" || ROC=$?
     if [ "$ROC" -eq 0 ]; then
-      echo "::error::Izhodisca ni ze 2 zagona zapored. Kljuc BACKUP_STEVILA_KLJUC se menja ali shranjevanje izhodisca ne uspe: preglej."
+      echo "::error::Izhodisca ni ze 2 zagona zapored. Shranjevanje izhodisca v R2 ne uspe ali je objekt pokvarjen: preglej."
       povzetek "- **NAPAKA:** izhodisca ni ze 2 zagona zapored."
       izhod "dvakrat=true"
     elif [ "$ROC" -eq 1 ]; then
@@ -80,10 +79,9 @@ case "$UKAZ" in
     if preberi; then mv "$TMP/prej.json" "$PREJ"; else rm -f "$PREJ"; fi
     node "$(dirname "$0")/stevila.js" padec "$IZVOZ" "$PREJ"
     # stevila.js je zapisal nova stevila (pri padcu brez potrditve konca z napako, sem ne pride)
-    openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_STEVILA_KLJUC -in "$PREJ" -out "$TMP/stevila.enc.novo"
-    bash "$R2" put "$TMP/stevila.enc.novo" "$KLJUC_STEVILA"
+    bash "$R2" put "$PREJ" "$KLJUC_STEVILA"
     bash "$R2" delete "$KLJUC_OZNAKA"      # brez oznake je delete v S3 uspesen tudi, ce je ni
-    echo "Izhodisce shranjeno (sifrirano, R2)."
+    echo "Izhodisce shranjeno (R2)."
     ;;
   *) echo "Neznan ukaz"; exit 2 ;;
 esac

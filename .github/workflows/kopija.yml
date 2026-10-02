@@ -1,8 +1,9 @@
 # Dnevna varnostna kopija produkcijske baze IZVEN Renderja (issue #88). Hramba: zasebni Cloudflare R2 bucket (EU), odlocitev Martina 2. 10. 2026.
 #
-# Kaj: prek obstojecega GET /admin/api/export (poseben admin racun) potegne logicni izvoz VSEH tabel, ga SIFRIRA z javnim kljucem (age),
-# nalozi v R2 (S3 API) in prebere nazaj (sha256), takoj preizkusi obnovo (service container postgres:16, db/obnovi_izvoz.js, primerjava
-# tabel in migracij), preveri padec stevila vrstic in pobrise kopije, starejse od 30 dni. NIC ni v GitHub artefaktih (repo je javen).
+# Kaj: prek obstojecega GET /admin/api/export (servisni admin racun agent@outly.si) potegne logicni izvoz VSEH tabel, ga SIFRIRA z geslom
+# (gpg, AES-256), nalozi v R2 (S3 API), prebere nazaj in ODSIFRIRA (mora biti enak izvozu), takoj preizkusi obnovo (service container
+# postgres:16, db/obnovi_izvoz.js, primerjava tabel in migracij), preveri padec stevila vrstic in pobrise kopije, starejse od 30 dni.
+# NIC ni v GitHub artefaktih (repo je javen).
 #
 # Zakaj izvoz prek API-ja in ne pg_dump: zunanji dostop do outly-db je zaprt (Inbound IP Rules prazne, STATE.md 30. 9.), GitHubovi runnerji pa
 # nimajo stalnega IP-ja. Z API-jem baza ostane zaprta, obnova pa je ISTI, ze testirani postopek (db/obnovi_izvoz.js) kot v ARCHITECTURE.md.
@@ -10,14 +11,14 @@
 # Repo je JAVEN: dnevniki zagonov so javni. V dnevnik gredo samo imena tabel, OK/NAPAKA, velikost sifrirane datoteke in odtis - nikoli
 # vrednosti iz baze, stevila vrstic, odgovori streznika ali ime/ID racuna R2 (napake R2 se skrajsajo na kodo).
 #
-# DOSTOP DO SKRIVNOSTI: job ima `environment: kopije` (Martin ga mora ustvariti PRED prvim zagonom, sicer ga GitHub ob zagonu ustvari brez
-# omejitve vej) z Deployment branches = SAMO `main`; skrivnosti so TAM, ne na ravni repozitorija. Zagon z druge veje pade ze pri »Branch not allowed«.
-#   environment kopije, secrets: BACKUP_ADMIN_EMAIL, BACKUP_ADMIN_PASSWORD   POSEBEN racun z vlogo admin (Supabase prijava)
+# DOSTOP DO SKRIVNOSTI: job ima `environment: kopije` z Deployment branches = SAMO `main`; skrivnosti so TAM, ne na ravni repozitorija.
+# Zagon z druge veje pade ze pri »Branch not allowed«.
+#   environment kopije, secrets: BACKUP_ADMIN_EMAIL, BACKUP_ADMIN_PASSWORD   servisni racun z vlogo admin (Supabase prijava; agent@outly.si)
 #   environment kopije, secrets: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET   token »Object Read & Write« samo za ta bucket
-#   environment kopije, secrets: BACKUP_STEVILA_KLJUC                        naklucen kljuc (64 hex) za sifriranje izhodisca stevil
-#   environment kopije, secrets: HC_URL_KOPIJE                               Healthchecks (Period 1 day, Grace 24 h)
-#   environment kopije, vars:    BACKUP_AGE_PUBLIC_KEYS                      javni kljuc(i) age1..., loceni s presledkom/novo vrstico
+#   environment kopije, secrets: BACKUP_GESLO                                geslo za sifriranje kopij (>= 32 znakov; kopija v upravljalniku gesel!)
+#   environment kopije, secrets: HC_URL_KOPIJE  (NEOBVEZNO)                  Healthchecks (Period 1 day, Grace 24 h); brez njega samo opozorilo
 #   repo secret NTFY_TOPIC (ze obstaja)                                      push ob napaki, kot pri nadzor.yml
+# Sprejeto tveganje (DECISIONS 2. 10. 2026): kdor lahko bere secrets tega environmenta, lahko odsifrira kopije.
 name: Varnostna kopija baze
 
 on:
@@ -82,8 +83,7 @@ jobs:
         env:
           E: ${{ secrets.BACKUP_ADMIN_EMAIL }}
           P: ${{ secrets.BACKUP_ADMIN_PASSWORD }}
-          S: ${{ secrets.BACKUP_STEVILA_KLJUC }}
-          K: ${{ vars.BACKUP_AGE_PUBLIC_KEYS }}
+          G: ${{ secrets.BACKUP_GESLO }}
           R1: ${{ secrets.R2_ACCOUNT_ID }}
           R2I: ${{ secrets.R2_ACCESS_KEY_ID }}
           R3: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -93,8 +93,8 @@ jobs:
           manjka=""
           [ -n "$E" ] || manjka+=" secrets.BACKUP_ADMIN_EMAIL"
           [ -n "$P" ] || manjka+=" secrets.BACKUP_ADMIN_PASSWORD"
-          [ -n "$S" ] || manjka+=" secrets.BACKUP_STEVILA_KLJUC"
-          [ -n "$K" ] || manjka+=" vars.BACKUP_AGE_PUBLIC_KEYS"
+          [ -n "$G" ] || manjka+=" secrets.BACKUP_GESLO"
+          [ "${#G}" -ge 32 ] || [ -z "$G" ] || { echo "::error::secrets.BACKUP_GESLO je prekratko (najmanj 32 znakov)."; exit 1; }
           [ -n "$R1" ] || manjka+=" secrets.R2_ACCOUNT_ID"
           [ -n "$R2I" ] || manjka+=" secrets.R2_ACCESS_KEY_ID"
           [ -n "$R3" ] || manjka+=" secrets.R2_SECRET_ACCESS_KEY"
@@ -104,7 +104,7 @@ jobs:
             exit 1
           fi
           if [ -z "$HC" ]; then
-            echo "::warning::secrets.HC_URL_KOPIJE ni nastavljen: ce kopija sploh ne stece (cron izpade, workflow onemogocen), ne javi nihce. Healthchecks je del obveznih nastavitev."
+            echo "::warning::secrets.HC_URL_KOPIJE ni nastavljen: ce kopija sploh ne stece (cron izpade, workflow onemogocen), ne javi nihce. Healthchecks je neobvezen, a priporocen (Period 1 day, Grace 24 h)."
           fi
           echo "Nastavitve: obvezne prisotne."
 
@@ -113,22 +113,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Namesti odvisnosti in age (znana razlicica, preverjen odtis)
+      - name: Namesti odvisnosti in preveri orodja
         if: env.TEST != 'true'
-        env:
-          AGE_VERSION: v1.3.2
-          # sha256 age-v1.3.2-linux-amd64.tar.gz (izracunano ob pripravi PR-ja; preveri proti
-          # https://github.com/FiloSottile/age/releases/tag/v1.3.2 ob pregledu). Ob menjavi razlicice posodobi OBOJE.
-          AGE_SHA256: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
         run: |
           set -euo pipefail
           npm ci
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/age.tgz" "https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/age-${AGE_VERSION}-linux-amd64.tar.gz"
-          echo "${AGE_SHA256}  $RUNNER_TEMP/age.tgz" | sha256sum -c -
-          mkdir -p "$RUNNER_TEMP/age-bin"
-          tar -xzf "$RUNNER_TEMP/age.tgz" -C "$RUNNER_TEMP/age-bin" --strip-components=1 age/age
-          echo "$RUNNER_TEMP/age-bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/age-bin/age" --version
+          gpg --version | head -n1
           jq --version
           aws --version
 
@@ -143,41 +133,41 @@ jobs:
           chmod 700 "$RUNNER_TEMP/kopija"
           bash _orodja/kopija/izvoz.sh "$RUNNER_TEMP/kopija/izvoz.json"
 
-      - name: Sifriraj z javnim kljucem (age)
+      - name: Sifriraj z geslom (gpg AES-256)
         id: sifriraj
         if: env.TEST != 'true'
         env:
-          BACKUP_AGE_PUBLIC_KEYS: ${{ vars.BACKUP_AGE_PUBLIC_KEYS }}
+          BACKUP_GESLO: ${{ secrets.BACKUP_GESLO }}
         run: |
           DATUM=$(date -u +%F)
           echo "DATUM=$DATUM" >> "$GITHUB_ENV"
           OZNAKA="${{ github.run_id }}-${{ github.run_attempt }}"
           echo "OZNAKA=$OZNAKA" >> "$GITHUB_ENV"
-          IME="outly-db-$DATUM-r$OZNAKA.json.gz.age"
+          IME="outly-db-$DATUM-r$OZNAKA.json.gz.gpg"
           bash _orodja/kopija/sifriraj.sh "$RUNNER_TEMP/kopija/izvoz.json" "$RUNNER_TEMP/kopija/izhod/$IME"
 
-      # Izhodisce stevil (za preverbo padca) je sifrirano v R2 (kopije/stanje/); stanje se prebere PRED nalaganjem danasnje kopije
+      # Izhodisce stevil (za preverbo padca) je v R2 (kopije/stanje/stevila.json, nesifrirano - stevila vrstic niso osebni podatek); stanje se prebere PRED nalaganjem danasnje kopije
       # (»prvi zagon« = v R2 se ni nobene kopije) in pred obnovo, da se padec preveri tudi, ce obnova pade.
       - name: Stanje izhodisca stevil (R2)
         id: izhodisce
         if: env.TEST != 'true'
         env:
-          BACKUP_STEVILA_KLJUC: ${{ secrets.BACKUP_STEVILA_KLJUC }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: bash _orodja/kopija/padec.sh stanje
 
-      - name: Nalozi sifrirano kopijo v R2 in preberi nazaj
+      - name: Nalozi sifrirano kopijo v R2, preberi nazaj in odsifriraj
         id: nalozi
         if: env.TEST != 'true'
         env:
+          BACKUP_GESLO: ${{ secrets.BACKUP_GESLO }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: bash _orodja/kopija/nalozi_r2.sh "$RUNNER_TEMP/kopija/izhod" "$DATUM" "$OZNAKA"
+        run: bash _orodja/kopija/nalozi_r2.sh "$RUNNER_TEMP/kopija/izhod" "$DATUM" "$OZNAKA" "$RUNNER_TEMP/kopija/izvoz.json"
 
       # Namenoma PO nalaganju: ce preizkus obnove pade (npr. deploy z novo migracijo je v teku), je kopija vseeno shranjena.
       - name: Preizkus obnove (service container postgres:16)
@@ -189,7 +179,6 @@ jobs:
         id: padec
         if: ${{ !cancelled() && steps.nalozi.outcome == 'success' }}
         env:
-          BACKUP_STEVILA_KLJUC: ${{ secrets.BACKUP_STEVILA_KLJUC }}
           POTRDI_PADEC: ${{ github.event.inputs.potrdi_padec || 'false' }}   # isto ime bere stevila.js (test_kopija_orodja.js to preverja)
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -201,7 +190,7 @@ jobs:
         id: dvakrat
         if: ${{ !cancelled() && steps.izhodisce.outputs.dvakrat == 'true' }}
         run: |
-          echo "::error::Izhodisce za preverbo padca manjka ze 2 zagona zapored (BACKUP_STEVILA_KLJUC se menja ali shranjevanje izhodisca ne uspe). Kopija je shranjena."
+          echo "::error::Izhodisce za preverbo padca manjka ze 2 zagona zapored (shranjevanje izhodisca v R2 ne uspe ali je objekt pokvarjen). Kopija je shranjena."
           exit 1
 
       # Hramba 30 dni: workflow sam brise stare kopije (zanesljivo, brez dodatnega klika); R2 lifecycle pravila NE nastavljamo (izniclo bi varovalo »vedno 7 najnovejsih«).

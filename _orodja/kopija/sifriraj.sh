@@ -1,30 +1,29 @@
 #!/usr/bin/env bash
-# Dnevna kopija, korak 2: stisni (gzip) in sifriraj z JAVNIM kljucem (age). Uporaba:
-#   sifriraj.sh <izvoz.json> <izhod.json.gz.age>
-# Prejemniki: BACKUP_AGE_PUBLIC_KEYS = en ali vec javnih kljucev "age1...", locenih s presledkom ali novo vrstico.
-# Zasebni kljuc je samo pri Martinu — ta workflow ga nikoli ne vidi. Ob izpisu: velikost (zaokrozena na MB) in odtis, nic drugega.
+# Dnevna kopija, korak 2: stisni (gzip) in sifriraj z GESLOM (gpg, AES-256, simetricno). Uporaba:
+#   sifriraj.sh <izvoz.json> <izhod.json.gz.gpg>
+# Geslo: okolje BACKUP_GESLO (GitHub environment secret »kopije«, >= 32 znakov, brez nove vrstice). Nikoli v ukazni vrstici ali izpisu.
+# Integriteta: gpg doda MDC (modification detection code, SHA-1 nad celim paketom) - spremenjena datoteka se pri desifriranju zavrne;
+# poleg tega ima vsaka kopija v R2 svoj .sha256 (nalozi_r2.sh ga primerja po prenosu). Ob izpisu: velikost (zaokrozena na MB) in odtis.
+# Sprejeto tveganje (DECISIONS 2. 10. 2026): kdor lahko bere secrets environmenta »kopije«, lahko odsifrira kopije.
 set -euo pipefail
 
-VHOD="${1:?Uporaba: sifriraj.sh <izvoz.json> <izhod.json.gz.age>}"
-IZHOD="${2:?Uporaba: sifriraj.sh <izvoz.json> <izhod.json.gz.age>}"
-: "${BACKUP_AGE_PUBLIC_KEYS:?manjka BACKUP_AGE_PUBLIC_KEYS}"
+VHOD="${1:?Uporaba: sifriraj.sh <izvoz.json> <izhod.json.gz.gpg>}"
+IZHOD="${2:?Uporaba: sifriraj.sh <izvoz.json> <izhod.json.gz.gpg>}"
 umask 077
+# shellcheck source=_orodja/kopija/gpg_skupno.sh
+. "$(dirname "$0")/gpg_skupno.sh"
+gpg_pripravi
+trap gpg_pocisti EXIT
 
-PREJEMNIKI=()
-for k in $BACKUP_AGE_PUBLIC_KEYS; do
-  if ! [[ "$k" =~ ^age1[0-9a-z]{58}$ ]]; then
-    echo "::error::BACKUP_AGE_PUBLIC_KEYS vsebuje nekaj, kar ni javni kljuc age (age1 + 58 znakov). Zasebni kljuc (AGE-SECRET-KEY-...) NIKOLI ne sme v GitHub."
-    exit 1
-  fi
-  PREJEMNIKI+=(-r "$k")
-done
-[ "${#PREJEMNIKI[@]}" -gt 0 ] || { echo "::error::Ni nobenega javnega kljuca."; exit 1; }
+rm -f "$IZHOD"
+gzip -9 -n < "$VHOD" | gpg_sifriraj "$IZHOD"
 
-gzip -9 -n < "$VHOD" | age "${PREJEMNIKI[@]}" -o "$IZHOD"
-
-# Preverba: izhod je age datoteka in v njej ni golega besedila izvoza.
-head -c 40 "$IZHOD" | grep -q 'age-encryption.org/v1' || { echo "::error::Izhod ni age datoteka."; rm -f "$IZHOD"; exit 1; }
+# Preverba: izhod je gpg simetricni paket z MDC in v njem ni golega besedila izvoza.
+PAKETI="$(gpg --batch --list-packets "$IZHOD" 2> /dev/null || true)"
+if ! grep -q 'symkey enc packet' <<< "$PAKETI" || ! grep -q 'mdc_method: 2' <<< "$PAKETI" || ! grep -q 'cipher 9' <<< "$PAKETI"; then
+  echo "::error::Izhod ni gpg simetricni paket AES-256 z MDC."; rm -f "$IZHOD"; exit 1
+fi
 if grep -q -a '"exported_at"' "$IZHOD"; then echo "::error::V sifrirani datoteki je golo besedilo!"; rm -f "$IZHOD"; exit 1; fi
 
 ( cd "$(dirname "$IZHOD")" && sha256sum "$(basename "$IZHOD")" > "$(basename "$IZHOD").sha256" )
-echo "Sifrirano: ~$(( ( $(stat -c %s "$IZHOD") + 1048575 ) / 1048576 )) MB, prejemnikov: $(( ${#PREJEMNIKI[@]} / 2 )), sha256 $(cut -c1-16 "$IZHOD.sha256")"
+echo "Sifrirano: ~$(( ( $(stat -c %s "$IZHOD") + 1048575 ) / 1048576 )) MB, sha256 $(cut -c1-16 "$IZHOD.sha256")"
