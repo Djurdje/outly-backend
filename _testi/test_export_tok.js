@@ -99,8 +99,19 @@ async function izvozKosi(token) {
   // Strezniku omejimo kopico V8 na 48 MB: tokovni izvoz mora v njej zdrzati odgovor > 100 MB (ne-tokovna koda
   // zgradi cel odgovor v kopici in pade z "heap out of memory"), poleg tega RSS ne zraste zaradi leno
   // sprozenega GC (brez omejitve zraste ~70 MB, tudi ce kopica ni vecja).
-  const srv = spawn("node", ["--max-old-space-size=48", "index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", TZ: "Europe/Ljubljana" }, stdio: ["ignore", "pipe", "pipe"] });
-  let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
+  // Casovne omejitve izvoza so v testu kratke (privzeto 60 s / 120 s): drain 3 s, idle-in-transaction 30 s.
+  let srv = null, log = "";
+  function zazeniStreznik(okolje) {
+    srv = spawn("node", ["--max-old-space-size=48", "index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", TZ: "Europe/Ljubljana", EXPORT_DRAIN_TIMEOUT_MS: "3000", EXPORT_IDLE_TX_MS: "30000", ...(okolje || {}) }, stdio: ["ignore", "pipe", "pipe"] });
+    srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
+  }
+  async function pocakajStreznik() { for (let i = 0; i < 80; i++) { try { await fetch(BASE + "/"); return; } catch { await new Promise(r => setTimeout(r, 100)); } } }
+  async function ponovniZagon(okolje) {
+    const s = srv;
+    if (s.exitCode === null) await new Promise(r => { s.once("exit", r); s.kill(); });
+    zazeniStreznik(okolje); await pocakajStreznik();
+  }
+  zazeniStreznik();
   for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
 
   const T = {
@@ -214,6 +225,115 @@ async function izvozKosi(token) {
   assert(r.status === 200, "/admin/api/summary po prekinitvah -> 200", r.status);
   const iz2 = await izvozKosi(T.admin);
   assert(iz2.status === 200 && iz2.telo.length > 1000000, "poln izvoz po prekinitvah se vedno deluje", iz2.status);
+
+  // ------------------------------------------------------------------------------------------------
+  // Pomocniki za bralca, ki ga nadziramo (bere sele, ko mu recemo)
+  function pocasniBralec() {
+    return new Promise((resolve, reject) => {
+      const req = http.get(BASE + "/admin/api/export", { headers: { authorization: "Bearer " + T.admin } }, (res) => {
+        res.pause(); // ne bere: socket se napolni in strežnik čaka na 'drain'
+        let bajtov = 0, napaka = null;
+        const izid = new Promise((done) => {
+          res.on("data", (d) => { bajtov += d.length; });
+          res.on("error", (e) => { napaka = e.code || e.message; });
+          res.on("close", () => done({ complete: res.complete, bajtov, napaka }));
+        });
+        resolve({ res, izid, status: res.statusCode });
+      });
+      req.on("error", (e) => reject(e));
+    });
+  }
+  const cakaj = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Povezave, ki jih drzi izvoz: 'idle in transaction' (REPEATABLE READ), zadnja poizvedba je FETCH/DECLARE/SELECT COUNT.
+  const mirujocaTx = async () => (await pool.query(
+    `SELECT pid, state, query FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND state LIKE 'idle in transaction%'`)).rows;
+  async function cakajNaMirujocoTx(msMax) {
+    for (let t = 0; t < msMax; t += 100) { const v = await mirujocaTx(); if (v.length) return v; await cakaj(100); }
+    return [];
+  }
+  async function cakajBrezMirujocihTx(msMax) {
+    for (let t = 0; t < msMax; t += 100) { if ((await mirujocaTx()).length === 0) return true; await cakaj(100); }
+    return false;
+  }
+  const streznikZiv = () => srv.exitCode === null && srv.signalCode === null;
+
+  console.log("\n# Baza sredi izvoza prekine povezavo (pg_terminate_backend) -> streznik preziv");
+  await ponovniZagon();
+  let b = await pocasniBralec();
+  assert(b.status === 200, "pocasni bralec dobi glave izvoza (200)", b.status);
+  await cakaj(1000); // streznik napolni socket in caka na 'drain'; transakcija izvoza miruje
+  let tx = await cakajNaMirujocoTx(5000);
+  assert(tx.length === 1, "izvoz drzi natanko eno transakcijo (idle in transaction)", tx);
+  if (tx.length) await pool.query("SELECT pg_terminate_backend($1)", [tx[0].pid]);
+  b.res.resume();
+  let izid = await Promise.race([b.izid, cakaj(15000).then(() => "casovna omejitev")]);
+  assert(izid !== "casovna omejitev" && izid.complete === false, "odjemalec dobi PREKINJEN (nepopoln) odgovor", izid);
+  await cakaj(300);
+  assert(streznikZiv(), "strezniski proces se je po prekinitvi povezave izvoza ziv", { exitCode: srv.exitCode, signalCode: srv.signalCode });
+  assert(!/Unhandled 'error' event/.test(log), "v logu ni 'Unhandled error event'", log.split("\n").filter((l) => /Unhandled/.test(l)).slice(0, 2));
+  if (streznikZiv()) {
+    r = await api("GET", "/clubs");
+    assert(r.status === 200, "/clubs po prekinitvi povezave izvoza -> 200", r.status);
+    r = await api("GET", "/admin/api/summary", T.admin);
+    assert(r.status === 200, "/admin/api/summary (pool dela naprej) -> 200", r.status);
+    assert(await cakajBrezMirujocihTx(3000), "po prekinitvi ni povezav 'idle in transaction'");
+    const iz3 = await izvozKosi(T.admin);
+    assert(iz3.status === 200 && iz3.telo.length > 1000000 && iz3.telo.subarray(-2).toString() === "]}", "poln izvoz po prekinitvi povezave se vedno deluje", iz3.status);
+  }
+
+  console.log("\n# Pocasen bralec (ne bere, ne zapre) -> po meji drain se transakcija sprosti, migracija se izvede");
+  await ponovniZagon(); // EXPORT_DRAIN_TIMEOUT_MS=3000, EXPORT_IDLE_TX_MS=30000
+  b = await pocasniBralec();
+  await cakaj(1000);
+  tx = await cakajNaMirujocoTx(5000);
+  assert(tx.length === 1, "pocasni bralec: izvoz drzi transakcijo", tx);
+  // bottle_packages je abecedno prva tabela, ki jo izvoz prebere: zaklep (AccessShareLock) drzi do konca transakcije,
+  // tudi ko je kurzor ze pri kasnejsi tabeli.
+  async function alter(lockTimeout, sql) {
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query(`SET LOCAL lock_timeout = '${lockTimeout}'`);
+      await c.query(sql);
+      await c.query("COMMIT");
+      return { ok: true };
+    } catch (e) { await c.query("ROLLBACK").catch(() => {}); return { ok: false, koda: e.code }; }
+    finally { c.release(); }
+  }
+  let al = await alter("500ms", "ALTER TABLE bottle_packages ADD COLUMN _test_tok integer");
+  assert(al.ok === false && al.koda === "55P03", "dokler bralec miruje, ALTER TABLE caka na zaklep (lock_timeout 55P03)", al);
+  const tAlter = Date.now();
+  al = await alter("12s", "ALTER TABLE bottle_packages ADD COLUMN _test_tok integer");
+  const alMs = Date.now() - tAlter;
+  assert(al.ok === true && alMs < 10000, `po meji drain (3 s) se ALTER TABLE izvede (${alMs} ms)`, { al, alMs });
+  if (al.ok) await pool.query("ALTER TABLE bottle_packages DROP COLUMN _test_tok");
+  assert(await cakajBrezMirujocihTx(3000), "pocasni bralec: po meji ni povezav 'idle in transaction'");
+  b.res.resume();
+  izid = await Promise.race([b.izid, cakaj(15000).then(() => "casovna omejitev")]);
+  assert(izid !== "casovna omejitev" && izid.complete === false, "pocasni bralec dobi prekinjen odgovor", izid);
+  assert(streznikZiv(), "strezniski proces je ziv");
+  if (streznikZiv()) { r = await api("GET", "/clubs"); assert(r.status === 200, "/clubs po sprostitvi pocasnega bralca -> 200", r.status); }
+
+  console.log("\n# Varovalo idle_in_transaction_session_timeout (drain meja je dolga, Postgres sam prekine)");
+  await ponovniZagon({ EXPORT_DRAIN_TIMEOUT_MS: "60000", EXPORT_IDLE_TX_MS: "2000" });
+  b = await pocasniBralec();
+  await cakaj(500);
+  tx = await cakajNaMirujocoTx(5000);
+  assert(tx.length === 1, "izvoz drzi transakcijo, preden izteče idle meja", tx);
+  assert(await cakajBrezMirujocihTx(8000), "Postgres po idle meji (2 s) sam prekine transakcijo izvoza");
+  b.res.resume();
+  izid = await Promise.race([b.izid, cakaj(15000).then(() => "casovna omejitev")]);
+  assert(izid !== "casovna omejitev" && izid.complete === false, "odjemalec dobi prekinjen odgovor", izid);
+  await cakaj(300);
+  assert(streznikZiv(), "strezniski proces je ziv po prekinitvi zaradi idle meje");
+  assert(!/Unhandled 'error' event/.test(log), "v logu ni 'Unhandled error event'");
+  if (streznikZiv()) {
+    r = await api("GET", "/clubs");
+    assert(r.status === 200, "/clubs po idle prekinitvi -> 200", r.status);
+    // normalen izvoz ne sme biti prekinjen zaradi idle meje (transakcija med izvozom ne miruje dolgo)
+    const iz4 = await izvozKosi(T.admin);
+    assert(iz4.status === 200 && iz4.telo.subarray(-2).toString() === "]}", "poln izvoz s hitrim bralcem uspe tudi z idle mejo 2 s", iz4.status);
+  }
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
   const napake = log.split("\n").filter(l => /error|TypeError|Unhandled/i.test(l) && !/Server error\./.test(l) && !/Resend/i.test(l));

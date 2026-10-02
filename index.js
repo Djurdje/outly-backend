@@ -2524,19 +2524,37 @@ admin.get("/finance", async (req, res) => {
 // db/obnovi_izvoz.js jo berejo: {exported_at, postgres, tables:{ime:{count,columns,rows}}, sequences}.
 // Test: _testi/test_export_tok.js (primerja z referenčno stari izvedbo, meri RSS, prekinitev odjemalca).
 const IZVOZ_VRSTIC = 500;
+// Varovalki pred bralcem, ki neha brati ali pred bazo, ki prekine povezavo (izvoz drži transakcijo z
+// AccessShareLock na vseh prebranih tabelah: migracija ob deployu bi čakala nanjo, za njo pa vsa navadna branja):
+//  - IZVOZ_DRAIN_TIMEOUT_MS: koliko čakamo, da odjemalec sprazni medpomnilnik ('drain'); nato res.destroy() + ROLLBACK;
+//  - IZVOZ_IDLE_TX_MS: Postgres sam prekine sejo, ki miruje v transakciji (SET LOCAL idle_in_transaction_session_timeout).
+// Drain mora biti krajši od idle, sicer prekine Postgres. Okolje je samo za teste (kratke meje).
+const IZVOZ_DRAIN_MS = Number(process.env.EXPORT_DRAIN_TIMEOUT_MS) || 60000;
+const IZVOZ_IDLE_TX_MS = Number(process.env.EXPORT_IDLE_TX_MS) || 120000;
 admin.get("/export", async (req, res) => {
   const c = await pool.connect();
-  let prekinjeno = false;   // odjemalec je zaprl povezavo, preden smo končali
+  let prekinjeno = false;   // odjemalec je zaprl povezavo (ali smo jo zaprli mi), preden smo končali
   let napaka = false;       // povezave ni več varno vrniti v pool
   let glavaPoslana = false;
+  let razlog = "";          // zakaj je izvoz prekinjen (samo za log)
   const dogodekZapiranja = () => { if (!res.writableEnded) prekinjeno = true; };
   res.on("close", dogodekZapiranja);
-  // Piše kos in upošteva povratni tlak (počasen odjemalec ne napolni pomnilnika).
+  // Povezava do baze se je med izvozom pokvarila (pg_terminate_backend, vzdrževanje, idle meja). Brez poslušalca bi
+  // 'error' na odjemalcu, ki je izposojen iz poola, sesul CEL proces (Unhandled 'error' event): padel bi tudi sken na vratih.
+  const naNapakoPovezave = (err) => {
+    napaka = true;
+    razlog = `povezava do baze prekinjena (${err && (err.code || err.message)})`;
+    res.destroy(); // začet JSON se ne sme zaključiti kot poln: odjemalec dobi prekinjen odgovor
+  };
+  c.on("error", naNapakoPovezave);
+  // Piše kos in upošteva povratni tlak (počasen odjemalec ne napolni pomnilnika). Bralec, ki ne bere dlje kot
+  // IZVOZ_DRAIN_MS, je prekinjen: sicer bi transakcija (in zaklepi) ostala odprta za nedoločen čas.
   const pisi = async (kos) => {
     if (prekinjeno) throw new Error("odjemalec je prekinil izvoz");
     if (!res.write(kos)) {
       await new Promise((resolve) => {
-        const konec = () => { res.off("drain", konec); res.off("close", konec); resolve(); };
+        const rok = setTimeout(() => { razlog = `bralec ne bere ${IZVOZ_DRAIN_MS} ms`; res.destroy(); }, IZVOZ_DRAIN_MS);
+        const konec = () => { clearTimeout(rok); res.off("drain", konec); res.off("close", konec); resolve(); };
         res.on("drain", konec); res.on("close", konec);
       });
     }
@@ -2544,6 +2562,8 @@ admin.get("/export", async (req, res) => {
   };
   try {
     await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    // Varovalo: seja, ki miruje v tej transakciji, se prekine sama (set_config ne dovoli parametra v SET LOCAL).
+    await c.query("SELECT set_config('idle_in_transaction_session_timeout', $1, true)", [String(IZVOZ_IDLE_TX_MS)]);
     const t = await c.query(
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name`
@@ -2594,8 +2614,8 @@ admin.get("/export", async (req, res) => {
     console.log(`Admin ${req.user.userId} izvoz baze (${t.rows.length} tabel)`);
   } catch (e) {
     try { await c.query("ROLLBACK"); } catch (_) { napaka = true; }
-    if (prekinjeno) {
-      console.log(`Admin ${req.user.userId}: izvoz prekinjen (odjemalec je zaprl povezavo)`);
+    if (prekinjeno || razlog) {
+      console.log(`Admin ${req.user.userId}: izvoz prekinjen (${razlog || "odjemalec je zaprl povezavo"})`);
     } else {
       console.error(e);
       // Glave so že poslane: začet JSON se ne sme zaključiti kot da je poln — povezavo prekinemo,
@@ -2604,6 +2624,9 @@ admin.get("/export", async (req, res) => {
     }
   } finally {
     res.off("close", dogodekZapiranja);
+    c.off("error", naNapakoPovezave);
+    // Zavrzena povezava lahko izda se kasen 'error' (socket se zapre po release): ne sme sesuti procesa.
+    if (napaka) c.on("error", () => {});
     c.release(napaka);
   }
 });

@@ -485,6 +485,10 @@ Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta r
   prvih poizvedbah, zato napaka sredi izvoza **prekine povezavo** (ne vrne 500). Admin panel (`admin/index.html`) odgovor v brskalniku še
   vedno prebere v celoti (`res.json()` + `JSON.stringify`) — to je brskalnik, ne strežnik; za zelo velike baze bo treba prenos
   shraniti neposredno (`fetch` → `Blob`). `_testi/test_export_tok.js` omeji kopico strežnika na 48 MB.
+  **Izvoz drži transakcijo:** izposojena povezava iz poola brez poslušalca `error` sesuje proces, ko baza prekine povezavo (pregled PR #104);
+  zato `c.on("error")` + odklop počasnega bralca (`EXPORT_DRAIN_TIMEOUT_MS`, 60 s) + `idle_in_transaction_session_timeout`
+  (`EXPORT_IDLE_TX_MS`, 120 s). **Isto velja za vsak `pool.connect()` z dolgo transakcijo**; `pool.on("error")` (mirujoče povezave) v
+  `index.js` ni nastavljen — odprta nevarnost, ni del tega PR.
 - **iOS: `AsyncImage` ne uporabljaj — vedno `OutlyAsyncImage`** (Core/Components, od outly-app #33, 29. 9. 2026). Isti klici
   (`{ phase in }` ali `{ img in } placeholder: { }`). `AsyncImage` nima pomnilnika dekodiranih slik in plakat v polni
   locljivosti dekodira na glavni niti ob vsakem pojavu kartice -> zatikanje pri drsenju. `OutlyAsyncImage` pomanjsa na 1200 px
