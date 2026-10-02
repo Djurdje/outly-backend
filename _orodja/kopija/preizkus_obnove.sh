@@ -25,13 +25,18 @@ node _orodja/kopija/stevila.js pocisti-seed
 
 if ! node db/obnovi_izvoz.js "$IZVOZ" > "$DELOVNA/obnova.log" 2>&1; then
   echo "::error::Obnova izvoza je padla."
-  if grep -q 'Nepričakovana napaka' "$DELOVNA/obnova.log"; then
-    echo "(podrobnosti skrite: nepricakovana napaka lahko vsebuje vrednosti iz baze; ponovi lokalno po skillu obnova-baze)"
+  # Seznam dovoljenih (kontrolirane Zavrnitev v obnovi_izvoz.js: imena tabel/stolpcev/migracij). Vse ostalo
+  # (Nepricakovana napaka, JSON.parse »ni mogoce prebrati ali razclenit« - oboje lahko vsebuje kose podatkov) se skrije.
+  if grep -E '^✖ (Cilj ni prazen|Cilj nima|Seznam migracij|Število vrstic|Tabela |Stolpec |Zaporedje |Med tabelami|Izvoz ne vsebuje|Datoteka ni videti)' "$DELOVNA/obnova.log" > /dev/null; then
+    # števila vrstic niso za javni dnevnik: pricakovano/dejansko in »ima N vrstic« -> N
+    grep -A8 '^✖' "$DELOVNA/obnova.log" | sed -E 's/pričakovano [0-9]+, dejansko [0-9]+/stevili se ne ujemata/; s/že ima [0-9]+ vrstic/ze ima vrstice/' | cut -c1-300 || true
   else
-    grep -A8 '✖' "$DELOVNA/obnova.log" | cut -c1-300 || true
+    echo "(podrobnosti skrite: napaka lahko vsebuje vrednosti iz baze; ponovi lokalno po skillu obnova-baze)"
   fi
   exit 1
 fi
-cat "$DELOVNA/obnova.log"
+# V javnem dnevniku brez stevila vrstic (poslovna informacija): samo ime tabele in OK.
+echo "Obnova izvoza: OK"
+grep -E '^  [a-z_0-9]+: [0-9]+ vrstic$' "$DELOVNA/obnova.log" | sed -E 's/: [0-9]+ vrstic$/: OK/'
 
 node _orodja/kopija/stevila.js primerjaj "$IZVOZ"

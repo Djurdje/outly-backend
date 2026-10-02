@@ -12,20 +12,27 @@
 # Zato: (1) kopija je sifrirana z JAVNIM kljucem, zasebni kljuc je samo pri Martinu; (2) v dnevnik gredo samo
 # imena tabel, stevila vrstic, velikosti in odtis - nikoli vrednosti iz baze ali odgovori streznika.
 #
+# DOSTOP DO SKRIVNOSTI: job ima `environment: kopije`. Martin ustvari environment »kopije« z Deployment branches = SAMO `main`
+# in vanj (ne na raven repozitorija) vpise spodnje secrets/vars. Tako geslo admin racuna in javni kljuc ne pridejo do nobenega zagona z
+# druge veje (workflow_dispatch iz veje, spremenjen workflow v PR-ju): job tam pade ze pri »Branch not allowed«.
+#
 # Nastavitve (vpise Martin; koraki v opisu PR-ja in v .claude/skills/obnova-baze/SKILL.md):
-#   secrets.BACKUP_ADMIN_EMAIL, secrets.BACKUP_ADMIN_PASSWORD   racun z vlogo admin (Supabase prijava)
-#   vars.BACKUP_AGE_PUBLIC_KEYS                                   javni kljuc(i) age1..., loceni s presledkom/novo vrstico
-#   secrets.NTFY_TOPIC (ze obstaja)                               push ob napaki, kot pri nadzor.yml
-#   secrets.HC_URL_KOPIJE (neobvezno)                             Healthchecks check »kopija ni stekla« (mrtev cloveka drzalo)
+#   environment kopije: secrets.BACKUP_ADMIN_EMAIL, secrets.BACKUP_ADMIN_PASSWORD   POSEBEN racun z vlogo admin (Supabase prijava)
+#   environment kopije: vars.BACKUP_AGE_PUBLIC_KEYS               javni kljuc(i) age1..., loceni s presledkom/novo vrstico
+#   environment kopije: secrets.HC_URL_KOPIJE                     Healthchecks check (Period 1 day, Grace 24 h): kopija, ki ne stece, drugace ostane neopazena
+#   repo secret NTFY_TOPIC (ze obstaja)                           push ob napaki, kot pri nadzor.yml
 name: Varnostna kopija baze
 
 on:
   schedule:
-    - cron: "23 4 * * *"   # 06:23 po slovenskem poletnem casu; GitHub cron zna zamuditi (STATE.md), kopija je zato dnevna z rezervo
+    - cron: "23 6 * * *"   # 08:23 poleti / 07:23 pozimi: klubi so zaprti do ~6:00, nocni deployi so koncani. GitHub cron zna zamuditi.
   workflow_dispatch:
     inputs:
       test:
         description: "true = samo testno push obvestilo (ntfy), kopije ne naredi"
+        default: "false"
+      potrdi_padec:
+        description: "true = Martin potrjuje, da je padec stevila vrstic (users/orders/tickets > 20 %) namerno (npr. ciscenje demo podatkov); nova stevila postanejo izhodisce"
         default: "false"
 
 permissions:
@@ -38,7 +45,8 @@ concurrency:
 jobs:
   kopija:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50   # izvoz: 3 poskusi x 600 s + 2 x 30 s = 31 min, ostalo (setup, obnova) < 15 min
+    environment: kopije
     services:
       postgres:
         image: postgres:16
@@ -57,6 +65,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/outly
       NODE_ENV: test
       TEST: ${{ github.event.inputs.test || 'false' }}
+      POTRDI_PADEC: ${{ github.event.inputs.potrdi_padec || 'false' }}
     steps:
       - name: Testno obvestilo (brez kopije)
         id: test
@@ -68,7 +77,7 @@ jobs:
           curl -sS --max-time 20 -H "Title: Outly varnostna kopija" -H "Tags: floppy_disk" \
             -d "TESTNO OBVESTILO - kopije nisem naredil, to je samo preizkus." "https://ntfy.sh/$TOPIC" >/dev/null && echo "Push poslan."
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: env.TEST != 'true'
 
       - name: Preveri nastavitve (samo imena, nikoli vrednosti)
@@ -78,29 +87,43 @@ jobs:
           E: ${{ secrets.BACKUP_ADMIN_EMAIL }}
           P: ${{ secrets.BACKUP_ADMIN_PASSWORD }}
           K: ${{ vars.BACKUP_AGE_PUBLIC_KEYS }}
+          HC: ${{ secrets.HC_URL_KOPIJE }}
         run: |
           manjka=""
           [ -n "$E" ] || manjka+=" secrets.BACKUP_ADMIN_EMAIL"
           [ -n "$P" ] || manjka+=" secrets.BACKUP_ADMIN_PASSWORD"
           [ -n "$K" ] || manjka+=" vars.BACKUP_AGE_PUBLIC_KEYS"
           if [ -n "$manjka" ]; then
-            echo "::error::Manjka nastavitve:$manjka (glej .claude/skills/obnova-baze/SKILL.md, razdelek Nastavitev)."
+            echo "::error::Manjka nastavitve v environmentu kopije:$manjka (glej .claude/skills/obnova-baze/SKILL.md, razdelek Nastavitev)."
             exit 1
           fi
-          echo "Nastavitve: vse prisotne."
+          if [ -z "$HC" ]; then
+            echo "::warning::secrets.HC_URL_KOPIJE ni nastavljen: ce kopija sploh ne stece (cron izpade, workflow onemogocen), ne javi nihce. Healthchecks je del obveznih nastavitev."
+          fi
+          echo "Nastavitve: obvezne prisotne."
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: env.TEST != 'true'
         with:
           node-version: 22
           cache: npm
-      - name: Namesti odvisnosti in age
+      - name: Namesti odvisnosti in age (znana razlicica, preverjen odtis)
         if: env.TEST != 'true'
+        env:
+          AGE_VERSION: v1.3.2
+          # sha256 age-v1.3.2-linux-amd64.tar.gz (izracunano ob pripravi PR-ja; preveri proti
+          # https://github.com/FiloSottile/age/releases/tag/v1.3.2 ob pregledu). Ob menjavi razlicice posodobi OBOJE.
+          AGE_SHA256: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
         run: |
+          set -euo pipefail
           npm ci
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq age jq
-          age --version
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/age.tgz" "https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/age-${AGE_VERSION}-linux-amd64.tar.gz"
+          echo "${AGE_SHA256}  $RUNNER_TEMP/age.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/age-bin"
+          tar -xzf "$RUNNER_TEMP/age.tgz" -C "$RUNNER_TEMP/age-bin" --strip-components=1 age/age
+          echo "$RUNNER_TEMP/age-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/age-bin/age" --version
+          jq --version
 
       - name: Izvoz produkcijske baze
         id: izvoz
@@ -134,7 +157,7 @@ jobs:
       - name: Shrani sifrirano kopijo (30 dni)
         id: nalozi
         if: env.TEST != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: outly-db-kopija-${{ env.DATUM }}
           path: ${{ runner.temp }}/kopija/izhod/
@@ -148,12 +171,29 @@ jobs:
         if: env.TEST != 'true'
         run: bash _orodja/kopija/preizkus_obnove.sh "$RUNNER_TEMP/kopija/izvoz.json"
 
+      # Stevila prejsnjega zagona so v actions/cache (ni javno berljiv kot artefakt); v dnevnik gredo samo imena tabel.
+      - name: Prejsnja stevila vrstic (za preverbo padca)
+        id: stevila
+        if: env.TEST != 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/kopija-stevila
+          key: kopija-stevila-${{ github.run_id }}
+          restore-keys: kopija-stevila-
+
+      - name: Preverba padca stevila vrstic (users, orders, tickets)
+        id: padec
+        if: ${{ !cancelled() && steps.nalozi.outcome == 'success' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/kopija-stevila"
+          node _orodja/kopija/stevila.js padec "$RUNNER_TEMP/kopija/izvoz.json" "$RUNNER_TEMP/kopija-stevila/stevila.json"
+
       - name: Pocisti golo besedilo z diska runnerja
         if: always() && env.TEST != 'true'
         run: rm -rf "$RUNNER_TEMP/kopija/izvoz.json" || true
 
       - name: Push obvestilo na telefon (ntfy)
-        if: failure() && env.TEST != 'true'
+        if: (failure() || cancelled()) && env.TEST != 'true'
         env:
           TOPIC: ${{ secrets.NTFY_TOPIC }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -162,10 +202,13 @@ jobs:
           S_SIFRIRAJ: ${{ steps.sifriraj.outcome }}
           S_NALOZI: ${{ steps.nalozi.outcome }}
           S_OBNOVA: ${{ steps.obnova.outcome }}
+          S_PADEC: ${{ steps.padec.outcome }}
         run: |
           if [ -z "$TOPIC" ]; then echo "NTFY_TOPIC ni nastavljen - push preskocen"; exit 0; fi
-          if [ "$S_NALOZI" = "success" ]; then
-            SPOROCILO="Kopija baze je shranjena, a PREIZKUS OBNOVE je padel. Preveri zagon."
+          if [ "$S_NALOZI" = "success" ] && [ "$S_PADEC" = "failure" ]; then
+            SPOROCILO="Kopija baze je shranjena, a stevilo vrstic (users/orders/tickets) je padlo za vec kot 20 % ali tabela manjka. Preveri zagon."
+          elif [ "$S_NALOZI" = "success" ]; then
+            SPOROCILO="Kopija baze je shranjena, a PREIZKUS OBNOVE je padel (ali je bil zagon prekinjen). Preveri zagon."
           else
             SPOROCILO="Dnevna kopija baze NI uspela (nastavitve: $S_NASTAVITVE, izvoz: $S_IZVOZ, sifriranje: $S_SIFRIRAJ, shranjevanje: $S_NALOZI)."
           fi
@@ -174,14 +217,14 @@ jobs:
             -d "$SPOROCILO" "https://ntfy.sh/$TOPIC" >/dev/null && echo "Push poslan."
 
       # Mrtev cloveka drzalo: ce kopija sploh NE stece (cron izpade, workflow onemogocen), ne javi nihce. Healthchecks obrne logiko.
-      # Check naredi Martin (Period 1 day, Grace 6 h) - neobvezno; brez HC_URL_KOPIJE se korak preskoci z opozorilom.
-      - name: Ping Healthchecks.io (neobvezno)
+      # Check naredi Martin (Period 1 day, Grace 24 h). Brez HC_URL_KOPIJE zagon izpise opozorilo (ne napake).
+      - name: Ping Healthchecks.io
         if: success() && env.TEST != 'true'
         env:
           HC_URL: ${{ secrets.HC_URL_KOPIJE }}
         run: |
           if [ -z "$HC_URL" ]; then
-            echo "::warning::HC_URL_KOPIJE ni nastavljen - ping preskocen (kopija, ki ne stece, ostane neopazena)."
+            echo "::warning::HC_URL_KOPIJE ni nastavljen - ping preskocen (kopija, ki ne stece, ostane neopazena). Nastavi Healthchecks check (Period 1 day, Grace 24 h)."
             exit 0
           fi
           curl -fsS -m 10 --retry 3 "$HC_URL" && echo "Ping poslan." \

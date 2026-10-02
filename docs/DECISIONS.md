@@ -329,5 +329,6 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   šifriranje obvezno (artefakte lahko prenese vsak prijavljen GitHub uporabnik, dnevniki so javni) in v dnevnik ne gre nobena vrednost iz baze.
   **Zasebnega ključa ni v GitHub secrets** (kdor bere secrets, bi bral tudi kopije): mesečno zato Martin lokalno odšifrira kopijo, workflow pa samo
   preveri svežino in celovitost (opomnik kot issue). Strošek 0 $ (javni repo: Actions minute in artefakti niso obračunani). Možna nadgradnja, če
-  30 dni ne zadošča ali artefakti zrastejo: Cloudflare R2 (EU), 10 GB brezplačno. *vir/dokaz*: STATE.md (zaprt dostop 30. 9.), GitHub Docs
+  30 dni ne zadošča ali artefakti zrastejo: Cloudflare R2 (EU), 10 GB brezplačno. Job teče v GitHub environmentu `kopije` (Deployment branches = samo `main`), s POSEBNIM admin računom (backend za izvoz zahteva vlogo `admin`; vloga samo-za-izvoz je predlog); skrivnosti in javni ključ so v environmentu, ne na ravni repozitorija. Preverbi: popolnost (vsaka tabela sheme v izvozu) in padec > 20 % za users/orders/tickets (števila v `actions/cache`, javni dnevnik samo OK/NAPAKA). Odprto za Martina: ali javni šifrirani artefakt 30 dni ali zasebna shramba (R2), in rok hrambe v politiki zasebnosti (nepreverjeno, pregled `pravnik`).
+  *vir/dokaz*: STATE.md (zaprt dostop 30. 9.), GitHub Docs
   (artefakti javnih repozitorijev, brez obračuna) · *velja dokler*: je baza zaprta za zunanje povezave in izvoz ostaja tok · *nadomeščena z*: —

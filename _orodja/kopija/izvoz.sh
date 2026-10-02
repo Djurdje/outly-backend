@@ -43,10 +43,11 @@ echo "::add-mask::$TOKEN"
 rm -f "$DELOVNA/prijava.json" "$DELOVNA/odgovor.json"
 echo "Prijava: OK"
 
-# --- 2. izvoz (tok; streznik ga piše sproti). Do 3 poskusi ob pretrganju ali 5xx; 4xx (zeton, vloga) se ne ponavlja ---
+# --- 2. izvoz (tok; streznik ga piše sproti). Do 3 poskusi po najvec 600 s (+ 2 x 30 s pavze = 31 min, workflow ima 50 min);
+#     4xx (zeton, vloga, e-naslov ni potrjen) se ne ponavlja ---
 for POSKUS in 1 2 3; do
   RC=0
-  STATUS=$(curl -sS --max-time 1200 -f -o "$IZHOD" -w '%{http_code}' \
+  STATUS=$(curl -sS --max-time 600 -f -o "$IZHOD" -w '%{http_code}' \
     -H "Authorization: Bearer $TOKEN" "$BACKEND_URL/admin/api/export" 2>/dev/null) || RC=$?
   [ "$RC" -eq 0 ] && break
   rm -f "$IZHOD"
@@ -55,7 +56,7 @@ for POSKUS in 1 2 3; do
   if [ "$POSKUS" -lt 3 ]; then sleep "${IZVOZ_PAVZA_S:-30}"; fi
 done
 if [ "$RC" -ne 0 ]; then
-  echo "::error::Izvoz ni uspel (curl koda $RC, HTTP ${STATUS:-000}). 401 = zeton, 403 = racun ni admin, 5xx/pretrganje = streznik."
+  echo "::error::Izvoz ni uspel (curl koda $RC, HTTP ${STATUS:-000}). 401 = zeton, 403 = racun ni admin ALI e-naslov v Supabase ni potrjen (email_verified), 5xx/pretrganje = streznik."
   exit 1
 fi
 echo "Izvoz: HTTP $STATUS, $(stat -c %s "$IZHOD") B"

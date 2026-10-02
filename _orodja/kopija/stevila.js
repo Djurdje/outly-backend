@@ -1,27 +1,38 @@
 #!/usr/bin/env node
 /**
- * Pomoc za preizkus obnove (workflow »Varnostna kopija baze«, skill obnova-baze).
+ * Pomoc za preizkus obnove in preverbe kopije (workflow »Varnostna kopija baze«, skill obnova-baze).
  *   node _orodja/kopija/stevila.js pocisti-seed         izbrise edini seed migracij (users: agent@outly.si),
  *                                                        da je cilj za db/obnovi_izvoz.js res prazen (STATE.md, past)
- *   node _orodja/kopija/stevila.js povzetek <izvoz>     BREZ baze: izpise cas izvoza, tabele in stevila vrstic
- *                                                        (hitri mesecni preizkus po desifriranju)
- *   node _orodja/kopija/stevila.js primerjaj <izvoz>     neodvisno od obnovi_izvoz.js primerja za VSAKO tabelo:
- *                                                        .count v izvozu == dolzina .rows == stevilo vrstic v bazi;
- *                                                        tabele v bazi brez izvoza ne smejo imeti vrstic;
+ *   node _orodja/kopija/stevila.js primerjaj <izvoz>     neodvisno od obnovi_izvoz.js, za VSAKO tabelo:
+ *                                                        .count v izvozu == dolzina .rows == vrstice v bazi po obnovi;
+ *                                                        VSAKA tabela migrirane sheme mora biti v izvozu (tudi s 0 vrsticami);
  *                                                        seznam migracij (datoteka + odtis) mora biti enak
- * DATABASE_URL = ciljna lokalna baza. Izpis: samo imena tabel in stevila (dnevnik je javen).
- * Ce je nastavljen GITHUB_STEP_SUMMARY, doda tudi tabelo v povzetek zagona.
+ *   node _orodja/kopija/stevila.js padec <izvoz> <stevila.json>
+ *                                                        BREZ baze: users/orders/tickets ne smejo pasti za > 20 % glede na
+ *                                                        prejsnji zagon (<stevila.json> iz actions/cache); nato zapise nova stevila.
+ *                                                        PADEC_POTRJEN=true: padec je namerno, nova stevila postanejo izhodisce.
+ *   node _orodja/kopija/stevila.js povzetek <izvoz>     BREZ baze: izpise cas izvoza, tabele in stevila vrstic (hitri
+ *                                                        mesecni preizkus po desifriranju, LOKALNO pri Martinu)
+ * DATABASE_URL = ciljna lokalna baza (primerjaj, pocisti-seed).
+ *
+ * JAVNI DNEVNIK: v zagonu Actions (primerjaj, padec) se izpisujejo SAMO imena tabel in OK/NAPAKA - stevila uporabnikov,
+ * narocil in vstopnic so poslovna informacija. Stevila vidi samo povzetek (lokalno) in cache (ni javno berljiv).
  */
 const fs = require("fs");
-const { Client } = require("pg");
 
-const [, , ukaz, potIzvoza] = process.argv;
-const URL_BAZE = process.env.DATABASE_URL;
+const [, , ukaz, potIzvoza, potStevil] = process.argv;
+const GLAVNE = ["users", "orders", "tickets"];
+const PRAG_PADCA = 0.2;
+const q = (ime) => `"${ime.replace(/"/g, '""')}"`;
+
+function preberiIzvoz(pot) {
+  try { return JSON.parse(fs.readFileSync(pot, "utf8")); }
+  catch (e) { console.error("Izvoz ni veljaven JSON (ali ga ni)."); process.exit(1); } // sporocilo JSON.parse bi vsebovalo kos podatkov
+}
 
 if (ukaz === "povzetek") {
   if (!potIzvoza) { console.error("Uporaba: stevila.js povzetek <izvoz.json>"); process.exit(2); }
-  let izvoz;
-  try { izvoz = JSON.parse(fs.readFileSync(potIzvoza, "utf8")); } catch (e) { console.error("Datoteka ni veljaven JSON (ali je ni)."); process.exit(1); }
+  const izvoz = preberiIzvoz(potIzvoza);
   const imena = Object.keys(izvoz.tables || {}).sort();
   if (!imena.length) { console.error("V izvozu ni nobene tabele."); process.exit(1); }
   console.log(`Izvoz z dne ${izvoz.exported_at}, ${imena.length} tabel:`);
@@ -37,11 +48,43 @@ if (ukaz === "povzetek") {
   process.exit(slabo ? 1 : 0);
 }
 
+if (ukaz === "padec") {
+  if (!potIzvoza || !potStevil) { console.error("Uporaba: stevila.js padec <izvoz.json> <stevila.json>"); process.exit(2); }
+  const izvoz = preberiIzvoz(potIzvoza);
+  const zdaj = {};
+  for (const [ime, t] of Object.entries(izvoz.tables || {})) zdaj[ime] = t.count;
+  let prej = null;
+  try { prej = JSON.parse(fs.readFileSync(potStevil, "utf8")); } catch (_) { /* prvi zagon ali cache pretekel */ }
+  const potrjen = process.env.PADEC_POTRJEN === "true";
+  const padle = [];
+  if (!prej) {
+    console.log("Prejsnjih stevil ni (prvi zagon ali cache pretekel): preverba padca preskocena, nova stevila shranjena.");
+  } else {
+    for (const ime of GLAVNE) {
+      const a = prej[ime], b = zdaj[ime];
+      if (typeof b !== "number") { padle.push(`${ime}: tabele ni v izvozu`); continue; }
+      // pod 20 vrsticami je odstotek brez pomena (en izbrisan testni uporabnik)
+      if (typeof a === "number" && a >= 20 && b < a * (1 - PRAG_PADCA)) padle.push(`${ime}: padec za vec kot ${PRAG_PADCA * 100} %`);
+    }
+    for (const ime of GLAVNE) console.log(`  ${padle.some((p) => p.startsWith(ime + ":")) ? "NAPAKA" : "OK    "} ${ime}`);
+  }
+  fs.mkdirSync(require("path").dirname(potStevil), { recursive: true });
+  if (!padle.length || potrjen) fs.writeFileSync(potStevil, JSON.stringify(zdaj));
+  if (padle.length && !potrjen) {
+    console.error("\n✖ Sumljiv padec glede na prejsnji zagon:\n  " + padle.join("\n  ") +
+      "\n  Kopija je shranjena. Ce je padec namerno (ciscenje podatkov), zazeni workflow rocno s potrdi_padec = true.");
+    process.exit(1);
+  }
+  if (padle.length) console.log("Padec potrjen (potrdi_padec = true): nova stevila so izhodisce.");
+  process.exit(0);
+}
+
+const { Client } = require("pg");
+const URL_BAZE = process.env.DATABASE_URL;
 if (!URL_BAZE || new URL(URL_BAZE).hostname !== "localhost") {
   console.error("DATABASE_URL mora kazati na localhost.");
   process.exit(1);
 }
-const q = (ime) => `"${ime.replace(/"/g, '""')}"`;
 
 async function glavno() {
   const c = new Client({ connectionString: URL_BAZE, ssl: false });
@@ -53,10 +96,10 @@ async function glavno() {
       return 0;
     }
     if (ukaz !== "primerjaj" || !potIzvoza) {
-      console.error("Uporaba: stevila.js pocisti-seed | primerjaj <izvoz.json>");
+      console.error("Uporaba: stevila.js pocisti-seed | primerjaj <izvoz.json> | padec <izvoz> <stevila.json> | povzetek <izvoz>");
       return 2;
     }
-    const izvoz = JSON.parse(fs.readFileSync(potIzvoza, "utf8"));
+    const izvoz = preberiIzvoz(potIzvoza);
     const tabeleBaze = (await c.query(
       "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'"
     )).rows.map((r) => r.table_name);
@@ -68,34 +111,36 @@ async function glavno() {
         ? (await c.query(`SELECT count(*)::int AS n FROM ${q(ime)}`)).rows[0].n
         : null;
       const ok = vBazi === t.count && t.rows.length === t.count;
-      if (!ok) napake.push(`${ime}: izvoz.count=${t.count}, izvoz.rows=${t.rows.length}, baza=${vBazi === null ? "(tabele ni)" : vBazi}`);
-      vrstice.push([ime, t.count, vBazi, ok]);
+      if (!ok) napake.push(`${ime}: stevilo vrstic se ne ujema (izvoz.count, izvoz.rows, baza)` + (vBazi === null ? "; tabele ni v bazi" : ""));
+      vrstice.push([ime, ok]);
     }
-    for (const ime of tabeleBaze.filter((t) => !(t in izvoz.tables)).sort()) {
-      const n = (await c.query(`SELECT count(*)::int AS n FROM ${q(ime)}`)).rows[0].n;
-      if (n > 0) napake.push(`${ime}: tabele ni v izvozu, v bazi pa ima ${n} vrstic`);
+    // POPOLNOST: vsaka tabela migrirane sheme mora biti v izvozu (tudi prazna). Tabela, ki je izvoz ne vsebuje, bi tiho manjkala po obnovi.
+    const manjkajoce = tabeleBaze.filter((t) => !(t in izvoz.tables)).sort();
+    for (const ime of manjkajoce) {
+      napake.push(`${ime}: tabela migrirane sheme MANJKA v izvozu`);
+      vrstice.push([ime, false]);
     }
     // seznam migracij: datoteka + odtis
     const mig = (a) => new Set(a.map((m) => `${m.datoteka}:${m.odtis}`));
     const izvozMig = mig(izvoz.tables.schema_migrations.rows);
     const bazaMig = mig((await c.query("SELECT datoteka, odtis FROM schema_migrations")).rows);
     const razlika = [...izvozMig].filter((x) => !bazaMig.has(x)).length + [...bazaMig].filter((x) => !izvozMig.has(x)).length;
-    if (razlika) napake.push(`schema_migrations: seznam se razlikuje v ${razlika} vnosih`);
+    if (razlika) napake.push("schema_migrations: seznam migracij se razlikuje");
 
-    for (const [ime, n, b, ok] of vrstice) console.log(`  ${ok ? "OK " : "NAPAKA"} ${ime}: izvoz ${n}, baza ${b}`);
-    console.log(`Migracij: izvoz ${izvozMig.size}, baza ${bazaMig.size}`);
+    vrstice.sort((a, b) => (a[0] < b[0] ? -1 : 1));
+    for (const [ime, ok] of vrstice) console.log(`  ${ok ? "OK    " : "NAPAKA"} ${ime}`);
+    console.log(`Migracije: ${razlika ? "NAPAKA" : "OK"} (${izvozMig.size})`);
 
     if (process.env.GITHUB_STEP_SUMMARY) {
-      const md = ["", "| tabela | izvoz | po obnovi | |", "|---|---:|---:|---|",
-        ...vrstice.map(([ime, n, b, ok]) => `| ${ime} | ${n} | ${b} | ${ok ? "ok" : "**napaka**"} |`),
-        "", `Migracije: izvoz ${izvozMig.size}, po obnovi ${bazaMig.size}.`, ""].join("\n");
+      const md = ["", "| tabela | obnova |", "|---|---|", ...vrstice.map(([ime, ok]) => `| ${ime} | ${ok ? "OK" : "**NAPAKA**"} |`),
+        "", `Migracije: ${razlika ? "**NAPAKA**" : "OK"} (${izvozMig.size}).`, ""].join("\n");
       fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
     }
     if (napake.length) {
       console.error("\n✖ Primerjava ni uspela:\n  " + napake.join("\n  "));
       return 1;
     }
-    console.log("\nPrimerjava: vse tabele se ujemajo.");
+    console.log("\nPrimerjava: vse tabele so v izvozu in se ujemajo.");
     return 0;
   } finally {
     await c.end();
