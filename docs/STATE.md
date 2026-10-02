@@ -168,6 +168,11 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`.
   `assets/fonts/`). Playwright: `npm i playwright` v scratchpadu + `executablePath` `/opt/pw-browsers/chromium-*/chrome-linux/chrome`.
 - Splet: razred `.points` je kartica točk v profilu (`auth.js`); nov razdelek s tem razredom bi podedoval centriranje.
 - Docs-only merge v `main` vseeno sproži Render deploy (~60 s restarta, brez nevarnosti).
+- **`owner_user_id` ni več v javnih odgovorih klubov (2. 10. 2026, #113, I4).** Odstranjen iz `JAVNI_STOLPCI_KLUBA` (torej tudi iz
+  `GET /clubs`, `/clubs/:id`, `/me/clubs/following`, `/business/clubs/me`); admin (`ADMIN_STOLPCI_KLUBA`) ga še vrne.
+  Preveritev odjemalcev: iOS ga dekodira (`APIClub.ownerUserId`, `decodeIfPresent ?? 0`), a ga nikjer ne bere; splet in admin ga ne
+  bereta. Pade nič. Za **ios-dev** (neurgentno): odstrani `ownerUserId` iz `APIClub.swift` ob prvi priložnosti. Za lastništvo
+  uporabi `my_role` / `GET /me` (`clubs[].role`), nikoli primerjave ID-jev. Za **web-dev**: ni dela.
 - Ostale pasti (AsyncImage brez okvirja, gnezden NavigationStack, pg BIGINT, Resend `{error}`, JSONB vs ARRAY)
   so v `CLAUDE.md` tega repa in iOS repa.
 
