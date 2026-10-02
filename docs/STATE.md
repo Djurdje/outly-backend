@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-02 (idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
+Zadnja posodobitev: 2026-10-02 (neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -19,7 +19,7 @@ in stvari, ki jih nobeno orodje ne ve.
 
 **Zgodovina** (zaključeni sklopi, dnevniki sej, stari načrti in daljše prvotno besedilo pasti do 2. 10. 2026) je v
 [`docs/arhiv/STATE-do-2026-10-02.md`](arhiv/STATE-do-2026-10-02.md) — ni merodajna. Ta datoteka ima **največ 200 vrstic**;
-kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`STATE-do-2026-10-02c.md`](arhiv/STATE-do-2026-10-02c.md)).
+kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`STATE-do-2026-10-02d.md`](arhiv/STATE-do-2026-10-02d.md)).
 
 ## Odprte naloge
 
@@ -128,6 +128,8 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   ne sme sama klicati `COMMIT`/`SET lock_timeout`.
 - **Vsak `pool.connect()` z dolgo transakcijo** rabi `c.on("error")`, odklop počasnega bralca in `idle_in_transaction_session_timeout`
   (kot izvoz). Mirujoče in izposojene povezave že ujame `pool.on("error")` / `pool.on("connect")` (#106, `test_pool_napaka.js`).
+- **Express 4 ne ujame zavrnjene obljube ročnika** (#129): neujet `await` (npr. `pool.connect()` pred `try`) je ob zasičenem poolu sesul cel proces.
+  Varuje `asinhroni_rocniki.js` (503/500, I10); nov `Router`/`app` ga podeduje sam, ne dodajaj `process.on("unhandledRejection")`. Express 5 ovoj odpravi.
 - **Obnova izvoza zahteva POPOLNOMA prazno ciljno bazo**, migracija 007 pa vstavi `agent@outly.si` → pred obnovo na cilju
   `DELETE FROM users;` (ARCHITECTURE, postopek obnove). Past odpade, ko servisni račun ne bo več v migracijah.
 - **iOS `OutlyAsyncImage`** (29. 9., outly-app #33) pomanjša na 1200 px in predpomni po URL-ju: slika z novo vsebino na istem URL-ju bi
@@ -165,8 +167,6 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   Zelen Nadzor ne dokaže, da teče nova koda (Render ob neuspelem deployu pusti staro) — ob dvomu preveri novo polje v odgovoru.
 - **Headless preverjanje outly.si:** stubati je treba samo Supabase (`*.supabase.co`; supabase-js in Inter sta v `vendor/`,
   `assets/fonts/`). Playwright: `npm i playwright` v scratchpadu + `executablePath` `/opt/pw-browsers/chromium-*/chrome-linux/chrome`.
-- Splet: razred `.points` je kartica točk v profilu (`auth.js`); nov razdelek s tem razredom bi podedoval centriranje.
-- Docs-only merge v `main` vseeno sproži Render deploy (~60 s restarta, brez nevarnosti).
 - `owner_user_id` ni več v javnih odgovorih klubov (#113, I4; arhiv `STATE-do-2026-10-02c.md`). **ios-dev** (neurgentno): odstrani `APIClub.ownerUserId`.
 - **Idempotentni ključ nakupa (#112, I18).** Glava `Idempotency-Key: <UUID>` na obeh `POST …/orders`; brez nje vse kot prej. Odjemalec: en UUID
   na pritisk »Kupi«, isti ob ponovnem poskusu ISTEGA nakupa (timeout, 503, 409 `request_in_progress`), nov ob spremembi količine/mize/paketa ali po
