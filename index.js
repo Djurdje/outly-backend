@@ -369,6 +369,9 @@ app.get("/", (req, res) => {
 // Render Health Check Path: Render novo kodo spusti v promet sele, ko ta pot vrne 2xx.
 // Preveri tudi bazo (SELECT 1) - backend brez baze ne streze nicesar. Omejeno na 3 s,
 // da zaseden pool (connectionTimeoutMillis 10 s) ne zadrzi odgovora cez Renderjev rok.
+// `commit` = prvih 12 znakov RENDER_GIT_COMMIT (javni SHA, ni skrivnost): s tem se vidi, KATERA koda teče. Padel deploy
+// (npr. migracija brez zaklepa, #115) pusti staro različico živo in vrača 200, zato 200 sam ne dokaže, da teče nova koda.
+const COMMIT_KRATEK = (process.env.RENDER_GIT_COMMIT || "").slice(0, 12) || null;
 app.get("/healthz", async (req, res) => {
   res.set("Cache-Control", "no-store");
   let casovnik;
@@ -377,9 +380,9 @@ app.get("/healthz", async (req, res) => {
       pool.query("SELECT 1"),
       new Promise((_, zavrni) => { casovnik = setTimeout(() => zavrni(new Error("timeout")), 3000); }),
     ]);
-    res.json({ ok: true });
+    res.json({ ok: true, commit: COMMIT_KRATEK });
   } catch (e) {
-    res.status(503).json({ ok: false });
+    res.status(503).json({ ok: false, commit: COMMIT_KRATEK });
   } finally {
     clearTimeout(casovnik);
   }

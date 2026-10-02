@@ -119,14 +119,13 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`.
 
 - **Izvoz baze je tok; ne vračaj ga v `res.json`** (#23; ARCHITECTURE »Varnostne kopije«). Admin panel odgovor v brskalniku še
   prebere v celoti (`res.json()`) — za zelo velike baze prenos shrani neposredno (`fetch` → `Blob`).
-- **Migracija, ki ne dobi zaklepa, pade; deploy pade** (#115, `db/migrate.js`): vsaka migracija teče v transakciji z `lock_timeout` 5 s
-  (`MIGRACIJA_LOCK_TIMEOUT`) in `statement_timeout` 120 s (`MIGRACIJA_STATEMENT_TIMEOUT`). `ALTER TABLE` med dolgim branjem tabele
-  (izvoz, poročilo) bi sicer čakal na zaklep, za njim pa bi obstala vsa nova branja in skeni. Ob preteku: `npm run migrate` izide s
-  kodo 1, `npm start` se ne zažene, **Render obdrži staro različico** (backend teče naprej, nova koda ni živa), vpisa v
-  `schema_migrations` ni (ROLLBACK, brez delnega učinka) → migracija se poskusi znova ob naslednjem deployu. Ob alarmu »deploy padel
-  zaradi lock timeout« ne popravljaj kode: poišči dolgo transakcijo (`pg_stat_activity`), počakaj, da se konča, in znova sproži deploy.
-  Nova migracija **ne sme sama klicati `COMMIT`** ali spreminjati `lock_timeout` (`SET LOCAL` velja samo do konca transakcije).
-  Test: `_testi/test_migracija_zaklep.js` (`MIGRACIJE_MAPA` je samo za teste).
+- **Migracija brez zaklepa pade, deploy pade, stara različica ostane živa** (#115, `db/migrate.js`, test `test_migracija_zaklep.js`): vsaka
+  migracija teče v transakciji z `lock_timeout` 5 s, `statement_timeout` 120 s (na stavek) in 2 ponovnima poskusoma po 10 s ob
+  zaklepu; advisory lock čaka največ 60 s (env `MIGRACIJA_*`, `.env.example`). Nato izhod 1: `npm start` se ne zažene, Render obdrži
+  staro različico, v `schema_migrations` ni vnosa → poskus znova ob naslednjem deployu. **Stara različica vrača 200, zato `Nadzor`
+  tega ne vidi** (alarma za to ni): po merge-u preveri `list_deploys` (zadnji deploy za commit = live) ali da `/healthz` vrne `commit`
+  z `main` (prvih 12 znakov). Ukrep: poišči dolgo transakcijo (`pg_stat_activity`), počakaj, ponovno sproži deploy. Migracija
+  ne sme sama klicati `COMMIT`/`SET lock_timeout`.
 - **Vsak `pool.connect()` z dolgo transakcijo** rabi `c.on("error")`, odklop počasnega bralca in `idle_in_transaction_session_timeout`
   (kot izvoz). Mirujoče in izposojene povezave že ujame `pool.on("error")` / `pool.on("connect")` (#106, `test_pool_napaka.js`).
 - **Obnova izvoza zahteva POPOLNOMA prazno ciljno bazo**, migracija 007 pa vstavi `agent@outly.si` → pred obnovo na cilju
