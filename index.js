@@ -3177,8 +3177,18 @@ async function vstopniceNarocil(idsNarocil, db = pool) {
      WHERE t.order_id = ANY($1::bigint[]) ORDER BY t.id`, [idsNarocil]
   );
   const po = {};
-  // Kupec vidi QR samo za vstopnice, ki jih se ima; prenesene kaze brez kode.
-  for (const t of r.rows) (po[t.order_id] ||= []).push({ ...t, qr: t.transferred ? null : qrVstopnice(t) });
+  // Kupcev pogled (GET /me/orders, odgovor nakupa in njegova ponovitev z Idempotency-Key; I7, issue #124): vstopnice, ki jih je
+  // kupec prenesel, kaze brez QR, brez seriala (prenos je dodelil NOV serial, ki pripada prejemniku; POST /business/tickets/scan
+  // sprejme tudi gol serial) in brez e-naslova prejemnika. Kljuc `serial` ostane (null), `holder_username` in `transferred` ostaneta.
+  // Prejemnik vidi serial in QR v GET /me/tickets, klub v poslovnih poteh - tam se STOLPCI_IMETNIKA ne spreminja.
+  for (const t of r.rows) {
+    if (t.transferred) {
+      const { holder_email, ...brezEposte } = t;
+      (po[t.order_id] ||= []).push({ ...brezEposte, serial: null, qr: null });
+    } else {
+      (po[t.order_id] ||= []).push({ ...t, qr: qrVstopnice(t) });
+    }
+  }
   return po;
 }
 

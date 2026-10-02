@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-02 (neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
+Zadnja posodobitev: 2026-10-02 (prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -168,10 +168,10 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 - **Headless preverjanje outly.si:** stubati je treba samo Supabase (`*.supabase.co`; supabase-js in Inter sta v `vendor/`,
   `assets/fonts/`). Playwright: `npm i playwright` v scratchpadu + `executablePath` `/opt/pw-browsers/chromium-*/chrome-linux/chrome`.
 - `owner_user_id` ni več v javnih odgovorih klubov (#113, I4; arhiv `STATE-do-2026-10-02c.md`). **ios-dev** (neurgentno): odstrani `APIClub.ownerUserId`.
-- **Idempotentni ključ nakupa (#112, I18).** Glava `Idempotency-Key: <UUID>` na obeh `POST …/orders`; brez nje vse kot prej. Odjemalec: en UUID
-  na pritisk »Kupi«, isti ob ponovnem poskusu ISTEGA nakupa (timeout, 503, 409 `request_in_progress`), nov ob spremembi količine/mize/paketa ali po
-  uspehu. Ponovitev = 201 + `Idempotent-Replayed: true` s TRENUTNIM stanjem; neaktivno naročilo 409 `order_not_active`; drug nakup = 422; neuspeh se NE zapomni.
-  **iOS in splet ključa še ne pošiljata** (ios-dev, web-dev). Ključ je vezan na uporabnika in ni v odgovorih.
+- **Idempotentni ključ nakupa (#112, I18).** Glava `Idempotency-Key: <UUID>` na obeh `POST …/orders` (brez nje vse kot prej): en UUID na pritisk »Kupi«, isti ob
+  ponovitvi ISTEGA nakupa, nov ob spremembi nakupa. Ponovitev = 201 + `Idempotent-Replayed: true` s TRENUTNIM stanjem; neaktivno 409, drug nakup 422. iOS (#53) in splet (#29) ga pošiljata.
+- **Prenesena vstopnica v kupčevem pogledu naročil (#124, I7; od 2. 10. 2026):** `serial` je `null` (ključ ostane), `holder_email` ni (`GET /me/orders`, odgovor nakupa in ponovitev); nadomestilo
+  `holder_username` + `transferred`. Prejemnik (`GET /me/tickets`) in klub (poslovne poti) serial še imata. iOS: `serial` opcijski (outly-app #54); splet `/me/orders` ne kliče.
 - Ostale pasti (AsyncImage brez okvirja, gnezden NavigationStack, pg BIGINT, Resend `{error}`, JSONB vs ARRAY)
   so v `CLAUDE.md` tega repa in iOS repa.
 
