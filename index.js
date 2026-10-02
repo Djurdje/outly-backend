@@ -61,24 +61,119 @@ app.use((req, res, next) => (req.path === "/business/tickets/scan-batch" ? next(
 const pgTipi = require("pg").types;
 pgTipi.setTypeParser(20, (v) => (v === null ? null : parseInt(v, 10)));
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
-  // Varovalka: če zahtevek 10 s čaka na prosto povezavo (pool je zaseden ali se
-  // je zaklenil), dobi napako in 500 namesto večnega čakanja. Brez tega bi en
-  // hrošč tipa "pool.query med držanjem odjemalca" obesil cel strežnik.
-  connectionTimeoutMillis: 10000,
-});
+// Celo stevilo iz okolja z varnim privzetkom (neveljavna ali izven mej -> privzeto).
+function okoljeCelo(ime, privzeto, min, max) {
+  const v = Number.parseInt(process.env[ime], 10);
+  return Number.isInteger(v) && v >= min && v <= max ? v : privzeto;
+}
+const PG_POOL_MAX = okoljeCelo("PG_POOL_MAX", 10, 1, 100);            // glavni pool (vse poti razen skena)
+const PG_SKEN_POOL_MAX = okoljeCelo("PG_SKEN_POOL_MAX", 3, 1, 20);    // loceni pool samo za sken na vratih
+const PG_CONNECT_TIMEOUT_MS = okoljeCelo("PG_CONNECT_TIMEOUT_MS", 10000, 100, 60000);
+// Sken: kratek rok (telefon ob 503 hitro preklopi na preverjanje brez povezave), ne 10 s.
+const PG_SKEN_CONNECT_TIMEOUT_MS = okoljeCelo("PG_SKEN_CONNECT_TIMEOUT_MS", 2500, 100, 60000);
 
-// Baza lahko prekine povezavo, ki jo pool drzi (vzdrzevanje ali ponovni zagon baze na Renderju, izpad omrezja).
-// node-postgres odda 'error' na poolu (mirujoca povezava) oziroma na odjemalcu (izposojena povezava); brez
-// poslusalca je to "Unhandled 'error' event" in CEL proces pade (tudi skeniranje na vratih, nakupi).
-// Pokvarjenega odjemalca pool sam zavrze in ob naslednjem zahtevku odpre novega; mi samo zapisemo v dnevnik.
-// Poslusalec na vsakem odjemalcu pokrije tudi izposojene povezave (transakcije v potekah), ne le mirujoce.
-pool.on("error", (e) => console.error("[pool] mirujoca povezava s bazo prekinjena:", e && e.message));
-pool.on("connect", (odjemalec) => {
-  odjemalec.on("error", (e) => console.error("[pool] povezava s bazo prekinjena:", e && e.message));
-});
+function novPool(max, connectMs) {
+  const p = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
+    max,
+    // Varovalka: če zahtevek čaka na prosto povezavo (pool je zaseden ali se je zaklenil), dobi napako
+    // namesto večnega čakanja. Brez tega bi en hrošč tipa "pool.query med držanjem odjemalca" obesil cel strežnik.
+    connectionTimeoutMillis: connectMs,
+  });
+  // Baza lahko prekine povezavo, ki jo pool drzi (vzdrzevanje ali ponovni zagon baze na Renderju, izpad omrezja).
+  // node-postgres odda 'error' na poolu (mirujoca povezava) oziroma na odjemalcu (izposojena povezava); brez
+  // poslusalca je to "Unhandled 'error' event" in CEL proces pade (tudi skeniranje na vratih, nakupi).
+  // Pokvarjenega odjemalca pool sam zavrze in ob naslednjem zahtevku odpre novega; mi samo zapisemo v dnevnik.
+  // Poslusalec na vsakem odjemalcu pokrije tudi izposojene povezave (transakcije v potekah), ne le mirujoce.
+  p.on("error", (e) => console.error("[pool] mirujoca povezava s bazo prekinjena:", e && e.message));
+  p.on("connect", (odjemalec) => {
+    odjemalec.on("error", (e) => console.error("[pool] povezava s bazo prekinjena:", e && e.message));
+  });
+  return p;
+}
+const pool = novPool(PG_POOL_MAX, PG_CONNECT_TIMEOUT_MS);
+// Sken vstopnic na vratih ne sme nikoli cakati v vrsti za drugim prometom (nakupi, branje seznamov): ima svoj majhen
+// pool, ki ga uporabljajo SAMO POST /business/tickets/scan, scan-batch, GET .../scan-list in scan-key, vkljucno
+// z requireAuthSken / requireClubSken (iskanje uporabnika in kluba gre prek istega poola). Issue #89.
+const skenPool = novPool(PG_SKEN_POOL_MAX, PG_SKEN_CONNECT_TIMEOUT_MS);
+
+// Hkratnost nakupov (issue #89, obremenitveni test). Nakup drzi povezavo z bazo od BEGIN do COMMIT, vsi nakupi
+// istega dogodka pa se v sprozilcu rezerviraj_zalogo() vrstijo na isti zaklenjeni vrstici. Ob navali (300 kupcev
+// naenkrat) bi zato vsi zahtevki zasedli glavni pool in branje bi cakalo za celo navalo. Semafor spusti v
+// transakcijo najvec NAKUP_VZPOREDNO nakupov hkrati, ostali cakajo v pomnilniku (brez povezave). Vrstni red je
+// FIFO; cakanje je omejeno (NAKUP_CAKANJE_MS, nato 503 Retry-After). Cakalec, ki ga odjemalec med cakanjem
+// prekine, takoj izstopi iz vrste (sicer bi "duh" kupil vstopnico, ki je kupec nikoli ne vidi).
+const NAKUP_VZPOREDNO = okoljeCelo("NAKUP_VZPOREDNO", 4, 1, 100);
+const NAKUP_CAKANJE_MS = okoljeCelo("NAKUP_CAKANJE_MS", 15000, 10, 120000);
+// Zgornja meja za zaklep in stavek v nakupni transakciji: obvisela transakcija ne sme drzati dovoljenja za vedno.
+const NAKUP_DB_TIMEOUT_MS = okoljeCelo("NAKUP_DB_TIMEOUT_MS", 10000, 100, 120000);
+// Kratek spomin "razprodano": zavrne 409 PRED semaforjem, da razprodan hit ne zadrzuje kupcev drugih klubov
+// v skupni FIFO vrsti. Laz je omejena na NAKUP_RAZPRODANO_MS (0 = izklopljeno); sprememba capacity ga takoj pozabi.
+const NAKUP_RAZPRODANO_MS = okoljeCelo("NAKUP_RAZPRODANO_MS", 3000, 0, 60000);
+const nakupVrsta = []; let nakupAktivnih = 0;
+// Vrne "ok" (dovoljenje pridobljeno), "cas" (cakanje potekla) ali "preklic" (odjemalec je odsel med cakanjem).
+function nakupVstopi(res) {
+  if (res.destroyed) return Promise.resolve("preklic");
+  if (nakupAktivnih < NAKUP_VZPOREDNO) { nakupAktivnih++; return Promise.resolve("ok"); }
+  return new Promise((resolve) => {
+    const cak = {};
+    const izVrste = () => { const i = nakupVrsta.indexOf(cak); if (i >= 0) nakupVrsta.splice(i, 1); };
+    cak.pocisti = () => { clearTimeout(cak.timer); res.off("close", cak.naZaprtje); };
+    cak.naZaprtje = () => { izVrste(); cak.pocisti(); resolve("preklic"); };
+    cak.timer = setTimeout(() => { izVrste(); cak.pocisti(); resolve("cas"); }, NAKUP_CAKANJE_MS);
+    cak.dodeli = () => { cak.pocisti(); resolve("ok"); };
+    res.once("close", cak.naZaprtje);
+    nakupVrsta.push(cak);
+  });
+}
+function nakupIzstopi() {
+  const naslednji = nakupVrsta.shift();
+  if (naslednji) naslednji.dodeli(); else nakupAktivnih--;
+}
+// Pridobi dovoljenje za nakup. true = dovoljenje drzimo (klicatelj MORA poklicati nakupIzstopi()); false = odgovor je
+// ze poslan (503) ali odjemalca ni vec, dovoljenja ne drzimo.
+async function nakupDovoljenje(req, res) {
+  const r = await nakupVstopi(res);
+  if (r === "cas") { res.status(503).set("Retry-After", "5").send("Too many purchases at once. Please try again."); return false; }
+  if (r === "preklic") return false;
+  if (req.aborted || res.destroyed || res.writableEnded) { nakupIzstopi(); return false; }   // prekinjeno tik pred dodelitvijo
+  return true;
+}
+const NAKUP_ZASEDEN = "Server busy. Please try again.";
+function napakaZasedenosti(err) { return !!err && (err.code === "55P03" || err.code === "57014"); }   // lock_timeout / statement_timeout
+// Middleware PRED omeji(): razprodan dogodek/miza dobi 409 brez porabe nakupnih poskusov (20/uro na IP) in brez semaforja.
+function zavrniRazprodano(req, res, next) {
+  const id = celoId(req.params.id);
+  if (id && razprodanoJe("v:" + id)) return res.status(409).send("Only 0 tickets left.");
+  next();
+}
+function zavrniRazprodanoMizo(req, res, next) {
+  const id = vipId(req.params.id), mizaId = vipId(req.params.tableId);
+  if (id && mizaId && razprodanoJe("m:" + id + ":" + mizaId)) return res.status(409).send("This table is already booked.");
+  next();
+}
+// Zacetek nakupne transakcije z zgornjo mejo za zaklep in stavek (glej NAKUP_DB_TIMEOUT_MS).
+function nakupZacni(c) {
+  return c.query(`BEGIN; SET LOCAL lock_timeout = ${NAKUP_DB_TIMEOUT_MS}; SET LOCAL statement_timeout = ${NAKUP_DB_TIMEOUT_MS}`);
+}
+const razprodano = new Map();   // kljuc -> do kdaj (ms). "v:<dogodek>" vstopnice, "m:<dogodek>:<miza>" VIP miza.
+function razprodanoJe(k) {
+  const do_ = razprodano.get(k);
+  if (do_ === undefined) return false;
+  if (do_ <= Date.now()) { razprodano.delete(k); return false; }
+  return true;
+}
+function razprodanoOznaci(k) {
+  if (!NAKUP_RAZPRODANO_MS) return;
+  if (razprodano.size >= 5000) {
+    const zdaj = Date.now();
+    for (const [kk, v] of razprodano) if (v <= zdaj) razprodano.delete(kk);
+    if (razprodano.size >= 5000) return;
+  }
+  razprodano.set(k, Date.now() + NAKUP_RAZPRODANO_MS);
+}
+function razprodanoPozabi(k) { razprodano.delete(k); }
 
 // Resend init
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
@@ -382,13 +477,13 @@ function predlogImena(p) {
 //   2. po e-naslovu (obstoječi račun iz časov lastne prijave → poveže se; Supabase
 //      e-naslov potrdi pred izdajo seje, zato je lastništvo naslova dokazano),
 //   3. sicer nova vrstica (email_verified = true, brez gesla).
-async function uporabnikIzSupabase(p) {
+async function uporabnikIzSupabase(p, db = pool) {
   const uid = p.sub.toLowerCase();
   const email = String(p.email).trim().toLowerCase();
 
   if (izbrisaniSub.has(uid)) throw new Error("izbrisan");
 
-  const r1 = await pool.query(`SELECT ${POLJA_SEJE} FROM users WHERE supabase_uid=$1`, [uid]);
+  const r1 = await db.query(`SELECT ${POLJA_SEJE} FROM users WHERE supabase_uid=$1`, [uid]);
   if (r1.rows.length) return r1.rows[0];
 
   // Povezava po e-naslovu in nov račun samo s POTRJENIM e-naslovom. Supabase
@@ -397,7 +492,7 @@ async function uporabnikIzSupabase(p) {
   // račun z vpisom tujega e-naslova.
   if (!(p.user_metadata && p.user_metadata.email_verified === true)) throw new Error("email_unverified");
 
-  const r2 = await pool.query(
+  const r2 = await db.query(
     `UPDATE users SET supabase_uid=$1, email_verified=true, failed_login_count=0, locked_until=NULL
      WHERE email=$2 AND supabase_uid IS NULL RETURNING ${POLJA_SEJE}`,
     [uid, email]
@@ -408,7 +503,7 @@ async function uporabnikIzSupabase(p) {
   for (let poskus = 0; poskus < 4; poskus++) {
     const kandidat = poskus === 0 ? ime : `${ime.slice(0, 14)}_${crypto.randomInt(1000, 9999)}`;
     try {
-      const r3 = await pool.query(
+      const r3 = await db.query(
         `INSERT INTO users (email, password_hash, username, email_verified, supabase_uid)
          VALUES ($1, NULL, $2, true, $3) RETURNING ${POLJA_SEJE}`,
         [email, kandidat, uid]
@@ -420,13 +515,13 @@ async function uporabnikIzSupabase(p) {
         // (tekma dveh prvih klicev) → poišči še enkrat.
         const c = String(e.constraint || "");
         if (c.includes("supabase")) {
-          const r4 = await pool.query(`SELECT ${POLJA_SEJE} FROM users WHERE supabase_uid=$1`, [uid]);
+          const r4 = await db.query(`SELECT ${POLJA_SEJE} FROM users WHERE supabase_uid=$1`, [uid]);
           if (r4.rows.length) return r4.rows[0];
         }
         if (c.includes("email")) {
           // Vrstica s tem e-naslovom že kaže na drug (star) Supabasov uid —
           // isti lastnik naslova se je pri Supabase registriral znova.
-          const r4 = await pool.query(
+          const r4 = await db.query(
             `UPDATE users SET supabase_uid=$1 WHERE email=$2 RETURNING ${POLJA_SEJE}`, [uid, email]
           );
           if (r4.rows.length) return r4.rows[0];
@@ -445,30 +540,42 @@ async function uporabnikIzSupabase(p) {
 // Sprejme samo Supabasov žeton (ES256). req.user = { userId, email, username,
 // role, auth: 'supabase', supabaseToken, supabaseSub, supabaseExp }. Vloga pride
 // iz baze ob vsakem klicu (ni v žetonu), zato sprememba vloge velja takoj.
-async function razberiUporabnika(token) {
-  const p = await preveriSupabaseZeton(token);
-  const u = await uporabnikIzSupabase(p);
+async function razberiUporabnika(token, db = pool) {
+  let p;
+  try { p = await preveriSupabaseZeton(token); }
+  catch (e) {
+    if (e && e.jwks) throw e;                         // izpad Supabase JWKS -> 503 (I10)
+    const n = new Error("zeton"); n.zeton = true; throw n;   // vsaka napaka pri branju/preverjanju zetona = slab zeton
+  }
+  const u = await uporabnikIzSupabase(p, db);
   return { userId: u.id, email: u.email, username: u.username, role: u.role, auth: "supabase",
            supabaseToken: token, supabaseSub: p.sub.toLowerCase(), supabaseExp: p.exp };
 }
 
-async function requireAuth(req, res, next) {
+// Skupna logika; `db` je pool, prek katerega gre iskanje uporabnika (glavni pool ali skenPool za poti skena).
+// 401 SAMO za znano napako zetona (oblika, podpis, potek, izbrisan racun): aplikacija ob 401 uporabnika odjavi
+// (SessionStore). Vse drugo - izpad Supabase, izpad baze, izcrpan pool, prekinjena povezava, kakrsnakoli napaka brez
+// kode - je zacasna tezava streznika: 503 + Retry-After, uporabnik ostane prijavljen (invarianta I10).
+async function requireAuthNa(db, req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!token) return res.status(401).send("Missing token.");
   try {
-    req.user = await razberiUporabnika(token);
+    req.user = await razberiUporabnika(token, db);
     return next();
   } catch (err) {
     if (err && err.jwks) {
       console.error(err.message);
-      return res.status(503).send("Auth service unavailable.");
+      return res.status(503).set("Retry-After", "5").send("Auth service unavailable.");
     }
     if (err && err.message === "email_unverified") return res.status(403).send("Email not verified.");
-    if (err && err.code) { console.error(err); return res.status(500).send("Server error."); }
-    return res.status(401).send("Invalid token.");
+    if (err && (err.zeton || err.message === "izbrisan")) return res.status(401).send("Invalid token.");
+    console.error("[auth] zacasna napaka pri iskanju uporabnika:", err && err.message);
+    return res.status(503).set("Retry-After", "5").send("Service temporarily unavailable. Please try again.");
   }
 }
+function requireAuth(req, res, next) { return requireAuthNa(pool, req, res, next); }
+function requireAuthSken(req, res, next) { return requireAuthNa(skenPool, req, res, next); }
 
 // ---------------------------
 // Role middleware
@@ -489,12 +596,12 @@ function requireRole(...allowed) {
 // Vrne null, če uporabnik nima kluba.
 // Od migracije 018 je oseba lahko v vec ekipah: `zeljeni` (glava X-Outly-Club ali ?club_id=)
 // izbere klub; brez njega prvo clanstvo (najstarejse), da star odjemalec dela kot prej.
-async function klubUporabnika(userId, zeljeni = null) {
-  const l = await pool.query("SELECT id FROM clubs WHERE owner_user_id=$1 ORDER BY id LIMIT 1", [userId]);
+async function klubUporabnika(userId, zeljeni = null, db = pool) {
+  const l = await db.query("SELECT id FROM clubs WHERE owner_user_id=$1 ORDER BY id LIMIT 1", [userId]);
   if (l.rows.length && (!zeljeni || Number(l.rows[0].id) === Number(zeljeni))) return { clubId: l.rows[0].id, role: "owner" };
   const m = zeljeni
-    ? await pool.query("SELECT club_id, role FROM club_members WHERE user_id=$1 AND club_id=$2", [userId, zeljeni])
-    : await pool.query("SELECT club_id, role FROM club_members WHERE user_id=$1 ORDER BY created_at, id LIMIT 1", [userId]);
+    ? await db.query("SELECT club_id, role FROM club_members WHERE user_id=$1 AND club_id=$2", [userId, zeljeni])
+    : await db.query("SELECT club_id, role FROM club_members WHERE user_id=$1 ORDER BY created_at, id LIMIT 1", [userId]);
   if (m.rows.length) return { clubId: m.rows[0].club_id, role: m.rows[0].role };
   return null;
 }
@@ -523,12 +630,12 @@ function zeljeniKlub(req) {
 // Admin brez lastnega kluba dobi { clubId: null, role: 'admin' } — poti, ki
 // rabijo klub, mu vrnejo 404 kot do zdaj; poti za urejanje dogodkov ga spustijo.
 // Vratar (doorman) sme SAMO skenirati in gledati vstopnice dogodka.
-function requireClub(...vloge) {
+function requireClubNa(db, vloge) {
   return async (req, res, next) => {
     try {
       if (!req.user) return res.status(401).send("Unauthorized.");
       const zeljeni = zeljeniKlub(req);
-      let k = await klubUporabnika(req.user.userId, zeljeni);
+      let k = await klubUporabnika(req.user.userId, zeljeni, db);
       if (!k) {
         // Izrecno zahtevan klub, v katerem uporabnik ni: 404 (ne razkrivamo, ali obstaja).
         if (zeljeni) return res.status(404).send("Club not found.");
@@ -547,6 +654,9 @@ function requireClub(...vloge) {
     }
   };
 }
+function requireClub(...vloge) { return requireClubNa(pool, vloge); }
+// Isto prek skenPool (poti skena na vratih).
+function requireClubSken(...vloge) { return requireClubNa(skenPool, vloge); }
 
 // test endpoint
 app.get("/", (req, res) => {
@@ -2004,6 +2114,7 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
       `UPDATE events SET ${sets.join(", ")} WHERE id = $${vrednosti.length} RETURNING *`,
       vrednosti
     );
+    razprodanoPozabi("v:" + d.id);   // capacity ali status se je morda spremenil
 
     // Dogodek je sele zdaj postal objavljen -> sledilci kluba dobijo obvestilo (migracija 019).
     if (d.status !== "published" && r.rows[0].status === "published") {
@@ -3040,7 +3151,7 @@ const STAROST_PAKET_PIJACE = 18;
 const starostZaPaket = (minAgeDogodka, jePaket) => Math.max(Number(minAgeDogodka) || 0, jePaket ? STAROST_PAKET_PIJACE : 0);
 
 // POST /events/:id/orders — nakup. Telo: { quantity }.
-app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+app.post("/events/:id/orders", requireAuth, zavrniRazprodano, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const id = celoId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const q = Number((req.body || {}).quantity ?? 1);
@@ -3052,9 +3163,11 @@ app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, 
     return res.status(503).send("Payments are not available yet.");
   }
 
-  const c = await pool.connect();
+  if (!(await nakupDovoljenje(req, res))) return;
+  let c;
+  try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
   try {
-    await c.query("BEGIN");
+    await nakupZacni(c);
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden
@@ -3065,6 +3178,7 @@ app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, 
     const np = napakaProdaje(e, { zahtevajCeno: true });
     if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
     if (e.capacity !== null && e.sold_count + q > e.capacity) {
+      if (e.capacity - e.sold_count <= 0) razprodanoOznaci("v:" + id);
       await c.query("ROLLBACK"); return res.status(409).send(`Only ${Math.max(0, e.capacity - e.sold_count)} tickets left.`);
     }
 
@@ -3102,11 +3216,12 @@ app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, 
     return res.status(201).json({ mode: "test", order: nr.rows[0], tickets: vst[oid] || [] });
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});
+    if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
     // Sprožilec: "Ni dovolj vstopnic" pride kot check_violation.
     if (err && err.code === "23514") return res.status(409).send(/Ni dovolj/.test(err.message) ? "Not enough tickets left." : "Order rejected: " + (err.constraint || err.message));
     console.error(err);
     return res.status(500).send("Server error.");
-  } finally { c.release(); }
+  } finally { try { c.release(); } finally { nakupIzstopi(); } }
 });
 
 // GET /me/orders — moja naročila z vstopnicami.
@@ -3423,7 +3538,7 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
 
 // POST /business/tickets/scan — skener na vratih. Telo: { qr } (ali { serial } za ročni vnos).
 // Preveri podpis, lastništvo, stanje; vstopnico označi kot uporabljeno. Ponovni sken -> 409.
-app.post("/business/tickets/scan", requireAuth, requireClub(), async (req, res) => {
+app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (req, res) => {
   try {
     const b = req.body || {};
     let serial = null, ev = null;
@@ -3439,7 +3554,7 @@ app.post("/business/tickets/scan", requireAuth, requireClub(), async (req, res) 
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
 
-    const r = await pool.query(
+    const r = await skenPool.query(
       `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, e.club_id, e.title AS event_title, e.start_at, o.status AS order_status, o.public_ref, o.buyer_email,
               ${STOLPCI_IMETNIKA}
        FROM tickets t JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK} WHERE t.serial = $1`, [serial]
@@ -3456,13 +3571,13 @@ app.post("/business/tickets/scan", requireAuth, requireClub(), async (req, res) 
     // prenesena prijatelju (prenos ji da NOV serial), stara koda ne sme več
     // veljati — sicer bi pošiljatelj vstopil s staro kodo, prejemnik pa bi
     // dobil že porabljeno vstopnico (ugotovljeno s testom sočasnosti).
-    const u = await pool.query(
+    const u = await skenPool.query(
       `UPDATE tickets SET status='used', used_at=NOW(), used_by_user_id=$2, scan_device=$3
        WHERE id=$1 AND status='valid' AND serial=$4 RETURNING id, serial, status, used_at`,
       [t.id, req.user.userId, String(req.headers["user-agent"] || "").slice(0, 100), serial]
     );
     if (u.rows.length === 0) {
-      const z = await pool.query(`SELECT status, serial FROM tickets WHERE id=$1`, [t.id]);
+      const z = await skenPool.query(`SELECT status, serial FROM tickets WHERE id=$1`, [t.id]);
       const s = z.rows[0];
       if (s && s.serial !== serial) return res.status(409).json({ result: "transferred", message: "This ticket was passed on to someone else. Ask them to show their new code." });
       return res.status(409).json({ result: "already_used", message: "Ticket was already scanned." });
@@ -3480,7 +3595,7 @@ app.post("/business/tickets/scan", requireAuth, requireClub(), async (req, res) 
 // Strežnik ostane razsodnik: dvojni sken iste vstopnice z dveh telefonov da NA STREŽNIKU samo en "ok" (invarianta I14).
 
 // GET /business/scan-key — javni ključ za preverjanje kod v2 (vse vloge v klubu, tudi vratar).
-app.get("/business/scan-key", requireAuth, requireClub(), (req, res) => {
+app.get("/business/scan-key", requireAuthSken, requireClubSken(), (req, res) => {
   const k = qrKljuci();
   return res.json({
     alg: "Ed25519", kid: k.kid, public_key: k.javniSurov.toString("base64url"),
@@ -3494,18 +3609,18 @@ app.get("/business/scan-key", requireAuth, requireClub(), (req, res) => {
 // Brez e-naslovov in drugih osebnih podatkov (samo uporabniško ime imetnika, ki ga skener pokaže pri sprejemu).
 // `transferred_serials`: stari serial-i prenesenih vstopnic — koda s takim serialom NE velja več (I7).
 // ETag: osveževanje vsakih nekaj minut pri 1000+ telefonih ne sme vsakič vleči celega seznama (If-None-Match -> 304).
-app.get("/business/events/:id/scan-list", requireAuth, requireClub(), async (req, res) => {
+app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken(), async (req, res) => {
   try {
     const id = celoId(req.params.id);
     if (!id) return res.status(400).json({ error: "invalid_id", message: "Invalid event id." });
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).json({ error: "not_found", message: "Club not found." });
-    const ev = await pool.query("SELECT id, club_id FROM events WHERE id = $1", [id]);
+    const ev = await skenPool.query("SELECT id, club_id FROM events WHERE id = $1", [id]);
     if (ev.rows.length === 0 || Number(ev.rows[0].club_id) !== Number(klub)) {
       return res.status(404).json({ error: "not_found", message: "Event not found." });
     }
     const [vst, prenosi] = await Promise.all([
-      pool.query(
+      skenPool.query(
         `SELECT t.serial,
                 CASE WHEN o.status IN ('paid','partially_refunded') OR t.status IN ('refunded','void') THEN t.status ELSE 'unpaid' END AS status,
                 t.used_at, (o.table_id IS NOT NULL) AS is_vip, o.table_label, o.package_name,
@@ -3513,7 +3628,7 @@ app.get("/business/events/:id/scan-list", requireAuth, requireClub(), async (req
          FROM tickets t JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK}
          WHERE t.event_id = $1
          ORDER BY t.id`, [id]),
-      pool.query(
+      skenPool.query(
         `SELECT tt.old_serial FROM ticket_transfers tt JOIN tickets t ON t.id = tt.ticket_id
          WHERE t.event_id = $1 ORDER BY tt.id`, [id]),
     ]);
@@ -3541,7 +3656,7 @@ const SKEN_REZERVA_PRED_ZACETKOM_MS = 12 * 3600 * 1000; // vrata se odprejo pred
 const SKEN_ID_VZOREC = /^[A-Za-z0-9._:-]{1,64}$/;
 const SERIAL_VZOREC = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const jsonVelik = express.json({ limit: "1mb" });
-app.post("/business/tickets/scan-batch", requireAuth, requireClub(), jsonVelik, async (req, res) => {
+app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken(), jsonVelik, async (req, res) => {
   try {
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).json({ error: "not_found", message: "Club not found." });
@@ -3586,14 +3701,14 @@ app.post("/business/tickets/scan-batch", requireAuth, requireClub(), jsonVelik, 
     const vrstice = new Map();
     const prenesene = new Map();
     if (serijski.length) {
-      const r = await pool.query(
+      const r = await skenPool.query(
         `SELECT t.id, t.serial, t.status, t.used_at, t.used_by_user_id, t.scan_device, t.event_id, t.created_at, e.club_id, e.start_at, o.status AS order_status
          FROM tickets t JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = t.order_id
          WHERE t.serial = ANY($1::uuid[])`, [serijski]);
       for (const t of r.rows) vrstice.set(t.serial, t);
       const neznani = serijski.filter(s => !vrstice.has(s));
       if (neznani.length) {
-        const p = await pool.query(
+        const p = await skenPool.query(
           `SELECT tt.old_serial, e.club_id FROM ticket_transfers tt JOIN tickets t ON t.id = tt.ticket_id JOIN events e ON e.id = t.event_id
            WHERE tt.old_serial = ANY($1::uuid[])`, [neznani]);
         for (const x of p.rows) prenesene.set(x.old_serial, x.club_id);
@@ -3619,7 +3734,7 @@ app.post("/business/tickets/scan-batch", requireAuth, requireClub(), jsonVelik, 
         else {
           // used_at = ura na telefonu, če je razumna: ne v prihodnosti, ne pred nastankom vstopnice, ne prej kot 12 h pred začetkom dogodka.
           // Pogoj serial = $4 kot pri /scan: prenos med branjem in pisanjem da vstopnici nov serial, stara koda ne sme več veljati.
-          const u = await pool.query(
+          const u = await skenPool.query(
             `UPDATE tickets SET status = 'used',
                     used_at = CASE WHEN $5::timestamptz IS NOT NULL AND $5::timestamptz <= NOW()
                                     AND $5::timestamptz >= GREATEST(created_at, $6::timestamptz)
@@ -3632,7 +3747,7 @@ app.post("/business/tickets/scan-batch", requireAuth, requireClub(), jsonVelik, 
             rez = { result: "ok", used_at: iso(t.used_at) };
           } else {
             // Med branjem in pisanjem je vstopnico nekdo spremenil: preberi dejansko stanje.
-            const z = await pool.query("SELECT serial, status, used_at, used_by_user_id, scan_device FROM tickets WHERE id = $1", [t.id]);
+            const z = await skenPool.query("SELECT serial, status, used_at, used_by_user_id, scan_device FROM tickets WHERE id = $1", [t.id]);
             const s = z.rows[0];
             if (!s || s.serial !== d.serial) rez = { result: "transferred", used_at: null };
             else if (s.status === "used") {
@@ -4086,7 +4201,7 @@ app.get("/events/:id/vip", async (req, res) => {
 // aktivne pakete; sicer izpusti ali null). Pravila nakupa (testni nacin, okno prodaje, starost) so ista
 // kot pri vstopnicah (napakaProdaje, preveriStarostKupca). Narocilo: quantity 1, cena = cena mize,
 // vstopnic = table_seats; ne steje v sold_count. Ista miza dvakrat: 409 (I13, unikaten indeks).
-app.post("/events/:id/tables/:tableId/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+app.post("/events/:id/tables/:tableId/orders", requireAuth, zavrniRazprodanoMizo, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const id = vipId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const mizaId = vipId(req.params.tableId);
@@ -4108,9 +4223,11 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, omeji({ kljuc: "naku
     return res.status(503).send("Payments are not available yet.");
   }
 
-  const c = await pool.connect();
+  if (!(await nakupDovoljenje(req, res))) return;
+  let c;
+  try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
   try {
-    await c.query("BEGIN");
+    await nakupZacni(c);
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled,
               e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden
@@ -4178,10 +4295,14 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, omeji({ kljuc: "naku
     return res.status(201).json({ mode: "test", order: nr.rows[0], tickets: vst[oid] || [] });
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});
-    if (err && err.code === "23505" && err.constraint === "orders_miza_dogodek_key") return res.status(409).send("This table is already booked.");
+    if (err && err.code === "23505" && err.constraint === "orders_miza_dogodek_key") {
+      razprodanoOznaci("m:" + id + ":" + mizaId);
+      return res.status(409).send("This table is already booked.");
+    }
+    if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
     console.error(err);
     return res.status(500).send("Server error.");
-  } finally { c.release(); }
+  } finally { try { c.release(); } finally { nakupIzstopi(); } }
 });
 
 // ---------------------------
