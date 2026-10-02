@@ -749,11 +749,13 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 // ---------------------------
 // CLUBS (public + business create)
 // ---------------------------
+// owner_user_id NI tu (issue #113, I4): notranji ID uporabnika ne sodi na javno pot, nobena
+// aplikacija ga ne bere; lastnika pove `my_role` / `GET /me`, admin ga dobi iz ADMIN_STOLPCI_KLUBA.
 // Stolpci, ki smejo ven javno. NAMENOMA ni "SELECT *": migracija 002 je
 // klubom dodala stripe_account_id, ki z zvezdico ni bil viden nikomur v
 // pregledu, javno pa bi ga vrnil vsak klic /clubs. Vsak nov stolpec je
 // treba tu dodati zavestno.
-const JAVNI_STOLPCI_KLUBA = `id, owner_user_id, name, logo_url, banner_url, description,
+const JAVNI_STOLPCI_KLUBA = `id, name, logo_url, banner_url, description,
   contact_email, contact_phone, instagram, website, address, city, country,
   lat, lng, min_age, genres, created_at, bar_prices, gallery_urls, video_url,
   (SELECT COUNT(*)::int FROM club_follows cf WHERE cf.club_id = clubs.id) AS followers_count`;
