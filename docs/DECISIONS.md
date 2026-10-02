@@ -323,8 +323,8 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   stal denar ali nastavitve računov, zdaj ni potreben. *vir/dokaz*: PR #111 (meritev), PR tega commita (pred/po), `_testi/test_javni_predpomnilnik.js` ·
   *velja dokler*: teče ena instanca; pri več instancah ali CDN-u pred API-jem preglej razveljavitev · *nadomeščena z*: —
 - 2026-10-02: **Idempotentni ključ nakupa** (glava `Idempotency-Key`, UUID; issue #112, I18, migracija 028). Dodajanje, ne brisanje: brez glave vse kot
-  prej. Odločitve agenta (Martin jih ni potrdil, vse povratne): (1) **ponovitev vrne 201 in isto telo** kot prvi uspeh (+ `Idempotent-Replayed: true`),
-  ne 200: odjemalca (iOS `200...299`, splet `ok`) status ne razlikuje in oba ob uspehu pokažeta vstopnico, posebna pot za ponovitev bi bila
+  prej. Odločitve agenta (Martin jih ni potrdil, vse povratne): (1) **ponovitev vrne 201 z istim naročilom in TRENUTNIM stanjem** (+ `Idempotent-Replayed: true`; po skenu `used`, po prenosu drug imetnik),
+  ne 200; neaktivno naročilo (vrnjeno, preklicano) 409 `order_not_active`, ker to ni uspeh: odjemalca (iOS `200...299`, splet `ok`) status ne razlikuje in oba ob uspehu pokažeta vstopnico, posebna pot za ponovitev bi bila
   nepotreben vzorec za napako; (2) **hkratni zahtevek počaka in dobi isti rezultat** (v istem procesu v pomnilniku, brez mesta v semaforju I16;
   med instancami ga vrsti `pg_advisory_xact_lock` na ključ), 409 `request_in_progress` + `Retry-After: 2` šele po `IDEMPOTENCA_CAKANJE_MS`
   (10 s): odjemalec brez posebne logike ob timeoutu in ponovitvi tako dobi naročilo, ne napake, 409 bi ga prisilil v lastno zanko ponavljanja;

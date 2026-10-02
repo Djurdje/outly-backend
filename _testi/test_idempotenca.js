@@ -7,6 +7,8 @@
  *   1  neveljavna oblika -> 400; brez glave -> obnasanje kot prej (dve enaki zahtevi = dve narocili)
  *   2  ponovni poskus (zaporedno) vrne ISTO narocilo (201 + Idempotent-Replayed), zaloga se zmanjsa enkrat; velja tudi
  *      za razprodan dogodek in ne porablja nakupnih poskusov (omejevalnik 20/h)
+ *   2b ponovitev neaktivnega narocila (vrnjeno, preklicano) -> 409 order_not_active; telo ponovitve je TRENUTNO stanje;
+ *      ponovitev ne razveljavi javnega predpomnilnika (sekcije 12 in 13)
  *   3  isti kljuc, druga vsebina (kolicina, dogodek, miza, paket, vrsta nakupa) -> 422
  *   4  kljuc je vezan na uporabnika (isti UUID drugega uporabnika = njegovo lastno narocilo)
  *   5  hkratni zahtevki z istim kljucem (en proces; dva procesa) -> natanko eno narocilo, vsi dobijo isto
@@ -146,7 +148,7 @@ const ponovljeno = (r) => r.h["idempotent-replayed"] === "true";
   assert(!ponovljeno(p1), "prvi nakup NI oznacen kot ponovitev");
   const p2 = await kupi(A, U.ana, E2, 2, K1);
   assert(p2.status === 201 && ponovljeno(p2), "ponovitev: 201 + Idempotent-Replayed: true", [p2.status, p2.h["idempotent-replayed"]]);
-  assert(JSON.stringify(p2.body) === JSON.stringify(p1.body), "ponovitev vrne ISTO telo (narocilo, vstopnice, QR) kot prvic");
+  assert(JSON.stringify(p2.body) === JSON.stringify(p1.body), "ponovitev vrne isto narocilo in vstopnice (id, serial, QR), ker se vmes ni nic spremenilo");
   assert(await narocil(E2) === 1 && await prodano(E2) === 2 && await stKljuca(K1) === 1, "eno narocilo, zaloga zmanjsana samo enkrat");
   const p3 = await kupi(A, U.ana, E2, 2, K1.toUpperCase());
   assert(p3.status === 201 && p3.body.order.id === p1.body.order.id, "velike crke istega UUID-ja = isti kljuc", p3.status);
@@ -285,7 +287,7 @@ const ponovljeno = (r) => r.h["idempotent-replayed"] === "true";
   const m1 = await kupiMizo(A, U.ana, EV1, T1, m1K);
   assert(m1.status === 201 && m1.body.tickets.length === 4 && m1.body.order.table_id === T1, "nakup mize z ključem: 201, 4 vstopnice", m1);
   const m2 = await kupiMizo(A, U.ana, EV1, T1, m1K);
-  assert(m2.status === 201 && ponovljeno(m2) && JSON.stringify(m2.body) === JSON.stringify(m1.body), "ponovitev nakupa mize: 201, isto telo, Idempotent-Replayed", [m2.status, m2.h["idempotent-replayed"]]);
+  assert(m2.status === 201 && ponovljeno(m2) && JSON.stringify(m2.body) === JSON.stringify(m1.body), "ponovitev nakupa mize: 201, isto narocilo in vstopnice, Idempotent-Replayed", [m2.status, m2.h["idempotent-replayed"]]);
   assert(await narocil(EV1) === 1, "ena rezervacija mize");
   const tujaMiza = await kupiMizo(A, U.bor, EV1, T1, nov());
   assert(tujaMiza.status === 409, "bor na isto mizo z drugim kljucem -> 409 (I13 velja)", tujaMiza);
@@ -432,6 +434,61 @@ const ponovljeno = (r) => r.h["idempotent-replayed"] === "true";
   assert(await stKljuca(Kg) === 1, "natanko eno narocilo za kljuc G (odsli zahtevek ni kupil)");
   assert(await stKljuca(Kg2) === 0, "odsli cakalec s kljucem G4 NIMA narocila (ni duha)");
   await ustavi("T");
+
+  console.log("\n# 12: ponovitev za naročilo, ki ni aktivno -> 409 order_not_active");
+  const Eo = await dogodek("Neaktivno", 10);
+  const Ko = nov();
+  const o1 = await kupi(A, U.ana, Eo, 2, Ko);
+  assert(o1.status === 201, "nakup 2x", o1.status);
+  await pool.query("UPDATE orders SET status='partially_refunded', refunded_cents=100 WHERE idempotency_key=$1", [Ko]);
+  const o2 = await kupi(A, U.ana, Eo, 2, Ko);
+  assert(o2.status === 201 && ponovljeno(o2) && o2.body.order.status === "partially_refunded", "delno vrnjeno naročilo je se aktivno: ponovitev 201 s trenutnim stanjem", [o2.status, o2.body.order && o2.body.order.status]);
+  await pool.query("UPDATE orders SET status='refunded', refunded_cents=total_cents WHERE idempotency_key=$1", [Ko]);
+  const o3 = await kupi(A, U.ana, Eo, 2, Ko);
+  assert(o3.status === 409 && o3.body.error === "order_not_active" && typeof o3.body.message === "string" && !ponovljeno(o3), "vrnjeno naročilo: ponovitev -> 409 order_not_active (JSON error + message), NE 201", o3);
+  const o4 = await kupi(B, U.ana, Eo, 3, Ko);
+  assert(o4.status === 422, "drugačna vsebina ima prednost: 422, ne 409 order_not_active", o4.status);
+  assert(await stKljuca(Ko) === 1, "neaktivno naročilo ostane edino s tem ključem (ponovitev ne ustvari novega)");
+  const o5 = await kupi(A, U.ana, Eo, 2, nov());
+  assert(o5.status === 201 && !ponovljeno(o5) && o5.body.order.id !== o1.body.order.id, "NOV ključ deluje normalno (201, novo naročilo)", o5.status);
+  const Kc = nov();
+  await kupi(A, U.bor, Eo, 1, Kc);
+  await pool.query("UPDATE orders SET status='cancelled', cancelled_at=NOW() WHERE idempotency_key=$1", [Kc]);
+  const o6 = await kupi(A, U.bor, Eo, 1, Kc);
+  assert(o6.status === 409 && o6.body.error === "order_not_active", "preklicano naročilo: ponovitev -> 409 order_not_active", o6.status);
+  const Kt = nov();
+  const t1 = await kupiMizo(A, U.ana, EV1, T4, Kt);
+  assert(t1.status === 201, "miza T4 kupljena", t1.status);
+  await pool.query("UPDATE orders SET status='refunded', refunded_cents=total_cents WHERE idempotency_key=$1", [Kt]);
+  const t2 = await kupiMizo(A, U.ana, EV1, T4, Kt);
+  assert(t2.status === 409 && t2.body.error === "order_not_active", "vrnjena miza: ponovitev -> 409 order_not_active (ne 201, ne »table already booked«)", t2);
+  const t3 = await kupiMizo(A, U.bor, EV1, T4, nov());
+  assert(t3.status === 201, "vrnjena miza je spet prosta za nov nakup", t3.status);
+
+  console.log("\n# 13: telo ponovitve je TRENUTNO stanje; ponovitev ne razveljavi javnega predpomnilnika");
+  const Es = await dogodek("Stanje", 10);
+  const Ks = nov();
+  const st1 = await kupi(A, U.ana, Es, 1, Ks);
+  await pool.query("UPDATE tickets SET status='used', used_at=NOW() WHERE order_id=$1", [st1.body.order.id]);
+  const st2 = await kupi(A, U.ana, Es, 1, Ks);
+  assert(st1.body.tickets[0].status === "valid" && st2.status === 201 && st2.body.tickets[0].status === "used", "po skenu ponovitev kaze vstopnico `used` (trenutno stanje, ne posnetek prvega odgovora)", [st1.body.tickets[0].status, st2.body.tickets[0] && st2.body.tickets[0].status]);
+
+  const pn = () => api(A, "GET", "/events", null);
+  await pn();                                   // napolni
+  const pz1 = await pn();
+  assert(pz1.h["x-predpomnilnik"] === "zadetek", "(kontrola) drugi GET /events je zadetek", pz1.h["x-predpomnilnik"]);
+  const rp = await kupi(A, U.ana, Es, 1, Ks);
+  assert(rp.status === 201 && ponovljeno(rp), "ponovitev 201");
+  const pz2 = await pn();
+  assert(pz2.h["x-predpomnilnik"] === "zadetek", "po PONOVITVI je GET /events se vedno zadetek (predpomnilnik ni razveljavljen)", pz2.h["x-predpomnilnik"]);
+  const rn = await kupi(A, U.ana, Es, 1, nov());
+  const pz3 = await pn();
+  assert(rn.status === 201 && pz3.h["x-predpomnilnik"] === "zgresitev", "po NOVEM nakupu je GET /events zgresitev (razveljavitev deluje, kot prej)", [rn.status, pz3.h["x-predpomnilnik"]]);
+  await pn();
+  const rt = await kupi(A, U.ana, Es, 1, Ks, { glave: { "idempotency-key": Ks } });
+  const rv2 = await kupi(A, U.ana, Es, 5, Ks);
+  const pz4 = await pn();
+  assert(rt.status === 201 && rv2.status === 422 && pz4.h["x-predpomnilnik"] === "zadetek", "tudi 422 in ponovitev skupaj ne razveljavita predpomnilnika", pz4.h["x-predpomnilnik"]);
 
   await ustavi("A"); await ustavi("B");
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);

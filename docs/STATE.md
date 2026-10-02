@@ -170,7 +170,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 - `owner_user_id` ni več v javnih odgovorih klubov (#113, I4; arhiv `STATE-do-2026-10-02c.md`). **ios-dev** (neurgentno): odstrani `APIClub.ownerUserId`.
 - **Idempotentni ključ nakupa (#112, I18).** Glava `Idempotency-Key: <UUID>` na obeh `POST …/orders`; brez nje vse kot prej. Odjemalec: en UUID
   na pritisk »Kupi«, isti ob ponovnem poskusu ISTEGA nakupa (timeout, 503, 409 `request_in_progress`), nov ob spremembi količine/mize/paketa ali po
-  uspehu. Ponovitev = 201 + `Idempotent-Replayed: true`, isto telo; drug nakup z istim ključem = 422; neuspeh (409/503) se NE zapomni.
+  uspehu. Ponovitev = 201 + `Idempotent-Replayed: true` s TRENUTNIM stanjem; neaktivno naročilo 409 `order_not_active`; drug nakup = 422; neuspeh se NE zapomni.
   **iOS in splet ključa še ne pošiljata** (ios-dev, web-dev). Ključ je vezan na uporabnika in ni v odgovorih.
 - Ostale pasti (AsyncImage brez okvirja, gnezden NavigationStack, pg BIGINT, Resend `{error}`, JSONB vs ARRAY)
   so v `CLAUDE.md` tega repa in iOS repa.

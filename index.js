@@ -3162,7 +3162,7 @@ const starostZaPaket = (minAgeDogodka, jePaket) => Math.max(Number(minAgeDogodka
 //
 // Tri plasti, od najcenejse do dokoncne:
 //  1. PRED omejevalnikom in semaforjem (middleware `idempotenca`): ce narocilo s tem kljucem ze obstaja, takoj vrne
-//     isto telo (201 + `Idempotent-Replayed: true`); ponovitev ne porabi nakupnega poskusa (20/h) in ne caka v vrsti.
+//     isto naročilo s TRENUTNIM stanjem (201 + `Idempotent-Replayed: true`; neaktivno -> 409 order_not_active); ponovitev ne porabi nakupnega poskusa (20/h) in ne caka v vrsti.
 //     Isti kljuc, druga vsebina (dogodek, kolicina, miza, paket) -> 422. Pred zavrniRazprodano, da ponovitev zadnje
 //     vstopnice ne dobi 409 »Only 0 tickets left«.
 //  2. Zahtevek, ki je s kljucem ze v teku v TEM procesu, ne vzame mesta v semaforju: ceka v pomnilniku (najvec
@@ -3204,7 +3204,7 @@ function idemIstaVsebina(a, b) {
 // Branje po kljucu (uporabnik IZ ZETONA, nikoli iz zahteve: kljuc drugega uporabnika je neviden, I3).
 async function idemPoisci(db, userId, kljuc) {
   const r = await db.query(
-    "SELECT id, event_id, quantity, table_id, package_id FROM orders WHERE user_id = $1 AND idempotency_key = $2", [userId, kljuc]);
+    "SELECT id, event_id, quantity, table_id, package_id, status FROM orders WHERE user_id = $1 AND idempotency_key = $2", [userId, kljuc]);
   return r.rows[0] || null;
 }
 // V transakciji: najprej serializiraj zahtevke istega kljuca (zaklep traja do COMMIT/ROLLBACK), nato preberi po kljucu.
@@ -3223,13 +3223,21 @@ function idemNapacnaVsebina(res) {
   return res.status(422).json({ error: "idempotency_key_reused",
     message: "This Idempotency-Key was already used for a different purchase. Use a new key for a different event, quantity or table." });
 }
-// Obstojece narocilo s tem kljucem: isti nakup -> isto telo (201, kot ob prvem uspehu; odjemalec ne rabi posebne poti),
-// z glavo Idempotent-Replayed; drug nakup -> 422.
+// Aktivno narocilo = placano (enako kot status vstopnic v scan-list). Vrnjeno, preklicano ali neplacano ni »uspeh«.
+const IDEM_AKTIVNA_NAROCILA = ["paid", "partially_refunded"];
+// Obstojece narocilo s tem kljucem: isti nakup, narocilo aktivno -> 201 s TRENUTNIM stanjem narocila in vstopnic (po skenu
+// `used`, po prenosu drug imetnik), z glavo Idempotent-Replayed; drug nakup -> 422; narocilo ni vec aktivno -> 409
+// order_not_active (kljuc ostane vezan nanj, za nov nakup rabi odjemalec nov kljuc).
 async function idemOdgovori(res, db, obst, v) {
   if (!idemIstaVsebina(obst, v)) return idemNapacnaVsebina(res);
+  if (!IDEM_AKTIVNA_NAROCILA.includes(obst.status)) {
+    return res.status(409).json({ error: "order_not_active",
+      message: "The order for this Idempotency-Key is no longer active (refunded, cancelled or unpaid). Use a new Idempotency-Key to buy again." });
+  }
   const telo = await odgovorNarocila(db, obst.id);
   console.log(`Nakup (ponovitev kljuca): naročilo ${obst.id}`);
   res.set("Idempotent-Replayed", "true");
+  res.locals.brezRazveljavitve = true;   // ponovitev ne spremeni nobenega podatka: javni predpomnilnik (I17) ostane
   return res.status(201).json(telo);
 }
 // Po 23505 (unikatni indeks): zmagovalec je ze commitan, preberi ga. true = odgovor poslan.

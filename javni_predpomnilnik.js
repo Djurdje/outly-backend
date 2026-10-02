@@ -190,6 +190,8 @@ function ustvariPredpomnilnik({ ttlMs = 3000, najvecKljucev = 300, najvecBajtov 
    * (read-your-writes), in se enkrat ob zaprtju zveze (ce odgovor ni sel). 4xx nima ucinka (zapisa ni bilo) -
    * tako neprijavljeni/neveljavni zahtevki predpomnilnika ne morejo izprazniti.
    * `izjeme`: [{ metoda, pot: RegExp }] - pogosti zapisi, ki ne vplivajo na javne sezname (ogledi, skeniranje).
+   * Obravnavalec, ki je v tem zahtevku dokazano NE zapisal nicesar (ponovitev nakupa z idempotentnim kljucem), nastavi
+   * `res.locals.brezRazveljavitve = true` pred pisanjem odgovora; tedaj predpomnilnik ostane.
    */
   function razveljaviOdPisanja(izjeme = []) {
     return (req, res, next) => {
@@ -201,10 +203,10 @@ function ustvariPredpomnilnik({ ttlMs = 3000, najvecKljucev = 300, najvecBajtov 
       res.writeHead = function (...a) {
         koncano = true;
         const koda = typeof a[0] === "number" ? a[0] : this.statusCode;
-        if (!(koda >= 400 && koda < 500)) razveljavi();
+        if (!(koda >= 400 && koda < 500) && !(this.locals && this.locals.brezRazveljavitve)) razveljavi();
         return writeHead.apply(this, a);
       };
-      res.once("close", () => { if (!koncano) razveljavi(); });
+      res.once("close", () => { if (!koncano && !(res.locals && res.locals.brezRazveljavitve)) razveljavi(); });
       next();
     };
   }
