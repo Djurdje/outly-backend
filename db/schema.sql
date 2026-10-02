@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–026, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–027, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,10 +15,10 @@
 -- PostgreSQL database dump
 --
 
-\restrict dPsY2zX5Wiqx0SVohJbeqs4suVW8S1NhS0nwJLTCEcSbG8pzBe3F75ASkMkckLS
+\restrict 8BcQochwwmEhSuVbBfwxZrQYKjNaVNH7ulPQOAccnjVzCjdDt9fwEaNDd7afJwz
 
--- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
--- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
+-- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
+-- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -568,6 +568,26 @@ CREATE TABLE public.friendships (
 
 
 --
+-- Name: omejitve; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE UNLOGGED TABLE public.omejitve (
+    kljuc text NOT NULL,
+    okno_do timestamp with time zone NOT NULL,
+    stevec integer NOT NULL,
+    CONSTRAINT omejitve_stevec_check CHECK ((stevec >= 0))
+)
+WITH (fillfactor='70');
+
+
+--
+-- Name: TABLE omejitve; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.omejitve IS 'Omejevalnik poskusov (issue #24): kljuc = HMAC(pot:IP), stevec poskusov v oknu. Kratkotrajno, UNLOGGED, ni v izvozu baze.';
+
+
+--
 -- Name: orders; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -989,6 +1009,14 @@ ALTER TABLE ONLY public.friendships
 
 
 --
+-- Name: omejitve omejitve_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.omejitve
+    ADD CONSTRAINT omejitve_pkey PRIMARY KEY (kljuc);
+
+
+--
 -- Name: orders orders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1194,6 +1222,13 @@ CREATE INDEX friend_requests_to_pending_idx ON public.friend_requests USING btre
 --
 
 CREATE INDEX friendships_user_b_idx ON public.friendships USING btree (user_b);
+
+
+--
+-- Name: omejitve_okno_do_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX omejitve_okno_do_idx ON public.omejitve USING btree (okno_do);
 
 
 --
@@ -1675,5 +1710,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict dPsY2zX5Wiqx0SVohJbeqs4suVW8S1NhS0nwJLTCEcSbG8pzBe3F75ASkMkckLS
+\unrestrict 8BcQochwwmEhSuVbBfwxZrQYKjNaVNH7ulPQOAccnjVzCjdDt9fwEaNDd7afJwz
 

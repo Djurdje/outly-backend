@@ -227,12 +227,25 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 - Render web service → paket 7 USD (0,5 CPU, 512 MB) je dovolj za 500+ uporabnikov.
   *vir/dokaz*: stresni test 11. 9. 2026 — 616 req/s pri 40 vzporednih, brez napak.
   *velja dokler*: teče **ena instanca** backenda; ob drugi instanci padeta omejevalnik poskusov v pomnilniku (S-02)
-  in ta izračun zmogljivosti.
+  in ta izračun zmogljivosti. *Dopolnilo 2. 10. 2026*: omejevalnik je od migracije 027 v PostgreSQL (spodaj), zato ta pogoj
+  za omejevalnik ne velja več; za izračun zmogljivosti (CPU/RAM ene instance) velja še naprej.
 - Render baza → plačljivi paket **pred 7. 10. 2026** (brezplačna se izbriše; januarja se je to že zgodilo).
   *velja dokler*: 7. 10. 2026 — po tem datumu ni več odločitev, ampak izgubljena baza.
   **Izvedeno 30. 9. 2026** (Martin): baza `0.1c-256mb` (6 $), web service Starter `0.5c-512mb` (7 $). Za webapp (`outly.si/app`)
   dodatnega gostovanja ni treba: statika na Cloudflare Pages, API isti backend.
   *vir/dokaz*: Stresni test #2/#3 (baza CPU ~0, RAM ~20 %; web CPU ~34 % na Starterju, 0 % napak), Render API.
+- 2026-10-02: **Omejevalnik poskusov je v PostgreSQL (tabela `omejitve`, UNLOGGED), ob njegovi okvari pa po poti: fail-open za `ogled` in
+  `iskanje`, fail-closed (503 + `Retry-After`) za nakup, prenos, brisanje računa in prošnje; skeniranje omejevalnika sploh nima.**
+  Razlog: števec v pomnilniku se je ob drugi instanci ali deployu ponastavil (issue #24). Redis bi pomenil nov plačljiv servis (7+ $/mesec),
+  ena UPDATE vrstica v bazi pa zadošča (izmerjeno ~2.000 omejenih klicev/s na instanco lokalno). Fail-open pri ogledu in iskanju, ker omejevalnik
+  tam varuje samo števec in gnetenje iskanja, in ne smemo ju zavreti zaradi pomožnega sistema. Fail-closed pri nakupu (vstopnice se rezervirajo
+  ob vstavitvi naročila), prenosu, brisanju (nepovratno) in prošnjah (maili): okvara omejevalnika je skoraj vedno okvara baze, kjer bi pot tako
+  ali tako padla, zato je 503 skoraj brez cene, odprta vrata pa bi pomenila neomejeno rezerviranje zaloge in brisanje. Ključ v bazi je
+  HMAC-SHA256(pot:IP) (HKDF iz `QR_SECRET`/`JWT_SECRET`, nove skrivnosti ni): IP je osebni podatek, golo sha256 pa bi se razbilo z naštevanjem
+  IPv4. Tabela je UNLOGGED (ni v WAL; po padcu baze se meje ponastavijo, kar je isto kot prej ob vsakem deployu) in ni v izvozu baze.
+  *vir/dokaz*: [issue #24](https://github.com/Djurdje/outly-backend/issues/24), `_testi/test_omejevalnik.js`, invarianta I15 ·
+  *velja dokler*: omejeni klici ostanejo pod ~1.000/s na instanco in je baza majhna; ob več kot ~1.000/s ali opaznem CPU baze zaradi
+  `omejitve` → Redis · *nadomeščena z*: — (nadomešča omejevalnik v pomnilniku procesa, S-02)
 - 2026-09-16: Apple Developer: Martin ima **Individual račun**; pozneje App Transfer na NEXT DIMENSIONS. Bundle ID `si.outly.app`,
   ime v App Store Connect »Outly - Nightlife« (»Outly« zasedeno). **Distribucija samo prek TestFlighta** (podpis v GitHub Actions s cloud
   signing, API ključ v secrets, nič v repu); Sideloadly/AltServer se opustita. Runner `macos-26`; `MARKETING_VERSION` dviguje Martin.
