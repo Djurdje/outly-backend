@@ -13,7 +13,9 @@
  * Lastnosti:
  *  - TTL (privzeto 3 s), omejeno stevilo kljucev in bajtov (LRU: najdlje neuporabljen gre prvi) - napadalec z nakljucnimi
  *    parametri ne napihne pomnilnika.
- *  - Single-flight: hkratni zahtevki za isti manjkajoci kljuc sprozijo eno poizvedbo.
+ *  - Single-flight: hkratni zahtevki za isti manjkajoci kljuc sprozijo eno poizvedbo. Cakanje ima casovno mejo
+ *    (cakanjeMs): obviselo poizvedbo kljuc spusti, cakajoci poskusijo sami (eden postane vodja, ostali se mu pridruzijo).
+ *  - Kljuci s prostim besedilom (`prosto`) imajo majhen loceni proracun (10 % kljucev), da vrocih kljucev ne izpodrinejo.
  *  - ETag (sha256 serializiranega telesa) + 304, brez ponovne serializacije.
  *  - Razveljavitev: vsak uspesen (ali negotov, 5xx) zapis (POST/PUT/PATCH/DELETE) v ISTEM procesu izprazni vse, PRED
  *    posiljanjem odgovora pisalcu. Druge instance zaostanejo najvec TTL (sprejeto).
@@ -32,13 +34,16 @@ function etagTelesa(telo) {
  * ttlMs: 0 ali manj = izklopljeno (poizvedba ob vsakem zahtevku, brez single-flight, kot pred #114).
  * ura: za teste.
  */
-function ustvariPredpomnilnik({ ttlMs = 3000, najvecKljucev = 300, najvecBajtov = NAJVEC_BAJTOV, ura = Date.now } = {}) {
+function ustvariPredpomnilnik({ ttlMs = 3000, najvecKljucev = 300, najvecBajtov = NAJVEC_BAJTOV, cakanjeMs = 8000, najvecProstih = Math.max(1, Math.floor(najvecKljucev / 10)), ura = Date.now } = {}) {
   const omogoceno = ttlMs > 0 && najvecKljucev > 0;
   const vnosi = new Map();   // kljuc -> vnos; vrstni red vstavljanja = LRU (najdlje neuporabljen prvi)
   const vLetu = new Map();   // kljuc -> obljuba poizvedbe, ki tece (single-flight)
   let bajti = 0;
+  let prostih = 0;           // stevilo vnosov z `prosto` (loceni proracun)
   let rod = 0;               // narasca ob razveljavitvi; poizvedba, ki se je zacela pred njo, rezultata ne shrani
-  const stat = { zadetki: 0, zgresitve: 0, zdruzeno: 0, izpodrivi: 0, razveljavitve: 0, neshranjeno: 0 };
+  const stat = { zadetki: 0, zgresitve: 0, zdruzeno: 0, izpodrivi: 0, razveljavitve: 0, neshranjeno: 0, casovneMeje: 0 };
+  const MEJA = Symbol("meja");
+  let zadnjePorocilo = { ...stat };
 
   /** Rezultat poizvedbe -> vnos s ze serializiranim telesom. `json` ali `besedilo` (za napake). */
   function pripravi(r) {
@@ -58,11 +63,12 @@ function ustvariPredpomnilnik({ ttlMs = 3000, najvecKljucev = 300, najvecBajtov 
       podatki: r.podatki,            // neobvezno: izvorna vrstica, iz katere klicalec gradi osebno razlicico (ne spreminjaj!)
       velikost: telo.length + REZIJA_VNOSA,
       doKdaj: 0,
+      prosto: false,
     };
   }
 
   function odstrani(kljuc, vnos) {
-    if (vnosi.get(kljuc) === vnos) { vnosi.delete(kljuc); bajti -= vnos.velikost; }
+    if (vnosi.get(kljuc) === vnos) { vnosi.delete(kljuc); bajti -= vnos.velikost; if (vnos.prosto) prostih--; }
   }
 
   function shrani(kljuc, vnos, zdaj) {
@@ -72,6 +78,13 @@ function ustvariPredpomnilnik({ ttlMs = 3000, najvecKljucev = 300, najvecBajtov 
     if (star) odstrani(kljuc, star);
     vnosi.set(kljuc, vnos);
     bajti += vnos.velikost;
+    if (vnos.prosto) {
+      prostih++;
+      // Loceni proracun: poplava prostega besedila izpodriva samo druge proste kljuce, nikoli vrocih.
+      while (prostih > najvecProstih) {
+        for (const [k, v] of vnosi) { if (v.prosto) { odstrani(k, v); stat.izpodrivi++; break; } }
+      }
+    }
     while (vnosi.size > najvecKljucev || bajti > najvecBajtov) {
       const [k, v] = vnosi.entries().next().value;
       odstrani(k, v);
@@ -84,7 +97,13 @@ function ustvariPredpomnilnik({ ttlMs = 3000, najvecKljucev = 300, najvecBajtov 
    * kljuc === null = tega zahtevka ne predpomnimo (nenavadni parametri) -> neposredna poizvedba.
    * Ce `izracunaj` vrze, vrze tudi dobi() (vsem cakajocim); klicalec odgovori s 500, kot prej.
    */
-  async function dobi(kljuc, izracunaj) {
+  function zMejo(obljuba) {
+    let t;
+    const meja = new Promise((_, no) => { t = setTimeout(() => no(MEJA), cakanjeMs); });
+    return Promise.race([obljuba, meja]).finally(() => clearTimeout(t));
+  }
+
+  async function dobi(kljuc, izracunaj, { prosto = false } = {}) {
     if (!omogoceno || kljuc === null || kljuc === undefined) {
       return { vnos: pripravi(await izracunaj()), stanje: "izklopljen" };
     }
@@ -99,7 +118,18 @@ function ustvariPredpomnilnik({ ttlMs = 3000, najvecKljucev = 300, najvecBajtov 
       odstrani(kljuc, v);
     }
     const poteka = vLetu.get(kljuc);
-    if (poteka) { stat.zdruzeno++; return { vnos: await poteka, stanje: "zdruzeno" }; }
+    if (poteka) {
+      stat.zdruzeno++;
+      try {
+        return { vnos: await zMejo(poteka), stanje: "zdruzeno" };
+      } catch (e) {
+        if (e !== MEJA) throw e;
+        // Vodja visi predolgo: kljuc se sprosti (samo ce je se ista poizvedba) in poskusimo sami.
+        stat.casovneMeje++;
+        if (vLetu.get(kljuc) === poteka) vLetu.delete(kljuc);
+        return dobi(kljuc, izracunaj, { prosto });
+      }
+    }
 
     const mojRod = rod;
     const obljuba = (async () => pripravi(await izracunaj()))();
@@ -107,7 +137,9 @@ function ustvariPredpomnilnik({ ttlMs = 3000, najvecKljucev = 300, najvecBajtov 
     try {
       const vnos = await obljuba;
       stat.zgresitve++;
-      if (vnos.status === 200 && rod === mojRod && vnos.velikost <= NAJVEC_TELO) {
+      // Shrani samo, ce je to se vedno tekoca poizvedba kljuca (obviselo, ki so jo cakajoci opustili, ne prepise novejsega).
+      if (vnos.status === 200 && rod === mojRod && vLetu.get(kljuc) === obljuba && vnos.velikost <= NAJVEC_TELO) {
+        vnos.prosto = prosto;
         vnos.doKdaj = zdaj + ttlMs;                       // staranje se steje od zacetka poizvedbe (posnetek podatkov)
         shrani(kljuc, vnos, zdaj);
       } else {
@@ -126,12 +158,22 @@ function ustvariPredpomnilnik({ ttlMs = 3000, najvecKljucev = 300, najvecBajtov 
     vnosi.clear();
     vLetu.clear();
     bajti = 0;
+    prostih = 0;
+  }
+
+  /** Spremembe stevcev od zadnjega klica (za dnevnik); brez osebnih podatkov. */
+  function porocilo() {
+    const zdaj = { ...stat };
+    const d = {};
+    for (const k of Object.keys(zdaj)) d[k] = zdaj[k] - zadnjePorocilo[k];
+    zadnjePorocilo = zdaj;
+    return { ...d, kljucev: vnosi.size, prostih };
   }
 
   /** Posljiv odgovor iz vnosa: ETag/304, Content-Length, brez ponovne serializacije. */
   function poslji(req, res, vnos, stanje) {
     res.set("X-Predpomnilnik", stanje);
-    if (vnos.glave) for (const [k, v] of Object.entries(vnos.glave)) res.set(k, v);
+    if (vnos.glave) for (const [k, v] of Object.entries(vnos.glave)) { if (k.toLowerCase() === "vary") res.vary(v); else res.set(k, v); }
     if (vnos.etag) {
       res.set("ETag", vnos.etag);
       res.status(vnos.status);
@@ -169,8 +211,8 @@ function ustvariPredpomnilnik({ ttlMs = 3000, najvecKljucev = 300, najvecBajtov 
 
   return {
     omogoceno, ttlMs, najvecKljucev,
-    dobi, poslji, pripravi, razveljavi, razveljaviOdPisanja,
-    statistika: () => ({ ...stat, kljucev: vnosi.size, bajtov: bajti, vLetu: vLetu.size }),
+    dobi, poslji, pripravi, razveljavi, razveljaviOdPisanja, porocilo,
+    statistika: () => ({ ...stat, kljucev: vnosi.size, bajtov: bajti, vLetu: vLetu.size, prostih }),
   };
 }
 

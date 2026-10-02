@@ -25,13 +25,31 @@ function stevilkaIzOkolja(ime, privzeto, najvec) {
 const javniPredpomnilnik = ustvariPredpomnilnik({
   ttlMs: stevilkaIzOkolja("JAVNI_PREDPOMNILNIK_MS", 3000, 60000),
   najvecKljucev: stevilkaIzOkolja("JAVNI_PREDPOMNILNIK_KLJUCEV", 300, 5000),
+  // Obviselo poizvedbo vodje kljuc spusti po tem casu (ms); cakajoci poskusijo sami. 0 = privzeto.
+  cakanjeMs: stevilkaIzOkolja("JAVNI_PREDPOMNILNIK_CAKANJE_MS", 8000, 60000) || 8000,
 });
+// Dnevnik stevcev (brez osebnih podatkov) na minuto, samo ce je bilo kaj prometa: po deployu vidno v Render logih.
+setInterval(() => {
+  const p = javniPredpomnilnik.porocilo();
+  if (p.zadetki + p.zgresitve + p.zdruzeno + p.razveljavitve > 0) {
+    console.log(`[predpomnilnik] 60 s: zadetki=${p.zadetki} zgresitve=${p.zgresitve} zdruzeno=${p.zdruzeno} razveljavitve=${p.razveljavitve} izpodrivi=${p.izpodrivi} casovneMeje=${p.casovneMeje} kljucev=${p.kljucev}`);
+  }
+}, 60 * 1000).unref();
 // Vsak zapis v tem procesu izprazni predpomnilnik; izjeme so pogosti zapisi, ki javnih seznamov ne spremenijo.
 app.use(javniPredpomnilnik.razveljaviOdPisanja([
   { metoda: "POST", pot: /^\/views$/ },
   { metoda: "POST", pot: /^\/business\/tickets\/scan(-batch)?$/ },
   { metoda: "POST", pot: /^\/me\/(club-events|tickets\/received)\/[^/]+\/seen$/ },
   { metoda: "POST", pot: /^\/uploads\/cloudinary-signature$/ },
+  // Zapisi, ki ne vplivajo na nobeno polje predpomnjenih odgovorov (dogodek: stolpci events + sold_count iz orders +
+  // interested_count + VIP; klub: stolpci clubs + followers_count). Preverjeno po tabelah: users, friendships,
+  // friend_requests, event_favorites, ticket_transfers/tickets. NE sem: interest, follow (stevca), nakupi, DELETE /me.
+  { metoda: "PATCH", pot: /^\/me(\/avatar)?$/ },
+  { metoda: "POST", pot: /^\/me\/friends\/requests(\/\d+\/(accept|decline))?$/ },
+  { metoda: "DELETE", pot: /^\/me\/friends\/(requests\/)?\d+$/ },
+  { metoda: "PUT", pot: /^\/me\/favorites\/\d+$/ },
+  { metoda: "DELETE", pot: /^\/me\/favorites\/\d+$/ },
+  { metoda: "POST", pot: /^\/tickets\/\d+\/transfer$/ },
 ]));
 // Privzeta omejitev telesa (100 kB) povsod, razen pri paketu skenov brez povezave (do 500 elementov, ima svoj razčlenjevalnik).
 const jsonPrivzeti = express.json();
@@ -819,18 +837,22 @@ function stevilo(vrednost, privzeto, najvec) {
 function nenavadniParametri(vrednosti, najdaljsiNiz = 100) {
   return vrednosti.some((v) => v !== undefined && (typeof v !== "string" || v.length > najdaljsiNiz));
 }
+// Osebna razlicica odgovora (prijavljen uporabnik): "private" + "Vary: Authorization", da skupni predpomnilnik (CDN, proxy)
+// osebnih polj nikoli ne shrani; javna razlicica (gost) ima samo Vary, da se loci od osebne.
+const GLAVE_OSEBNO = { "Cache-Control": "private", Vary: "Authorization" };
 function kljucId(vrsta, id) {
   return id.length > 15 ? null : JSON.stringify([vrsta, id]);
 }
 function kljucKlubov(q) {
   const { limit, offset, city, q: iskanje, withCoords } = q;
   if (nenavadniParametri([limit, offset, city, iskanje, withCoords])) return null;
-  return JSON.stringify(["clubs", stevilo(limit, 100, 200), stevilo(offset, 0, 100000), city || null,
-    iskanje ? String(iskanje).trim() : null, withCoords === "true"]);
+  if (iskanje) return null;   // prosto iskanje se ne predpomni: poplava razlicnih iskalnih nizov ne sme izpodrivati vrocih kljucev
+  return JSON.stringify(["clubs", stevilo(limit, 100, 200), stevilo(offset, 0, 100000), city || null, withCoords === "true"]);
 }
 
 app.get("/clubs", async (req, res) => {
   try {
+    // city je prosto besedilo: loceni majhen proracun (`prosto`), da poplava mest ne izpodrine vrocih kljucev.
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucKlubov(req.query), async () => {
     const limit  = stevilo(req.query.limit, 100, 200);
     const offset = stevilo(req.query.offset, 0, 100000);
@@ -862,7 +884,7 @@ app.get("/clubs", async (req, res) => {
     // Skupno stevilo v glavi, da telo ostane navaden seznam in se aplikaciji
     // ni treba spreminjati. Dekoder v Swiftu pricakuje [APIClub].
     return { status: 200, json: r.rows, glave: { "X-Total-Count": String(skupaj.rows[0].n) } };
-    });
+    }, { prosto: !!req.query.city });
     return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
     console.error(e);
@@ -912,7 +934,7 @@ app.get("/clubs/:id", neobveznaPrijava, async (req, res) => {
         `SELECT ${JAVNI_STOLPCI_KLUBA} FROM clubs WHERE id=$1 AND hidden = FALSE`, [req.params.id]
       );
       if (r.rows.length === 0) return { status: 404, besedilo: "Club not found." };
-      return { status: 200, json: { ...r.rows[0], is_following: false }, podatki: r.rows[0] };
+      return { status: 200, json: { ...r.rows[0], is_following: false }, podatki: r.rows[0], glave: { Vary: "Authorization" } };
     });
     if (vnos.status !== 200 || !req.user) return javniPredpomnilnik.poslji(req, res, vnos, stanje);
 
@@ -921,7 +943,7 @@ app.get("/clubs/:id", neobveznaPrijava, async (req, res) => {
       [req.params.id, req.user.userId]
     );
     return javniPredpomnilnik.poslji(req, res,
-      javniPredpomnilnik.pripravi({ status: 200, json: { ...vnos.podatki, is_following: f.rowCount > 0 } }), stanje);
+      javniPredpomnilnik.pripravi({ status: 200, json: { ...vnos.podatki, is_following: f.rowCount > 0 }, glave: GLAVE_OSEBNO }), stanje);
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
@@ -1466,7 +1488,7 @@ app.get("/events/:id", neobveznaPrijava, async (req, res) => {
         [req.params.id]
       );
       if (r.rows.length === 0) return { status: 404, besedilo: "Event not found." };
-      return { status: 200, json: { ...r.rows[0], my_plan: null, friends_going: [], friends_interested: [] }, podatki: r.rows[0] };
+      return { status: 200, json: { ...r.rows[0], my_plan: null, friends_going: [], friends_interested: [] }, podatki: r.rows[0], glave: { Vary: "Authorization" } };
     });
     if (vnos.status !== 200 || !req.user) return javniPredpomnilnik.poslji(req, res, vnos, stanje);
 
@@ -1496,6 +1518,7 @@ app.get("/events/:id", neobveznaPrijava, async (req, res) => {
     return javniPredpomnilnik.poslji(req, res, javniPredpomnilnik.pripravi({
       status: 200,
       json: { ...vnos.podatki, my_plan, friends_going: f.rows[0].friends_going, friends_interested: f.rows[0].friends_interested },
+      glave: GLAVE_OSEBNO,
     }), stanje);
   } catch (e) {
     console.error(e);

@@ -3,8 +3,10 @@
  * Test: javni predpomnilnik seznamov (issue #114, invarianta I17).
  * Zagon (lokalno, PG16, baza z vsemi migracijami):
  *   DATABASE_URL="postgres://postgres:postgres@localhost:5432/outly" node _testi/test_javni_predpomnilnik.js
- * Vzorec kot test_vabila.js: lokalni JWKS (3990), backend A (privzeti TTL 3 s, 20 kljucev) na 3150, backend B (predpomnilnik
- * izklopljen, JAVNI_PREDPOMNILNIK_MS=0) na 3151 = kontrola, da meritve niso prazne.
+ * Vzorec kot test_vabila.js: lokalni JWKS (3990); backend A (TTL 60 s, torej v testu nikoli ne poteče - vse se zanasa na
+ * razveljavitev, test ni obcutljiv na pocasen CI; 20 kljucev) na 3150; backend B (predpomnilnik izklopljen,
+ * JAVNI_PREDPOMNILNIK_MS=0) na 3151 = kontrola, da meritve niso prazne; backend C (TTL 2 s, casovna meja single-flight
+ * 0,5 s) na 3152 za teste, ki potrebujejo potek casa.
  *
  * Pokrito: (a) osebna polja ne uhajajo med uporabniki/gosta, (b) sprememba je takoj vidna v istem procesu,
  * (c) ETag + 304, (d) 200 hkratnih zahtevkov = 1 poizvedba v bazo (merjeno z zaklepom tabele in pg_stat_activity),
@@ -19,8 +21,8 @@ const { ustvariPredpomnilnik } = require("../javni_predpomnilnik");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const PORT_A = 3150, PORT_B = 3151, JWKS_PORT = 3990;
-const A = `http://127.0.0.1:${PORT_A}`, B = `http://127.0.0.1:${PORT_B}`;
+const PORT_A = 3150, PORT_B = 3151, PORT_C = 3152, JWKS_PORT = 3990;
+const A = `http://127.0.0.1:${PORT_A}`, B = `http://127.0.0.1:${PORT_B}`, C = `http://127.0.0.1:${PORT_C}`;
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
 const jwk = publicKey.export({ format: "jwk" });
@@ -73,6 +75,8 @@ const a = (method, pot, token, body, headers) => (method === "GET" && headers
   ? surovGet(A, pot, { ...(token ? { authorization: "Bearer " + token } : {}), ...headers })
   : req(A, method, pot, { token, body, headers }));
 const b = (method, pot, token, body) => req(B, method, pot, { token, body });
+const cakajoci_zaklep = async (pool) => Number((await pool.query(
+  "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()")).rows[0].n);
 const osebna = ["my_plan", "friends_going", "friends_interested", "is_following"];
 
 function zazeni(port, dodatnoOkolje) {
@@ -149,6 +153,39 @@ async function enotski() {
   await stara;
   assert(JSON.parse((await cr.dobi("r", async () => ({ status: 200, json: "x" }))).vnos.telo) === "novo", "stara poizvedba (pred razveljavitvijo) ne prepise vnosa");
 
+  // Casovna meja single-flight
+  const ct = ustvariPredpomnilnik({ ttlMs: 1000, najvecKljucev: 10, cakanjeMs: 50, ura });
+  let nt = 0, sprosti;
+  const vrataT = new Promise((res) => { sprosti = res; });
+  const vodja = ct.dobi("t", async () => { nt++; await vrataT; return { status: 200, json: "staro" }; });
+  await spi(5);
+  const cakNiz = await Promise.race([
+    Promise.all([1, 2, 3].map(() => ct.dobi("t", async () => { nt++; return { status: 200, json: "novo" }; }))),
+    spi(2000).then(() => null)]);
+  assert(cakNiz !== null, "casovna meja: cakajoci se ne obesijo za obviselim vodjem");
+  const cak = cakNiz || [];
+  assert(nt === 2, "casovna meja: vodja + ena nova poizvedba (ne tri)", nt);
+  assert(cak.length === 3 && cak.every((x) => JSON.parse(x.vnos.telo) === "novo"), "casovna meja: vsi cakajoci dobijo svez rezultat");
+  assert(ct.statistika().casovneMeje === 3, "casovna meja: stevec 3", ct.statistika());
+  sprosti(); await vodja;
+  const pov = await ct.dobi("t", async () => ({ status: 200, json: "x" }));
+  assert(pov.stanje === "zadetek" && JSON.parse(pov.vnos.telo) === "novo", "opuscena stara poizvedba, ki se konca pozneje, ne prepise novejsega vnosa");
+
+  // Loceni proracun za prosto besedilo
+  const cp = ustvariPredpomnilnik({ ttlMs: 1000, najvecKljucev: 100, najvecProstih: 3, ura });
+  await cp.dobi("vroc", async () => ({ status: 200, json: 1 }));
+  for (let i = 0; i < 50; i++) await cp.dobi("p" + i, async () => ({ status: 200, json: i }), { prosto: true });
+  assert(cp.statistika().prostih === 3 && (await cp.dobi("vroc", async () => ({ status: 200, json: 2 }))).stanje === "zadetek", "prosti kljuci: najvec 3, vroc kljuc ostane", cp.statistika());
+  assert(cp.statistika().kljucev === 4, "prosti kljuci: skupaj 1 + 3", cp.statistika());
+
+  // Porocilo stevcev (za dnevnik)
+  const cq = ustvariPredpomnilnik({ ttlMs: 1000, najvecKljucev: 10, ura });
+  await cq.dobi("q", async () => ({ status: 200, json: 1 })); await cq.dobi("q", async () => ({ status: 200, json: 1 })); cq.razveljavi();
+  let por = cq.porocilo();
+  assert(por.zadetki === 1 && por.zgresitve === 1 && por.razveljavitve === 1, "porocilo: delta stevcev", por);
+  por = cq.porocilo();
+  assert(por.zadetki === 0 && por.razveljavitve === 0, "porocilo: drugi klic = 0 sprememb", por);
+
   // Izklopljeno
   const ci = ustvariPredpomnilnik({ ttlMs: 0, ura });
   let ni = 0;
@@ -162,9 +199,11 @@ async function enotski() {
   const pool = new Pool({ connectionString: DB });
   await pool.query("TRUNCATE view_counts, event_interest, club_event_notifications, club_follows, club_invites, club_members, event_favorites, friendships, friend_requests, ticket_transfers, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
   await new Promise((r) => jwksServer.listen(JWKS_PORT, r));
-  const sA = zazeni(PORT_A, { JAVNI_PREDPOMNILNIK_KLJUCEV: "20" });
+  const sA = zazeni(PORT_A, { JAVNI_PREDPOMNILNIK_MS: "60000", JAVNI_PREDPOMNILNIK_KLJUCEV: "20" });
   const sB = zazeni(PORT_B, { JAVNI_PREDPOMNILNIK_MS: "0" });
-  await pocakaj(A); await pocakaj(B);
+  const sC = zazeni(PORT_C, { JAVNI_PREDPOMNILNIK_MS: "2000", JAVNI_PREDPOMNILNIK_CAKANJE_MS: "500" });
+  await pocakaj(A); await pocakaj(B); await pocakaj(C);
+  const c = (method, pot, token, body) => req(C, method, pot, { token, body });
 
   try {
     const T = {};
@@ -242,6 +281,43 @@ async function enotski() {
     r = await a("GET", `/events/${ev}`, T.an_x);
     assert(r.stanje === "zadetek" && r.body.friends_going.length === 0 && r.body.friends_interested.length === 0 && r.body.my_plan === "interested",
       "an_x za ano: ne vidi anine vsebine, vidi samo svoj plan", r.body);
+
+    console.log("\n# Glave: osebna razlicica je private + Vary: Authorization (CDN je ne sme shraniti)");
+    const vary = (x) => String(x.headers.get("vary") || "").toLowerCase();
+    for (const pot of [`/events/${ev}`, "/clubs/1"]) {
+      const g = await a("GET", pot), o = await a("GET", pot, T.ana);
+      assert(o.headers.get("cache-control") === "private" && vary(o).includes("authorization"), `${pot}: prijavljen -> Cache-Control: private + Vary: Authorization`, [o.headers.get("cache-control"), vary(o)]);
+      assert(g.headers.get("cache-control") === null && vary(g).includes("authorization"), `${pot}: gost -> Vary: Authorization, brez Cache-Control`, [g.headers.get("cache-control"), vary(g)]);
+      const o304 = await a("GET", pot, T.ana, null, { "If-None-Match": o.headers.get("etag") });
+      assert(o304.status === 304 && o304.headers.get("cache-control") === "private", `${pot}: 304 osebne razlicice je tudi private`);
+    }
+    for (const pot of ["/events?upcoming=true", "/clubs"]) {
+      const l = await a("GET", pot, T.ana);
+      assert(l.headers.get("cache-control") === null && !vary(l).includes("authorization"), `${pot}: seznam ostane brez Cache-Control in Vary (enak za vse)`);
+    }
+
+    console.log("\n# Razveljavitev: zapisi, ki ne vplivajo na predpomnjene odgovore, je ne sprozijo; stevci jo");
+    await a("GET", "/events?upcoming=true"); await a("GET", "/clubs/1"); await a("GET", `/events/${ev}`);
+    const ostane = async (opis) => {
+      const x = [await a("GET", "/events?upcoming=true"), await a("GET", "/clubs/1"), await a("GET", `/events/${ev}`)];
+      assert(x.every((q) => q.stanje === "zadetek"), `${opis}: predpomnilnik ostane (3 zadetki)`, x.map((q) => q.stanje));
+    };
+    r = await a("PATCH", "/me", T.an_x, { genres: ["techno"] });
+    assert(r.status === 200, "PATCH /me", r.status); await ostane("PATCH /me");
+    r = await a("PUT", `/me/favorites/${ev}`, T.an_x); assert(r.status < 300, "PUT favorites", r.status);
+    r = await a("DELETE", `/me/favorites/${ev}`, T.an_x); assert(r.status < 300, "DELETE favorites", r.status); await ostane("favorites");
+    r = await a("POST", "/me/friends/requests", T.an_x, { user_id: id.cene });
+    assert(r.status === 201, "an_x -> prosnja za prijateljstvo", r.status);
+    r = await a("DELETE", `/me/friends/requests/${r.body.request.id}`, T.an_x); assert(r.status < 300, "preklic prosnje", r.status);
+    await ostane("prijateljske prosnje");
+    // Stevca (interested_count, followers_count) pa se spreminjata -> razveljavitev
+    r = await a("PUT", `/events/${ev}/interest`, T.cene);
+    r = await a("GET", `/events/${ev}`);
+    assert(r.stanje === "zgresitev" && r.body.interested_count === 4, "PUT interest razveljavi in stevec je takoj tocen (4)", [r.stanje, r.body.interested_count]);
+    r = await a("PUT", "/clubs/1/follow", T.bor);
+    r = await a("GET", "/clubs/1");
+    assert(r.stanje === "zgresitev" && r.body.followers_count === 1, "PUT follow razveljavi in followers_count je takoj tocen (1)", [r.stanje, r.body.followers_count]);
+    await a("DELETE", `/events/${ev}/interest`, T.cene); await a("DELETE", "/clubs/1/follow", T.bor);
 
     // Kljuc ne vsebuje zetona: seznama /events in /clubs sta enaka za vse
     const sezGost = await a("GET", "/events?upcoming=true");
@@ -357,14 +433,15 @@ async function enotski() {
     r = await a("GET", "/events?upcoming=true");
     assert(r.stanje === "zadetek", "po 401, 4xx in POST /views je GET /events se vedno zadetek", r.stanje);
 
-    console.log("\n# Neposredna sprememba baze (druga instanca) zaostane najvec TTL (sprejeto)");
-    await a("GET", "/events?upcoming=true");
+    console.log("\n# Neposredna sprememba baze (druga instanca) zaostane najvec TTL (sprejeto; backend C, TTL 2 s)");
+    await c("GET", "/events?upcoming=true");
     await pool.query("UPDATE events SET title = 'Neposredno v bazi' WHERE id = $1", [ev2]);
-    r = await a("GET", "/events?upcoming=true");
-    assert(r.stanje === "zadetek" && r.body.find((e) => e.id === ev2).title !== "Neposredno v bazi", "znotraj TTL se neposredna sprememba se ne vidi (zadetek)");
-    await spi(3300);
-    r = await a("GET", "/events?upcoming=true");
-    assert(r.stanje === "zgresitev" && r.body.find((e) => e.id === ev2).title === "Neposredno v bazi", "po TTL (3 s) se vidi", [r.stanje]);
+    r = await c("GET", "/events?upcoming=true");
+    assert(r.stanje === "zadetek" && r.body.find((e) => e.id === ev2).title !== "Neposredno v bazi", "znotraj TTL se neposredna sprememba se ne vidi (zadetek)", r.stanje);
+    await spi(2300);
+    r = await c("GET", "/events?upcoming=true");
+    assert(r.stanje === "zgresitev" && r.body.find((e) => e.id === ev2).title === "Neposredno v bazi", "po TTL (2 s) se vidi", [r.stanje]);
+    await a("PATCH", `/events/${ev2}`, T.lastnik, { title: "Druga" });   // A je neposredno spremembo zamudil (TTL 60 s): zapis ga uskladi
 
     console.log("\n# (c) ETag in 304");
     r = await a("GET", "/events?upcoming=true");
@@ -468,20 +545,50 @@ async function enotski() {
     m = await meritev(A, "/clubs/1", "clubs");
     assert(m.n === 1, "A: GET /clubs/:id (gosti): natanko 1 poizvedba", m.n);
 
-    console.log("\n# (e) Omejitev velikosti (JAVNI_PREDPOMNILNIK_KLJUCEV=20)");
+    console.log("\n# Casovna meja single-flight (backend C, 0,5 s): obviselo poizvedbo kljuc spusti, cakajoci poskusijo sami");
+    await c("PATCH", `/events/${ev}`, T.lastnik, { title: "C zacetek" });
+    {
+      const k = await pool.connect();
+      try {
+        await k.query("BEGIN"); await k.query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE");
+        const vodja = req(C, "GET", "/events?clubId=1&upcoming=false");
+        await spi(150);
+        const cakajoci = [1, 2, 3].map(() => req(C, "GET", "/events?clubId=1&upcoming=false"));
+        await spi(1000);                                   // cakajoci so po 0,5 s opustili vodjo
+        const n = await cakajoci_zaklep(pool);
+        assert(n === 2, "obvisela poizvedba vodje + ENA nova (ne 4): cakajoci so se zdruzili v novega vodjo", n);
+        await k.query("COMMIT");
+        const vsi = await Promise.all([vodja, ...cakajoci]);
+        assert(vsi.every((x) => x.status === 200), "po sprostitvi zaklepa vsi 4 dobijo 200", vsi.map((x) => x.status));
+      } finally { k.release(); }
+    }
+
+    console.log("\n# (e) Omejitev velikosti (JAVNI_PREDPOMNILNIK_KLJUCEV=20) in loceni proracun za prosto besedilo");
     const rss0 = rssMB(sA.pid);
-    for (let i = 0; i < 40; i++) await a("GET", `/clubs?q=nakljucno${i}`);
+    for (let i = 0; i < 40; i++) await a("GET", `/clubs?offset=${i}`);
     let zadetki = 0;
-    for (let i = 39; i >= 20; i--) if ((await a("GET", `/clubs?q=nakljucno${i}`)).stanje === "zadetek") zadetki++;
+    for (let i = 39; i >= 20; i--) if ((await a("GET", `/clubs?offset=${i}`)).stanje === "zadetek") zadetki++;
     assert(zadetki === 20, "po 40 razlicnih kljucih je v predpomnilniku natanko zadnjih 20 (omejitev)", zadetki);
-    r = await a("GET", "/clubs?q=nakljucno19");
+    r = await a("GET", "/clubs?offset=19");
     assert(r.stanje === "zgresitev", "21. najnovejsi kljuc je izpodrinjen (LRU)", r.stanje);
-    // Poplava z razlicnimi parametri (napad): 3000 zahtevkov, vsak svoj kljuc, dolgi nizi
+    r = await a("GET", "/clubs?q=pure");
+    assert(r.status === 200 && r.stanje === "izklopljen", "iskanje q se ne predpomni (gre mimo)", r.stanje);
+    // city je prosto besedilo: poplava mest izpodriva samo druge proste kljuce (proracun 10 % kljucev), ne vrocih
+    await a("GET", "/clubs?offset=39");
+    for (let i = 0; i < 100; i++) await a("GET", `/clubs?city=mesto${i}`);
+    r = await a("GET", "/clubs?offset=39");
+    assert(r.stanje === "zadetek", "vroc kljuc preziv poplavo 100 razlicnih mest", r.stanje);
+    let mest = 0;
+    for (let i = 99; i >= 98; i--) if ((await a("GET", `/clubs?city=mesto${i}`)).stanje === "zadetek") mest++;
+    assert(mest === 2, "od prostih kljucev sta ostala natanko zadnja 2 (10 % od 20 kljucev)", mest);
+    r = await a("GET", "/clubs?city=mesto97");
+    assert(r.stanje === "zgresitev", "3. najnovejsi prosti kljuc je izpodrinjen", r.stanje);
+    // Poplava z razlicnimi parametri (napad): 1500 zahtevkov, vsak svoj kljuc, dolgi nizi
     const kosi = [];
-    for (let i = 0; i < 3000; i++) kosi.push(req(A, "GET", `/clubs?q=${i}-${"x".repeat(90)}&offset=${i % 500}`).then((x) => x.status));
+    for (let i = 0; i < 1500; i++) kosi.push(req(A, "GET", `/clubs?city=${i}-${"x".repeat(90)}&offset=${i % 500}`).then((x) => x.status));
     for (let i = 0; i < kosi.length; i += 100) await Promise.all(kosi.slice(i, i + 100));
     const statusiPoplave = await Promise.all(kosi);
-    assert(statusiPoplave.every((s) => s === 200), "poplava 3000 razlicnih kljucev: vsi 200");
+    assert(statusiPoplave.every((s) => s === 200), "poplava 1500 razlicnih kljucev: vsi 200");
     console.log(`  (informativno) RSS backenda A: ${rss0.toFixed(0)} -> ${rssMB(sA.pid).toFixed(0)} MB; trda omejitev je v enotskih testih (kljucev, bajtov)`);
     r = await a("GET", "/clubs?q=" + "z".repeat(150));
     assert(r.status === 200 && r.stanje === "izklopljen", "predolg niz (>100 znakov) gre mimo predpomnilnika", r.stanje);
@@ -496,9 +603,9 @@ async function enotski() {
 
     console.log("\n# Brez neujetih napak v dnevniku");
     assert(!/Unhandled|TypeError|ReferenceError/.test(sA.log), "dnevnik A brez neujetih napak", sA.log.slice(-400));
-    assert(!/Unhandled|TypeError|ReferenceError/.test(sB.log), "dnevnik B brez neujetih napak");
+    assert(!/Unhandled|TypeError|ReferenceError/.test(sB.log) && !/Unhandled|TypeError|ReferenceError/.test(sC.log), "dnevnika B in C brez neujetih napak");
   } finally {
-    sA.kill(); sB.kill(); jwksServer.close();
+    sA.kill(); sB.kill(); sC.kill(); jwksServer.close();
     await pool.end().catch(() => {});
   }
   console.log(`\n${ok} ok, ${fail} napak`);

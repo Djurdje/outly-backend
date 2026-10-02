@@ -80,15 +80,11 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`.
 - **VIP 18+ na odjemalcih še ni:** iOS in splet polja `package_min_age` (lahko `undefined` na starem backendu — privzeto 18) še ne
   kažeta. 403 sta navadno besedilo (kot pri `min_age`); odjemalec starosti ne preverja sam.
 
-## Javni predpomnilnik (2. 10. 2026, #114; ARCHITECTURE »Javni predpomnilnik«, I17)
+## Javni predpomnilnik (#114, ARCHITECTURE »Javni predpomnilnik«, I17; odločitev agenta, Martin je ni potrdil)
 
-- `GET /events`, `/clubs`, `/events/:id`, `/clubs/:id` so 3 s v pomnilniku procesa; zapis (POST/PUT/PATCH/DELETE) ga takoj izprazni. Kar se spremeni
-  mimo API-ja (ročni SQL, migracija, druga instanca) je vidno do 3 s pozneje; `sold_count` in `lifecycle` zaostanejo največ toliko.
-- **Past:** nov javni GET, ki je odvisen od uporabnika (žeton, IP), NE sme v predpomnilnik; `/events/:id` vrača osebna polja šele po branju. Test, ki
-  piše v bazo neposredno in nato bere prek HTTP, rabi `JAVNI_PREDPOMNILNIK_MS=0` (kot `test_pool_napaka.js`) ali počakati TTL.
-- Za `ios-dev` / `web-dev` (neobvezno, samo dodajanje): `GET /events?lite=true` izpusti `description` (ključ manjka, ne `null`; testni podatki, 200
-  dogodkov: 177 → 111 kB). Model naj ima `description` neobvezen; kjer seznam opisa ne kaže, ga opis dobi iz `GET /events/:id`.
-  Odgovori imajo `ETag` (`If-None-Match` → 304) in `X-Predpomnilnik` (`zadetek | zgresitev | zdruzeno | izklopljen`, za `curl`).
+- `/events`, `/clubs`, `/events/:id`, `/clubs/:id` so 3 s v pomnilniku; zapis ga izprazni, mimo API-ja (SQL, migracija, druga instanca) zaostane do 3 s.
+  Dnevnik `[predpomnilnik] 60 s: …` kaže zadetke/razveljavitve; izklop: `JAVNI_PREDPOMNILNIK_MS=0`. Nov javni GET, odvisen od uporabnika, NE sme vanj.
+- Za iOS/splet (neobvezno): `GET /events?lite=true` brez `description` (ključ manjka; model naj ga ima neobveznega), `ETag`/304.
 
 ## Spletna aplikacija (outly.si/app; podrobnosti v `outly_webpage/CLAUDE.md`)
 
