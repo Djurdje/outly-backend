@@ -11,6 +11,7 @@
  *       POST /me/friends/requests/999/accept -> proces zivi, odgovori 404/503, vsak 503 ima Retry-After 5.
  *   S2  vsako mesto s `await pool.connect()` pred `try` (admin: approve, POST/PATCH clubs, export; transfer vstopnice,
  *       sprejem vabila, PUT /business/vip, PUT /business/events/:id/vip) pod isto zasicenostjo -> proces zivi, brez 500.
+ *   S3c DETERMINISTICNO: napaka baze (57014) v `await` pred `try` -> 503 + Retry-After, dnevnik [rocnik] (S1/S2 sta odvisna od casovanja).
  *   S3  `await` pred `try`, ki pade z NE-povezavno napako (pool.query z 22003 v staPrijatelja) -> 500 (ne izhod procesa).
  *   S4  skenPool (PG_SKEN_POOL_MAX=1, kratek timeout): 300 vzporednih skenov -> proces zivi, /clubs po koncu 200.
  */
@@ -90,6 +91,9 @@ const steje = (rez) => rez.reduce((m, r) => (m[r.status] = (m[r.status] || 0) + 
   // ---------------------------------------------------------------- S1
   console.log("# S1: scenarij iz issuea (PG_POOL_MAX=2, PG_CONNECT_TIMEOUT_MS=100, 400 x POST /me/friends/requests/999/accept)");
   await zagon(3962, { PG_POOL_MAX: "2", PG_CONNECT_TIMEOUT_MS: "100" });
+  // Opomba: ali zavrnitev pool.connect res pride do rocnika, ali pa vsi 503 nastanejo ze v iskanju uporabnika (avtentikacija,
+  // requireAuth tudi porabi povezavo iz istega poola), je odvisno od casovanja (CPU, CI) - zato tu NE trdimo dnevnika [rocnik].
+  // To trditev determinirano drzi S3c; S1 in S2 sta testa PREZIVETJA procesa pod navalo (na stari kodi izstopi s kodo 1).
   let rez = await Promise.all(Array.from({ length: 400 }, () => api("POST", "/me/friends/requests/999/accept", U.ana)));
   let st = steje(rez);
   console.log("  (statusi:", JSON.stringify(st), ")");
@@ -98,7 +102,6 @@ const steje = (rez) => rez.reduce((m, r) => (m[r.status] = (m[r.status] || 0) + 
   assert(Object.keys(st).every(k => k === "404" || k === "503"), "vsak odgovor je 404 (ni prosnje) ali 503 (pool zaseden): brez 500 in prekinjenih zvez", st);
   assert((st["503"] || 0) > 0, "scenarij je res zasitil pool (vsaj en 503)", st);
   assert(rez.filter(r => r.status === 503).every(r => r.retryAfter === "5"), "vsak 503 ima Retry-After: 5");
-  assert(/\[rocnik\] zacasna napaka povezave/.test(log), "zavrnitev pool.connect je sla prek obravnavalnika napak (dnevnik [rocnik])");
   assert(await zivo(), "po navali GET /clubs -> 200");
   await ustavi();
 
@@ -120,7 +123,6 @@ const steje = (rez) => rez.reduce((m, r) => (m[r.status] = (m[r.status] || 0) + 
   console.log("  (statusi:", JSON.stringify(steje(vsi)), ")");
   await spi(300);
   assert(!umrl, "proces po 720 vzporednih zahtevkih na 9 poti ZIVI", umrl);
-  assert(/\[rocnik\] zacasna napaka povezave/.test(log), "zavrnitve so sle prek obravnavalnika napak (dnevnik [rocnik])");
   for (const [ime] of poti) {
     const r = vsi.filter(x => x.ime === ime), s = steje(r);
     assert(!r.some(x => x.status === 500 || x.status === "omrezje"), `${ime}: brez 500 in prekinjenih zvez`, s);
@@ -136,9 +138,31 @@ const steje = (rez) => rez.reduce((m, r) => (m[r.status] = (m[r.status] || 0) + 
   assert(r.status === 500, "prenos vstopnice z user_id izven int4 (staPrijatelja pred try) -> 500 (ne izhod procesa)", r);
   await spi(300);
   assert(!umrl, "proces po napaki ZIVI", umrl);
-  assert(/\[rocnik\] nepricakovana napaka/.test(log), "napaka je zapisana s skladom ([rocnik] nepricakovana napaka)");
-  const slabJson = await fetch(BASE + "/me", { method: "PATCH", headers: { "content-type": "application/json", authorization: "Bearer " + U.ana }, body: "{pokvarjen" });
+  assert(log.includes("[rocnik] nepricakovana napaka (POST /tickets/1/transfer)"), "napaka je zapisana s potjo in skladom ([rocnik] nepricakovana napaka)");
+  const slabJson = await fetch(BASE + "/me", { method: "PATCH", headers: { "content-type": "application/json", authorization: "Bearer " + U.ana }, body: "{pokvarjen" }).catch(() => ({ status: "omrezje" }));
   assert(slabJson.status === 400, "pokvarjen JSON ostane 400 (napaka body-parserja gre skozi privzeti obravnavalnik, ne 500/503)", slabJson.status);
+  assert(await zivo(), "GET /clubs -> 200");
+  await ustavi();
+
+  // ---------------------------------------------------------------- S3c
+  console.log("\n# S3c: DETERMINISTICNO: napaka povezave/baze (57014 statement_timeout, razred 57) v `await` pred `try` -> 503 + dnevnik [rocnik]");
+  // Avtentikacija uspe (tabela users ni zaklenjena), `staPrijatelja` (pool.query PRED try v prenosu vstopnice) pa obvisi na zaklepu
+  // tabele friendships, dokler Postgres ne prekine stavka (PGOPTIONS statement_timeout). Isti mehanizem kot zavrnjen pool.connect
+  // pred try (zavrnjena obljuba pred try), a brez odvisnosti od casovanja.
+  await zagon(3962, { PGOPTIONS: "-c statement_timeout=400" });
+  const borId = (await pool.query("SELECT id FROM users WHERE email='bor@outly.si'")).rows[0].id;
+  const zk = await pool.connect();
+  await zk.query("BEGIN"); await zk.query("LOCK TABLE friendships IN ACCESS EXCLUSIVE MODE");
+  let t0 = Date.now();
+  r = await api("POST", "/tickets/1/transfer", U.ana, { user_id: borId });
+  assert(r.status === 503 && r.retryAfter === "5", "prenos vstopnice: stavek pred try prekinjen (57014) -> 503 + Retry-After 5 (NE izhod procesa, NE 500)", r);
+  assert(Date.now() - t0 >= 300, "odgovor je prisel po statement_timeout (zaklep je res drzal)", Date.now() - t0);
+  assert(log.includes("[rocnik] zacasna napaka povezave z bazo (POST /tickets/1/transfer)"), "napaka je sla prek obravnavalnika napak (dnevnik [rocnik] z metodo in potjo)");
+  await spi(300);
+  assert(!umrl, "proces ZIVI", umrl);
+  await zk.query("ROLLBACK"); zk.release();
+  r = await api("POST", "/tickets/1/transfer", U.ana, { user_id: borId });
+  assert(r.status === 404, "po sprostitvi zaklepa isti klic -> 404 (nista prijatelja), spet normalno", r);
   assert(await zivo(), "GET /clubs -> 200");
   await ustavi();
 

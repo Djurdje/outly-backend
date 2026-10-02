@@ -12,6 +12,11 @@
 // Ovoj poseze v Layer.prototype.handle_request (notranjost Expressa 4.x, enako dela paket express-async-errors), zato velja za
 // VSE poti: app, Router (admin) in vmesne programe, brez spreminjanja 77 poti. Ce poti ni (Express 5 ali druga razlicica),
 // require pade ob zagonu (deploy pade, stara razlicica ostane) - ne tiho brez varovala.
+// Ovoj je zakrpa za Express 4: pri drugi major razlicici glasno padi ob zagonu (Express 5 ujame zavrnitve sam, notranjost se razlikuje).
+const EXPRESS_RAZLICICA = require("express/package.json").version;
+if (!/^4\./.test(EXPRESS_RAZLICICA)) {
+  throw new Error(`asinhroni_rocniki.js podpira samo Express 4.x (namesceno ${EXPRESS_RAZLICICA}): odstrani ovoj ali ga preveri.`);
+}
 const Layer = require("express/lib/router/layer");
 const { jeNapakaPovezave } = require("./napaka_povezave");
 
@@ -38,16 +43,17 @@ function namestiAsinhroniOvoj() {
 //  - vse drugo: 500 s polnim skladom v dnevniku.
 function napakaRocnik(err, req, res, next) {
   const status = Number(err && (err.status || err.statusCode));
+  const kje = `${(req && req.method) || "?"} ${(req && req.path) || "?"}`;   // brez poizvedbenih parametrov (lahko vsebujejo zetone)
   if (res.headersSent) {
-    console.error("[rocnik] napaka po poslanem odgovoru:", (err && err.stack) || err);
+    console.error(`[rocnik] napaka po poslanem odgovoru (${kje}):`, (err && err.stack) || err);
     return next(err);
   }
   if (status >= 400 && status < 500) return next(err);
   if (jeNapakaPovezave(err)) {
-    console.error("[rocnik] zacasna napaka povezave z bazo:", (err && err.message) || err);
+    console.error(`[rocnik] zacasna napaka povezave z bazo (${kje}):`, (err && err.message) || err);
     return res.status(503).set("Retry-After", "5").send("Service temporarily unavailable. Please try again.");
   }
-  console.error("[rocnik] nepricakovana napaka:", (err && err.stack) || err);
+  console.error(`[rocnik] nepricakovana napaka (${kje}):`, (err && err.stack) || err);
   return res.status(500).send("Server error.");
 }
 
