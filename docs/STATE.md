@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-02 (zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
+Zadnja posodobitev: 2026-10-02 (idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -19,7 +19,7 @@ in stvari, ki jih nobeno orodje ne ve.
 
 **Zgodovina** (zaključeni sklopi, dnevniki sej, stari načrti in daljše prvotno besedilo pasti do 2. 10. 2026) je v
 [`docs/arhiv/STATE-do-2026-10-02.md`](arhiv/STATE-do-2026-10-02.md) — ni merodajna. Ta datoteka ima **največ 200 vrstic**;
-kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`STATE-do-2026-10-02b.md`](arhiv/STATE-do-2026-10-02b.md)).
+kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`STATE-do-2026-10-02c.md`](arhiv/STATE-do-2026-10-02c.md)).
 
 ## Odprte naloge
 
@@ -97,7 +97,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   imajo zato višjo specifičnost (`.karta.maplibregl-map`).
 - **Odprte najdbe pregleda faze 1** (29. 9., še brez Issueja): CSP velja samo za `/app` (seja v localStorage je skupna z vsem
   outly.si); `img-src https:` (poljuben https plakat/logo); `ticket_url`, `website`/`logo_url` brez preverbe `^https://` na strežniku
-  (splet filtrira z `varenUrl`, iOS ne); `JAVNI_STOLPCI_KLUBA` vsebuje `owner_user_id` (I4); nakup nima idempotenčnega ključa.
+  (splet filtrira z `varenUrl`, iOS ne).
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 
@@ -167,11 +167,11 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   `assets/fonts/`). Playwright: `npm i playwright` v scratchpadu + `executablePath` `/opt/pw-browsers/chromium-*/chrome-linux/chrome`.
 - Splet: razred `.points` je kartica točk v profilu (`auth.js`); nov razdelek s tem razredom bi podedoval centriranje.
 - Docs-only merge v `main` vseeno sproži Render deploy (~60 s restarta, brez nevarnosti).
-- **`owner_user_id` ni več v javnih odgovorih klubov (2. 10. 2026, #113, I4).** Odstranjen iz `JAVNI_STOLPCI_KLUBA` (torej tudi iz
-  `GET /clubs`, `/clubs/:id`, `/me/clubs/following`, `/business/clubs/me`); admin (`ADMIN_STOLPCI_KLUBA`) ga še vrne.
-  Preveritev odjemalcev: iOS ga dekodira (`APIClub.ownerUserId`, `decodeIfPresent ?? 0`), a ga nikjer ne bere; splet in admin ga ne
-  bereta. Pade nič. Za **ios-dev** (neurgentno): odstrani `ownerUserId` iz `APIClub.swift` ob prvi priložnosti. Za lastništvo
-  uporabi `my_role` / `GET /me` (`clubs[].role`), nikoli primerjave ID-jev. Za **web-dev**: ni dela.
+- `owner_user_id` ni več v javnih odgovorih klubov (#113, I4; arhiv `STATE-do-2026-10-02c.md`). **ios-dev** (neurgentno): odstrani `APIClub.ownerUserId`.
+- **Idempotentni ključ nakupa (#112, I18).** Glava `Idempotency-Key: <UUID>` na obeh `POST …/orders`; brez nje vse kot prej. Odjemalec: en UUID
+  na pritisk »Kupi«, isti ob ponovnem poskusu ISTEGA nakupa (timeout, 503, 409 `request_in_progress`), nov ob spremembi količine/mize/paketa ali po
+  uspehu. Ponovitev = 201 + `Idempotent-Replayed: true` s TRENUTNIM stanjem; neaktivno naročilo 409 `order_not_active`; drug nakup = 422; neuspeh se NE zapomni.
+  **iOS in splet ključa še ne pošiljata** (ios-dev, web-dev). Ključ je vezan na uporabnika in ni v odgovorih.
 - Ostale pasti (AsyncImage brez okvirja, gnezden NavigationStack, pg BIGINT, Resend `{error}`, JSONB vs ARRAY)
   so v `CLAUDE.md` tega repa in iOS repa.
 

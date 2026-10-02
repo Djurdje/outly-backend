@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–027, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–028, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 6hlk4xyF6LcsHhbjke2qM6E7aOCwq7gfCYpTQjdUEUKRdB8SRBKfNe2g0w0oLeZ
+\restrict gg2vofsrICnDY7O6Rdjwiy1ORvbHDezcmolpHjP1Rmtdy61X8Nb6pPguD4UnXd4
 
 -- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
@@ -618,6 +618,7 @@ CREATE TABLE public.orders (
     package_id integer,
     package_name text,
     package_description text,
+    idempotency_key uuid,
     CONSTRAINT orders_fee_chk CHECK (((application_fee_cents >= 0) AND (application_fee_cents <= total_cents))),
     CONSTRAINT orders_paid_chk CHECK (((status <> 'paid'::text) OR (paid_at IS NOT NULL))),
     CONSTRAINT orders_price_chk CHECK (((unit_price_cents >= 0) AND (total_cents >= 0))),
@@ -627,6 +628,13 @@ CREATE TABLE public.orders (
     CONSTRAINT orders_table_chk CHECK (((table_id IS NULL) OR ((quantity = 1) AND (table_label IS NOT NULL) AND ((table_seats >= 1) AND (table_seats <= 20))))),
     CONSTRAINT orders_total_chk CHECK ((total_cents = (unit_price_cents * quantity)))
 );
+
+
+--
+-- Name: COLUMN orders.idempotency_key; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.idempotency_key IS 'Glava Idempotency-Key ob nakupu (UUID, issue #112, I18). NULL = nakup brez kljuca. Unikaten po (user_id, idempotency_key).';
 
 
 --
@@ -1246,6 +1254,13 @@ CREATE INDEX orders_event_idx ON public.orders USING btree (event_id, status);
 
 
 --
+-- Name: orders_idempotency_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX orders_idempotency_key ON public.orders USING btree (user_id, idempotency_key) WHERE (idempotency_key IS NOT NULL);
+
+
+--
 -- Name: orders_miza_dogodek_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1710,5 +1725,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 6hlk4xyF6LcsHhbjke2qM6E7aOCwq7gfCYpTQjdUEUKRdB8SRBKfNe2g0w0oLeZ
+\unrestrict gg2vofsrICnDY7O6Rdjwiy1ORvbHDezcmolpHjP1Rmtdy61X8Nb6pPguD4UnXd4
 
