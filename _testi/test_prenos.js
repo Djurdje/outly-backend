@@ -188,6 +188,95 @@ async function api(method, path, token, body) {
   r = await api("POST", `/tickets/${vstopnicaAna}/transfer`, null, { email: "ana@outly.si" });
   assert(r.status === 401, "brez zetona -> 401", r.status);
 
+  console.log("\n# Kupcev pogled narocil po prenosu (I7, issue #124): brez novega seriala in e-naslova prejemnika");
+  // POST z Idempotency-Key (api() glav ne podpira) - ponovitev mora kupcu pokazati isto kot GET /me/orders.
+  const kupiZKljucem = async (token, pot, kljuc, telo) => {
+    const rs = await fetch(BASE + pot, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + token, "idempotency-key": kljuc }, body: JSON.stringify(telo) });
+    const t = await rs.text(); let j; try { j = JSON.parse(t); } catch { j = t; }
+    return { status: rs.status, body: j, replayed: rs.headers.get("idempotent-replayed") };
+  };
+  const serialIzBaze = async (id) => (await pool.query("SELECT serial FROM tickets WHERE id=$1", [id])).rows[0].serial;
+  // Kupcev pogled vstopnice po prenosu: serial je null (kljuc ostane), holder_email ni, drugo ostane.
+  const preveriKupcevPogled = (t, pricakovanId, ime, kdaj) => {
+    assert(t && t.id === pricakovanId, `${kdaj}: vstopnica ${pricakovanId} je v narocilu`, t);
+    assert("serial" in t && t.serial === null, `${kdaj}: serial je null (kljuc ostane)`, t && t.serial);
+    assert(!("holder_email" in t), `${kdaj}: brez holder_email prejemnika`, t);
+    assert(t.transferred === true && t.holder_username === ime && t.status === "valid" && t.qr === null,
+      `${kdaj}: transferred=true, holder_username=${ime}, status=valid, qr=null`, t);
+  };
+  const cezTri = new Date(Date.now() + 3 * 24 * 3600 * 1000).toISOString();
+  r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Kupcev pogled", startAt: cezTri, ticketPriceCents: 1000, capacity: 100, minAge: 0 });
+  assert(r.status === 201, "dogodek za kupcev pogled ustvarjen", r.body);
+  const dogodekPogled = r.body.id;
+  await pool.query("UPDATE events SET vip_enabled = TRUE WHERE id=$1", [dogodekPogled]);
+
+  const kljucA = crypto.randomUUID();
+  r = await kupiZKljucem(T.ana, `/events/${dogodekPogled}/orders`, kljucA, { quantity: 2 });
+  assert(r.status === 201 && r.body.tickets.length === 2, "ana kupi 2 vstopnici z Idempotency-Key", r.body);
+  const narociloA = r.body.order.id;
+  const [vA1, vA2] = r.body.tickets.map(t => t.id);
+  const serialA1Star = await serialIzBaze(vA1);
+  assert(typeof r.body.tickets[0].serial === "string" && r.body.tickets[0].serial === serialA1Star && typeof r.body.tickets[0].qr === "string"
+    && r.body.tickets[0].holder_email === "ana@outly.si" && r.body.tickets[0].transferred === false,
+    "pred prenosom kupec vidi svoj serial, QR in svoj e-naslov", r.body.tickets[0]);
+
+  r = await api("POST", `/tickets/${vA1}/transfer`, T.ana, { email: "cene@outly.si" });
+  assert(r.status === 200 && r.body.result === "ok", "ana prenese prvo vstopnico Cenetu", r.body);
+  const serialA1Novi = await serialIzBaze(vA1);
+  assert(serialA1Novi && serialA1Novi !== serialA1Star, "prenos je vstopnici dodelil nov serial (I7)", [serialA1Star, serialA1Novi]);
+
+  r = await api("GET", "/me/orders", T.ana);
+  const narociloVSeznamu = r.body.find(o => o.id === narociloA);
+  assert(r.status === 200 && narociloVSeznamu && narociloVSeznamu.tickets.length === 2, "GET /me/orders: narocilo z 2 vstopnicama", r.body);
+  preveriKupcevPogled(narociloVSeznamu.tickets.find(t => t.id === vA1), vA1, "cene", "GET /me/orders");
+  let ostala = narociloVSeznamu.tickets.find(t => t.id === vA2);
+  assert(ostala && typeof ostala.serial === "string" && typeof ostala.qr === "string" && ostala.holder_email === "ana@outly.si" && ostala.transferred === false,
+    "GET /me/orders: neprenesena vstopnica ima se serial, QR in kupcev e-naslov", ostala);
+  let surovo = JSON.stringify(r.body);
+  assert(!surovo.includes(serialA1Novi) && !surovo.includes("cene@outly.si"), "GET /me/orders nikjer ne vsebuje novega seriala ali e-naslova prejemnika");
+
+  r = await kupiZKljucem(T.ana, `/events/${dogodekPogled}/orders`, kljucA, { quantity: 2 });
+  assert(r.status === 201 && r.replayed === "true" && r.body.order.id === narociloA, "ponovitev nakupa z istim kljucem: 201 + Idempotent-Replayed, isto narocilo", [r.status, r.replayed]);
+  preveriKupcevPogled(r.body.tickets.find(t => t.id === vA1), vA1, "cene", "ponovitev nakupa");
+  ostala = r.body.tickets.find(t => t.id === vA2);
+  assert(ostala && typeof ostala.serial === "string" && typeof ostala.qr === "string", "ponovitev nakupa: neprenesena vstopnica ima se serial in QR", ostala);
+  surovo = JSON.stringify(r.body);
+  assert(!surovo.includes(serialA1Novi) && !surovo.includes("cene@outly.si"), "ponovitev nakupa nikjer ne vsebuje novega seriala ali e-naslova prejemnika");
+
+  // VIP miza: isti odgovor (POST /events/:id/tables/:tableId/orders), tudi ponovitev.
+  const mizaId = (await pool.query("INSERT INTO club_tables (club_id, label, x, y, w, h, seats, price_cents) VALUES (1,'T1',0,0,2,2,3,30000) RETURNING id")).rows[0].id;
+  const kljucV = crypto.randomUUID();
+  r = await kupiZKljucem(T.ana, `/events/${dogodekPogled}/tables/${mizaId}/orders`, kljucV, {});
+  assert(r.status === 201 && r.body.tickets.length === 3 && r.body.order.is_vip === true, "ana kupi VIP mizo z Idempotency-Key (3 vstopnice)", r.body);
+  const [vV1, vV2] = r.body.tickets.map(t => t.id);
+  r = await api("POST", `/tickets/${vV1}/transfer`, T.ana, { email: "bor@outly.si" });
+  assert(r.status === 200, "ana prenese prvo VIP vstopnico Boru", r.body);
+  const serialV1Novi = await serialIzBaze(vV1);
+  r = await kupiZKljucem(T.ana, `/events/${dogodekPogled}/tables/${mizaId}/orders`, kljucV, {});
+  assert(r.status === 201 && r.replayed === "true", "ponovitev nakupa mize: 201 + Idempotent-Replayed", [r.status, r.replayed]);
+  preveriKupcevPogled(r.body.tickets.find(t => t.id === vV1), vV1, "bor", "VIP ponovitev");
+  assert(typeof r.body.tickets.find(t => t.id === vV2).serial === "string", "VIP ponovitev: neprenesena vstopnica ima se serial");
+  assert(!JSON.stringify(r.body).includes(serialV1Novi) && !JSON.stringify(r.body).includes("bor@outly.si"), "VIP ponovitev ne vsebuje novega seriala ali e-naslova prejemnika");
+  r = await api("GET", "/me/orders", T.ana);
+  const vipNarocilo = r.body.find(o => o.is_vip && o.tickets.some(t => t.id === vV1));
+  preveriKupcevPogled(vipNarocilo && vipNarocilo.tickets.find(t => t.id === vV1), vV1, "bor", "VIP GET /me/orders");
+  assert(!JSON.stringify(r.body).includes(serialV1Novi) && !JSON.stringify(r.body).includes("bor@outly.si"), "VIP GET /me/orders ne vsebuje novega seriala ali e-naslova prejemnika");
+
+  console.log("\n# Prejemnik in klub serial se vedno imata (spremenjen je samo kupcev pogled narocil)");
+  r = await api("GET", "/me/tickets", T.cene);
+  const priCenetuPogled = r.body.find(t => t.id === vA1);
+  assert(priCenetuPogled && priCenetuPogled.serial === serialA1Novi && typeof priCenetuPogled.qr === "string" && priCenetuPogled.transferred === true,
+    "cene (prejemnik) v /me/tickets vidi nov serial in QR, transferred=true", priCenetuPogled);
+  r = await api("GET", "/me/tickets", T.ana);
+  assert(!r.body.some(t => t.id === vA1) && r.body.find(t => t.id === vA2) && typeof r.body.find(t => t.id === vA2).serial === "string",
+    "ana v /me/tickets prenesene vstopnice nima, svoje neprenesene pa se (serial)", r.body.map(t => t.id));
+  r = await api("GET", `/business/events/${dogodekPogled}/tickets`, T.lastnik);
+  const vKlubu = r.status === 200 && r.body.find(t => t.id === vA1);
+  assert(vKlubu && vKlubu.serial === serialA1Novi && typeof vKlubu.qr === "string" && vKlubu.holder_username === "cene" && vKlubu.holder_email === "cene@outly.si",
+    "klub (GET /business/events/:id/tickets) vidi serial in imetnika prenesene vstopnice", r.body);
+  r = await api("POST", "/business/tickets/scan", T.lastnik, { serial: serialA1Novi });
+  assert(r.status === 200 && r.body.result === "ok", "vratar skenira nov serial prejemnika -> 200", r.body);
+
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
   const napake = log.split("\n").filter(l => /error|TypeError|Unhandled/i.test(l) && !/Server error\./.test(l) && !/Resend/i.test(l));
   if (napake.length) console.log("\nLog backenda (sumljivo):\n" + napake.join("\n"));
