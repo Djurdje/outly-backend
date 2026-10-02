@@ -1,0 +1,188 @@
+# Dnevna varnostna kopija produkcijske baze IZVEN Renderja (issue #88).
+#
+# Kaj: prek obstojecega GET /admin/api/export (servisni admin racun) potegne logicni izvoz VSEH tabel,
+# ga SIFRIRA z javnim kljucem (age), shrani kot Actions artefakt (30 dni) in takoj preizkusi obnovo
+# (service container postgres:16, db/obnovi_izvoz.js, primerjava stevil vrstic in migracij).
+#
+# Zakaj izvoz prek API-ja in ne pg_dump: zunanji dostop do outly-db je zaprt (Inbound IP Rules prazne, STATE.md 30. 9.),
+# GitHubovi runnerji pa nimajo stalnega IP-ja. Z API-jem baza ostane zaprta, obnova pa je ISTI, ze testirani postopek
+# (db/obnovi_izvoz.js) kot v ARCHITECTURE.md.
+#
+# Repo je JAVEN: artefakti so dosegljivi vsakomur, ki je prijavljen v GitHub, dnevniki zagonov pa vsem.
+# Zato: (1) kopija je sifrirana z JAVNIM kljucem, zasebni kljuc je samo pri Martinu; (2) v dnevnik gredo samo
+# imena tabel, stevila vrstic, velikosti in odtis - nikoli vrednosti iz baze ali odgovori streznika.
+#
+# Nastavitve (vpise Martin; koraki v opisu PR-ja in v .claude/skills/obnova-baze/SKILL.md):
+#   secrets.BACKUP_ADMIN_EMAIL, secrets.BACKUP_ADMIN_PASSWORD   racun z vlogo admin (Supabase prijava)
+#   vars.BACKUP_AGE_PUBLIC_KEYS                                   javni kljuc(i) age1..., loceni s presledkom/novo vrstico
+#   secrets.NTFY_TOPIC (ze obstaja)                               push ob napaki, kot pri nadzor.yml
+#   secrets.HC_URL_KOPIJE (neobvezno)                             Healthchecks check »kopija ni stekla« (mrtev cloveka drzalo)
+name: Varnostna kopija baze
+
+on:
+  schedule:
+    - cron: "23 4 * * *"   # 06:23 po slovenskem poletnem casu; GitHub cron zna zamuditi (STATE.md), kopija je zato dnevna z rezervo
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "true = samo testno push obvestilo (ntfy), kopije ne naredi"
+        default: "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: varnostna-kopija-baze
+  cancel-in-progress: false
+
+jobs:
+  kopija:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: outly
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Ciljna baza preizkusa obnove: SAMO service container na runnerju (nikoli produkcija).
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/outly
+      NODE_ENV: test
+      TEST: ${{ github.event.inputs.test || 'false' }}
+    steps:
+      - name: Testno obvestilo (brez kopije)
+        id: test
+        if: env.TEST == 'true'
+        env:
+          TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          if [ -z "$TOPIC" ]; then echo "NTFY_TOPIC ni nastavljen - push preskocen"; exit 0; fi
+          curl -sS --max-time 20 -H "Title: Outly varnostna kopija" -H "Tags: floppy_disk" \
+            -d "TESTNO OBVESTILO - kopije nisem naredil, to je samo preizkus." "https://ntfy.sh/$TOPIC" >/dev/null && echo "Push poslan."
+
+      - uses: actions/checkout@v4
+        if: env.TEST != 'true'
+
+      - name: Preveri nastavitve (samo imena, nikoli vrednosti)
+        id: nastavitve
+        if: env.TEST != 'true'
+        env:
+          E: ${{ secrets.BACKUP_ADMIN_EMAIL }}
+          P: ${{ secrets.BACKUP_ADMIN_PASSWORD }}
+          K: ${{ vars.BACKUP_AGE_PUBLIC_KEYS }}
+        run: |
+          manjka=""
+          [ -n "$E" ] || manjka+=" secrets.BACKUP_ADMIN_EMAIL"
+          [ -n "$P" ] || manjka+=" secrets.BACKUP_ADMIN_PASSWORD"
+          [ -n "$K" ] || manjka+=" vars.BACKUP_AGE_PUBLIC_KEYS"
+          if [ -n "$manjka" ]; then
+            echo "::error::Manjka nastavitve:$manjka (glej .claude/skills/obnova-baze/SKILL.md, razdelek Nastavitev)."
+            exit 1
+          fi
+          echo "Nastavitve: vse prisotne."
+
+      - uses: actions/setup-node@v4
+        if: env.TEST != 'true'
+        with:
+          node-version: 22
+          cache: npm
+      - name: Namesti odvisnosti in age
+        if: env.TEST != 'true'
+        run: |
+          npm ci
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq age jq
+          age --version
+
+      - name: Izvoz produkcijske baze
+        id: izvoz
+        if: env.TEST != 'true'
+        env:
+          BACKUP_ADMIN_EMAIL: ${{ secrets.BACKUP_ADMIN_EMAIL }}
+          BACKUP_ADMIN_PASSWORD: ${{ secrets.BACKUP_ADMIN_PASSWORD }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/kopija/izhod"
+          chmod 700 "$RUNNER_TEMP/kopija"
+          bash _orodja/kopija/izvoz.sh "$RUNNER_TEMP/kopija/izvoz.json"
+
+      - name: Sifriraj z javnim kljucem (age)
+        id: sifriraj
+        if: env.TEST != 'true'
+        env:
+          BACKUP_AGE_PUBLIC_KEYS: ${{ vars.BACKUP_AGE_PUBLIC_KEYS }}
+        run: |
+          DATUM=$(date -u +%F)
+          echo "DATUM=$DATUM" >> "$GITHUB_ENV"
+          bash _orodja/kopija/sifriraj.sh "$RUNNER_TEMP/kopija/izvoz.json" "$RUNNER_TEMP/kopija/izhod/outly-db-$DATUM.json.gz.age"
+          {
+            echo "### Varnostna kopija baze $DATUM"
+            echo
+            echo "Sifrirano z age; odtis (sha256): \`$(cut -d' ' -f1 "$RUNNER_TEMP/kopija/izhod/outly-db-$DATUM.json.gz.age.sha256")\`"
+            echo "Velikost: $(stat -c %s "$RUNNER_TEMP/kopija/izhod/outly-db-$DATUM.json.gz.age") B (sifrirano, stisnjeno)."
+            echo
+            echo "Obnova: \`.claude/skills/obnova-baze/SKILL.md\` (potrebuje Martinov zasebni kljuc)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Shrani sifrirano kopijo (30 dni)
+        id: nalozi
+        if: env.TEST != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: outly-db-kopija-${{ env.DATUM }}
+          path: ${{ runner.temp }}/kopija/izhod/
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: error
+
+      # Namenoma PO nalaganju: ce preizkus obnove pade (npr. deploy z novo migracijo je v teku), je kopija vseeno shranjena.
+      - name: Preizkus obnove (service container postgres:16)
+        id: obnova
+        if: env.TEST != 'true'
+        run: bash _orodja/kopija/preizkus_obnove.sh "$RUNNER_TEMP/kopija/izvoz.json"
+
+      - name: Pocisti golo besedilo z diska runnerja
+        if: always() && env.TEST != 'true'
+        run: rm -rf "$RUNNER_TEMP/kopija/izvoz.json" || true
+
+      - name: Push obvestilo na telefon (ntfy)
+        if: failure() && env.TEST != 'true'
+        env:
+          TOPIC: ${{ secrets.NTFY_TOPIC }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          S_NASTAVITVE: ${{ steps.nastavitve.outcome }}
+          S_IZVOZ: ${{ steps.izvoz.outcome }}
+          S_SIFRIRAJ: ${{ steps.sifriraj.outcome }}
+          S_NALOZI: ${{ steps.nalozi.outcome }}
+          S_OBNOVA: ${{ steps.obnova.outcome }}
+        run: |
+          if [ -z "$TOPIC" ]; then echo "NTFY_TOPIC ni nastavljen - push preskocen"; exit 0; fi
+          if [ "$S_NALOZI" = "success" ]; then
+            SPOROCILO="Kopija baze je shranjena, a PREIZKUS OBNOVE je padel. Preveri zagon."
+          else
+            SPOROCILO="Dnevna kopija baze NI uspela (nastavitve: $S_NASTAVITVE, izvoz: $S_IZVOZ, sifriranje: $S_SIFRIRAJ, shranjevanje: $S_NALOZI)."
+          fi
+          curl -sS --max-time 20 \
+            -H "Title: Outly varnostna kopija" -H "Priority: high" -H "Tags: rotating_light" -H "Click: $RUN_URL" \
+            -d "$SPOROCILO" "https://ntfy.sh/$TOPIC" >/dev/null && echo "Push poslan."
+
+      # Mrtev cloveka drzalo: ce kopija sploh NE stece (cron izpade, workflow onemogocen), ne javi nihce. Healthchecks obrne logiko.
+      # Check naredi Martin (Period 1 day, Grace 6 h) - neobvezno; brez HC_URL_KOPIJE se korak preskoci z opozorilom.
+      - name: Ping Healthchecks.io (neobvezno)
+        if: success() && env.TEST != 'true'
+        env:
+          HC_URL: ${{ secrets.HC_URL_KOPIJE }}
+        run: |
+          if [ -z "$HC_URL" ]; then
+            echo "::warning::HC_URL_KOPIJE ni nastavljen - ping preskocen (kopija, ki ne stece, ostane neopazena)."
+            exit 0
+          fi
+          curl -fsS -m 10 --retry 3 "$HC_URL" && echo "Ping poslan." \
+            || echo "::warning::Healthchecks ping ni uspel - to NI napaka kopije."

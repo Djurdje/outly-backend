@@ -1,0 +1,97 @@
+# Mesecni pregled shranjene kopije (issue #88). Dopolnjuje dnevni preizkus obnove v kopija.yml.
+#
+# Dnevni zagon obnovi izvoz v prazno bazo PRED sifriranjem, torej dokazuje, da je izvoz obnovljiv.
+# Ta workflow preveri, da je SHRANJENA sifrirana datoteka (tista, ki jo bo Martin res potreboval) sveza in cela,
+# in odpre opomnik za pravi preizkus: dešifriranje z Martinovim zasebnim kljucem na Martinovem racunalniku.
+# Zasebnega kljuca namenoma NI v GitHubu: kdor lahko bere secrets, bi bral tudi kopijo, sifriranje bi bilo brez pomena.
+#
+# Preverbe: obstaja nepotekel artefakt »outly-db-kopija-*«, najnovejsi ni starejsi od 50 ur (opozorilo, ce jih je v 30 dneh manj kot 20),
+# vsebina ustreza vpisanemu sha256 in je age datoteka (ne golo besedilo).
+name: Preizkus kopije (mesecni)
+
+on:
+  schedule:
+    - cron: "41 6 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  pregled:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Najdi najnovejso kopijo
+        id: najdi
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/actions/artifacts?per_page=100" --jq '.artifacts[]' \
+            | jq -s '[ .[] | select(.name | startswith("outly-db-kopija-")) | select(.expired == false) ] | sort_by(.created_at) | reverse' > artefakti.json
+          ST=$(jq 'length' artefakti.json)
+          echo "Nepotecenih kopij: $ST"
+          if [ "$ST" -eq 0 ]; then echo "::error::Ni nobene nepotekle kopije (outly-db-kopija-*)."; exit 1; fi
+          IME=$(jq -r '.[0].name' artefakti.json)
+          NASTALA=$(jq -r '.[0].created_at' artefakti.json)
+          RUN_ID=$(jq -r '.[0].workflow_run.id' artefakti.json)
+          STAROST_H=$(( ( $(date -u +%s) - $(date -u -d "$NASTALA" +%s) ) / 3600 ))
+          echo "Najnovejsa: $IME, nastala $NASTALA (pred $STAROST_H h)"
+          {
+            echo "IME=$IME"; echo "RUN_ID=$RUN_ID"; echo "STAROST_H=$STAROST_H"; echo "ST=$ST"
+          } >> "$GITHUB_ENV"
+          NAPAKE=""
+          [ "$STAROST_H" -le 50 ] || NAPAKE+="Najnovejsa kopija je stara $STAROST_H h (dovoljeno 50). "
+          [ "$ST" -ge 20 ] || echo "::warning::V zadnjih 30 dneh je samo $ST kopij (po enem mesecu delovanja pricakovano ~30)."
+          if [ -n "$NAPAKE" ]; then echo "::error::$NAPAKE"; exit 1; fi
+
+      - name: Prenesi in preveri celovitost
+        run: |
+          set -euo pipefail
+          mkdir -p kopija
+          gh run download "$RUN_ID" -R "$REPO" -n "$IME" -D kopija
+          stat -c '%s B  %n' kopija/*
+          cd kopija
+          sha256sum -c ./*.sha256
+          for f in ./*.age; do
+            head -c 40 "$f" | grep -q 'age-encryption.org/v1' || { echo "::error::$f ni age datoteka."; exit 1; }
+            if grep -q -a '"exported_at"' "$f"; then echo "::error::$f vsebuje golo besedilo!"; exit 1; fi
+            [ "$(stat -c %s "$f")" -gt 1000 ] || { echo "::error::$f je sumljivo majhna."; exit 1; }
+          done
+          echo "Celovitost: OK"
+
+      - name: Opomnik Martinu za pravi preizkus obnove (issue)
+        run: |
+          set -euo pipefail
+          MESEC=$(date -u +%Y-%m)
+          NASLOV="Mesecni preizkus obnove kopije baze ($MESEC)"
+          ODPRT=$(gh issue list -R "$REPO" --state open --label martin --json title --jq '[.[] | select(.title | startswith("Mesecni preizkus obnove kopije baze"))] | length')
+          if [ "$ODPRT" -gt 0 ]; then echo "Opomnik ze obstaja (odprt) - novega ne odpiram."; exit 0; fi
+          cat > telo.md <<TELO
+          Samodejni pregled shranjene kopije je zelen: najnovejsa je \`$IME\` (pred $STAROST_H h), nepotecenih kopij je $ST, odtis sha256 in oblika age sta v redu.
+
+          **Kar workflow ne more preveriti, ker zasebnega kljuca namenoma ni v GitHubu: ali jo znas odsifrirati in obnoviti.**
+          Pojdi po skillu \`.claude/skills/obnova-baze/SKILL.md\`, razdelek **»Mesecni preizkus (Martin, lokalno)«**:
+
+          - [ ] prenesi \`$IME\` (Actions -> zagon https://github.com/$REPO/actions/runs/$RUN_ID -> Artifacts)
+          - [ ] odsifriraj z zasebnim kljucem iz upravljalnika gesel
+          - [ ] hitri preizkus: \`node _orodja/kopija/stevila.js povzetek izvoz.json\` izpise tabele in stevila vrstic (polna obnova v lokalno bazo je po zelji, vsake 3 mesece)
+          - [ ] zapri ta issue; ce je karkoli spodletelo, dopisi vrstico v docs/INCIDENTI.md
+
+          Dnevni preizkus obnove (pred sifriranjem) je ze ob vsaki kopiji v povzetku zagona \`Varnostna kopija baze\`.
+          TELO
+          gh issue create -R "$REPO" --title "$NASLOV" --label martin --body-file telo.md
+
+      - name: Push obvestilo ob napaki (ntfy)
+        if: failure()
+        env:
+          TOPIC: ${{ secrets.NTFY_TOPIC }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TOPIC" ]; then echo "NTFY_TOPIC ni nastavljen - push preskocen"; exit 0; fi
+          curl -sS --max-time 20 -H "Title: Outly varnostna kopija" -H "Priority: high" -H "Tags: rotating_light" -H "Click: $RUN_URL" \
+            -d "Mesecni pregled kopije baze je padel (kopija stara/manjka/pokvarjena). Preveri zagon." "https://ntfy.sh/$TOPIC" >/dev/null && echo "Push poslan."

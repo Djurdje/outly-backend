@@ -174,6 +174,11 @@ Izvozu **ni več mogoče** dodati odgovora, ki bi zgradil celoten rezultat v pom
 Pozor: obnova iz starejšega izvoza **oživi že unovčene vstopnice**, ki so bile skenirane po izvozu — pred dogodkom
 naredi svež izvoz. Izvoz hrani osebne podatke; shrani ga zasebno (`outly/backup/`), nikoli v git.
 
+**Dnevna kopija izven Renderja (issue #88, 2. 10. 2026):** workflow `Varnostna kopija baze` (`.github/workflows/kopija.yml`, skripte v `_orodja/kopija/`)
+vsak dan potegne ta izvoz, ga šifrira z age (javni ključ v `vars.BACKUP_AGE_PUBLIC_KEYS`, zasebni samo pri Martinu), shrani artefakt za 30 dni in
+takoj obnovi izvoz v `postgres:16` ter primerja števila vrstic in migracije. Postopek prenosa, dešifriranja in obnove (tudi v produkcijo, samo z
+Martinovim DA) ter mesečni preizkus: `.claude/skills/obnova-baze/SKILL.md`.
+
 ## iOS brez Maca — TestFlight (od 16. 9. 2026)
 
 1. Merge v `master` → Actions `Gradnja iOS` (~8–10 min): prevod za simulator (artefakt `Outly-simulator-app` za appetize.io) +

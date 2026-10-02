@@ -322,3 +322,12 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   podatke (opis, telefon, naslov v centru LJ, zanr balkan, cenik) in dopolni dogodke do 3 koncanih + 3 prihajajocih. Narocila,
   vstopnice in obstojeci dogodki ostanejo. Migracija 022. *vir/dokaz*: pogovor 28. 9. 2026. *velja dokler*: pravi klubi ne
   podpisejo in ne vnesejo svojih podatkov. *nadomescena z*: —
+- 2026-10-02: **Dnevna kopija baze izven Renderja = logični izvoz prek API-ja, šifriran z age; zasebni ključ samo pri Martinu** (issue #88).
+  Workflow `Varnostna kopija baze` potegne `GET /admin/api/export` (servisni admin račun), šifrira z JAVNIM ključem (`vars.BACKUP_AGE_PUBLIC_KEYS`),
+  shrani kot Actions artefakt (30 dni) in v istem zagonu preizkusi obnovo v `postgres:16`. Ne `pg_dump`: zunanji dostop do `outly-db` je zaprt
+  (30. 9.) in GitHubovi runnerji nimajo stalnega IP-ja; baza ostane zaprta, obnova je isti postopek kot v ARCHITECTURE. Repo je javen, zato je
+  šifriranje obvezno (artefakte lahko prenese vsak prijavljen GitHub uporabnik, dnevniki so javni) in v dnevnik ne gre nobena vrednost iz baze.
+  **Zasebnega ključa ni v GitHub secrets** (kdor bere secrets, bi bral tudi kopije): mesečno zato Martin lokalno odšifrira kopijo, workflow pa samo
+  preveri svežino in celovitost (opomnik kot issue). Strošek 0 $ (javni repo: Actions minute in artefakti niso obračunani). Možna nadgradnja, če
+  30 dni ne zadošča ali artefakti zrastejo: Cloudflare R2 (EU), 10 GB brezplačno. *vir/dokaz*: STATE.md (zaprt dostop 30. 9.), GitHub Docs
+  (artefakti javnih repozitorijev, brez obračuna) · *velja dokler*: je baza zaprta za zunanje povezave in izvoz ostaja tok · *nadomeščena z*: —
