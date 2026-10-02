@@ -120,9 +120,11 @@ const sledZanke = [];
 const sledVrste = [];   // dolzina vrste sprejemanja (rx_queue vticnice LISTEN) na vratih backenda
 function dolzinaVrsteSprejemanja() {
   try {
-    const vrstice = require("fs").readFileSync("/proc/net/tcp", "utf8").split("\n");
-    const hex = ":" + PORT.toString(16).toUpperCase().padStart(4, "0");
-    for (const l of vrstice) { const c = l.trim().split(/\s+/); if (c[3] === "0A" && c[1] && c[1].endsWith(hex)) return parseInt(c[4].split(":")[1], 16); }
+    const hex = ":" + PORT.toString(16).toUpperCase().padStart(4, "0");   // Node posluša na :: (tcp6) ali 0.0.0.0 (tcp)
+    for (const dat of ["/proc/net/tcp6", "/proc/net/tcp"]) {
+      let vrstice; try { vrstice = require("fs").readFileSync(dat, "utf8").split("\n"); } catch { continue; }
+      for (const l of vrstice) { const c = l.trim().split(/\s+/); if (c[3] === "0A" && c[1] && c[1].endsWith(hex)) return parseInt(c[4].split(":")[1], 16); }
+    }
   } catch { /* ni Linux */ }
   return null;
 }
@@ -294,6 +296,11 @@ function razlikaStevcev(pred, po) {
   const jedroRazlika = razlikaStevcev(jedroPred, jedroStevci());
   await new Promise(rs => setTimeout(rs, 300));   // predal strezniku zapisuje vsake 250 ms
   izpisiSledPocasnih(d.skeni);
+  try {
+    const sl = require("fs").readFileSync(SLED_STREZNIK, "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l)).filter(x => x.k === "loop" && x.t >= tZacetek3b);
+    console.log(`  (streznik med 3b na 250 ms [sprejetih povezav / zasedenost zanke 0-1 / zastoj ms]: ${sl.map(x => `${x.sprejetih}/${x.elu}/${x.max}`).join(" ")})`);
+    console.log(`  (okolje: ${os.cpus().length} CPU, ${(require("fs").readFileSync("/proc/self/limits", "utf8").match(/Max open files\s+(\d+)\s+(\d+)/) || []).slice(1).join("/")} odprtih datotek mehko/trdo, node ${process.version})`);
+  } catch { /* ni Linux ali predala */ }
   console.log(`  (vrsta sprejemanja na vratih ${PORT} med 3b: najvec ${Math.max(0, ...sledVrste.filter(x => x.t >= tZacetek3b).map(x => x.v))} povezav; zanka odjemalca najvec ${Math.max(0, ...sledZanke.filter(x => x.t >= tZacetek3b).map(x => x.max))} ms)`);
   if (jedroRazlika && Object.keys(jedroRazlika).length) {
     console.log(`  (jedro med 3b, razlika stevcev: ${JSON.stringify(jedroRazlika)})`);
