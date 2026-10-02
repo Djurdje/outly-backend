@@ -12,8 +12,8 @@ if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
 let ok = 0, fail = 0;
 function assert(cond, msg, extra) { if (cond) { ok++; console.log("  ✓", msg); } else { fail++; console.log("  ✗", msg, extra !== undefined ? JSON.stringify(extra) : ""); } }
 
-async function zazeni(port, dbUrl) {
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), DATABASE_URL: dbUrl, SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
+async function zazeni(port, dbUrl, dodatniEnv = {}) {
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), DATABASE_URL: dbUrl, SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test", ...dodatniEnv }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
   for (let i = 0; i < 50; i++) { try { await fetch(`http://127.0.0.1:${port}/`); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
   return { srv, log: () => log };
@@ -33,7 +33,16 @@ async function zdravje(port) {
     assert(r.status === 200, "GET /healthz -> 200", r);
     assert(r.body && r.body.ok === true, "telo {ok:true}", r.body);
     assert(r.cache === "no-store", "Cache-Control: no-store", r.cache);
+    assert(r.body && r.body.commit === null, "brez RENDER_GIT_COMMIT je commit null", r.body);
   } finally { a.srv.kill(); }
+
+  console.log("Commit v /healthz (RENDER_GIT_COMMIT):");
+  const c = await zazeni(3134, DB, { RENDER_GIT_COMMIT: "0123456789abcdef0123456789abcdef01234567" });
+  try {
+    const r = await zdravje(3134);
+    assert(r.status === 200 && r.body && r.body.ok === true, "GET /healthz -> 200 {ok:true}", r);
+    assert(r.body && r.body.commit === "0123456789ab", "commit skrajsan na 12 znakov", r.body);
+  } finally { c.srv.kill(); }
 
   console.log("Baza NI dosegljiva:");
   const b = await zazeni(3132, "postgres://postgres:postgres@localhost:1/outly");

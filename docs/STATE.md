@@ -19,7 +19,7 @@ in stvari, ki jih nobeno orodje ne ve.
 
 **Zgodovina** (zaključeni sklopi, dnevniki sej, stari načrti in daljše prvotno besedilo pasti do 2. 10. 2026) je v
 [`docs/arhiv/STATE-do-2026-10-02.md`](arhiv/STATE-do-2026-10-02.md) — ni merodajna. Ta datoteka ima **največ 200 vrstic**;
-kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`.
+kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`STATE-do-2026-10-02b.md`](arhiv/STATE-do-2026-10-02b.md)).
 
 ## Odprte naloge
 
@@ -36,10 +36,6 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`.
 
 ## Render (od 30. 9. 2026; paketa v ARCHITECTURE, Produkcija)
 
-- **Zmogljivost:** Stresni test #3 (40 vzporednih, 30 s): 132,6 req/s, p95 502 ms, 0 % napak, web CPU vrh ~34 %, RAM ~65 MB.
-  Past pri branju: req/s ~ 40 / p50 — meri zakasnitev runner -> Frankfurt, ne kapacitete; referenca 616 req/s (11. 9.) ni
-  primerljiva. Večji paket, ko je CPU dlje časa > 70 % ali RAM blizu 512 MB. Workflow `Stresni test` (ročno, `potrdi` = `DA`)
-  bere samo javne GET poti; nakupa (pisanje, zaklep zaloge) ne pokrije — #89.
 - **Zunanji dostop do baze je zaprt** (Inbound IP Rules `outly-db` prazne; backend gre po notranjem omrežju, `10.x`). psql /
   pgAdmin z External Database URL ne dela: dodaj svoj IP (in ga odstrani) ali Render Shell. Pravili `0.0.0.0/0` na ravni
   workspacea in okolja ostaneta (veljata tudi za web servis) — ne zapiraj.
@@ -54,8 +50,6 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`.
 
 ## Sken brez povezave (QR v2; ARCHITECTURE »Sken brez povezave«, invarianta I14)
 
-- Odjemalca sta prilagojena (outly-app #45, outly_webpage #24): kodo v2 preverjata na napravi, hranita vrsto skenov in
-  sinhronizirata prek `scan-batch`; `unpaid` na seznamu je rdeče.
 - Past: ob zamenjavi `QR_SECRET` se spremeni tudi javni ključ — telefon mora ključ ob vsaki sinhronizaciji primerjati po `kid`.
 - Idempotentnost skena brez povezave je zaznamek `batch|<device_id>|<client_scan_id>` v `tickets.scan_device` (stolpec sicer
   hrani user-agent online skena; nihče ga ne bere) — brez migracije. `device_id` in `client_scan_id` morata biti naključna (UUID).
@@ -125,6 +119,13 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`.
 
 - **Izvoz baze je tok; ne vračaj ga v `res.json`** (#23; ARCHITECTURE »Varnostne kopije«). Admin panel odgovor v brskalniku še
   prebere v celoti (`res.json()`) — za zelo velike baze prenos shrani neposredno (`fetch` → `Blob`).
+- **Migracija brez zaklepa pade, deploy pade, stara različica ostane živa** (#115, `db/migrate.js`, test `test_migracija_zaklep.js`): vsaka
+  migracija teče v transakciji z `lock_timeout` 2 s (kratko: čakajoči ALTER blokira nove poizvedbe, tudi sken), `statement_timeout` 120 s (na stavek) in 4
+  ponovnimi poskusi po 10 s ob zaklepu; advisory lock čaka največ 60 s (env `MIGRACIJA_*`, `.env.example`). Nato izhod 1: `npm start` se ne zažene, Render obdrži
+  staro različico, v `schema_migrations` ni vnosa → poskus znova ob naslednjem deployu. **Stara različica vrača 200, zato `Nadzor`
+  tega ne vidi** (alarma za to ni): po merge-u preveri `list_deploys` (zadnji deploy za commit = live) ali da `/healthz` vrne `commit`
+  z `main` (prvih 12 znakov). Ukrep: poišči dolgo transakcijo (`pg_stat_activity`), počakaj, ponovno sproži deploy. Migracija
+  ne sme sama klicati `COMMIT`/`SET lock_timeout`.
 - **Vsak `pool.connect()` z dolgo transakcijo** rabi `c.on("error")`, odklop počasnega bralca in `idle_in_transaction_session_timeout`
   (kot izvoz). Mirujoče in izposojene povezave že ujame `pool.on("error")` / `pool.on("connect")` (#106, `test_pool_napaka.js`).
 - **Obnova izvoza zahteva POPOLNOMA prazno ciljno bazo**, migracija 007 pa vstavi `agent@outly.si` → pred obnovo na cilju
