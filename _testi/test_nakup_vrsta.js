@@ -11,6 +11,8 @@
  *       "razprodano" zavrne 409 pred semaforjem in ga sprememba capacity takoj pozabi.
  *   S2  pool.connect pade (PG_POOL_MAX=2, kratek PG_CONNECT_TIMEOUT_MS): 503 Retry-After (ne 500), dovoljenje se sprosti.
  *   S3  lock_timeout nakupne transakcije (NAKUP_DB_TIMEOUT_MS): 503 Retry-After, dovoljenje se sprosti.
+ *   S4  izcrpan pool (PG_POOL_MAX=1 in PG_SKEN_POOL_MAX=1) ni 401: GET /me in sken vrneta 503 Retry-After, ne 401 (I10: izpad
+ *       baze/poola ne sme odjaviti uporabnika ali vratarja).
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -42,13 +44,13 @@ let ok = 0, fail = 0;
 function assert(cond, msg, extra) { if (cond) { ok++; console.log("  ✓", msg); } else { fail++; console.log("  ✗", msg, extra !== undefined ? JSON.stringify(extra) : ""); } }
 const spi = (ms) => new Promise(r => setTimeout(r, ms));
 
-let BASE = "", ipStevec = 0;
+let BASE = "", ipStevec = 0, ipFiksen = null;
 async function api(method, path, token, body, signal) {
   const t0 = performance.now();
   try {
     const r = await fetch(BASE + path, {
       method,
-      headers: { "content-type": "application/json", "x-forwarded-for": `10.9.${(++ipStevec >> 8) & 255}.${(ipStevec & 255) + 1}`, ...(token ? { authorization: "Bearer " + token } : {}) },
+      headers: { "content-type": "application/json", "x-forwarded-for": ipFiksen || `10.9.${(++ipStevec >> 8) & 255}.${(ipStevec & 255) + 1}`, ...(token ? { authorization: "Bearer " + token } : {}) },
       body: body ? JSON.stringify(body) : undefined, signal: signal || AbortSignal.timeout(30000),
     });
     const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = t; }
@@ -59,6 +61,7 @@ async function api(method, path, token, body, signal) {
 (async () => {
   const pool = new Pool({ connectionString: DB });
   await pool.query("TRUNCATE ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
+  await pool.query("DO $$ BEGIN IF to_regclass('public.omejitve') IS NOT NULL THEN TRUNCATE omejitve; END IF; END $$");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
 
   let srv = null, log = "";
@@ -146,6 +149,15 @@ async function api(method, path, token, body, signal) {
   const [a3, zk] = await Promise.all([A3, zaklenjen]);
   assert(a3.status === 201 && zk.status === 201, "nerazprodan dogodek se po sprostitvi normalno proda", [a3.status, zk.status]);
 
+  console.log("\n## razprodano ne porablja nakupnih poskusov (omejevalnik 20/uro na IP)");
+  ipFiksen = "10.99.0.1";
+  const sold = [];
+  for (let i = 0; i < 25; i++) sold.push(await api("POST", `/events/${H}/orders`, U.kupec_b, { quantity: 1 }));
+  assert(sold.every(x => x.status === 409), "25 zaporednih nakupov razprodanega dogodka z istega IP: vsi 409, nobeden 429", sold.map(x => x.status).filter(x => x !== 409));
+  const prost = await api("POST", `/events/${E}/orders`, U.kupec_h, { quantity: 1 });
+  assert(prost.status === 201, "nakup nerazprodanega dogodka z istega IP po 25 zavrnjenih gre skozi (poskusi niso porabljeni)", prost);
+  ipFiksen = null;
+
   console.log("\n## sprememba capacity takoj pozabi razprodano");
   r = await api("POST", `/events/${F}/orders`, U.kupec_a, { quantity: 1 });
   assert(r.status === 201, "F capacity 1: prvi kupec 201", r);
@@ -199,6 +211,45 @@ async function api(method, path, token, body, signal) {
   assert(z2.status === 201 && z2.ms < 1000, "po lock_timeout se dovoljenje in povezava sprostita (naslednji nakup 201)", z2);
   const naE3 = (await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE event_id=$1", [E3])).rows[0].n;
   assert(naE3 === 1, "na E3 je samo ena narocilo (nakup, ki je padel na lock_timeout, narocila nima)", naE3);
+  await ustavi();
+
+  // ---------------------------------------------------------------- S4
+  console.log("\n# S4: izcrpan pool ni odjava (PG_POOL_MAX=1, PG_SKEN_POOL_MAX=1, kratki timeouti)");
+  await zagon(3144, { PG_POOL_MAX: "1", PG_CONNECT_TIMEOUT_MS: "300", PG_SKEN_POOL_MAX: "1", PG_SKEN_CONNECT_TIMEOUT_MS: "300" });
+  const E4 = await dogodek("E4 zaklenjen", 1000);
+  const kup = await api("POST", `/events/${E4}/orders`, U.kupec_c, { quantity: 1 });
+  assert(kup.status === 201 && kup.body.tickets.length === 1, "priprava: vstopnica za sken", kup);
+  const koda = kup.body.tickets[0];
+  const lkE = await zakleni(E4);
+  const obvisel = api("POST", `/events/${E4}/orders`, U.kupec_d, { quantity: 1 });                  // drzi edino povezavo glavnega poola
+  await spi(400);
+  const me = await api("GET", "/me", U.kupec_c);
+  assert(me.status === 503 && me.retryAfter === "5", "GET /me ob izcrpanem glavnem poolu -> 503 Retry-After (NE 401, sicer aplikacija odjavi uporabnika)", me);
+  const me2 = await api("GET", "/me/tickets", U.kupec_c);
+  assert(me2.status === 503, "GET /me/tickets ob izcrpanem poolu -> 503", me2);
+  const slab = await api("GET", "/me", U.kupec_c + "x");
+  assert(slab.status === 401, "zeton s pokvarjenim podpisom je ob izcrpanem poolu se vedno 401 (preverba podpisa ne rabi baze)", slab.status);
+  await lkE.sprosti();
+  assert((await obvisel).status === 201, "obvisel nakup se po sprostitvi zaklepa konca");
+  const me3 = await api("GET", "/me", U.kupec_c);
+  assert(me3.status === 200, "po sprostitvi GET /me spet 200", me3);
+  const brezZetona = await api("GET", "/me");
+  assert(brezZetona.status === 401, "brez zetona je se vedno 401", brezZetona.status);
+  const slabZeton = await api("GET", "/me", "abc.def.ghi");
+  assert(slabZeton.status === 401, "zares slab zeton (napacna oblika) je 401", slabZeton.status);
+
+  // Sken: edina povezava skenPool obvisi na zaklepu vrstice vstopnice; naslednji sken dobi 503, ne 401.
+  const lkT = await (async () => { const c = await pool.connect(); await c.query("BEGIN"); await c.query("SELECT id FROM tickets WHERE serial=$1 FOR UPDATE", [koda.serial]); return { sprosti: async () => { await c.query("ROLLBACK"); c.release(); } }; })();
+  const sken1 = api("POST", "/business/tickets/scan", U.lastnik, { qr: koda.qr });                   // obvisi na UPDATE
+  await spi(400);
+  const sken2 = await api("POST", "/business/tickets/scan", U.lastnik, { qr: koda.qr });
+  assert(sken2.status === 503 && sken2.retryAfter === "5", "sken ob izcrpanem skenPool -> 503 Retry-After (NE 401: vratar ostane prijavljen, telefon preklopi na preverjanje brez povezave)", sken2);
+  assert(sken2.ms < 2000, "503 skena pride hitro (kratek PG_SKEN_CONNECT_TIMEOUT_MS)", sken2.ms);
+  const sk = await api("GET", "/business/scan-key", U.lastnik);
+  assert(sk.status === 503, "GET /business/scan-key ob izcrpanem skenPool -> 503", sk);
+  await lkT.sprosti();
+  const s1 = await sken1;
+  assert(s1.status === 200 && s1.body.result === "ok", "obvisel sken se po sprostitvi konca (ok)", s1);
   await ustavi();
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);

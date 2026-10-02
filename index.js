@@ -28,15 +28,17 @@ function okoljeCelo(ime, privzeto, min, max) {
 const PG_POOL_MAX = okoljeCelo("PG_POOL_MAX", 10, 1, 100);            // glavni pool (vse poti razen skena)
 const PG_SKEN_POOL_MAX = okoljeCelo("PG_SKEN_POOL_MAX", 3, 1, 20);    // loceni pool samo za sken na vratih
 const PG_CONNECT_TIMEOUT_MS = okoljeCelo("PG_CONNECT_TIMEOUT_MS", 10000, 100, 60000);
+// Sken: kratek rok (telefon ob 503 hitro preklopi na preverjanje brez povezave), ne 10 s.
+const PG_SKEN_CONNECT_TIMEOUT_MS = okoljeCelo("PG_SKEN_CONNECT_TIMEOUT_MS", 2500, 100, 60000);
 
-function novPool(max) {
+function novPool(max, connectMs) {
   const p = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
     max,
     // Varovalka: če zahtevek čaka na prosto povezavo (pool je zaseden ali se je zaklenil), dobi napako
     // namesto večnega čakanja. Brez tega bi en hrošč tipa "pool.query med držanjem odjemalca" obesil cel strežnik.
-    connectionTimeoutMillis: PG_CONNECT_TIMEOUT_MS,
+    connectionTimeoutMillis: connectMs,
   });
   // Baza lahko prekine povezavo, ki jo pool drzi (vzdrzevanje ali ponovni zagon baze na Renderju, izpad omrezja).
   // node-postgres odda 'error' na poolu (mirujoca povezava) oziroma na odjemalcu (izposojena povezava); brez
@@ -49,11 +51,11 @@ function novPool(max) {
   });
   return p;
 }
-const pool = novPool(PG_POOL_MAX);
+const pool = novPool(PG_POOL_MAX, PG_CONNECT_TIMEOUT_MS);
 // Sken vstopnic na vratih ne sme nikoli cakati v vrsti za drugim prometom (nakupi, branje seznamov): ima svoj majhen
 // pool, ki ga uporabljajo SAMO POST /business/tickets/scan, scan-batch, GET .../scan-list in scan-key, vkljucno
 // z requireAuthSken / requireClubSken (iskanje uporabnika in kluba gre prek istega poola). Issue #89.
-const skenPool = novPool(PG_SKEN_POOL_MAX);
+const skenPool = novPool(PG_SKEN_POOL_MAX, PG_SKEN_CONNECT_TIMEOUT_MS);
 
 // Hkratnost nakupov (issue #89, obremenitveni test). Nakup drzi povezavo z bazo od BEGIN do COMMIT, vsi nakupi
 // istega dogodka pa se v sprozilcu rezerviraj_zalogo() vrstijo na isti zaklenjeni vrstici. Ob navali (300 kupcev
@@ -99,6 +101,17 @@ async function nakupDovoljenje(req, res) {
 }
 const NAKUP_ZASEDEN = "Server busy. Please try again.";
 function napakaZasedenosti(err) { return !!err && (err.code === "55P03" || err.code === "57014"); }   // lock_timeout / statement_timeout
+// Middleware PRED omeji(): razprodan dogodek/miza dobi 409 brez porabe nakupnih poskusov (20/uro na IP) in brez semaforja.
+function zavrniRazprodano(req, res, next) {
+  const id = celoId(req.params.id);
+  if (id && razprodanoJe("v:" + id)) return res.status(409).send("Only 0 tickets left.");
+  next();
+}
+function zavrniRazprodanoMizo(req, res, next) {
+  const id = vipId(req.params.id), mizaId = vipId(req.params.tableId);
+  if (id && mizaId && razprodanoJe("m:" + id + ":" + mizaId)) return res.status(409).send("This table is already booked.");
+  next();
+}
 // Zacetek nakupne transakcije z zgornjo mejo za zaklep in stavek (glej NAKUP_DB_TIMEOUT_MS).
 function nakupZacni(c) {
   return c.query(`BEGIN; SET LOCAL lock_timeout = ${NAKUP_DB_TIMEOUT_MS}; SET LOCAL statement_timeout = ${NAKUP_DB_TIMEOUT_MS}`);
@@ -341,13 +354,21 @@ async function uporabnikIzSupabase(p, db = pool) {
 // role, auth: 'supabase', supabaseToken, supabaseSub, supabaseExp }. Vloga pride
 // iz baze ob vsakem klicu (ni v žetonu), zato sprememba vloge velja takoj.
 async function razberiUporabnika(token, db = pool) {
-  const p = await preveriSupabaseZeton(token);
+  let p;
+  try { p = await preveriSupabaseZeton(token); }
+  catch (e) {
+    if (e && e.jwks) throw e;                         // izpad Supabase JWKS -> 503 (I10)
+    const n = new Error("zeton"); n.zeton = true; throw n;   // vsaka napaka pri branju/preverjanju zetona = slab zeton
+  }
   const u = await uporabnikIzSupabase(p, db);
   return { userId: u.id, email: u.email, username: u.username, role: u.role, auth: "supabase",
            supabaseToken: token, supabaseSub: p.sub.toLowerCase(), supabaseExp: p.exp };
 }
 
 // Skupna logika; `db` je pool, prek katerega gre iskanje uporabnika (glavni pool ali skenPool za poti skena).
+// 401 SAMO za znano napako zetona (oblika, podpis, potek, izbrisan racun): aplikacija ob 401 uporabnika odjavi
+// (SessionStore). Vse drugo - izpad Supabase, izpad baze, izcrpan pool, prekinjena povezava, kakrsnakoli napaka brez
+// kode - je zacasna tezava streznika: 503 + Retry-After, uporabnik ostane prijavljen (invarianta I10).
 async function requireAuthNa(db, req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
@@ -358,11 +379,12 @@ async function requireAuthNa(db, req, res, next) {
   } catch (err) {
     if (err && err.jwks) {
       console.error(err.message);
-      return res.status(503).send("Auth service unavailable.");
+      return res.status(503).set("Retry-After", "5").send("Auth service unavailable.");
     }
     if (err && err.message === "email_unverified") return res.status(403).send("Email not verified.");
-    if (err && err.code) { console.error(err); return res.status(500).send("Server error."); }
-    return res.status(401).send("Invalid token.");
+    if (err && (err.zeton || err.message === "izbrisan")) return res.status(401).send("Invalid token.");
+    console.error("[auth] zacasna napaka pri iskanju uporabnika:", err && err.message);
+    return res.status(503).set("Retry-After", "5").send("Service temporarily unavailable. Please try again.");
   }
 }
 function requireAuth(req, res, next) { return requireAuthNa(pool, req, res, next); }
@@ -2894,7 +2916,7 @@ const STAROST_PAKET_PIJACE = 18;
 const starostZaPaket = (minAgeDogodka, jePaket) => Math.max(Number(minAgeDogodka) || 0, jePaket ? STAROST_PAKET_PIJACE : 0);
 
 // POST /events/:id/orders — nakup. Telo: { quantity }.
-app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600 }), async (req, res) => {
+app.post("/events/:id/orders", requireAuth, zavrniRazprodano, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600 }), async (req, res) => {
   const id = celoId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const q = Number((req.body || {}).quantity ?? 1);
@@ -2906,8 +2928,6 @@ app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, 
     return res.status(503).send("Payments are not available yet.");
   }
 
-  // Razprodano pred kratkim: zavrni brez semaforja in baze (glej NAKUP_RAZPRODANO_MS).
-  if (razprodanoJe("v:" + id)) return res.status(409).send("Only 0 tickets left.");
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
@@ -3946,7 +3966,7 @@ app.get("/events/:id/vip", async (req, res) => {
 // aktivne pakete; sicer izpusti ali null). Pravila nakupa (testni nacin, okno prodaje, starost) so ista
 // kot pri vstopnicah (napakaProdaje, preveriStarostKupca). Narocilo: quantity 1, cena = cena mize,
 // vstopnic = table_seats; ne steje v sold_count. Ista miza dvakrat: 409 (I13, unikaten indeks).
-app.post("/events/:id/tables/:tableId/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600 }), async (req, res) => {
+app.post("/events/:id/tables/:tableId/orders", requireAuth, zavrniRazprodanoMizo, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600 }), async (req, res) => {
   const id = vipId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const mizaId = vipId(req.params.tableId);
@@ -3968,7 +3988,6 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, omeji({ kljuc: "naku
     return res.status(503).send("Payments are not available yet.");
   }
 
-  if (razprodanoJe("m:" + id + ":" + mizaId)) return res.status(409).send("This table is already booked.");
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
