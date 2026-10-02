@@ -344,13 +344,15 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   podatke (opis, telefon, naslov v centru LJ, zanr balkan, cenik) in dopolni dogodke do 3 koncanih + 3 prihajajocih. Narocila,
   vstopnice in obstojeci dogodki ostanejo. Migracija 022. *vir/dokaz*: pogovor 28. 9. 2026. *velja dokler*: pravi klubi ne
   podpisejo in ne vnesejo svojih podatkov. *nadomescena z*: —
-- 2026-10-02: **Dnevna kopija baze izven Renderja = logični izvoz prek API-ja, šifriran z age; zasebni ključ samo pri Martinu** (issue #88).
-  Workflow `Varnostna kopija baze` potegne `GET /admin/api/export` (servisni admin račun), šifrira z JAVNIM ključem (`vars.BACKUP_AGE_PUBLIC_KEYS`),
-  shrani kot Actions artefakt (30 dni) in v istem zagonu preizkusi obnovo v `postgres:16`. Ne `pg_dump`: zunanji dostop do `outly-db` je zaprt
-  (30. 9.) in GitHubovi runnerji nimajo stalnega IP-ja; baza ostane zaprta, obnova je isti postopek kot v ARCHITECTURE. Repo je javen, zato je
-  šifriranje obvezno (artefakte lahko prenese vsak prijavljen GitHub uporabnik, dnevniki so javni) in v dnevnik ne gre nobena vrednost iz baze.
-  **Zasebnega ključa ni v GitHub secrets** (kdor bere secrets, bi bral tudi kopije): mesečno zato Martin lokalno odšifrira kopijo, workflow pa samo
-  preveri svežino in celovitost (opomnik kot issue). Strošek 0 $ (javni repo: Actions minute in artefakti niso obračunani). Možna nadgradnja, če
-  30 dni ne zadošča ali artefakti zrastejo: Cloudflare R2 (EU), 10 GB brezplačno. Job teče v GitHub environmentu `kopije` (Deployment branches = samo `main`), s POSEBNIM admin računom (backend za izvoz zahteva vlogo `admin`; vloga samo-za-izvoz je predlog); skrivnosti in javni ključ so v environmentu, ne na ravni repozitorija. Preverbi: popolnost (vsaka tabela sheme v izvozu) in padec > 20 % za users/orders/tickets (števila v `actions/cache`, javni dnevnik samo OK/NAPAKA). Prag 20 % glede na prejšnji zagon **ne ujame postopnega padca** (npr. 5 % na dan) — sprejeto tveganje; števila izhodišča so v `actions/cache` šifrirana (`BACKUP_STEVILA_KLJUC`), ker je cache v javnem repu berljiv workflowom iz PR-jev. Odprto za Martina: ali javni šifrirani artefakt 30 dni ali zasebna shramba (R2), in rok hrambe v politiki zasebnosti (nepreverjeno, pregled `pravnik`).
-  *vir/dokaz*: STATE.md (zaprt dostop 30. 9.), GitHub Docs
-  (artefakti javnih repozitorijev, brez obračuna) · *velja dokler*: je baza zaprta za zunanje povezave in izvoz ostaja tok · *nadomeščena z*: —
+- 2026-10-02: **Dnevna kopija baze izven Renderja: logični izvoz prek API-ja, šifriran z age, hranjen v ZASEBNEM Cloudflare R2 (EU); odločitev Martina v klepetu 2. 10. 2026** (issue #88).
+  Workflow `Varnostna kopija baze` potegne `GET /admin/api/export` (poseben admin račun), šifrira z JAVNIM ključem (`vars.BACKUP_AGE_PUBLIC_KEYS`, zasebni samo pri Martinu),
+  naloži v R2 bucket `outly-kopije` (S3 API, endpoint `<ACCOUNT_ID>.eu.r2.cloudflarestorage.com`) in prebere nazaj (sha256), v istem zagonu preizkusi obnovo v `postgres:16`
+  in po 30 dneh sam briše stare kopije (vedno pusti 7 najnovejših). Martin je izbral R2 namesto GitHub artefakta v javnem repu (A): kopije so zasebne, ne le šifrirane.
+  Ne `pg_dump`: zunanji dostop do `outly-db` je zaprt (30. 9.), runnerji nimajo stalnega IP-ja; baza ostane zaprta, obnova je isti postopek kot v ARCHITECTURE.
+  Dnevniki zagonov so javni: v njih so samo imena tabel, OK/NAPAKA in odtis, nikoli števila vrstic ali podatki o računu R2. Zasebnega ključa age NI v GitHub secrets
+  (kdor bere secrets, bi bral tudi kopije); mesečno ga Martin uporabi lokalno, workflow pa preveri svežost in celovitost. Job teče v environmentu `kopije` (samo `main`);
+  skrivnosti (`BACKUP_ADMIN_*`, `R2_*`, `BACKUP_STEVILA_KLJUC`, `HC_URL_KOPIJE`) so tam, ne na ravni repozitorija. Backend za izvoz zahteva vlogo `admin`
+  (vloga samo-za-izvoz je predlog). Preverbi popolnosti (vsaka tabela sheme v izvozu, izjema `omejitve`) in padca > 20 % za users/orders/tickets; izhodišče je šifrirano v R2.
+  Prag 20 % glede na prejšnji zagon **ne ujame postopnega padca** (sprejeto tveganje). Strošek 0 EUR do 10 GB/1 M zapisov na mesec (Cloudflare lahko ob vklopu R2 zahteva plačilno
+  sredstvo). Rok hrambe 30 dni (in dejstvo, da šifrirani osebni podatki ležijo pri Cloudflare) v politiki zasebnosti ni zapisan — nepreverjeno, pregled `pravnik` pred javnim zagonom.
+  *vir/dokaz*: Martinova izbira v pogovoru 2. 10. 2026; STATE.md (zaprt dostop 30. 9.) · *velja dokler*: je baza zaprta za zunanje povezave in izvoz ostaja tok · *nadomeščena z*: —

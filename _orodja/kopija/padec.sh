@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Izhodisce za preverbo padca stevila vrstic (users/orders/tickets). Stevila so poslovna informacija, actions/cache v javnem repu pa je
-# berljiv workflowom iz PR-jev, zato so v cachu SIFRIRANA (openssl aes-256-cbc, pbkdf2) s kljucem BACKUP_STEVILA_KLJUC iz environmenta »kopije«.
+# Izhodisce za preverbo padca stevila vrstic (users/orders/tickets). Stevila so poslovna informacija, zato je izhodisce SIFRIRANO
+# (openssl aes-256-cbc, pbkdf2, kljuc BACKUP_STEVILA_KLJUC iz environmenta »kopije«) in hranjeno v ZASEBNEM R2 bucketu:
+#   kopije/stanje/stevila.enc          sifrirana stevila prejsnjega zagona
+#   kopije/stanje/brez-izhodisca       oznaka: izhodisca ni bilo ze ob prejsnjem zagonu (pisemo ob »stanje«, brisemo ob uspesnem »preveri«)
 # Dva ukaza:
-#   padec.sh stanje <mapa-cache>             ugotovi, ali je izhodisce berljivo; izpise opozorilo in vrstico v povzetek;
-#                                            v $GITHUB_OUTPUT: izhodisce=1|0, dvakrat=true|false (izhodisca ni ze 2 zagona zapored)
-#   padec.sh preveri <izvoz.json> <mapa-cache>   primerja z izhodiscem (stevila.js padec) in izhodisce znova zasifrira
-# Brez izhodisca (prvi zagon, cache pretekel/izgubljen, ZAMENJAN KLJUC): opozorilo, izhodisce se nastavi na novo.
-# »Dvakrat zapored« = izhodisca ni zdaj IN je artefakt prejsnjega zagona (ime ...-b0) ze nastal brez njega. Prvi zagon (ni nobene prejsnje
-# kopije) je dovoljen. Stanje nosi ime artefakta (-b0/-b1), ker cache sam ne more povedati, da je bil izgubljen.
+#   padec.sh stanje             ugotovi, ali je izhodisce berljivo; opozorilo + vrstica v povzetku; v $GITHUB_OUTPUT: izhodisce=1|0, dvakrat=true|false
+#   padec.sh preveri <izvoz>    primerja z izhodiscem (stevila.js padec), izhodisce znova zasifrira in shrani, pobrise oznako
+# Brez izhodisca (prvi zagon, izbrisan objekt, ZAMENJAN KLJUC): opozorilo, izhodisce se nastavi na novo. Ce izhodisca ni 2 zagona
+# zapored (oznaka ze obstaja), je zagon rdec. Prvi zagon (v R2 se ni nobene kopije) je dovoljen. Okolje R2_* kot r2.sh.
 set -euo pipefail
 
 : "${BACKUP_STEVILA_KLJUC:?manjka BACKUP_STEVILA_KLJUC}"
-UKAZ="${1:?Uporaba: padec.sh stanje <mapa> | preveri <izvoz.json> <mapa>}"
+UKAZ="${1:?Uporaba: padec.sh stanje | preveri <izvoz.json>}"
+R2="$(dirname "$0")/r2.sh"
+KLJUC_STEVILA="kopije/stanje/stevila.enc"
+KLJUC_OZNAKA="kopije/stanje/brez-izhodisca"
 umask 077
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -19,11 +22,14 @@ trap 'rm -rf "$TMP"' EXIT
 povzetek() { [ -n "${GITHUB_STEP_SUMMARY:-}" ] && echo "$1" >> "$GITHUB_STEP_SUMMARY" || true; }
 izhod() { [ -n "${GITHUB_OUTPUT:-}" ] && echo "$1" >> "$GITHUB_OUTPUT" || true; }
 
-# Poskusi prebrati izhodisce v $TMP/prej.json; vrne 0 samo ce je dekodirano in je veljaven JSON objekt.
+# 0 = berljivo (v $TMP/prej.json), 1 = obstaja a se ne da dekodirati, 2 = ni objekta
 preberi() {
-  local enc="$1/stevila.enc"
-  [ -f "$enc" ] || return 2
-  if openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BACKUP_STEVILA_KLJUC -in "$enc" -out "$TMP/prej.json" 2>/dev/null \
+  local rc=0
+  bash "$R2" exists "$KLJUC_STEVILA" || rc=$?
+  [ "$rc" -eq 1 ] && return 2
+  [ "$rc" -eq 0 ] || exit 1            # prava napaka R2 (dovoljenja, povezava): zagon naj pade, ne molci
+  bash "$R2" get "$KLJUC_STEVILA" "$TMP/stevila.enc"
+  if openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BACKUP_STEVILA_KLJUC -in "$TMP/stevila.enc" -out "$TMP/prej.json" 2>/dev/null \
      && jq -e 'type == "object"' "$TMP/prej.json" > /dev/null 2>&1; then
     return 0
   fi
@@ -33,50 +39,50 @@ preberi() {
 
 case "$UKAZ" in
   stanje)
-    MAPA="${2:?mapa}"
-    RC=0; preberi "$MAPA" || RC=$?
+    RC=0; preberi || RC=$?
     if [ "$RC" -eq 0 ]; then
       echo "Izhodisce za preverbo padca: prisotno."
       izhod "izhodisce=1"; izhod "dvakrat=false"
       exit 0
     fi
     if [ "$RC" -eq 1 ]; then
-      RAZLOG="obstaja, a se ne da dekodirati (zamenjan BACKUP_STEVILA_KLJUC ali pokvarjen cache)"
+      RAZLOG="obstaja, a se ne da dekodirati (zamenjan BACKUP_STEVILA_KLJUC ali pokvarjen objekt)"
     else
-      RAZLOG="ni (prvi zagon, cache pretekel ali izgubljen)"
+      RAZLOG="ni (prvi zagon ali objekt izbrisan)"
     fi
     echo "::warning::Izhodisce za preverbo padca $RAZLOG; preverba padca je ta dan preskocena, izhodisce se nastavi na novo."
     povzetek "- **Izhodisce za preverbo padca:** $RAZLOG. Preverba padca ta dan preskocena, izhodisce nastavljeno na novo."
     izhod "izhodisce=0"
-    # Je to prvi zagon? Pogledamo, ali obstaja kaksna prejsnja kopija in kaj pove njeno ime (-b0 = tudi takrat izhodisca ni bilo).
-    PREJ_IME=""
-    if [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
-      PREJ_IME=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --jq '.artifacts[]' \
-        | jq -rs '[ .[] | select(.name | startswith("outly-db-kopija-")) | select(.expired == false) ] | sort_by(.created_at) | reverse | (.[0].name // "")') || PREJ_IME="?"
+    # Prvi zagon? Se ni nobene kopije v R2 (stanje tece PRED nalaganjem danasnje).
+    BILE=$(bash "$R2" list "kopije/20" | grep -c . || true)
+    if [ "$BILE" -eq 0 ]; then
+      echo "V R2 se ni nobene kopije: prvi zagon, odsotnost izhodisca je pricakovana."
+      izhod "dvakrat=false"
+      exit 0
     fi
-    if [ "$PREJ_IME" = "?" ]; then
-      echo "::warning::Seznama prejsnjih artefaktov ni bilo mogoce prebrati; dvojna odsotnost izhodisca ni preverjena."
-      izhod "dvakrat=false"
-    elif [ -z "$PREJ_IME" ]; then
-      echo "Prejsnjih kopij ni: prvi zagon, odsotnost izhodisca je pricakovana."
-      izhod "dvakrat=false"
-    elif [[ "$PREJ_IME" == *-b0 ]]; then
-      echo "::error::Izhodisca ni ze 2 zagona zapored (prejsnja kopija je nastala brez njega). Cache se ne ohranja ali BACKUP_STEVILA_KLJUC se menja: preglej."
+    ROC=0; bash "$R2" exists "$KLJUC_OZNAKA" || ROC=$?
+    if [ "$ROC" -eq 0 ]; then
+      echo "::error::Izhodisca ni ze 2 zagona zapored. Kljuc BACKUP_STEVILA_KLJUC se menja ali shranjevanje izhodisca ne uspe: preglej."
       povzetek "- **NAPAKA:** izhodisca ni ze 2 zagona zapored."
       izhod "dvakrat=true"
-    else
+    elif [ "$ROC" -eq 1 ]; then
+      printf '%s\n' "$(date -u +%FT%TZ)" > "$TMP/oznaka.txt"
+      bash "$R2" put "$TMP/oznaka.txt" "$KLJUC_OZNAKA"
       izhod "dvakrat=false"
+    else
+      exit 1
     fi
     ;;
   preveri)
-    IZVOZ="${2:?izvoz.json}"; MAPA="${3:?mapa}"
-    mkdir -p "$MAPA"
+    IZVOZ="${2:?izvoz.json}"
     PREJ="$TMP/stevila.json"
-    if preberi "$MAPA"; then mv "$TMP/prej.json" "$PREJ"; else rm -f "$PREJ"; fi
+    if preberi; then mv "$TMP/prej.json" "$PREJ"; else rm -f "$PREJ"; fi
     node "$(dirname "$0")/stevila.js" padec "$IZVOZ" "$PREJ"
     # stevila.js je zapisal nova stevila (pri padcu brez potrditve konca z napako, sem ne pride)
-    openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_STEVILA_KLJUC -in "$PREJ" -out "$MAPA/stevila.enc"
-    echo "Izhodisce shranjeno (sifrirano)."
+    openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_STEVILA_KLJUC -in "$PREJ" -out "$TMP/stevila.enc.novo"
+    bash "$R2" put "$TMP/stevila.enc.novo" "$KLJUC_STEVILA"
+    bash "$R2" delete "$KLJUC_OZNAKA"      # brez oznake je delete v S3 uspesen tudi, ce je ni
+    echo "Izhodisce shranjeno (sifrirano, R2)."
     ;;
   *) echo "Neznan ukaz"; exit 2 ;;
 esac

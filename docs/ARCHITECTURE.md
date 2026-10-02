@@ -188,7 +188,7 @@ Pozor: obnova iz starejšega izvoza **oživi že unovčene vstopnice**, ki so bi
 naredi svež izvoz. Izvoz hrani osebne podatke; shrani ga zasebno (`outly/backup/`), nikoli v git.
 
 **Dnevna kopija izven Renderja (issue #88, 2. 10. 2026):** workflow `Varnostna kopija baze` (`.github/workflows/kopija.yml`, skripte v `_orodja/kopija/`)
-vsak dan potegne ta izvoz, ga šifrira z age (javni ključ v `vars.BACKUP_AGE_PUBLIC_KEYS`, zasebni samo pri Martinu), shrani artefakt za 30 dni in
+vsak dan potegne ta izvoz, ga šifrira z age (javni ključ v `vars.BACKUP_AGE_PUBLIC_KEYS`, zasebni samo pri Martinu), naloži v zasebni Cloudflare R2 (EU; hramba 30 dni, brez GitHub artefaktov) in
 takoj obnovi izvoz v `postgres:16` ter primerja števila vrstic in migracije. Postopek prenosa, dešifriranja in obnove (tudi v produkcijo, samo z
 Martinovim DA) ter mesečni preizkus: `.claude/skills/obnova-baze/SKILL.md`.
 

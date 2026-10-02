@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Hramba: izbrise kopije v R2, starejse od R2_HRAMBA_DNI (privzeto 30). Uporaba: cisti_stare.sh
+# Varovala: brise SAMO kljuce kopije/YYYY/MM/outly-db-*.age|.sha256 (nikoli kopije/stanje/...); vedno ohrani najnovejsih
+# R2_MIN_KOPIJ (privzeto 7) kopij ne glede na starost (ce kopije prenehajo nastajati, se zaloga ne izprazni).
+# R2_ZDAJ = epoch sekunde (samo za preizkus). Izpis: samo stevila.
+set -euo pipefail
+SKRIPTA="$(dirname "$0")/r2.sh"
+HRAMBA_DNI="${R2_HRAMBA_DNI:-30}"
+MIN_KOPIJ="${R2_MIN_KOPIJ:-7}"
+ZDAJ="${R2_ZDAJ:-$(date -u +%s)}"
+MEJA=$(( ZDAJ - HRAMBA_DNI * 86400 ))
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+bash "$SKRIPTA" list "kopije/20" > "$TMP/seznam.tsv"
+# samo veljavni kljuci kopij
+grep -E $'^kopije/[0-9]{4}/[0-9]{2}/outly-db-[0-9-]+-r[0-9]+\\.json\\.gz\\.age(\\.sha256)?\t' "$TMP/seznam.tsv" > "$TMP/kopije.tsv" || true
+# kopije = .age objekti, najnovejsi prvi (po casu spremembe)
+while IFS=$'\t' read -r kljuc cas _; do
+  case "$kljuc" in *.age) printf '%s\t%s\n' "$(date -u -d "$cas" +%s)" "$kljuc" ;; esac
+done < "$TMP/kopije.tsv" | sort -rn > "$TMP/age.tsv"
+SKUPAJ=$(wc -l < "$TMP/age.tsv")
+head -n "$MIN_KOPIJ" "$TMP/age.tsv" | cut -f2 > "$TMP/zascitene.txt"
+
+BRISANO=0
+while IFS=$'\t' read -r kljuc cas _; do
+  t=$(date -u -d "$cas" +%s)
+  [ "$t" -lt "$MEJA" ] || continue
+  osnova="${kljuc%.sha256}"
+  if grep -qxF "$osnova" "$TMP/zascitene.txt"; then continue; fi
+  bash "$SKRIPTA" delete "$kljuc"
+  BRISANO=$((BRISANO + 1))
+done < "$TMP/kopije.tsv"
+echo "Hramba: kopij v R2 $SKUPAJ, izbrisanih objektov (starejsih od $HRAMBA_DNI dni): $BRISANO"
+[ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "Hramba: kopij v R2 $SKUPAJ, izbrisanih objektov starejsih od $HRAMBA_DNI dni: $BRISANO." >> "$GITHUB_STEP_SUMMARY"

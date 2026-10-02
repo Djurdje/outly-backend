@@ -1,12 +1,11 @@
-# Mesecni pregled shranjene kopije (issue #88). Dopolnjuje dnevni preizkus obnove v kopija.yml.
+# Mesecni pregled shranjene kopije v R2 (issue #88). Dopolnjuje dnevni preizkus obnove v kopija.yml.
 #
-# Dnevni zagon obnovi izvoz v prazno bazo PRED sifriranjem, torej dokazuje, da je izvoz obnovljiv.
-# Ta workflow preveri, da je SHRANJENA sifrirana datoteka (tista, ki jo bo Martin res potreboval) sveza in cela,
-# in odpre opomnik za pravi preizkus: dešifriranje z Martinovim zasebnim kljucem na Martinovem racunalniku.
-# Zasebnega kljuca namenoma NI v GitHubu: kdor lahko bere secrets, bi bral tudi kopijo, sifriranje bi bilo brez pomena.
+# Dnevni zagon obnovi izvoz v prazno bazo PRED sifriranjem, torej dokazuje, da je izvoz obnovljiv. Ta workflow preveri, da je v R2 SHRANJENA
+# sifrirana datoteka (tista, ki jo bo Martin res potreboval) sveza in cela, in odpre opomnik za pravi preizkus: desifriranje z Martinovim
+# zasebnim kljucem na Martinovem racunalniku. Zasebnega kljuca namenoma NI v GitHubu.
 #
-# Preverbe: obstaja nepotekel artefakt »outly-db-kopija-*«, najnovejsi ni starejsi od 50 ur (opozorilo, ce jih je v 30 dneh manj kot 20),
-# vsebina ustreza vpisanemu sha256 in je age datoteka (ne golo besedilo).
+# Preverbe: v R2 je kopija, najnovejsa ni starejsa od 50 ur (opozorilo, ce jih je v 30 dneh manj kot 20), vsebina ustreza .sha256 in je age
+# datoteka (ne golo besedilo). Job tece v environmentu »kopije« (samo main) zaradi R2 skrivnosti.
 name: Preizkus kopije (mesecni)
 
 on:
@@ -16,52 +15,56 @@ on:
 
 permissions:
   contents: read
-  actions: read
   issues: write
 
 jobs:
   pregled:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment: kopije
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
     steps:
-      - name: Najdi najnovejso kopijo
-        id: najdi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Najdi najnovejso kopijo v R2
         run: |
           set -euo pipefail
-          gh api --paginate "repos/$REPO/actions/artifacts?per_page=100" --jq '.artifacts[]' \
-            | jq -s '[ .[] | select(.name | startswith("outly-db-kopija-")) | select(.expired == false) ] | sort_by(.created_at) | reverse' > artefakti.json
-          ST=$(jq 'length' artefakti.json)
-          echo "Nepotecenih kopij: $ST"
-          if [ "$ST" -eq 0 ]; then echo "::error::Ni nobene nepotekle kopije (outly-db-kopija-*)."; exit 1; fi
-          IME=$(jq -r '.[0].name' artefakti.json)
-          NASTALA=$(jq -r '.[0].created_at' artefakti.json)
-          RUN_ID=$(jq -r '.[0].workflow_run.id' artefakti.json)
+          bash _orodja/kopija/r2.sh list "kopije/20" \
+            | grep -E $'^kopije/[0-9]{4}/[0-9]{2}/outly-db-[0-9-]+-r[0-9]+\\.json\\.gz\\.age\t' \
+            | sort -t$'\t' -k2,2r > kopije.tsv || true
+          ST=$(grep -c . kopije.tsv || true)
+          echo "Kopij v R2: $ST"
+          if [ "$ST" -eq 0 ]; then echo "::error::V R2 ni nobene kopije."; exit 1; fi
+          KLJUC=$(head -n1 kopije.tsv | cut -f1)
+          NASTALA=$(head -n1 kopije.tsv | cut -f2)
           STAROST_H=$(( ( $(date -u +%s) - $(date -u -d "$NASTALA" +%s) ) / 3600 ))
-          echo "Najnovejsa: $IME, nastala $NASTALA (pred $STAROST_H h)"
+          echo "Najnovejsa: ${KLJUC##*/}, nastala $NASTALA (pred $STAROST_H h)"
           {
-            echo "IME=$IME"; echo "RUN_ID=$RUN_ID"; echo "STAROST_H=$STAROST_H"; echo "ST=$ST"
+            echo "KLJUC=$KLJUC"; echo "IME=${KLJUC##*/}"; echo "STAROST_H=$STAROST_H"; echo "ST=$ST"
           } >> "$GITHUB_ENV"
           NAPAKE=""
           [ "$STAROST_H" -le 50 ] || NAPAKE+="Najnovejsa kopija je stara $STAROST_H h (dovoljeno 50). "
-          [ "$ST" -ge 20 ] || echo "::warning::V zadnjih 30 dneh je samo $ST kopij (po enem mesecu delovanja pricakovano ~30)."
+          [ "$ST" -ge 20 ] || echo "::warning::V R2 je samo $ST kopij (po enem mesecu delovanja pricakovano ~30)."
           if [ -n "$NAPAKE" ]; then echo "::error::$NAPAKE"; exit 1; fi
 
       - name: Prenesi in preveri celovitost
         run: |
           set -euo pipefail
           mkdir -p kopija
-          gh run download "$RUN_ID" -R "$REPO" -n "$IME" -D kopija
+          bash _orodja/kopija/r2.sh get "$KLJUC" "kopija/$IME"
+          bash _orodja/kopija/r2.sh get "$KLJUC.sha256" "kopija/$IME.sha256"
           stat -c '%s B  %n' kopija/*
           cd kopija
-          sha256sum -c ./*.sha256
-          for f in ./*.age; do
-            head -c 40 "$f" | grep -q 'age-encryption.org/v1' || { echo "::error::$f ni age datoteka."; exit 1; }
-            if grep -q -a '"exported_at"' "$f"; then echo "::error::$f vsebuje golo besedilo!"; exit 1; fi
-            [ "$(stat -c %s "$f")" -gt 1000 ] || { echo "::error::$f je sumljivo majhna."; exit 1; }
-          done
+          sha256sum -c "$IME.sha256"
+          head -c 40 "$IME" | grep -q 'age-encryption.org/v1' || { echo "::error::$IME ni age datoteka."; exit 1; }
+          if grep -q -a '"exported_at"' "$IME"; then echo "::error::$IME vsebuje golo besedilo!"; exit 1; fi
+          [ "$(stat -c %s "$IME")" -gt 1000 ] || { echo "::error::$IME je sumljivo majhna."; exit 1; }
           echo "Celovitost: OK"
 
       - name: Opomnik Martinu za pravi preizkus obnove (issue)
@@ -72,12 +75,12 @@ jobs:
           ODPRT=$(gh issue list -R "$REPO" --state open --label martin --json title --jq '[.[] | select(.title | startswith("Mesecni preizkus obnove kopije baze"))] | length')
           if [ "$ODPRT" -gt 0 ]; then echo "Opomnik ze obstaja (odprt) - novega ne odpiram."; exit 0; fi
           cat > telo.md <<TELO
-          Samodejni pregled shranjene kopije je zelen: najnovejsa je \`$IME\` (pred $STAROST_H h), nepotecenih kopij je $ST, odtis sha256 in oblika age sta v redu.
+          Samodejni pregled kopij v R2 je zelen: najnovejsa je \`$IME\` (pred $STAROST_H h), kopij je $ST, odtis sha256 in oblika age sta v redu.
 
           **Kar workflow ne more preveriti, ker zasebnega kljuca namenoma ni v GitHubu: ali jo znas odsifrirati in obnoviti.**
           Pojdi po skillu \`.claude/skills/obnova-baze/SKILL.md\`, razdelek **»Mesecni preizkus (Martin, lokalno)«**:
 
-          - [ ] prenesi \`$IME\` (Actions -> zagon https://github.com/$REPO/actions/runs/$RUN_ID -> Artifacts)
+          - [ ] prenesi \`$KLJUC\` (Cloudflare > R2 > bucket > mapa kopije/ > objekt > Download)
           - [ ] odsifriraj z zasebnim kljucem iz upravljalnika gesel
           - [ ] hitri preizkus: \`node _orodja/kopija/stevila.js povzetek izvoz.json\` izpise tabele in stevila vrstic (polna obnova v lokalno bazo je po zelji, vsake 3 mesece)
           - [ ] zapri ta issue; ce je karkoli spodletelo, dopisi vrstico v docs/INCIDENTI.md

@@ -9,20 +9,23 @@
  *                                                        seznam migracij (datoteka + odtis) mora biti enak
  *   node _orodja/kopija/stevila.js padec <izvoz> <stevila.json>
  *                                                        BREZ baze: users/orders/tickets ne smejo pasti za > 20 % glede na
- *                                                        prejsnji zagon (<stevila.json>: izhodisce, ki ga _orodja/kopija/padec.sh hrani SIFRIRANO v actions/cache); nato zapise nova stevila.
+ *                                                        prejsnji zagon (<stevila.json>: izhodisce, ki ga _orodja/kopija/padec.sh hrani SIFRIRANO v zasebnem R2); nato zapise nova stevila.
  *                                                        PADEC_POTRJEN=true: padec je namerno, nova stevila postanejo izhodisce.
  *   node _orodja/kopija/stevila.js povzetek <izvoz>     BREZ baze: izpise cas izvoza, tabele in stevila vrstic (hitri
  *                                                        mesecni preizkus po desifriranju, LOKALNO pri Martinu)
  * DATABASE_URL = ciljna lokalna baza (primerjaj, pocisti-seed).
  *
  * JAVNI DNEVNIK: v zagonu Actions (primerjaj, padec) se izpisujejo SAMO imena tabel in OK/NAPAKA - stevila uporabnikov,
- * narocil in vstopnic so poslovna informacija. Stevila vidi samo povzetek (lokalno) in sifrirano izhodisce v cachu (padec.sh).
+ * narocil in vstopnic so poslovna informacija. Stevila vidi samo povzetek (lokalno) in sifrirano izhodisce v R2 (padec.sh).
  */
 const fs = require("fs");
 
 const [, , ukaz, potIzvoza, potStevil] = process.argv;
 const GLAVNE = ["users", "orders", "tickets"];
 const PRAG_PADCA = 0.2;
+// Tabele, ki jih izvoz NAMERNO izpusti (index.js, GET /admin/api/export: `table_name <> 'omejitve'` - kratkotrajni stevci omejevalnika, UNLOGGED).
+// Ob spremembi izvoza posodobi tudi tu; sicer je preverba popolnosti vsak dan rdeca.
+const IZVZETE = ["omejitve"];
 const q = (ime) => `"${ime.replace(/"/g, '""')}"`;
 
 function preberiIzvoz(pot) {
@@ -54,11 +57,11 @@ if (ukaz === "padec") {
   const zdaj = {};
   for (const [ime, t] of Object.entries(izvoz.tables || {})) zdaj[ime] = t.count;
   let prej = null;
-  try { prej = JSON.parse(fs.readFileSync(potStevil, "utf8")); } catch (_) { /* prvi zagon ali cache pretekel */ }
+  try { prej = JSON.parse(fs.readFileSync(potStevil, "utf8")); } catch (_) { /* prvi zagon ali izhodisce izgubljeno */ }
   const potrjen = process.env.PADEC_POTRJEN === "true";
   const padle = [];
   if (!prej) {
-    console.log("Prejsnjih stevil ni (prvi zagon ali cache pretekel): preverba padca preskocena, nova stevila shranjena.");
+    console.log("Prejsnjih stevil ni (prvi zagon ali izhodisce izgubljeno): preverba padca preskocena, nova stevila shranjena.");
   } else {
     for (const ime of GLAVNE) {
       const a = prej[ime], b = zdaj[ime];
@@ -115,7 +118,7 @@ async function glavno() {
       vrstice.push([ime, ok]);
     }
     // POPOLNOST: vsaka tabela migrirane sheme mora biti v izvozu (tudi prazna). Tabela, ki je izvoz ne vsebuje, bi tiho manjkala po obnovi.
-    const manjkajoce = tabeleBaze.filter((t) => !(t in izvoz.tables)).sort();
+    const manjkajoce = tabeleBaze.filter((t) => !(t in izvoz.tables) && !IZVZETE.includes(t)).sort();
     for (const ime of manjkajoce) {
       napake.push(`${ime}: tabela migrirane sheme MANJKA v izvozu`);
       vrstice.push([ime, false]);
