@@ -74,6 +74,44 @@ function percentil(sortirano, p) { return sortirano.length ? sortirano[Math.min(
 function steviloPoStatusu(rezultati) { const s = {}; for (const r of rezultati) s[r.status] = (s[r.status] || 0) + 1; return s; }
 const je5xx = r => typeof r.status !== "number" || r.status >= 500;
 
+// Diagnostika jedra (issue #139): ob p95 skena ~3,5 s (ujema se s ponovnim SYN po 1 s + 2 s) mora izpis pokazati, ali je jedro
+// zavrglo ali ponovno poslalo povezavo. Samo Linux (/proc); drugje (macOS) se izpis tiho preskoci.
+const JEDRO_STEVCI = {
+  netstat: ["ListenOverflows", "ListenDrops", "TCPReqQFullDrop", "TCPReqQFullDoCookies", "SyncookiesSent", "TCPSynRetrans", "TCPTimeouts"],
+  snmp: ["ActiveOpens", "PassiveOpens", "AttemptFails", "EstabResets", "RetransSegs"],
+};
+function preberiProc(pot) {
+  const v = require("fs").readFileSync(pot, "utf8").trim().split("\n"), izh = {};
+  for (let i = 0; i + 1 < v.length; i += 2) {
+    const [ime, ...kljuci] = v[i].split(/\s+/), [ime2, ...vrednosti] = v[i + 1].split(/\s+/);   // "TcpExt:" vrstica imen, nato vrstica vrednosti
+    if (ime !== ime2) continue;
+    kljuci.forEach((k, j) => { izh[ime + k] = Number(vrednosti[j]); });   // ime ze vsebuje ":"
+  }
+  return izh;
+}
+function jedroStevci() {
+  try {
+    const ns = preberiProc("/proc/net/netstat"), sn = preberiProc("/proc/net/snmp"), s = {};
+    for (const k of JEDRO_STEVCI.netstat) s[k] = ns["TcpExt:" + k];
+    for (const k of JEDRO_STEVCI.snmp) s[k] = sn["Tcp:" + k];
+    return s;
+  } catch { return null; }
+}
+function jedroSysctl() {
+  const fs = require("fs"), s = {};
+  for (const [k, pot] of [["somaxconn", "/proc/sys/net/core/somaxconn"], ["tcp_max_syn_backlog", "/proc/sys/net/ipv4/tcp_max_syn_backlog"],
+    ["tcp_syncookies", "/proc/sys/net/ipv4/tcp_syncookies"], ["tcp_synack_retries", "/proc/sys/net/ipv4/tcp_synack_retries"], ["ip_local_port_range", "/proc/sys/net/ipv4/ip_local_port_range"]]) {
+    try { s[k] = fs.readFileSync(pot, "utf8").trim().replace(/\s+/g, "-"); } catch { /* ni Linux */ }
+  }
+  return s;
+}
+function razlikaStevcev(pred, po) {
+  if (!pred || !po) return null;
+  const d = {};
+  for (const k of Object.keys(po)) if (Number.isFinite(po[k]) && Number.isFinite(pred[k])) d[k] = po[k] - pred[k];
+  return d;
+}
+
 (async () => {
   const pool = new Pool({ connectionString: DB });
   await pool.query("TRUNCATE ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
@@ -148,11 +186,13 @@ const je5xx = r => typeof r.status !== "number" || r.status >= 500;
   // Ena navala: 300 hkratnih nakupov za dogodek + (neobvezno) bralci GET /events hkrati + 3 vratarji skenirajo.
   async function navala(dogodek, bralcev) {
     let nakupiKonec = false;
-    const skeni = [];   // { status, result, ms }
+    const tNavale = performance.now();   // zacetek navale; skeni si zapomnijo zamik (diagnostika #139)
+    const skeni = [];   // { status, result, ms, zacetek }
     async function skener(v) {
       while (!nakupiKonec && kodeSken.length) {
+        const zacetek = performance.now() - tNavale;
         const x = await api("POST", "/business/tickets/scan", v.token, { qr: kodeSken.pop() });
-        skeni.push({ status: x.status, result: x.body && x.body.result, ms: x.ms });
+        skeni.push({ status: x.status, result: x.body && x.body.result, ms: x.ms, zacetek });
         await new Promise(rs => setTimeout(rs, bralcev ? 15 : 5));
       }
     }
@@ -204,7 +244,19 @@ const je5xx = r => typeof r.status !== "number" || r.status >= 500;
   preveriSkene("navala nakupov", skeni);
 
   console.log("\n# 3b. Navala 300 nakupov + 1000 bralcev GET /events hkrati + sken (dogodek D)");
+  const jedroPred = jedroStevci();
+  console.log(`  (jedro pred 3b: sysctl ${JSON.stringify(jedroSysctl())}, stevci ${JSON.stringify(jedroPred)})`);
   const d = await navala(dogodekD, BRALCEV);
+  const jedroRazlika = razlikaStevcev(jedroPred, jedroStevci());
+  if (jedroRazlika && Object.keys(jedroRazlika).length) {
+    console.log(`  (jedro med 3b, razlika stevcev: ${JSON.stringify(jedroRazlika)})`);
+    const pocasni = d.skeni.filter(x => x.ms > 500).map(x => `+${Math.round(x.zacetek)} ms: ${Math.round(x.ms)} ms`);
+    if (pocasni.length) console.log(`  (skeni pocasnejsi od 500 ms [zacetek od navale: trajanje]: ${pocasni.join(", ")})`);
+    const zavrzeno = (jedroRazlika.ListenOverflows || 0) + (jedroRazlika.ListenDrops || 0) + (jedroRazlika.TCPReqQFullDrop || 0);
+    if (zavrzeno > 0) console.log(`  !! jedro je med 3b zavrglo povezave (ListenOverflows+ListenDrops+TCPReqQFullDrop = ${zavrzeno}): vrsta sprejemanja/SYN je prepolna, ne zakasnitev aplikacije`);
+    else if ((jedroRazlika.TCPSynRetrans || 0) > 0) console.log(`  !! ponovno poslanih SYN: ${jedroRazlika.TCPSynRetrans} (brez zavrzenih v ListenOverflows/Drops - SYN vrsta ali SYN piskoti)`);
+    else console.log("  (jedro ni zavrglo nobene povezave in ni bilo ponovnih SYN: pocasen sken ni krivda vrste povezav)");
+  }
   const stD = steviloPoStatusu(d.nakupi);
   const bralciMs = d.bralciRez.map(x => x.ms).sort((a, b) => a - b);
   console.log(`  (nakupi ${Math.round(d.trajanje)} ms, statusi ${JSON.stringify(stD)}; bralci: ${BRALCEV} x GET /events, statusi ${JSON.stringify(steviloPoStatusu(d.bralciRez))}, p50 ${percentil(bralciMs, 0.5).toFixed(0)} ms, p95 ${percentil(bralciMs, 0.95).toFixed(0)} ms)`);
