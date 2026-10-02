@@ -73,7 +73,7 @@ async function pockaj(base) {
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE omejitve, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
 
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   const srv = dvigni(PORT, JWKS_PORT);

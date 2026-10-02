@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
 const crypto = require("crypto");
+const net = require("net");
 const { Resend } = require("resend");
 const path = require("path");
 
@@ -90,39 +91,185 @@ const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KE
 // ---------------------------
 
 // ---------------------------
-// Omejevanje pogostosti (S-02)
+// Omejevanje pogostosti (S-02, invarianta I15)
 // ---------------------------
-// OMEJITEV: stevec je v pomnilniku procesa. Ob ponovnem zagonu se izprazni in
-// ne deluje cez vec instanc. Za en Render proces zadosca; ko bo instanc vec,
-// to zamenja Redis ali tabela v bazi. Racun je poleg tega zascisten se z
-// zaklepom v tabeli users, ki NI odvisen od IP naslova.
-const stevci = new Map();
+// Stevec poskusov je v PostgreSQL (tabela omejitve, migracija 027), zato meja velja cez vse instance backenda
+// in preživi restart/deploy (issue #24). En poskus = en kratek INSERT ... ON CONFLICT DO UPDATE ... RETURNING
+// (atomicen, brez transakcije in brez locenega branja); okno se zacne ob prvem poskusu in traja oknoSekund,
+// po izteku se stevec ponastavi - enako kot prej v pomnilniku. Racun je poleg tega zascisten se z zaklepom
+// v tabeli users, ki NI odvisen od IP naslova.
+//
+// Zmogljivost: omejevalnik ima LASTEN majhen pool (OMEJEVALNIK_POOL_MAX, privzeto 2) s kratkimi casovnimi
+// omejitvami, zato ne zaseda povezav glavnega poola in ne caka za dolgimi poizvedbami (npr. izvoz). Ko je
+// kljuc prekoracen, se "blokiran do" zapomni se v pomnilniku procesa (negativni predpomnilnik): napadalec, ki
+// bije v ze blokiran kljuc, baze ne obremenjuje vec. DB ostane vir resnice - predpomnilnik le skrajsa pot do
+// 429 in poteče najkasneje ob koncu okna.
+//
+// Okvara omejevalnika (baza nedosegljiva, poizvedba pocasna/napacna) - odlocitev PO POTI (priNapaki):
+//   "odpri" (fail-open)  - ogled, iskanje: majhna skoda ob izpadu (steje se ogled, isci uporabnike), poleg tega pot
+//                          brez baze tako ali tako ne naredi nic koristnega; ne smemo pa jih zavreti zaradi
+//                          pomocnega sistema.
+//   "lokalno" (degradirano) - nakup (obe poti), prenos: ob okvari velja STARO vedenje, stevec v pomnilniku procesa
+//                          (iste meje, brez skupnega stanja). Fail-closed bi tu ob navalu (zasicen/pocasen
+//                          pool omejevalnika) zavrnil kupce, ceprav glavni pool dela; fail-open bi pustil
+//                          neomejeno rezerviranje zaloge. Lokalni stevec je vmes: zalogo se varuje, prodaja tece.
+//   "zapri" (fail-closed, privzeto) - brisanje racuna, prosnje (ustvarjalec, prijatelji): nepovraten izbris in
+//                          posiljanje mailov; tu je 503 + Retry-After bolje kot neomejeno ali lokalno stetje.
+// Skeniranje vstopnic omejevalnika NIMA na poti (test_omejevalnik.js to preverja) - ne more pasti zaradi njega.
+const OMEJEVALNIK_CISCENJE_MS = Number(process.env.OMEJEVALNIK_CISCENJE_MS) || 2 * 60 * 1000;
+const limiterPool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
+  max: Number(process.env.OMEJEVALNIK_POOL_MAX) || 2,
+  // Hitro odpove ali odpade: obvisel omejevalnik ne sme zadrzati zahtevka dlje kot ~3,5 s (nato velja priNapaki).
+  // Povezava je z Renderjevo bazo v isti regiji (TLS ~deset ms), zato 2 s za vzpostavitev ni pretesno.
+  connectionTimeoutMillis: 2000,
+  statement_timeout: 1500,
+  idleTimeoutMillis: 30000,
+});
+limiterPool.on("error", (e) => console.error("[omejevalnik] mirujoca povezava s bazo prekinjena:", e && e.message));
+limiterPool.on("connect", (odjemalec) => {
+  odjemalec.on("error", (e) => console.error("[omejevalnik] povezava s bazo prekinjena:", e && e.message));
+});
 
+// Kljuc v bazi = HMAC-SHA256(pot:najvec:okno:IP) s kljucem, izpeljanim (HKDF) iz QR_SECRET/JWT_SECRET: IP je osebni podatek,
+// golo sha256 pa bi se z naštevanjem vseh 2^32 IPv4 naslovov razbilo v minutah. Ista skrivnost je na vseh instancah
+// istega servisa (okolje na Renderju), zato se kljuci ujemajo; zamenjava skrivnosti enkrat ponastavi meje.
+// Brez skrivnosti (samo lokalni razvoj) velja stalen niz - tam IP-ji niso realni.
+// V ključ sta všteta tudi meja in okno: dve poti z istim imenom, a drugačno mejo, nikoli ne delita vrstice (druga bi lahko
+// števec "zmanjšala" z LEAST(...) ali podedovala tujo blokado), v bazi pa števec zato nikoli ne pade, dokler okno teče.
+// IP: IPv4 polno, IPv6 na predponi /64 (en uporabnik/priključek dobi cel /64, sicer bi mejo obšel s sosednjimi naslovi).
+let omejevalnikHmac = null;
+function predponaIp(ip) {
+  if (typeof ip !== "string" || !ip) return String(ip);
+  const preslikan = ip.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
+  if (preslikan) return preslikan[1];
+  const brezCone = ip.split("%")[0];
+  if (!net.isIPv6(brezCone) || brezCone.includes(".")) return ip;
+  const deli = brezCone.split("::");
+  const levo = deli[0] ? deli[0].split(":") : [];
+  const desno = deli.length > 1 && deli[1] ? deli[1].split(":") : [];
+  const sredina = deli.length > 1 ? Array(Math.max(0, 8 - levo.length - desno.length)).fill("0") : [];
+  const hextets = [...levo, ...sredina, ...desno].map((h) => h.toLowerCase().padStart(4, "0"));
+  return hextets.slice(0, 4).join(":") + "::/64";
+}
+function kljucOmejitve(pot, najvec, oknoSekund, ip) {
+  if (!omejevalnikHmac) {
+    omejevalnikHmac = Buffer.from(crypto.hkdfSync("sha256", qrSkrivnost() || "outly-brez-skrivnosti", "", "outly-omejevalnik-v1", 32));
+  }
+  return crypto.createHmac("sha256", omejevalnikHmac).update(`${pot}:${najvec}:${oknoSekund}:${predponaIp(ip)}`).digest("hex").slice(0, 32);
+}
+
+// Negativni predpomnilnik: kljuc -> ms (Date.now), do katerega je kljuc zagotovo blokiran.
+const blokiraniKljuci = new Map();
+const BLOKIRANI_NAJVEC = 50000;
+// Lokalni stevec (priNapaki "lokalno"): staro vedenje ob okvari omejevalnika. id -> { n, doKdaj }.
+const lokalniStevci = new Map();
+const LOKALNI_NAJVEC = 100000;
 setInterval(() => {
   const zdaj = Date.now();
-  for (const [k, v] of stevci) if (v.doKdaj <= zdaj) stevci.delete(k);
+  for (const [k, doKdaj] of blokiraniKljuci) if (doKdaj <= zdaj) blokiraniKljuci.delete(k);
+  for (const [k, v] of lokalniStevci) if (v.doKdaj <= zdaj) lokalniStevci.delete(k);
 }, 60 * 1000).unref();
+// Vrne 0 (v mejah) ali sekunde do konca okna (prekoraceno).
+function lokalnoPreseglo(id, najvec, oknoSekund) {
+  const zdaj = Date.now();
+  const v = lokalniStevci.get(id);
+  if (!v || v.doKdaj <= zdaj) {
+    if (v || lokalniStevci.size < LOKALNI_NAJVEC) lokalniStevci.set(id, { n: 1, doKdaj: zdaj + oknoSekund * 1000 });
+    return 0;
+  }
+  v.n += 1;
+  return v.n > najvec ? Math.max(1, Math.ceil((v.doKdaj - zdaj) / 1000)) : 0;
+}
 
-function omeji({ kljuc, najvec, oknoSekund }) {
-  return (req, res, next) => {
-    const id = `${kljuc}:${req.ip}`;
+// Dnevnik okvar omejevalnika: najvec ena vrstica na 10 s (sicer bi izpad zalil dnevnik z 1000 vrsticami/s).
+let omejevalnikZadnjiDnevnik = 0, omejevalnikIzpuscenih = 0;
+function dnevnikOmejevalnika(e) {
+  omejevalnikIzpuscenih++;
+  const zdaj = Date.now();
+  if (zdaj - omejevalnikZadnjiDnevnik < 10000) return;
+  console.error(`[omejevalnik] poizvedba ni uspela (${omejevalnikIzpuscenih}x od zadnjega zapisa): ${e && e.message}`);
+  omejevalnikZadnjiDnevnik = zdaj; omejevalnikIzpuscenih = 0;
+}
+
+// Atomicen korak: nov kljuc -> stevec 1; kljuc z veljavnim oknom -> stevec + 1 (najvec do najvec + 1, da se int ne
+// prekorači, tudi ce kdo bije dlje casa); kljuc z izteklim oknom -> stevec 1 in novo okno. preostalo = sekunde do
+// konca okna, izracunane v bazi (ura procesa in baze se lahko razlikujeta).
+const OMEJEVALNIK_SQL = `
+  INSERT INTO omejitve AS o (kljuc, okno_do, stevec)
+  VALUES ($1, now() + make_interval(secs => $2::double precision), 1)
+  ON CONFLICT (kljuc) DO UPDATE SET
+    stevec  = CASE WHEN o.okno_do <= now() THEN 1 ELSE LEAST(o.stevec + 1, $3::int + 1) END,
+    okno_do = CASE WHEN o.okno_do <= now() THEN now() + make_interval(secs => $2::double precision) ELSE o.okno_do END
+  RETURNING stevec, GREATEST(1, CEIL(EXTRACT(EPOCH FROM (o.okno_do - now()))))::int AS preostalo`;
+
+function omeji({ kljuc, najvec, oknoSekund, priNapaki = "zapri" }) {
+  return async (req, res, next) => {
+    const id = kljucOmejitve(kljuc, najvec, oknoSekund, req.ip);
     const zdaj = Date.now();
-    const v = stevci.get(id);
-
-    if (!v || v.doKdaj <= zdaj) {
-      stevci.set(id, { n: 1, doKdaj: zdaj + oknoSekund * 1000 });
-      return next();
+    const blokiranDo = blokiraniKljuci.get(id);
+    if (blokiranDo && blokiranDo > zdaj) {
+      res.set("Retry-After", String(Math.max(1, Math.ceil((blokiranDo - zdaj) / 1000))));
+      return res.status(429).send("Too many requests. Please try again later.");
     }
 
-    v.n += 1;
-    if (v.n > najvec) {
-      const cezKoliko = Math.ceil((v.doKdaj - zdaj) / 1000);
-      res.set("Retry-After", String(cezKoliko));
+    let vrstica;
+    try {
+      vrstica = (await limiterPool.query(OMEJEVALNIK_SQL, [id, oknoSekund, najvec])).rows[0];
+    } catch (e) {
+      dnevnikOmejevalnika(e);
+      if (priNapaki === "odpri") return next();
+      if (priNapaki === "lokalno") {
+        const preostaloLokalno = lokalnoPreseglo(id, najvec, oknoSekund);
+        if (!preostaloLokalno) return next();
+        res.set("Retry-After", String(preostaloLokalno));
+        return res.status(429).send("Too many requests. Please try again later.");
+      }
+      res.set("Retry-After", "5");
+      return res.status(503).send("Service temporarily unavailable. Please try again shortly.");
+    }
+
+    if (vrstica.stevec > najvec) {
+      if (vrstica.preostalo > 1 && blokiraniKljuci.size < BLOKIRANI_NAJVEC) {
+        blokiraniKljuci.set(id, Date.now() + (vrstica.preostalo - 1) * 1000);
+      }
+      res.set("Retry-After", String(vrstica.preostalo));
       return res.status(429).send("Too many requests. Please try again later.");
     }
     next();
   };
 }
+
+// Ciscenje izteklih vrstic: vsaka instanca na svoji periodi (zamik ob zagonu je nakljucen), brez cron storitve.
+// Iztekla vrstica je ze nepomembna (naslednji poskus ji ponastavi okno), zato brisanje ne more spremeniti meje.
+// Zunanji pogoj okno_do < now() se pri sočasni posodobitvi vrstice (reset okna) ponovno preveri (READ COMMITTED) -
+// sveze ponastavljena vrstica se ne izbrise. Serija 5000, da en klic ne zadrzi ključavnic dolgo; dokler serija izbrise
+// polnih 5000, se ponovi (najvec 20 s na zagon), da poplava kljucev (botnet, mnogo IPv6 predpon) ne raste v nedogled.
+const CISCENJE_SERIJA = 5000;
+let ciscenjeTece = false;
+async function pocistiOmejitve() {
+  if (ciscenjeTece) return;
+  ciscenjeTece = true;
+  const zacetek = Date.now();
+  try {
+    let r;
+    do {
+      r = await limiterPool.query(
+        `DELETE FROM omejitve WHERE okno_do < now()
+           AND kljuc IN (SELECT kljuc FROM omejitve WHERE okno_do < now() ORDER BY okno_do LIMIT ${CISCENJE_SERIJA})`
+      );
+    } while (r.rowCount >= CISCENJE_SERIJA && Date.now() - zacetek < 20000);
+  } catch (e) {
+    dnevnikOmejevalnika(e);
+  } finally {
+    ciscenjeTece = false;
+  }
+}
+setTimeout(() => {
+  pocistiOmejitve();
+  setInterval(pocistiOmejitve, OMEJEVALNIK_CISCENJE_MS).unref();
+}, Math.round(Math.random() * Math.min(OMEJEVALNIK_CISCENJE_MS, 60 * 1000))).unref();
 
 // ---------------------------
 // Supabase Auth (migracija 010) — edina identiteta aplikacije in spletne strani
@@ -1603,7 +1750,7 @@ app.delete("/events/:id/interest", requireAuth, async (req, res) => {
 // naprave ne moreta napihniti stevila. GDPR: view_counts nima IP-ja, uporabnika ne casa
 // posameznega klika, samo agregiran dnevni stevec. Neveljaven id -> 204 tiho (aplikacija
 // klic po odprtju zaslona sprozi "fire and forget" in ne sme dobiti napake, ki bi jo prikazala).
-app.post("/views", omeji({ kljuc: "ogled", najvec: 600, oknoSekund: 3600 }), async (req, res) => {
+app.post("/views", omeji({ kljuc: "ogled", najvec: 600, oknoSekund: 3600, priNapaki: "odpri" }), async (req, res) => {
   try {
     const b = req.body || {};
     const eventId = b.event_id !== undefined ? celoId(b.event_id) : null;
@@ -2660,9 +2807,11 @@ admin.get("/export", async (req, res) => {
     await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     // Varovalo: seja, ki miruje v tej transakciji, se prekine sama (set_config ne dovoli parametra v SET LOCAL).
     await c.query("SELECT set_config('idle_in_transaction_session_timeout', $1, true)", [String(IZVOZ_IDLE_TX_MS)]);
+    // `omejitve` (omejevalnik poskusov) ni v izvozu: kratkotrajni stevci s hashi IP-jev niso podatki, ki bi jih kdo obnavljal,
+    // in ne smejo v datoteko, ki jo admin prenese na disk.
     const t = await c.query(
       `SELECT table_name FROM information_schema.tables
-       WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name`
+       WHERE table_schema='public' AND table_type='BASE TABLE' AND table_name <> 'omejitve' ORDER BY table_name`
     );
     const v = await c.query("SELECT version() AS version, NOW() AS now");
     // DATE (OID 1082) v izvozu kot besedilo "YYYY-MM-DD": privzeti razčlenjevalnik
@@ -2891,7 +3040,7 @@ const STAROST_PAKET_PIJACE = 18;
 const starostZaPaket = (minAgeDogodka, jePaket) => Math.max(Number(minAgeDogodka) || 0, jePaket ? STAROST_PAKET_PIJACE : 0);
 
 // POST /events/:id/orders — nakup. Telo: { quantity }.
-app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600 }), async (req, res) => {
+app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const id = celoId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const q = Number((req.body || {}).quantity ?? 1);
@@ -3203,7 +3352,7 @@ app.post("/me/tickets/received/:id/seen", requireAuth, async (req, res) => {
 // Prenese lahko samo trenutni imetnik; samo veljavno vstopnico pred zacetkom dogodka;
 // prejemnik mora imeti Outly racun in izpolnjevati min_age. Serial se zamenja ->
 // star QR (posnetek zaslona pri posiljatelju) ne velja vec. Narocilo ostane kupcu (008).
-app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 30, oknoSekund: 3600 }), async (req, res) => {
+app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 30, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const id = celoId(req.params.id);
   if (!id) return res.status(400).send("Invalid ticket id.");
   // Prejemnik: { user_id } prijatelja (izbira iz seznama, migracija 016) ALI { email } kot doslej.
@@ -3937,7 +4086,7 @@ app.get("/events/:id/vip", async (req, res) => {
 // aktivne pakete; sicer izpusti ali null). Pravila nakupa (testni nacin, okno prodaje, starost) so ista
 // kot pri vstopnicah (napakaProdaje, preveriStarostKupca). Narocilo: quantity 1, cena = cena mize,
 // vstopnic = table_seats; ne steje v sold_count. Ista miza dvakrat: 409 (I13, unikaten indeks).
-app.post("/events/:id/tables/:tableId/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600 }), async (req, res) => {
+app.post("/events/:id/tables/:tableId/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const id = vipId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const mizaId = vipId(req.params.tableId);
@@ -4292,7 +4441,7 @@ async function mojeProsnje(userId) {
 // največ 10 zadetkov, brez sebe, samo potrjeni računi. Vrne id, username, avatar_url in
 // relation: 'none' | 'friends' | 'request_sent' | 'request_received'. Omejeno, da se
 // imenik ne da izluščiti z avtomatskim iskanjem.
-app.get("/users/search", requireAuth, omeji({ kljuc: "iskanje", najvec: 120, oknoSekund: 3600 }), async (req, res) => {
+app.get("/users/search", requireAuth, omeji({ kljuc: "iskanje", najvec: 120, oknoSekund: 3600, priNapaki: "odpri" }), async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
     if (q.length < 2 || q.length > 20 || !/^[a-zA-Z0-9_]+$/.test(q)) return res.status(400).send("q must be 2-20 characters: letters, numbers, underscore.");
@@ -4428,7 +4577,7 @@ app.get("/me/plans", requireAuth, async (req, res) => {
 // POST /me/friends/requests — telo: { user_id } ali { username }.
 // 201 { request } ko prošnja čaka; 200 { friend } če je nasprotna prošnja že čakala (takoj prijatelja).
 // 409 already_friends | already_requested; 404 no_account; 400 self.
-app.post("/me/friends/requests", requireAuth, omeji({ kljuc: "prosnja", najvec: 30, oknoSekund: 3600 }), async (req, res) => {
+app.post("/me/friends/requests", requireAuth, omeji({ kljuc: "prijatelji", najvec: 30, oknoSekund: 3600 }), async (req, res) => {
   const b = req.body || {};
   let cilj = null;
   try {

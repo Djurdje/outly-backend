@@ -72,7 +72,7 @@ async function referencniIzvoz(pool, exportedAt, postgres) {
     await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     const t = await c.query(
       `SELECT table_name FROM information_schema.tables
-       WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name`);
+       WHERE table_schema='public' AND table_type='BASE TABLE' AND table_name <> 'omejitve' ORDER BY table_name`);
     const tipiIzvoza = { getTypeParser: (oid, fmt) => (oid === 1082 ? (v) => v : pgTipi.getTypeParser(oid, fmt)) };
     const tables = {};
     for (const { table_name } of t.rows) {
@@ -94,7 +94,7 @@ async function izvozKosi(token) {
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   // Strezniku omejimo kopico V8 na 48 MB: tokovni izvoz mora v njej zdrzati odgovor > 100 MB (ne-tokovna koda
   // zgradi cel odgovor v kopici in pade z "heap out of memory"), poleg tega RSS ne zraste zaradi leno
@@ -176,7 +176,7 @@ async function izvozKosi(token) {
     const refTelo = await referencniIzvoz(pool, izvoz.exported_at, izvoz.postgres);
     const enako = Buffer.compare(mali.telo, Buffer.from(refTelo, "utf8")) === 0;
     assert(enako, "odgovor je BAJT ZA BAJTOM enak izhodu stare (ne-tokovne) izvedbe", { dolzina_tok: mali.telo.length, dolzina_ref: Buffer.byteLength(refTelo) });
-    const tabele = (await pool.query(`SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'`)).rows[0].n;
+    const tabele = (await pool.query(`SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' AND table_name <> 'omejitve'`)).rows[0].n;
     assert(Object.keys(izvoz.tables).length === tabele, `izvoz vsebuje vseh ${tabele} tabel`, Object.keys(izvoz.tables).length);
   }
 
@@ -339,7 +339,7 @@ async function izvozKosi(token) {
   const napake = log.split("\n").filter(l => /error|TypeError|Unhandled/i.test(l) && !/Server error\./.test(l) && !/Resend/i.test(l));
   if (napake.length) console.log("\nLog backenda (sumljivo):\n" + napake.join("\n"));
   srv.kill(); jwksServer.close();
-  await pool.query("TRUNCATE ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
   await pool.end();
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

@@ -197,7 +197,7 @@ async function enotski() {
   await enotski();
 
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE view_counts, event_interest, club_event_notifications, club_follows, club_invites, club_members, event_favorites, friendships, friend_requests, ticket_transfers, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE omejitve, view_counts, event_interest, club_event_notifications, club_follows, club_invites, club_members, event_favorites, friendships, friend_requests, ticket_transfers, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
   await new Promise((r) => jwksServer.listen(JWKS_PORT, r));
   const sA = zazeni(PORT_A, { JAVNI_PREDPOMNILNIK_MS: "60000", JAVNI_PREDPOMNILNIK_KLJUCEV: "20" });
   const sB = zazeni(PORT_B, { JAVNI_PREDPOMNILNIK_MS: "0" });
