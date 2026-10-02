@@ -67,7 +67,7 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   S sekund. Brez prijave in brez pisanja v bazo. Pade, ce je napak > 1 % ali p95 > 2000 ms. Porocilo v povzetku zagona.
 - Namen: po preklopu Render baze na placljiv paket (0.1c-256mb, #12) preveriti, da zmogljivost zadosca.
   Poganjaj ob mirnem casu (med testom je produkcija pocasnejsa).
-- Ne pokrije: nakupa vstopnic (pisanje v bazo, zaklep zaloge) - ta konica ob odprtju prodaje ni izmerjena.
+- Ne pokrije nakupa vstopnic. Nakup + sken so merjeni samo LOKALNO (`_testi/test_obremenitev.js`, `orodja/obremenitev.mjs`, issue #89, PR tega commita): z bazo omejeno na 0,1 CPU je streha javnih poti ~90 req/s (baza je ozko grlo, ne web); proti produkciji ni merjeno.
 
 ## Past: Cloudflare Browser Cache TTL (29. 9. 2026)
 

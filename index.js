@@ -39,6 +39,29 @@ pool.on("connect", (odjemalec) => {
   odjemalec.on("error", (e) => console.error("[pool] povezava s bazo prekinjena:", e && e.message));
 });
 
+// Hkratnost nakupov (issue #89, obremenitveni test). Nakup drzi povezavo z bazo od BEGIN do COMMIT, vsi nakupi
+// istega dogodka pa se v sprozilcu rezerviraj_zalogo() vrstijo na isti zaklenjeni vrstici. Ob navali (300 kupcev
+// naenkrat) bi zato vsi zahtevki zasedli pool (10 povezav) in sken vstopnice na vratih bi cakal za celo navalo
+// (izmerjeno ~600 ms namesto ~10 ms). Semafor spusti v transakcijo najvec NAKUP_VZPOREDNO nakupov hkrati, ostali
+// cakajo v pomnilniku (brez povezave), tako da ostane pool prost za sken in branje. Vrstni red je FIFO; cakanje
+// je omejeno, da navala ne visi v nedogled (503, odjemalec poskusi znova).
+const NAKUP_VZPOREDNO = 4, NAKUP_CAKANJE_MS = 15000;
+const nakupVrsta = []; let nakupAktivnih = 0;
+function nakupVstopi() {
+  if (nakupAktivnih < NAKUP_VZPOREDNO) { nakupAktivnih++; return Promise.resolve(true); }
+  return new Promise((resolve) => {
+    const cakalec = { resolve, timer: setTimeout(() => {
+      const i = nakupVrsta.indexOf(cakalec); if (i >= 0) nakupVrsta.splice(i, 1);
+      resolve(false);
+    }, NAKUP_CAKANJE_MS) };
+    nakupVrsta.push(cakalec);
+  });
+}
+function nakupIzstopi() {
+  const naslednji = nakupVrsta.shift();
+  if (naslednji) { clearTimeout(naslednji.timer); naslednji.resolve(true); } else nakupAktivnih--;
+}
+
 // Resend init
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
@@ -2817,7 +2840,9 @@ app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, 
     return res.status(503).send("Payments are not available yet.");
   }
 
-  const c = await pool.connect();
+  if (!(await nakupVstopi())) return res.status(503).set("Retry-After", "5").send("Too many purchases at once. Please try again.");
+  let c;
+  try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(500).send("Server error."); }
   try {
     await c.query("BEGIN");
     const er = await c.query(
@@ -2871,7 +2896,7 @@ app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, 
     if (err && err.code === "23514") return res.status(409).send(/Ni dovolj/.test(err.message) ? "Not enough tickets left." : "Order rejected: " + (err.constraint || err.message));
     console.error(err);
     return res.status(500).send("Server error.");
-  } finally { c.release(); }
+  } finally { c.release(); nakupIzstopi(); }
 });
 
 // GET /me/orders — moja naročila z vstopnicami.
@@ -3873,7 +3898,9 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, omeji({ kljuc: "naku
     return res.status(503).send("Payments are not available yet.");
   }
 
-  const c = await pool.connect();
+  if (!(await nakupVstopi())) return res.status(503).set("Retry-After", "5").send("Too many purchases at once. Please try again.");
+  let c;
+  try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(500).send("Server error."); }
   try {
     await c.query("BEGIN");
     const er = await c.query(
@@ -3946,7 +3973,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, omeji({ kljuc: "naku
     if (err && err.code === "23505" && err.constraint === "orders_miza_dogodek_key") return res.status(409).send("This table is already booked.");
     console.error(err);
     return res.status(500).send("Server error.");
-  } finally { c.release(); }
+  } finally { c.release(); nakupIzstopi(); }
 });
 
 // ---------------------------

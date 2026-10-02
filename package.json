@@ -7,7 +7,7 @@
     "start": "node index.js",
     "migrate": "node db/migrate.js",
     "migrate:stanje": "node db/migrate.js --stanje",
-    "test": "node _testi/test_vabila.js && node _testi/test_prijatelji.js && node _testi/test_cenik.js && node _testi/test_dogodki_7dni.js && node _testi/test_sledenje.js && node _testi/test_zanimanje.js && node _testi/test_aktivnost.js && node _testi/test_vstopnice.js && node _testi/test_prenos.js && node _testi/test_finance_admin.js && node _testi/test_invariante.js && node _testi/test_obnova.js && node _testi/test_demo_klubi.js && node _testi/test_vip.js && node _testi/test_vip_starost.js && node _testi/test_sken_brez_povezave.js && node _testi/test_export_tok.js && node _testi/test_zdravje.js && node _testi/test_pool_napaka.js"
+    "test": "node _testi/test_vabila.js && node _testi/test_prijatelji.js && node _testi/test_cenik.js && node _testi/test_dogodki_7dni.js && node _testi/test_sledenje.js && node _testi/test_zanimanje.js && node _testi/test_aktivnost.js && node _testi/test_vstopnice.js && node _testi/test_prenos.js && node _testi/test_finance_admin.js && node _testi/test_invariante.js && node _testi/test_obnova.js && node _testi/test_demo_klubi.js && node _testi/test_vip.js && node _testi/test_vip_starost.js && node _testi/test_sken_brez_povezave.js && node _testi/test_export_tok.js && node _testi/test_zdravje.js && node _testi/test_pool_napaka.js && node _testi/test_obremenitev.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
