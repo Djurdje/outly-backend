@@ -107,19 +107,34 @@ const skenPool = novPool(PG_SKEN_POOL_MAX, PG_SKEN_CONNECT_TIMEOUT_MS);
 // Brez tega bi edina povezava obvisela za vedno in /healthz bi ostal 503 tudi po okrevanju (pregled PR #127).
 const zdraviPool = novPool(1, 2000, { statement_timeout: 2500, query_timeout: 2500, idleTimeoutMillis: 30000 });
 
-// Trajna zasicenost glavnega poola (puscanje povezav, obvisele transakcije) JE nezdrava instanca: restart jo popravi.
-// Kratek naval ni: /healthz postane 503 sele, ko je glavni pool NEPREKINJENO zasicen (vse povezave zasedene IN zahtevki cakajo)
-// dlje od ZDRAVJE_ZASICEN_MS. Merjenje v procesu: casovni zig zacetka zasicenosti, ponastavi se ob prvem vzorcu s prosto
-// povezavo ali brez cakajocih. Vzorci: vsakih 500 ms in ob vsakem klicu /healthz.
-const ZDRAVJE_ZASICEN_MS = okoljeCelo("ZDRAVJE_ZASICEN_MS", 120000, 100, 3600000);
-let zasicenOd = null;
-function vzorciZasicenost() {
-  const zasicen = pool.waitingCount > 0 && pool.idleCount === 0;
-  if (!zasicen) zasicenOd = null;
-  else if (zasicenOd === null) zasicenOd = Date.now();
-  return zasicenOd !== null ? Date.now() - zasicenOd : 0;
+// ZASTOJ poola (puscanje povezav, obvisele transakcije) JE nezdrava instanca: restart ga popravi. PREOBREMENITEV ni: ob dolgem
+// navalu pool normalno krozi (povezave se ves cas vracajo), cakalna vrsta je lahko vseskozi neprazna - restart sredi navala
+// bi bil ista skoda kot #117 (pregled PR #127: simulacija max 4, 11 s od 12 s "zasicenosti" pri 936 uspesnih poizvedbah).
+// Zato signal NAPREDKA, ne dolzina vrste: pool.on("release") zapise `zadnjiNapredek`. Zastoj = vse povezave poola izposojene
+// (totalCount >= max IN idleCount == 0; ni pomembno, ali kdo caka - tudi pool brez prometa z vsemi puscenimi povezavami je
+// pokvarjen) IN od zacetka tega stanja ter od zadnje vrnjene povezave je minilo vec kot ZDRAVJE_ZASICEN_MS. Krozece povezave
+// (release vsakih nekaj ms) casovnik vedno ponastavijo. Privzeto 60 s: nakupna transakcija ima lock/statement timeout 10 s,
+// poizvedbe so kratke, zato 60 s brez ENE vrnjene povezave pri vseh izposojenih ni nobena legitimna obremenitev; hkrati je
+// dovolj dolgo, da kratek zastoj (restart baze, izpad omrezja z okrevanjem) ne sprozi restarta. Vzorci: vsakih 500 ms
+// in ob vsakem klicu /healthz. Nadzorovana sta glavni pool IN skenPool (sken na vratih je najkriticnejsa pot; sken je
+// ena kratka poizvedba, zato zastoj v njem pomeni puscanje in samo restart povrne sken; cena je en kratek restart, med
+// katerim telefon preklopi na sken brez povezave).
+const ZDRAVJE_ZASICEN_MS = okoljeCelo("ZDRAVJE_ZASICEN_MS", 60000, 100, 3600000);
+function nadzorZastoja(p, max) {
+  const st = { zadnjiNapredek: Date.now(), zasicenOd: null };
+  p.on("release", () => { st.zadnjiNapredek = Date.now(); });
+  // Vrne ms, odkar pool ni napredoval, medtem ko so vse povezave izposojene; 0, ce pool ni zasicen.
+  st.vzorci = () => {
+    const zasicen = p.totalCount >= max && p.idleCount === 0;
+    if (!zasicen) { st.zasicenOd = null; return 0; }
+    if (st.zasicenOd === null) st.zasicenOd = Date.now();
+    return Date.now() - Math.max(st.zasicenOd, st.zadnjiNapredek);
+  };
+  return st;
 }
-setInterval(vzorciZasicenost, 500).unref();
+const zastojGlavni = nadzorZastoja(pool, PG_POOL_MAX);
+const zastojSken = nadzorZastoja(skenPool, PG_SKEN_POOL_MAX);
+setInterval(() => { zastojGlavni.vzorci(); zastojSken.vzorci(); }, 500).unref();
 
 // Hkratnost nakupov (issue #89, obremenitveni test). Nakup drzi povezavo z bazo od BEGIN do COMMIT, vsi nakupi
 // istega dogodka pa se v sprozilcu rezerviraj_zalogo() vrstijo na isti zaklenjeni vrstici. Ob navali (300 kupcev
@@ -654,15 +669,7 @@ function zeljeniKlub(req) {
 // rabijo klub, mu vrnejo 404 kot do zdaj; poti za urejanje dogodkov ga spustijo.
 // Vratar (doorman) sme SAMO skenirati in gledati vstopnice dogodka.
 const INT4_MAX = 2147483647;
-// Napaka povezave/baze (izcrpan pool, prekinjena povezava, izpad, timeout) = zacasna tezava streznika -> 503. Programska ali
-// podatkovna napaka (TypeError, SQLSTATE razreda 22/42 ...) ostane 500 s skladom v dnevniku.
-function jeNapakaPovezave(e) {
-  if (!e || e instanceof TypeError || e instanceof ReferenceError || e instanceof RangeError || e instanceof SyntaxError) return false;
-  const koda = String(e.code || "");
-  if (/^[0-9A-Z]{5}$/.test(koda)) return /^(08|53|57)/.test(koda);       // SQLSTATE: povezava, sredstva, poseg operaterja
-  if (/^E[A-Z_]+$/.test(koda)) return true;                              // ECONNRESET, ETIMEDOUT, ECONNREFUSED, EPIPE, ENOTFOUND ...
-  return !koda && /timeout|timed out|connect|terminated|ended|closed/i.test(String(e.message || ""));  // pg: brez kode
-}
+const { jeNapakaPovezave } = require("./napaka_povezave");   // 503 samo za napake povezave/baze, ostalo 500
 function requireClubNa(db, vloge) {
   return async (req, res, next) => {
     try {
@@ -716,12 +723,14 @@ app.get("/healthz", async (req, res) => {
   res.set("Cache-Control", "no-store");
   let casovnik;
   try {
-    const zasicenMs = vzorciZasicenost();
-    if (zasicenMs > ZDRAVJE_ZASICEN_MS) {
-      // Trajno zasicen glavni pool: povezave se ne vracajo (puscanje, obviseli zaklepi) -> naj Render instanco ponovno zazene.
-      console.error(`[zdravje] glavni pool neprekinjeno zasicen ${Math.round(zasicenMs / 1000)} s (meja ${Math.round(ZDRAVJE_ZASICEN_MS / 1000)} s; ` +
-        `povezav ${pool.totalCount}, cakajocih ${pool.waitingCount}) -> 503`);
-      return res.status(503).json({ ok: false, commit: COMMIT_KRATEK });
+    for (const [ime, z, p] of [["glavni pool", zastojGlavni, pool], ["skenPool", zastojSken, skenPool]]) {
+      const zastojMs = z.vzorci();
+      if (zastojMs > ZDRAVJE_ZASICEN_MS) {
+        // Vse povezave izposojene in nobena se ne vraca (puscanje, obviseli zaklepi) -> naj Render instanco ponovno zazene.
+        console.error(`[zdravje] ${ime}: zastoj ${Math.round(zastojMs / 1000)} s brez vrnjene povezave (meja ${Math.round(ZDRAVJE_ZASICEN_MS / 1000)} s; ` +
+          `povezav ${p.totalCount}, cakajocih ${p.waitingCount}) -> 503`);
+        return res.status(503).json({ ok: false, commit: COMMIT_KRATEK });
+      }
     }
     await Promise.race([
       zdraviPool.query("SELECT 1"),

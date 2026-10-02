@@ -40,7 +40,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 - **Zunanji dostop do baze je zaprt** (Inbound IP Rules `outly-db` prazne; backend gre po notranjem omrežju, `10.x`). psql /
   pgAdmin z External Database URL ne dela: dodaj svoj IP (in ga odstrani) ali Render Shell. Pravili `0.0.0.0/0` na ravni
   workspacea in okolja ostaneta (veljata tudi za web servis) — ne zapiraj.
-- **Health Check Path = `/healthz`** (200 / 503 ob nedosegljivi bazi, `_testi/test_zdravje.js`; lasten pool `zdraviPool`; 503 tudi ob >120 s zasičenem glavnem poolu, I10); Render novo kodo spusti v promet
+- **Health Check Path = `/healthz`** (200 / 503 ob nedosegljivi bazi, `_testi/test_zdravje.js`; lasten pool `zdraviPool`; 503 tudi ob >60 s zastoju glavnega poola ali skenPool (nobena povezava se ne vrne), I10); Render novo kodo spusti v promet
   šele, ko odgovori. Interni klici health checka niso v request logih (prazni logi so pričakovani).
 
 ## Cloudflare Browser Cache TTL = 4 h (29. 9. 2026)

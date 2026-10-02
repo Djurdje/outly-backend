@@ -18,8 +18,12 @@
  *       (zaklep tabele clubs + pg_terminate_backend) -> sken, scan-list, scan-key in glavna poslovna pot vrnejo 503
  *       Retry-After 5 (NE 500: vratar bi dobil "napako streznika", ne zacasne tezave in preklopa na sken brez povezave).
  *       Club id izven int4 (?club_id=99999999999) je 404, ne 503/500; programska/podatkovna napaka (manjkajoca tabela) ostane 500.
- *   S6  trajno zasicen glavni pool (ZDRAVJE_ZASICEN_MS): kratek naval je /healthz 200, neprekinjena zasicenost dlje od meje
- *       (vse povezave zasedene + zahtevki cakajo) je 503 (Render instanco ponovno zazene), po sprostitvi spet 200.
+ *   S6  zastoj glavnega poola (ZDRAVJE_ZASICEN_MS): vse povezave izposojene in nobena se ne vraca dlje od meje (zahtevki cakajo)
+ *       je /healthz 503 (Render instanco ponovno zazene), po sprostitvi spet 200.
+ *   S7  isto brez prometa (vse povezave puscene, nihce ne caka) -> 503.
+ *   S8  PREOBREMENITEV Z NAPREDKOM (PG_POOL_MAX=2, 40 vzporednih zank kratkih poizvedb dlje od praga): pool krozi, vrsta je
+ *       vseskozi neprazna, a /healthz ostane 200 (restart sredi navala bi bil ista skoda kot #117).
+ *   S9  zastoj skenPool (sken je najkriticnejsa pot) -> /healthz 503.
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -315,7 +319,7 @@ async function api(method, path, token, body, signal) {
   await ustavi();
 
   // ---------------------------------------------------------------- S6
-  console.log("\n# S6: trajno zasicen glavni pool -> /healthz 503 (PG_POOL_MAX=1, ZDRAVJE_ZASICEN_MS=2000)");
+  console.log("\n# S6: zastoj glavnega poola -> /healthz 503 (PG_POOL_MAX=1, ZDRAVJE_ZASICEN_MS=2000)");
   await zagon(3146, { PG_POOL_MAX: "1", PG_CONNECT_TIMEOUT_MS: "4000", ZDRAVJE_ZASICEN_MS: "2000" });
   const E6 = await dogodek("E6 zaklenjen", 1000);
   const lk6 = await zakleni(E6);
@@ -326,19 +330,72 @@ async function api(method, path, token, body, signal) {
   (async () => { while (tok) { cakalci.push(api("GET", "/me", U.kupec_d)); await spi(250); } })();
   await spi(600);
   const k = await api("GET", "/healthz");
-  assert(k.status === 200 && k.body.ok === true, "kratka zasicenost (< meje): /healthz se vedno 200", k);
+  assert(k.status === 200 && k.body.ok === true, "kratek zastoj (< meje): /healthz se vedno 200", k);
   await spi(2600);
   const hz503 = await api("GET", "/healthz");
-  assert(hz503.status === 503 && hz503.body.ok === false, "neprekinjena zasicenost dlje od ZDRAVJE_ZASICEN_MS -> /healthz 503", hz503);
+  assert(hz503.status === 503 && hz503.body.ok === false, "zastoj (nobena povezava se ne vrne) dlje od ZDRAVJE_ZASICEN_MS -> /healthz 503", hz503);
   assert(hz503.body && "commit" in hz503.body, "503 ima polje commit", hz503.body);
-  assert(/\[zdravje\] glavni pool neprekinjeno zasicen/.test(log), "razlog 503 je zapisan v dnevnik");
+  assert(/\[zdravje\] glavni pool: zastoj/.test(log), "razlog 503 je zapisan v dnevnik");
   tok = false;
   await lk6.sprosti();
   assert((await obvisel6).status === 201, "obvisel nakup se po sprostitvi konca");
   await Promise.all(cakalci);
   await spi(700);
   const po = await api("GET", "/healthz");
-  assert(po.status === 200, "po sprostitvi povezave se zasicenost ponastavi: /healthz spet 200", po);
+  assert(po.status === 200, "po sprostitvi povezave se zastoj ponastavi: /healthz spet 200", po);
+  await ustavi();
+
+  // ---------------------------------------------------------------- S7
+  console.log("\n# S7: vse povezave puscene, brez prometa (nihce ne caka) -> /healthz 503 (PG_POOL_MAX=1, ZDRAVJE_ZASICEN_MS=1500)");
+  await zagon(3147, { PG_POOL_MAX: "1", ZDRAVJE_ZASICEN_MS: "1500" });
+  const E7 = await dogodek("E7 zaklenjen", 1000);
+  const lk7 = await zakleni(E7);
+  const obvisel7 = api("POST", `/events/${E7}/orders`, U.kupec_c, { quantity: 1 });
+  await spi(400);
+  const k7 = await api("GET", "/healthz");
+  assert(k7.status === 200, "kratek zastoj brez prometa (< meje): 200", k7);
+  await spi(2200);
+  const t7 = await api("GET", "/healthz");
+  assert(t7.status === 503, "povezava puscena dlje od meje, nihce ne caka -> /healthz 503", t7);
+  await lk7.sprosti();
+  await obvisel7;
+  await spi(600);
+  const p7 = await api("GET", "/healthz");
+  assert(p7.status === 200, "po vrnitvi povezave spet 200", p7);
+  await ustavi();
+
+  // ---------------------------------------------------------------- S8
+  console.log("\n# S8: preobremenitev Z NAPREDKOM ni zastoj (PG_POOL_MAX=2, 40 vzporednih zank, ZDRAVJE_ZASICEN_MS=1500)");
+  await zagon(3148, { PG_POOL_MAX: "2", ZDRAVJE_ZASICEN_MS: "1500" });
+  let delo = true, uspesnih = 0, napak = 0;
+  const zanke = Array.from({ length: 40 }, () => (async () => { while (delo) { const r = await api("GET", "/me", U.kupec_d); if (r.status === 200) uspesnih++; else napak++; } })());
+  const zdravja = [];
+  const t8 = Date.now();
+  while (Date.now() - t8 < 4500) { zdravja.push((await api("GET", "/healthz")).status); await spi(300); }
+  delo = false; await Promise.all(zanke);
+  assert(Date.now() - t8 >= 4500 && 1500 * 2 < 4500, "obremenitev je trajala dlje od dvakratnega praga");
+  assert(zdravja.length >= 10 && zdravja.every(x => x === 200), `/healthz je ves cas 200 (vzorcev ${zdravja.length}; stanja ${[...new Set(zdravja)]})`, zdravja);
+  assert(uspesnih > 200, `pool je krozil: ${uspesnih} uspesnih poizvedb /me med obremenitvijo`, { uspesnih, napak });
+  await ustavi();
+
+  // ---------------------------------------------------------------- S9
+  console.log("\n# S9: zastoj skenPool -> /healthz 503 (PG_SKEN_POOL_MAX=1, ZDRAVJE_ZASICEN_MS=1500)");
+  await zagon(3149, { PG_SKEN_POOL_MAX: "1", PG_SKEN_CONNECT_TIMEOUT_MS: "300", ZDRAVJE_ZASICEN_MS: "1500" });
+  const lkT9 = await pool.connect();
+  await lkT9.query("BEGIN"); await lkT9.query("LOCK TABLE tickets IN ACCESS EXCLUSIVE MODE");   // sken obvisi na poizvedbi vstopnice
+  const sken9 = api("POST", "/business/tickets/scan", U.lastnik, { qr: koda.qr });
+  await spi(600);
+  const k9 = await api("GET", "/healthz");
+  assert(k9.status === 200, "kratek zastoj skenPool (< meje): 200", k9);
+  await spi(2200);
+  const t9 = await api("GET", "/healthz");
+  assert(t9.status === 503, "skenPool brez vrnjene povezave dlje od meje -> /healthz 503", t9);
+  assert(/\[zdravje\] skenPool: zastoj/.test(log), "razlog 503 (skenPool) je zapisan v dnevnik");
+  await lkT9.query("ROLLBACK"); lkT9.release();
+  await sken9;
+  await spi(600);
+  const p9 = await api("GET", "/healthz");
+  assert(p9.status === 200, "po vrnitvi povezave skenPool spet 200", p9);
   await ustavi();
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
