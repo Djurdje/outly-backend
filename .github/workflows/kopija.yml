@@ -1,0 +1,256 @@
+# Dnevna varnostna kopija produkcijske baze IZVEN Renderja (issue #88). Hramba: zasebni Cloudflare R2 bucket (EU), odlocitev Martina 2. 10. 2026.
+#
+# Kaj: prek obstojecega GET /admin/api/export (servisni admin racun agent@outly.si) potegne logicni izvoz VSEH tabel, ga SIFRIRA z geslom
+# (gpg, AES-256), nalozi v R2 (S3 API), prebere nazaj in ODSIFRIRA (mora biti enak izvozu), takoj preizkusi obnovo (service container
+# postgres:16, db/obnovi_izvoz.js, primerjava tabel in migracij), preveri padec stevila vrstic in pobrise kopije, starejse od 30 dni.
+# NIC ni v GitHub artefaktih (repo je javen).
+#
+# Zakaj izvoz prek API-ja in ne pg_dump: zunanji dostop do outly-db je zaprt (Inbound IP Rules prazne, STATE.md 30. 9.), GitHubovi runnerji pa
+# nimajo stalnega IP-ja. Z API-jem baza ostane zaprta, obnova pa je ISTI, ze testirani postopek (db/obnovi_izvoz.js) kot v ARCHITECTURE.md.
+#
+# Repo je JAVEN: dnevniki zagonov so javni. V dnevnik gredo samo imena tabel, OK/NAPAKA, velikost sifrirane datoteke in odtis - nikoli
+# vrednosti iz baze, stevila vrstic, odgovori streznika ali ime/ID racuna R2 (napake R2 se skrajsajo na kodo).
+#
+# DOSTOP DO SKRIVNOSTI: job ima `environment: kopije` z Deployment branches = SAMO `main`; skrivnosti so TAM, ne na ravni repozitorija.
+# Zagon z druge veje pade ze pri »Branch not allowed«.
+#   environment kopije, secrets: BACKUP_ADMIN_EMAIL, BACKUP_ADMIN_PASSWORD   servisni racun z vlogo admin (Supabase prijava; agent@outly.si)
+#   environment kopije, secrets: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET   token »Object Read & Write« samo za ta bucket
+#   environment kopije, secrets: BACKUP_GESLO                                geslo za sifriranje kopij (>= 32 znakov; kopija v upravljalniku gesel!)
+#   environment kopije, secrets: HC_URL_KOPIJE  (NEOBVEZNO)                  Healthchecks (Period 1 day, Grace 24 h); brez njega samo opozorilo
+#   repo secret NTFY_TOPIC (ze obstaja)                                      push ob napaki, kot pri nadzor.yml
+# Sprejeto tveganje (DECISIONS 2. 10. 2026): kdor lahko bere secrets tega environmenta, lahko odsifrira kopije.
+name: Varnostna kopija baze
+
+on:
+  schedule:
+    - cron: "23 6 * * *"   # 08:23 poleti / 07:23 pozimi: klubi so zaprti do ~6:00, nocni deployi so koncani. GitHub cron zna zamuditi.
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "true = samo testno push obvestilo (ntfy), kopije ne naredi"
+        default: "false"
+      potrdi_padec:
+        description: "true = Martin potrjuje, da je padec stevila vrstic (users/orders/tickets > 20 %) namerno (npr. ciscenje demo podatkov); nova stevila postanejo izhodisce"
+        default: "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: varnostna-kopija-baze
+  cancel-in-progress: false
+
+jobs:
+  kopija:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50   # izvoz: 3 poskusi x 600 s + 2 x 30 s = 31 min, ostalo (setup, nalaganje, obnova) < 15 min
+    environment: kopije
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: outly
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Ciljna baza preizkusa obnove: SAMO service container na runnerju (nikoli produkcija).
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/outly
+      NODE_ENV: test
+      TEST: ${{ github.event.inputs.test || 'false' }}
+    steps:
+      - name: Testno obvestilo (brez kopije)
+        id: test
+        if: env.TEST == 'true'
+        env:
+          TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          if [ -z "$TOPIC" ]; then echo "NTFY_TOPIC ni nastavljen - push preskocen"; exit 0; fi
+          curl -sS --max-time 20 -H "Title: Outly varnostna kopija" -H "Tags: floppy_disk" \
+            -d "TESTNO OBVESTILO - kopije nisem naredil, to je samo preizkus." "https://ntfy.sh/$TOPIC" >/dev/null && echo "Push poslan."
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: env.TEST != 'true'
+
+      - name: Preveri nastavitve (samo imena, nikoli vrednosti)
+        id: nastavitve
+        if: env.TEST != 'true'
+        env:
+          E: ${{ secrets.BACKUP_ADMIN_EMAIL }}
+          P: ${{ secrets.BACKUP_ADMIN_PASSWORD }}
+          G: ${{ secrets.BACKUP_GESLO }}
+          R1: ${{ secrets.R2_ACCOUNT_ID }}
+          R2I: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R3: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R4: ${{ secrets.R2_BUCKET }}
+          HC: ${{ secrets.HC_URL_KOPIJE }}
+        run: |
+          manjka=""
+          [ -n "$E" ] || manjka+=" secrets.BACKUP_ADMIN_EMAIL"
+          [ -n "$P" ] || manjka+=" secrets.BACKUP_ADMIN_PASSWORD"
+          [ -n "$G" ] || manjka+=" secrets.BACKUP_GESLO"
+          [ "${#G}" -ge 32 ] || [ -z "$G" ] || { echo "::error::secrets.BACKUP_GESLO je prekratko (najmanj 32 znakov)."; exit 1; }
+          [ -n "$R1" ] || manjka+=" secrets.R2_ACCOUNT_ID"
+          [ -n "$R2I" ] || manjka+=" secrets.R2_ACCESS_KEY_ID"
+          [ -n "$R3" ] || manjka+=" secrets.R2_SECRET_ACCESS_KEY"
+          [ -n "$R4" ] || manjka+=" secrets.R2_BUCKET"
+          if [ -n "$manjka" ]; then
+            echo "::error::Manjka nastavitve v environmentu kopije:$manjka (glej .claude/skills/obnova-baze/SKILL.md, razdelek Nastavitev)."
+            exit 1
+          fi
+          if [ -z "$HC" ]; then
+            echo "::warning::secrets.HC_URL_KOPIJE ni nastavljen: ce kopija sploh ne stece (cron izpade, workflow onemogocen), ne javi nihce. Healthchecks je neobvezen, a priporocen (Period 1 day, Grace 24 h)."
+          fi
+          echo "Nastavitve: obvezne prisotne."
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: env.TEST != 'true'
+        with:
+          node-version: 22
+          cache: npm
+      - name: Namesti odvisnosti in preveri orodja
+        if: env.TEST != 'true'
+        run: |
+          set -euo pipefail
+          npm ci
+          gpg --version | head -n1
+          jq --version
+          aws --version
+
+      - name: Izvoz produkcijske baze
+        id: izvoz
+        if: env.TEST != 'true'
+        env:
+          BACKUP_ADMIN_EMAIL: ${{ secrets.BACKUP_ADMIN_EMAIL }}
+          BACKUP_ADMIN_PASSWORD: ${{ secrets.BACKUP_ADMIN_PASSWORD }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/kopija/izhod"
+          chmod 700 "$RUNNER_TEMP/kopija"
+          bash _orodja/kopija/izvoz.sh "$RUNNER_TEMP/kopija/izvoz.json"
+
+      - name: Sifriraj z geslom (gpg AES-256)
+        id: sifriraj
+        if: env.TEST != 'true'
+        env:
+          BACKUP_GESLO: ${{ secrets.BACKUP_GESLO }}
+        run: |
+          DATUM=$(date -u +%F)
+          echo "DATUM=$DATUM" >> "$GITHUB_ENV"
+          OZNAKA="${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "OZNAKA=$OZNAKA" >> "$GITHUB_ENV"
+          IME="outly-db-$DATUM-r$OZNAKA.json.gz.gpg"
+          bash _orodja/kopija/sifriraj.sh "$RUNNER_TEMP/kopija/izvoz.json" "$RUNNER_TEMP/kopija/izhod/$IME"
+
+      # Izhodisce stevil (za preverbo padca) je v R2 (kopije/stanje/stevila.json, nesifrirano - stevila vrstic niso osebni podatek); stanje se prebere PRED nalaganjem danasnje kopije
+      # (»prvi zagon« = v R2 se ni nobene kopije) in pred obnovo, da se padec preveri tudi, ce obnova pade.
+      - name: Stanje izhodisca stevil (R2)
+        id: izhodisce
+        if: env.TEST != 'true'
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: bash _orodja/kopija/padec.sh stanje
+
+      - name: Nalozi sifrirano kopijo v R2, preberi nazaj in odsifriraj
+        id: nalozi
+        if: env.TEST != 'true'
+        env:
+          BACKUP_GESLO: ${{ secrets.BACKUP_GESLO }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: bash _orodja/kopija/nalozi_r2.sh "$RUNNER_TEMP/kopija/izhod" "$DATUM" "$OZNAKA" "$RUNNER_TEMP/kopija/izvoz.json"
+
+      # Namenoma PO nalaganju: ce preizkus obnove pade (npr. deploy z novo migracijo je v teku), je kopija vseeno shranjena.
+      - name: Preizkus obnove (service container postgres:16)
+        id: obnova
+        if: env.TEST != 'true'
+        run: bash _orodja/kopija/preizkus_obnove.sh "$RUNNER_TEMP/kopija/izvoz.json"
+
+      - name: Preverba padca stevila vrstic (users, orders, tickets)
+        id: padec
+        if: ${{ !cancelled() && steps.nalozi.outcome == 'success' }}
+        env:
+          POTRDI_PADEC: ${{ github.event.inputs.potrdi_padec || 'false' }}   # isto ime bere stevila.js (test_kopija_orodja.js to preverja)
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: bash _orodja/kopija/padec.sh preveri "$RUNNER_TEMP/kopija/izvoz.json"
+
+      - name: Izhodisca ni 2 zagona zapored
+        id: dvakrat
+        if: ${{ !cancelled() && steps.izhodisce.outputs.dvakrat == 'true' }}
+        run: |
+          echo "::error::Izhodisce za preverbo padca manjka ze 2 zagona zapored (shranjevanje izhodisca v R2 ne uspe ali je objekt pokvarjen). Kopija je shranjena."
+          exit 1
+
+      # Hramba 30 dni: workflow sam brise stare kopije (zanesljivo, brez dodatnega klika); R2 lifecycle pravila NE nastavljamo (izniclo bi varovalo »vedno 7 najnovejsih«).
+      - name: Hramba - pobrisi kopije starejse od 30 dni (R2)
+        id: hramba
+        if: ${{ !cancelled() && steps.nalozi.outcome == 'success' }}
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: bash _orodja/kopija/cisti_stare.sh
+
+      - name: Pocisti golo besedilo z diska runnerja
+        if: always() && env.TEST != 'true'
+        run: rm -rf "$RUNNER_TEMP/kopija/izvoz.json" || true
+
+      - name: Push obvestilo na telefon (ntfy)
+        if: (failure() || cancelled()) && env.TEST != 'true'
+        env:
+          TOPIC: ${{ secrets.NTFY_TOPIC }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          S_NALOZI: ${{ steps.nalozi.outcome }}
+          IZIDI: >-
+            nastavitve=${{ steps.nastavitve.outcome }}
+            izvoz=${{ steps.izvoz.outcome }}
+            sifriranje=${{ steps.sifriraj.outcome }}
+            izhodisce=${{ steps.izhodisce.outcome }}
+            nalaganje-v-R2=${{ steps.nalozi.outcome }}
+            preizkus-obnove=${{ steps.obnova.outcome }}
+            padec-stevil=${{ steps.padec.outcome }}
+            izhodisca-ni-2x=${{ steps.dvakrat.outcome }}
+            hramba=${{ steps.hramba.outcome }}
+        run: |
+          if [ -z "$TOPIC" ]; then echo "NTFY_TOPIC ni nastavljen - push preskocen"; exit 0; fi
+          RAZLOGI=""
+          for par in $IZIDI; do
+            case "${par#*=}" in failure|cancelled) RAZLOGI+="${par%%=*} (${par#*=}), " ;; esac
+          done
+          RAZLOGI="${RAZLOGI%, }"
+          [ -n "$RAZLOGI" ] || RAZLOGI="neznan korak (zagon prekinjen ali timeout)"
+          if [ "$S_NALOZI" = "success" ]; then
+            SPOROCILO="Kopija baze JE v R2, a zagon ni cist: $RAZLOGI. Preveri zagon."
+          else
+            SPOROCILO="Dnevna kopija baze NI shranjena: $RAZLOGI."
+          fi
+          curl -sS --max-time 20 \
+            -H "Title: Outly varnostna kopija" -H "Priority: high" -H "Tags: rotating_light" -H "Click: $RUN_URL" \
+            -d "$SPOROCILO" "https://ntfy.sh/$TOPIC" >/dev/null && echo "Push poslan."
+
+      # Mrtev cloveka drzalo: ce kopija sploh NE stece (cron izpade, workflow onemogocen), ne javi nihce. Healthchecks obrne logiko.
+      # Check naredi Martin (Period 1 day, Grace 24 h). Brez HC_URL_KOPIJE zagon izpise opozorilo (ne napake).
+      - name: Ping Healthchecks.io
+        if: success() && env.TEST != 'true'
+        env:
+          HC_URL: ${{ secrets.HC_URL_KOPIJE }}
+        run: |
+          if [ -z "$HC_URL" ]; then
+            echo "::warning::HC_URL_KOPIJE ni nastavljen - ping preskocen (kopija, ki ne stece, ostane neopazena). Nastavi Healthchecks check (Period 1 day, Grace 24 h)."
+            exit 0
+          fi
+          curl -fsS -m 10 --retry 3 "$HC_URL" && echo "Ping poslan." \
+            || echo "::warning::Healthchecks ping ni uspel - to NI napaka kopije."

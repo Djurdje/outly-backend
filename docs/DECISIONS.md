@@ -358,3 +358,18 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   podatke (opis, telefon, naslov v centru LJ, zanr balkan, cenik) in dopolni dogodke do 3 koncanih + 3 prihajajocih. Narocila,
   vstopnice in obstojeci dogodki ostanejo. Migracija 022. *vir/dokaz*: pogovor 28. 9. 2026. *velja dokler*: pravi klubi ne
   podpisejo in ne vnesejo svojih podatkov. *nadomescena z*: —
+- 2026-10-02: **Dnevna kopija baze izven Renderja: logični izvoz prek API-ja, šifriran z GESLOM (gpg AES-256), hranjen v ZASEBNEM Cloudflare R2 (EU); odločitev Martina v klepetu 2. 10. 2026** (issue #88).
+  Workflow `Varnostna kopija baze` potegne `GET /admin/api/export` (servisni račun `agent@outly.si`), šifrira z geslom `BACKUP_GESLO` (`gpg --symmetric`, AES-256, MDC),
+  naloži v R2 bucket `outly-kopije` (S3 API, endpoint `<ACCOUNT_ID>.eu.r2.cloudflarestorage.com`), prebere nazaj (sha256), **odsifrira in primerja z izvozom**, v istem zagonu preizkusi obnovo v `postgres:16`
+  in po 30 dneh sam briše stare kopije (vedno pusti 7 najnovejših; R2 lifecycle pravila namenoma ni, ker bi to varovalo izničilo). Mesečno workflow `Preizkus kopije (mesecni)` kopijo iz R2 odsifrira,
+  obnovi v prazno bazo in primerja (brez Martina); ob napaki rdeč zagon + push + issue. Martin je izbral R2 namesto GitHub artefakta v javnem repu: kopije so zasebne, ne le šifrirane.
+  Ne `pg_dump`: zunanji dostop do `outly-db` je zaprt (30. 9.), runnerji nimajo stalnega IP-ja.
+  **Sprejeto tveganje (Martin, 2. 10. 2026: preprostost):** geslo je v GitHub secrets (environment `kopije`, samo `main`), zato kdor lahko bere secrets tega okolja, lahko odsifrira kopije (prej predvideni
+  zasebni ključ age samo pri Martinu je opuščen, ker Martin ročnega upravljanja ključev ne zmore). Utemeljitev: bucket je zaseben in v EU, dostop do secretov imajo samo lastnik repozitorija in workflowi na `main`
+  (spremembe workflowov zahtevajo oznako `odobril-martin`), v zameno dobimo polni samodejni mesečni preizkus obnove. Nasprotni dokaz: kdor prevzame GitHub račun ali R2 in secrets hkrati, dobi kopije z osebnimi podatki.
+  Servisni račun za izvoz je obstoječi `agent@outly.si` (ne poseben račun; vloga `admin` je potrebna za `/admin/api`; predlog vloge samo-za-izvoz ostaja).
+  Izhodišče števil za preverbo padca (> 20 % za users/orders/tickets) je JSON v R2 **nešifriran**: števila vrstic niso osebni podatek, bucket je zaseben, ločen ključ bi bil še en del, ki se lahko pokvari.
+  Dnevniki zagonov so javni: v njih so samo imena tabel, OK/NAPAKA in odtis, nikoli števila vrstic, podatki o računu R2 ali geslo. Prag 20 % glede na prejšnji zagon **ne ujame postopnega padca** (sprejeto tveganje).
+  Strošek 0 EUR do 10 GB/1 M zapisov na mesec (Cloudflare lahko ob vklopu R2 zahteva plačilno sredstvo). Rok hrambe 30 dni (in dejstvo, da šifrirani osebni podatki ležijo pri Cloudflare) v politiki zasebnosti
+  ni zapisan — nepreverjeno, pregled `pravnik` pred javnim zagonom.
+  *vir/dokaz*: Martinova izbira in poenostavitev v pogovoru 2. 10. 2026; STATE.md (zaprt dostop 30. 9.) · *velja dokler*: je baza zaprta za zunanje povezave in izvoz ostaja tok · *nadomeščena z*: —
