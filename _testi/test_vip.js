@@ -7,8 +7,9 @@
  * javni GET brez kupca, nakup mize (N vstopnic z is_vip + QR), I13 (vzporedni nakupi iste mize -> natanko 1),
  * mize ne stejejo v sold_count, izklopljena miza, paket obvezen/tuj, starost 18+, prenos VIP vstopnice, sken,
  * rezervacije za vratarja, cena po dogodku, vip_enabled/vip_from_cents, prodaja (tables_sold) in demo migracijo 026.
- * Pozor: POST .../orders ima omejevalnik "nakup" 20/uro na req.ip (v pomnilniku procesa). Zato test pred
- * vecjimi skupinami nakupov znova zazene backend (nakup() steje klice in ga po potrebi osvezi).
+ * Pozor: POST .../orders ima omejevalnik "nakup" 20/uro na req.ip (od migracije 027 v tabeli omejitve, ne vec v pomnilniku
+ * procesa). Zato test pred vecjimi skupinami nakupov izprazni tabelo in znova zazene backend (nakup() steje klice in ga po
+ * potrebi osvezi).
  */
 const crypto = require("crypto");
 const fs = require("fs");
@@ -47,7 +48,7 @@ async function api(method, p, token, body, glave) {
   return { status: r.status, body: j, besedilo: t };
 }
 
-// Backend kot otrok proces; restart() ga ugasne in zazene znova (omejevalnik nakupov je v pomnilniku procesa).
+// Backend kot otrok proces; restart() ga ugasne, izprazni omejitve (restart procesa jih ne ponastavi vec) in zazene znova.
 let srv = null, log = "", nakupov = 0;
 async function zazeni() {
   srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
@@ -55,9 +56,14 @@ async function zazeni() {
   for (let i = 0; i < 80; i++) { try { await fetch(BASE + "/"); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
   nakupov = 0;
 }
+async function izprazniOmejitve() {
+  const p = new Pool({ connectionString: DB });
+  try { await p.query("TRUNCATE omejitve"); } finally { await p.end(); }
+}
 async function restart() {
   const s = srv;
   await new Promise(r => { s.once("exit", r); s.kill(); });
+  await izprazniOmejitve();
   await zazeni();
 }
 // Nakup mize (steje proti omejitvi 20/uro; pred mejo osvezi proces).
@@ -83,7 +89,7 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  const TRUNC = "TRUNCATE ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE";
+  const TRUNC = "TRUNCATE omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE";
   await pool.query(TRUNC);
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   await zazeni();

@@ -22,7 +22,7 @@ const { Pool } = require("pg");
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
 const PORT = 3118, JWKS_PORT = 3999;
-const PORT_BREZ_JWKS = 3119, MRTVA_VRATA = 3998;
+const PORT_BREZ_JWKS = 3119, MRTVA_VRATA = Number(process.env.MRTVA_VRATA) || 3998; // MRTVA_VRATA: za lokalni zagon, ce je 3998 zasedena
 const BASE = `http://127.0.0.1:${PORT}`;
 const BASE_BREZ_JWKS = `http://127.0.0.1:${PORT_BREZ_JWKS}`;
 
@@ -73,7 +73,7 @@ async function pockaj(base) {
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE omejitve, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
 
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   const srv = dvigni(PORT, JWKS_PORT);
@@ -139,6 +139,38 @@ async function pockaj(base) {
   assert(r.body && r.body.stripe_charges_enabled === true, "lastnik vidi stripe_charges_enabled (stanje, ne id)", r.body);
   r = await api("GET", `/clubs/${klubId}`, null);
   assert(r.body && r.body.name === "Pure Club" && r.body.bar_prices !== undefined, "javni klub vseeno vrne svoja javna polja", r.body);
+  // I4b: notranji ID lastnika (owner_user_id) ne sme na javne in poslovne poti (issue #113).
+  // Admin panel ga NAMENOMA vidi (ADMIN_STOLPCI_KLUBA), zato admin poti niso na seznamu.
+  // Iscemo po kljucih v razclenjenem JSON-u (tudi ugnezdenih), ne po besedilu.
+  const lastnikId = (await pool.query("SELECT id FROM users WHERE email='lastnik@outly.si'")).rows[0].id;
+  function kljuci(x, acc = new Set()) {
+    if (Array.isArray(x)) x.forEach(v => kljuci(v, acc));
+    else if (x && typeof x === "object") for (const [k, v] of Object.entries(x)) { acc.add(k); kljuci(v, acc); }
+    return acc;
+  }
+  r = await api("PUT", `/clubs/${klubId}/follow`, T.gost);
+  assert(r.status === 200 || r.status === 201 || r.status === 204, "gost sledi klubu (priprava)", r.status);
+  const brezLastnika = [
+    ["GET", "/clubs", null],
+    ["GET", `/clubs/${klubId}`, null],
+    ["GET", `/clubs/${klubId}`, T.gost],
+    ["GET", "/clubs/map", null],
+    ["GET", "/events", null],
+    ["GET", `/events/${dogId}`, null],
+    ["GET", "/search?q=Pure", null],
+    ["GET", "/me/clubs/following", T.gost],
+    ["GET", "/business/clubs/me", T.lastnik],
+  ];
+  for (const [m, p, t] of brezLastnika) {
+    const o = await api(m, p, t);
+    assert(o.status === 200, `I4b ${m} ${p}${t ? " (prijavljen)" : ""} -> 200`, o.status);
+    assert(!kljuci(o.body).has("owner_user_id"), `I4b ${p}: odgovor nima kljuca owner_user_id`, o.tekst.slice(0, 200));
+  }
+  // Kontrola, da test ni prazen: v bazi lastnik JE, admin pot ga (namenoma) kaze.
+  r = await api("GET", "/admin/api/clubs", T.admin);
+  const adminKlubi = Array.isArray(r.body) ? r.body : (r.body && (r.body.clubs || r.body.items)) || [];
+  assert(adminKlubi.some(k => k.owner_user_id === lastnikId), "admin pot ga se vedno vrne (kontrola, da lastnik JE v bazi)", r.tekst.slice(0, 200));
+
   // In da je skrivnost res v bazi (sicer test ne dokazuje nicesar).
   const vBazi = await pool.query("SELECT stripe_account_id FROM clubs WHERE id=$1", [klubId]);
   assert(vBazi.rows[0].stripe_account_id === TAJNI_ACCT, "stripe_account_id JE v bazi (test ni prazen)", vBazi.rows[0]);

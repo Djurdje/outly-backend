@@ -227,12 +227,29 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 - Render web service → paket 7 USD (0,5 CPU, 512 MB) je dovolj za 500+ uporabnikov.
   *vir/dokaz*: stresni test 11. 9. 2026 — 616 req/s pri 40 vzporednih, brez napak.
   *velja dokler*: teče **ena instanca** backenda; ob drugi instanci padeta omejevalnik poskusov v pomnilniku (S-02)
-  in ta izračun zmogljivosti.
+  in ta izračun zmogljivosti. *Dopolnilo 2. 10. 2026*: omejevalnik je od migracije 027 v PostgreSQL (spodaj), zato ta pogoj
+  za omejevalnik ne velja več; za izračun zmogljivosti (CPU/RAM ene instance) velja še naprej.
 - Render baza → plačljivi paket **pred 7. 10. 2026** (brezplačna se izbriše; januarja se je to že zgodilo).
   *velja dokler*: 7. 10. 2026 — po tem datumu ni več odločitev, ampak izgubljena baza.
   **Izvedeno 30. 9. 2026** (Martin): baza `0.1c-256mb` (6 $), web service Starter `0.5c-512mb` (7 $). Za webapp (`outly.si/app`)
   dodatnega gostovanja ni treba: statika na Cloudflare Pages, API isti backend.
   *vir/dokaz*: Stresni test #2/#3 (baza CPU ~0, RAM ~20 %; web CPU ~34 % na Starterju, 0 % napak), Render API.
+- 2026-10-02: **Omejevalnik poskusov je v PostgreSQL (tabela `omejitve`, UNLOGGED); ob njegovi okvari po poti: fail-open za `ogled` in
+  `iskanje`, lokalni števec v procesu (staro vedenje) za nakup in prenos, fail-closed (503 + `Retry-After`) za brisanje računa in prošnje;
+  skeniranje omejevalnika sploh nima.** Razlog: števec v pomnilniku se je ob drugi instanci ali deployu ponastavil (issue #24). Redis bi pomenil
+  nov plačljiv servis (7+ $/mesec), ena UPDATE vrstica v bazi pa zadošča. Fail-open pri ogledu in iskanju, ker omejevalnik tam varuje samo števec
+  in gnetenje iskanja. Nakup in prenos: fail-closed bi ob navalu (zasičen ali počasen pool omejevalnika, povezava 2 s) zavrnil kupce, čeprav glavni
+  pool dela, fail-open pa bi pustil neomejeno rezerviranje zaloge (nakup rezervira vstopnice že ob vstavitvi) — zato degradirano, ne zaprto: iste meje,
+  a števec samo v procesu. Brisanje (nepovratno) in prošnje (maili) ostanejo fail-closed: okvara omejevalnika je skoraj vedno okvara baze, kjer bi pot
+  tako ali tako padla. Ključ v bazi je HMAC-SHA256(pot:meja:okno:IP) (HKDF iz `QR_SECRET`/`JWT_SECRET`, nove skrivnosti ni; IPv6 na /64): IP je osebni
+  podatek, golo sha256 pa bi se razbilo z naštevanjem IPv4; meja v ključu prepreči, da bi pot z drugo mejo števec zmanjšala ali podedovala tujo blokado.
+  Tabela je UNLOGGED (po padcu baze se meje ponastavijo, kot prej ob vsakem deployu) in ni v izvozu baze. Hashi IP-jev ostanejo do 1 h v bazi =
+  psevdonimizacija: pregled politike zasebnosti (pravnik/Martin).
+  *vir/dokaz*: [issue #24](https://github.com/Djurdje/outly-backend/issues/24), `_testi/test_omejevalnik.js`, invarianta I15; zmogljivost: LOKALNA meritev
+  (PG16 na isti napravi, `_orodja/merjenje_omejevalnika.js`, ~2.100 omejenih klicev/s na instanco pri 1000 vzporednih povezavah) — NE na Renderjevi bazi
+  `0.1c-256mb`, kjer bo počasneje; treba izmeriti po deployu ·
+  *velja dokler*: omejeni klici ostanejo pod ~1.000/s na instanco in je baza majhna; ob več ali opaznem CPU baze zaradi `omejitve` → Redis ·
+  *nadomeščena z*: — (nadomešča omejevalnik v pomnilniku procesa, S-02)
 - 2026-09-16: Apple Developer: Martin ima **Individual račun**; pozneje App Transfer na NEXT DIMENSIONS. Bundle ID `si.outly.app`,
   ime v App Store Connect »Outly - Nightlife« (»Outly« zasedeno). **Distribucija samo prek TestFlighta** (podpis v GitHub Actions s cloud
   signing, API ključ v secrets, nič v repu); Sideloadly/AltServer se opustita. Runner `macos-26`; `MARKETING_VERSION` dviguje Martin.
@@ -300,6 +317,11 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   veljajo naprej. Strežnik ostane razsodnik (`scan-batch`); dva telefona brez povezave lahko spustita isto vstopnico — sprejeto tveganje.
   *vir/dokaz*: issue #86, backend PR "Sken brez povezave", `_testi/test_sken_brez_povezave.js` · *velja dokler*: — (rotacija ključa =
   zamenjava `QR_SECRET`, razveljavi vse kode) · *nadomeščena z*: —
+- 2026-10-02: **Odločitev agenta (predpostavka), Martin je ni potrdil:** javni seznami se predpomnijo v procesu, 3 s, brez Redisa; `Cache-Control: private` samo na osebnih različicah (issue #114; zanesljivost: 1000+ hkratnih
+  ogledov, sken na vratih ne sme pasti). Predpomni se samo javni del odgovora (ključ brez žetona), osebna polja se računajo posebej (I17).
+  Razveljavitev ob zapisu v procesu (izjeme: ARCHITECTURE »Javni predpomnilnik«); zaostanek drugih instanc največ TTL agent sprejema kot predpostavko. Zunanji predpomnilnik (Redis, CDN pravila) bi
+  stal denar ali nastavitve računov, zdaj ni potreben. *vir/dokaz*: PR #111 (meritev), PR tega commita (pred/po), `_testi/test_javni_predpomnilnik.js` ·
+  *velja dokler*: teče ena instanca; pri več instancah ali CDN-u pred API-jem preglej razveljavitev · *nadomeščena z*: —
 
 ## Način dela (odločeno 16. 9. 2026)
 

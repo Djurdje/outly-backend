@@ -4,8 +4,8 @@
  *   DATABASE_URL="postgres://postgres@localhost:5432/outly" node _testi/test_vstopnice.js
  * Vzorec kot test_vabila.js: lokalni JWKS (3999), backend na svojem portu (3117).
  * Pozor: POST /events/:id/orders ima omejevalnik "nakup" 20/uro na req.ip (index.js), deljen med
- * VSEMI nakupi v tej datoteki (proces je svez, torej ni deljen z drugimi test datotekami). Ce dodajas
- * nove scenarije nakupa, sesteje stevilo klicev proti tej meji.
+ * VSEMI nakupi v tej datoteki (od migracije 027 je stevec v tabeli omejitve; test jo ob zacetku izprazni, zato
+ * ni deljen z drugimi test datotekami). Ce dodajas nove scenarije nakupa, sesteje stevilo klicev proti tej meji.
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -54,7 +54,7 @@ function preveriQrV2(qr, javniSurov) {
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
