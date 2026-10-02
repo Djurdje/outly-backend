@@ -42,6 +42,12 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
 });
+// Prekinjena povezava (ponovni zagon baze med deployem) naj da jasno napako, ne "Unhandled 'error' event".
+// Poizvedba, ki je tekla, tako ali tako zavrne obljubo; glavno() to ujame in konča z izhodno kodo 1.
+pool.on("error", (e) => console.error("[pool] povezava s bazo prekinjena:", e && e.message));
+pool.on("connect", (odjemalec) => {
+  odjemalec.on("error", (e) => console.error("[pool] povezava s bazo prekinjena:", e && e.message));
+});
 
 function odtis(besedilo) {
   return crypto.createHash("sha256").update(besedilo).digest("hex").slice(0, 16);
