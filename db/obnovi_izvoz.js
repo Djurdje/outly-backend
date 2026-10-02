@@ -134,9 +134,10 @@ async function glavno() {
     throw new Zavrnitev("Cilj nima tabele schema_migrations — to ni baza, pripravljena z migracijami (poženi npm run migrate).");
   }
 
-  // --- 2. cilj mora biti prazen (razen evidence migracij) ---
+  // --- 2. cilj mora biti prazen (razen evidence migracij in kratkotrajnih stevcev omejevalnika) ---
+  // `omejitve` (migracija 027) ni del izvoza; ce backend ze dela na novi bazi, so v njej stevci poskusov.
   for (const tabela of imenaCilja) {
-    if (tabela === "schema_migrations") continue;
+    if (tabela === "schema_migrations" || tabela === "omejitve") continue;
     const r = await client.query(`SELECT count(*)::int AS n FROM "${tabela.replace(/"/g, '""')}"`);
     if (r.rows[0].n > 0) {
       const namig = tabela === "users"

@@ -61,7 +61,7 @@ async function api(method, path, token, body, signal) {
 (async () => {
   const pool = new Pool({ connectionString: DB });
   await pool.query("TRUNCATE ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
-  await pool.query("DO $$ BEGIN IF to_regclass('public.omejitve') IS NOT NULL THEN TRUNCATE omejitve; END IF; END $$");
+  await pool.query("TRUNCATE omejitve");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
 
   let srv = null, log = "";

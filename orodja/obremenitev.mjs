@@ -18,6 +18,10 @@
 //   --max-p95 MS  najvecji dovoljen p95 vseh zahtevkov (privzeto 1000); izhodna koda 1, ce presezeno
 //   --timeout MS  casovna meja enega zahtevka; zamuda se steje kot napaka (privzeto 15000)
 //
+// POZOR - javni predpomnilnik (#114, I17): GET /events, /events/:id, /clubs/:id strezejo iz predpomnilnika (privzeto 3 s), zato
+// ob vklopljenem predpomnilniku orodje meri predvsem predpomnilnik, ne baze. Za zmogljivost baze zazeni backend z
+// JAVNI_PREDPOMNILNIK_MS=0; za realno sliko produkcije pusti privzeto (in ne mešaj obojega v isti primerjavi).
+//
 // Seja: GET /events?upcoming=true  ->  nakljucen dogodek: GET /events/:id  ->  GET /clubs/:club_id  (premor med koraki).
 // Izpis: stevilo zahtevkov, napake po statusu, p50/p95/p99 po poti in skupaj, req/s, trajanje sej.
 //

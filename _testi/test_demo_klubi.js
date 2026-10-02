@@ -36,7 +36,7 @@ const SQL_VELVET = brezTransakcije("024_dogodki_velvet.sql");
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE omejitve, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
 
   // 6 lastnikov in 6 klubov s pravimi imeni (kot demo v produkciji).
   for (let i = 1; i <= 6; i++) {
@@ -145,7 +145,7 @@ const SQL_VELVET = brezTransakcije("024_dogodki_velvet.sql");
   }
 
   srv.kill();
-  await pool.query("TRUNCATE club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE omejitve, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
   await pool.end();
   console.log(`\n${ok} ok, ${fail} napak`);
   if (fail) { console.log(log.slice(-2000)); process.exit(1); }

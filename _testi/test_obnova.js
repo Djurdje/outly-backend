@@ -232,7 +232,7 @@ async function telo() {
 }
 
 (async () => {
-  await pool.query("TRUNCATE ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   // TZ namerno ni UTC: izvoz in obnova tečeta v istem pasu kot Martinov računalnik (Europe/Ljubljana).
   // Brez tega je test za DATE stolpce okoljsko odvisen (na UTC runnerju je zelen tudi ob napaki).
