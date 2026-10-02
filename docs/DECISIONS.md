@@ -176,6 +176,18 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   *vir/dokaz*: specifikacija VIP miz 1. 10. 2026, `_testi/test_vip.js` · *velja dokler*: Martin ne rece drugace ·
   *nadomeščena z*: —
 
+- 2026-10-02: **VIP miza s paketom pijace: nakup in prenos od 18 let** (issue #102, pravna analiza pravnika 1. 10. 2026, ZOPA 7/1: alkohola
+  se ne sme prodati ali dati osebi pod 18 let). Strezniska preverba starosti je gledala samo `min_age` dogodka, zato je lahko miza s
+  steklenico sla 16-letniku na dogodku 16+. Polja "vsebuje alkohol" v shemi ni (`bottle_packages`: ime, opis), zato **vsak paket stejemo
+  kot alkohol** (najmanjsa varna resitev brez migracije): za mizo Z IZBRANIM PAKETOM nakup (`POST /events/:id/tables/:tableId/orders`)
+  in prenos vsake njene vstopnice (`POST /tickets/:id/transfer`) zahtevata starost >= max(`min_age` dogodka, 18); brez datuma rojstva 403
+  (kot pri `min_age`). Miza BREZ paketa (klub brez paketov) in navadne vstopnice ostanejo pri `min_age` dogodka. `GET /events/:id/vip`
+  vrne novo polje `package_min_age`. Pozneje, ce bo potrebno razlikovati brezalkoholne pakete: stolpec `bottle_packages.contains_alcohol`
+  (migracija, privzeto TRUE) in klub ga oznaci sam; brez tega ostane vsak paket alkohol. Predpostavka (Martin je ni izrecno potrdil):
+  miza brez paketa ne pomeni nakupa alkohola prek Outly. *vir/dokaz*: issue #102, `_testi/test_vip_starost.js` (nakup in prenos: 17 let,
+  tocno 18, brez datuma, strozja meja dogodka) · *velja dokler*: Martin ali pravnik ne rece drugace ·
+  *nadomeščena z*: —
+
 ## Oblikovanje
 
 - Figma datoteka `XeVmPgY0LDGkNcQGBkNDbg` (stran »App«, ~147 zaslonov 393×852) je merodajna za postavitev,
