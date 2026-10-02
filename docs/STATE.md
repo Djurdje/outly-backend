@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-01 (sken brez povezave, backend).
+Zadnja posodobitev: 2026-10-02 (sken brez povezave: scan-list z unpaid).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -101,6 +101,11 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
 - **Past (QR_SECRET):** ob zagonu backend z `console.error` opozori, če je `QR_SECRET` (ali rezervna `JWT_SECRET`) prazna ali krajša od 32 znakov.
   Vedenje se NI spremenilo (zavrnitev bi lahko ustavila skeniranje); ali je skrivnost na Renderju nastavljena, ni znano — vprašanje za Martina
   (Render → Environment → `QR_SECRET`; zamenjava razveljavi vse obstoječe QR kode).
+- **scan-list vrne VSE vstopnice dogodka (2. 10. 2026, samo dodajanje).** Status `unpaid` = vstopnica naročila, ki ni `paid`/`partially_refunded`
+  (vrnjeno, preklicano, neplačano, neuspelo); če je vstopnica sama `refunded` ali `void`, ostane ta status. **Odjemalec `unpaid` obravnava kot rdeče**
+  (zavrni, »ni plačano«; enako kot rezultat `unpaid` v `scan-batch`). Razlog: koda je podpisana ob izdaji za vsako naročilo, zato bi jo telefon brez
+  tega zapisa spustil kot »veljavna, ni na seznamu«. Polja se niso spremenila; star odjemalec bi neznan status moral zavrniti (odjemalca še nista v produkciji).
+  Odprta naloga `ios-dev`/`web-dev`: ob `unpaid` pokaži rdeče; `used` na seznamu še vedno pomeni že unovčeno.
 - Dostop: `scan-key` in `scan-list` vidijo vse vloge v klubu (tudi vratar) — vratar tako dobi seznam imen imetnikov vstopnic; e-naslovov ni.
 - Testi: `_testi/test_sken_brez_povezave.js` (v `npm test`). `test_vstopnice.js` in `test_vip.js` preverjata kode v2 z javnim ključem.
 
