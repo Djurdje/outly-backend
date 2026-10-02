@@ -72,7 +72,7 @@ const PG_CONNECT_TIMEOUT_MS = okoljeCelo("PG_CONNECT_TIMEOUT_MS", 10000, 100, 60
 // Sken: kratek rok (telefon ob 503 hitro preklopi na preverjanje brez povezave), ne 10 s.
 const PG_SKEN_CONNECT_TIMEOUT_MS = okoljeCelo("PG_SKEN_CONNECT_TIMEOUT_MS", 2500, 100, 60000);
 
-function novPool(max, connectMs) {
+function novPool(max, connectMs, dodatno = {}) {
   const p = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
@@ -80,6 +80,7 @@ function novPool(max, connectMs) {
     // Varovalka: če zahtevek čaka na prosto povezavo (pool je zaseden ali se je zaklenil), dobi napako
     // namesto večnega čakanja. Brez tega bi en hrošč tipa "pool.query med držanjem odjemalca" obesil cel strežnik.
     connectionTimeoutMillis: connectMs,
+    ...dodatno,
   });
   // Baza lahko prekine povezavo, ki jo pool drzi (vzdrzevanje ali ponovni zagon baze na Renderju, izpad omrezja).
   // node-postgres odda 'error' na poolu (mirujoca povezava) oziroma na odjemalcu (izposojena povezava); brez
@@ -97,6 +98,11 @@ const pool = novPool(PG_POOL_MAX, PG_CONNECT_TIMEOUT_MS);
 // pool, ki ga uporabljajo SAMO POST /business/tickets/scan, scan-batch, GET .../scan-list in scan-key, vkljucno
 // z requireAuthSken / requireClubSken (iskanje uporabnika in kluba gre prek istega poola). Issue #89.
 const skenPool = novPool(PG_SKEN_POOL_MAX, PG_SKEN_CONNECT_TIMEOUT_MS);
+// GET /healthz (Renderjev Health Check Path) ima LASTEN pool z eno povezavo: ob navali nakupov je glavni pool zaseden, zdravje
+// v njegovi vrsti ne dobi povezave v roku, vrne 503 in Render instanco ponovno zazene - ravno med navalom (issue #117).
+// Ena povezava je dovolj (en SELECT 1 naenkrat; ostali zahtevki za zdravje cakajo kratek rok) in steje proti max_connections
+// baze (glej .env.example). Kratka roka: baza, ki ne odgovori v ~2 s, je za zdravje res nedosegljiva.
+const zdraviPool = novPool(1, 2000, { statement_timeout: 2500, idleTimeoutMillis: 30000 });
 
 // Hkratnost nakupov (issue #89, obremenitveni test). Nakup drzi povezavo z bazo od BEGIN do COMMIT, vsi nakupi
 // istega dogodka pa se v sprozilcu rezerviraj_zalogo() vrstijo na isti zaklenjeni vrstici. Ob navali (300 kupcev
@@ -649,8 +655,11 @@ function requireClubNa(db, vloge) {
       req.klub = k;
       next();
     } catch (e) {
-      console.error(e);
-      return res.status(500).send("Server error.");
+      // Kot requireAuthNa (I10): napaka baze (izcrpan pool, prekinjena povezava, timeout) je zacasna tezava streznika, ne
+      // napaka zahtevka. Na sken poteh (requireClubSken) mora vratar dobiti 503 + Retry-After (telefon preklopi na sken brez
+      // povezave), ne 500. V tem bloku ni druge kode, ki bi lahko vrgla (zeljeniKlub in vloge so cista logika) - issue #125.
+      console.error("[klub] zacasna napaka pri iskanju kluba:", e && e.message);
+      return res.status(503).set("Retry-After", "5").send("Service temporarily unavailable. Please try again.");
     }
   };
 }
@@ -664,8 +673,9 @@ app.get("/", (req, res) => {
 });
 
 // Render Health Check Path: Render novo kodo spusti v promet sele, ko ta pot vrne 2xx.
-// Preveri tudi bazo (SELECT 1) - backend brez baze ne streze nicesar. Omejeno na 3 s,
-// da zaseden pool (connectionTimeoutMillis 10 s) ne zadrzi odgovora cez Renderjev rok.
+// Preveri tudi bazo (SELECT 1) - backend brez baze ne streze nicesar. Gre prek LASTNEGA poola `zdraviPool` (ne glavnega):
+// preobremenjen glavni pool ni nezdrava instanca (I10, issue #117). Nedosegljiva baza je se vedno 503. Omejeno na 3 s,
+// da obvisela povezava ne zadrzi odgovora cez Renderjev rok.
 // `commit` = prvih 12 znakov RENDER_GIT_COMMIT (javni SHA, ni skrivnost): s tem se vidi, KATERA koda teče. Padel deploy
 // (npr. migracija brez zaklepa, #115) pusti staro različico živo in vrača 200, zato 200 sam ne dokaže, da teče nova koda.
 const COMMIT_KRATEK = (process.env.RENDER_GIT_COMMIT || "").slice(0, 12) || null;
@@ -674,7 +684,7 @@ app.get("/healthz", async (req, res) => {
   let casovnik;
   try {
     await Promise.race([
-      pool.query("SELECT 1"),
+      zdraviPool.query("SELECT 1"),
       new Promise((_, zavrni) => { casovnik = setTimeout(() => zavrni(new Error("timeout")), 3000); }),
     ]);
     res.json({ ok: true, commit: COMMIT_KRATEK });

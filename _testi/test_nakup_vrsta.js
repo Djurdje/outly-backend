@@ -12,7 +12,11 @@
  *   S2  pool.connect pade (PG_POOL_MAX=2, kratek PG_CONNECT_TIMEOUT_MS): 503 Retry-After (ne 500), dovoljenje se sprosti.
  *   S3  lock_timeout nakupne transakcije (NAKUP_DB_TIMEOUT_MS): 503 Retry-After, dovoljenje se sprosti.
  *   S4  izcrpan pool (PG_POOL_MAX=1 in PG_SKEN_POOL_MAX=1) ni 401: GET /me in sken vrneta 503 Retry-After, ne 401 (I10: izpad
- *       baze/poola ne sme odjaviti uporabnika ali vratarja).
+ *       baze/poola ne sme odjaviti uporabnika ali vratarja). Isti scenarij: /healthz (issue #117) ima svoj pool in ob
+ *       zasedenem glavnem ali skenPool odgovori 200 hitro (Render ob 503 instanco ponovno zazene - ravno med navalom).
+ *   S5  napaka baze v requireClubNa (issue #125): povezava skenPool/glavnega poola je prekinjena SREDI iskanja kluba
+ *       (zaklep tabele clubs + pg_terminate_backend) -> sken, scan-list, scan-key in glavna poslovna pot vrnejo 503
+ *       Retry-After 5 (NE 500: vratar bi dobil "napako streznika", ne zacasne tezave in preklopa na sken brez povezave).
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -227,6 +231,11 @@ async function api(method, path, token, body, signal) {
   assert(me.status === 503 && me.retryAfter === "5", "GET /me ob izcrpanem glavnem poolu -> 503 Retry-After (NE 401, sicer aplikacija odjavi uporabnika)", me);
   const me2 = await api("GET", "/me/tickets", U.kupec_c);
   assert(me2.status === 503, "GET /me/tickets ob izcrpanem poolu -> 503", me2);
+  // #117: /healthz ne sme cakati v vrsti glavnega poola (Render bi ob 503 instanco ponovno zagnal, ravno med navalom).
+  const hz = await api("GET", "/healthz");
+  assert(hz.status === 200 && hz.body && hz.body.ok === true, "GET /healthz ob izcrpanem glavnem poolu -> 200 {ok:true} (NE 503)", hz);
+  assert(hz.ms < 1000, "/healthz ob izcrpanem glavnem poolu odgovori hitro (< 1 s, ne po 3 s casovnem roku)", hz.ms);
+  assert(hz.body && "commit" in hz.body, "/healthz ima se vedno polje commit", hz.body);
   const slab = await api("GET", "/me", U.kupec_c + "x");
   assert(slab.status === 401, "zeton s pokvarjenim podpisom je ob izcrpanem poolu se vedno 401 (preverba podpisa ne rabi baze)", slab.status);
   await lkE.sprosti();
@@ -247,9 +256,46 @@ async function api(method, path, token, body, signal) {
   assert(sken2.ms < 2000, "503 skena pride hitro (kratek PG_SKEN_CONNECT_TIMEOUT_MS)", sken2.ms);
   const sk = await api("GET", "/business/scan-key", U.lastnik);
   assert(sk.status === 503, "GET /business/scan-key ob izcrpanem skenPool -> 503", sk);
+  const hz2 = await api("GET", "/healthz");
+  assert(hz2.status === 200 && hz2.ms < 1000, "GET /healthz ob izcrpanem skenPool in glavnem poolu -> 200 hitro", hz2);
   await lkT.sprosti();
   const s1 = await sken1;
   assert(s1.status === 200 && s1.body.result === "ok", "obvisel sken se po sprostitvi konca (ok)", s1);
+  await ustavi();
+
+  // ---------------------------------------------------------------- S5
+  console.log("\n# S5: napaka baze v requireClubNa je 503 Retry-After, ne 500 (issue #125)");
+  await zagon(3145, {});
+  // Avtentikacija (tabela users) uspe, iskanje kluba (tabela clubs) pa obvisi na zaklepu; test nato prekine to povezavo z bazo
+  // (kot ponovni zagon baze na Renderju) - zahtevek dobi napako "Connection terminated" SREDI requireClubNa.
+  async function klubPoizvedbaPade(metoda, pot, zeton, telo) {
+    const lk = await pool.connect();
+    await lk.query("BEGIN"); await lk.query("LOCK TABLE clubs IN ACCESS EXCLUSIVE MODE");
+    try {
+      const zahteva = api(metoda, pot, zeton, telo);
+      let pid = null;
+      for (let i = 0; i < 60 && !pid; i++) {
+        await spi(50);
+        const r = await pool.query("SELECT pid FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE '%FROM clubs WHERE owner_user_id%'");
+        if (r.rows.length) pid = r.rows[0].pid;
+      }
+      if (!pid) { assert(false, `${metoda} ${pot}: iskanje kluba ni obviselo na zaklepu (priprava testa)`); return await zahteva; }
+      await pool.query("SELECT pg_terminate_backend($1)", [pid]);
+      return await zahteva;
+    } finally { await lk.query("ROLLBACK"); lk.release(); }
+  }
+  const s5a = await klubPoizvedbaPade("POST", "/business/tickets/scan", U.lastnik, { qr: koda.qr });
+  assert(s5a.status === 503 && s5a.retryAfter === "5", "POST /business/tickets/scan, povezava prekinjena v iskanju kluba -> 503 Retry-After 5 (NE 500)", s5a);
+  const s5b = await klubPoizvedbaPade("GET", `/business/events/${E4}/scan-list`, U.lastnik);
+  assert(s5b.status === 503 && s5b.retryAfter === "5", "GET /business/events/:id/scan-list, povezava prekinjena v iskanju kluba -> 503 Retry-After 5 (NE 500)", s5b);
+  const s5c = await klubPoizvedbaPade("GET", "/business/scan-key", U.lastnik);
+  assert(s5c.status === 503 && s5c.retryAfter === "5", "GET /business/scan-key, povezava prekinjena v iskanju kluba -> 503 Retry-After 5 (NE 500)", s5c);
+  const s5d = await klubPoizvedbaPade("GET", "/business/events", U.lastnik);
+  assert(s5d.status === 503 && s5d.retryAfter === "5", "GET /business/events (glavni pool), povezava prekinjena v iskanju kluba -> 503 Retry-After 5 (NE 500)", s5d);
+  const s5e = await api("POST", "/business/tickets/scan", U.lastnik, { qr: koda.qr });
+  assert(s5e.status === 409 && s5e.body.result === "already_used", "po sprostitvi zaklepa sken spet dela (pool si je opomogel; vstopnica je ze unovcena -> 409 already_used, ne 503/500)", s5e);
+  const s5f = await api("GET", "/business/events", U.kupec_a);
+  assert(s5f.status === 403, "pravilne napake ostanejo: uporabnik brez kluba -> 403 (ne 503)", s5f);
   await ustavi();
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
