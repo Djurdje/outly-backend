@@ -1,6 +1,6 @@
 -- 027_omejitve.sql
 -- Omejevalnik poskusov (omeji() v index.js, S-02) v PostgreSQL namesto v pomnilniku procesa (issue #24):
--- meja velja cez vec instanc backenda in cez restart/deploy. Ena vrstica = en kljuc (HMAC poti in IP-ja,
+-- meja velja cez vec instanc backenda in cez restart/deploy. Ena vrstica = en kljuc (HMAC poti, meje, okna in IP-ja,
 -- nikoli golo IP/e-naslov) s stevcem poskusov in koncem trenutnega okna; en sam atomicen
 -- INSERT ... ON CONFLICT DO UPDATE na poskus (glej omeji() v index.js).
 --
@@ -14,7 +14,7 @@
 BEGIN;
 
 CREATE UNLOGGED TABLE IF NOT EXISTS omejitve (
-    kljuc   TEXT        PRIMARY KEY,                     -- HMAC-SHA256(pot:IP), 32 hex znakov (glej omeji())
+    kljuc   TEXT        PRIMARY KEY,                     -- HMAC-SHA256(pot:meja:okno:IP), 32 hex znakov (glej omeji())
     okno_do TIMESTAMPTZ NOT NULL,                        -- konec okna; okno se zacne ob prvem poskusu in traja oknoSekund
     stevec  INTEGER     NOT NULL CHECK (stevec >= 0)     -- poskusi v oknu; omejen na najvec + 1 (brez prekoracitve int)
 ) WITH (fillfactor = 70);
@@ -22,6 +22,6 @@ CREATE UNLOGGED TABLE IF NOT EXISTS omejitve (
 -- Ciscenje izteklih vrstic (DELETE ... WHERE okno_do < now()) brez branja cele tabele.
 CREATE INDEX IF NOT EXISTS omejitve_okno_do_idx ON omejitve (okno_do);
 
-COMMENT ON TABLE omejitve IS 'Omejevalnik poskusov (issue #24): kljuc = HMAC(pot:IP), stevec poskusov v oknu. Kratkotrajno, UNLOGGED, ni v izvozu baze.';
+COMMENT ON TABLE omejitve IS 'Omejevalnik poskusov (issue #24): kljuc = HMAC(pot:meja:okno:IP), stevec poskusov v oknu. Kratkotrajno, UNLOGGED, ni v izvozu baze.';
 
 COMMIT;

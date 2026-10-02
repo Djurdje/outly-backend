@@ -92,9 +92,8 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`.
   lastnik z drugim klubom v glavi `X-Outly-Club` dobi 404. Danes ima vsak lastnik en klub - ob drugem klubu to popraviti.
 - **Past (splet):** `PATCH /me` vrne samo `POLJA_UPORABNIKA` (brez `clubs`, `pending_*`) - odjemalec mora zdruziti s
   trenutnim profilom ali znova poklicati `GET /me` (iOS po avatarju klice `GET /me`).
-- **Past (backend, odprto):** omejevalnik `omeji({kljuc:"prosnja"})` si delita `POST /creator-applications` (5/h) in
-  `POST /me/friends/requests` (30/h) - kljuc je `prosnja:<ip>`, zato po 5 prosnjah za prijateljstvo prosnja za poslovni
-  racun z istega IP-ja dobi 429. Popravek: locena kljuca (backend PR, samo sprememba kljuca).
+- **Past (backend, rešena 2. 10., PR #110):** `POST /creator-applications` (5/h) in `POST /me/friends/requests` (30/h) sta si delila
+  omejevalni ključ `prosnja`; zdaj imata ločena (`prosnja`, `prijatelji`), v ključ pa je všteta tudi meja.
 - MapLibre 5 nima več `maplibregl.supported()`; MapLibrov CSS (naložen pozneje) prepiše `position` platna — pravila zemljevida
   imajo zato višjo specifičnost (`.karta.maplibregl-map`).
 - **Odprte najdbe pregleda faze 1** (29. 9., še brez Issueja): CSP velja samo za `/app` (seja v localStorage je skupna z vsem
@@ -117,6 +116,8 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`.
 
 ## Znane pasti (aktivne)
 
+- **Omejevalnik poskusov je v bazi (`omejitve`, #24, I15) in šteje po IP** (IPv6 po /64): meje preživijo deploy, blokada traja do konca okna (največ 1 h);
+  sprostitev = oštevilčena migracija `TRUNCATE omejitve` + restart servisa (proces si blokado zapomni do konca okna). CGNAT ali skupni Wi-Fi kluba lahko zadene 20 nakupov/h na IP.
 - **Izvoz baze je tok; ne vračaj ga v `res.json`** (#23; ARCHITECTURE »Varnostne kopije«). Admin panel odgovor v brskalniku še
   prebere v celoti (`res.json()`) — za zelo velike baze prenos shrani neposredno (`fetch` → `Blob`).
 - **Vsak `pool.connect()` z dolgo transakcijo** rabi `c.on("error")`, odklop počasnega bralca in `idle_in_transaction_session_timeout`

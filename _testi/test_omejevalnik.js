@@ -7,7 +7,9 @@
  * (a) meja velja cez dva ločena procesa  - na stari kodi (stevec v pomnilniku procesa) PADE
  * (b) meja preživi restart procesa
  * (c) hkratni poskusi (Promise.all, dva procesa hkrati) ne prekoračijo meje
- * (d) okvara omejevalnika: fail-open (ogled, iskanje) / fail-closed (brisanje, prosnja); sken nima omejevalnika
+ * (d) okvara omejevalnika: fail-open (ogled, iskanje) / lokalni stevec (nakup, prenos) / fail-closed (brisanje, prosnja);
+ *     sken nima omejevalnika
+ * (f) loceni kljuci po poti (prosnja ustvarjalca 5/h, prijatelji 30/h), stevec se ne zmanjsa, IPv6 /64, IPv4 polno
  * (e) ključ ne vsebuje IP-ja ali imena poti; izvoz baze tabele ne vsebuje; čiščenje izteklih vrstic
  */
 const crypto = require("crypto");
@@ -62,14 +64,16 @@ async function zazeni(port, env) {
   p.ustavi = async () => { if (p.umrl === null) { srv.kill(); for (let i = 0; i < 50 && p.umrl === null; i++) await spi(50); } };
   return p;
 }
-async function klic(p, method, pot, token, body) {
+async function klic(p, method, pot, token, body, glave) {
   const t0 = Date.now();
-  const r = await fetch(p.base + pot, { method, headers: { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(p.base + pot, { method, headers: { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}), ...(glave || {}) }, body: body ? JSON.stringify(body) : undefined });
   const besedilo = await r.text();
   return { status: r.status, besedilo, retryAfter: r.headers.get("retry-after"), ms: Date.now() - t0 };
 }
 // Javna pot z mejo 5/h (kljuc "prosnja"); prazno telo -> 400 (validacija), omejevalnik steje vseh 5 poskusov.
-const prosnja = (p) => klic(p, "POST", "/creator-applications", null, {});
+const prosnja = (p, ip) => klic(p, "POST", "/creator-applications", null, {}, ip ? { "x-forwarded-for": ip } : undefined);
+// Prosnja za prijateljstvo (meja 30/h, svoj kljuc); prazno telo -> 400, omejevalnik steje.
+const prijatelj = (p, tok) => klic(p, "POST", "/me/friends/requests", tok, {});
 
 (async () => {
   const pool = new Pool({ connectionString: DB, max: 3 });
@@ -156,7 +160,7 @@ const prosnja = (p) => klic(p, "POST", "/creator-applications", null, {});
       assert(brisi.status === 503 && brisi.ms < 5000, "obešen omejevalnik, pot »brisanje« (fail-closed): 503 v < 5 s, ne 400/200", { s: brisi.status, ms: brisi.ms, b: brisi.besedilo });
       assert(Number(brisi.retryAfter) > 0, "503 ima Retry-After", brisi.retryAfter);
       const prenos = await klic(D, "POST", "/tickets/1/transfer", T, {});
-      assert(prenos.status === 503, "obešen omejevalnik, pot »prenos« (fail-closed): 503", prenos.status);
+      assert(prenos.status !== 503 && prenos.status !== 429 && prenos.ms < 5000, "obešen omejevalnik, pot »prenos« (lokalni števec): zahtevek pride do poti, ne 503", { s: prenos.status, ms: prenos.ms });
       const prs = await prosnja(D);
       assert(prs.status === 429, "že blokiran ključ (zapomnjen v procesu) ostane 429 tudi ob okvari omejevalnika", prs.status);
       const uporabnik = await pool.query("SELECT 1 FROM users WHERE email='brisalec@outly.si'");
@@ -179,6 +183,12 @@ const prosnja = (p) => klic(p, "POST", "/creator-applications", null, {});
       assert(b2.status === 503 && b2.ms < 1500, "manjkajoča tabela: brisanje (fail-closed) 503 hitro", { s: b2.status, ms: b2.ms });
       assert(D.umrl === null, "proces živi");
       assert(/\[omejevalnik\]/.test(D.log), "napaka je zapisana v dnevnik (ni tiha)");
+      // Lokalni števec: prenos (meja 30/h) deluje v procesu tudi brez tabele. D je ob d1 porabil 1 klic.
+      const st = [];
+      for (let i = 0; i < 31; i++) st.push((await klic(D, "POST", "/tickets/1/transfer", T, {})).status);
+      assert(st.slice(0, 29).every((x) => x !== 429 && x !== 503), "manjkajoča tabela: prenos 2.-30. klic gre do poti (lokalni števec)", st);
+      assert(st[29] === 429 || st[30] === 429, "manjkajoča tabela: prenos preko meje 30/h -> 429 (lokalni števec, ne 503)", st);
+      assert(!st.includes(503), "manjkajoča tabela: prenos nikoli 503", st);
     } finally {
       await pool.query("ALTER TABLE omejitve_zacasno RENAME TO omejitve");
     }
@@ -216,14 +226,68 @@ const prosnja = (p) => klic(p, "POST", "/creator-applications", null, {});
     assert(!("omejitve" in izvoz.tables), "izvoz NE vsebuje tabele omejitve (kratkotrajen števec, hashi IP-jev)", Object.keys(izvoz.tables));
 
     // ------------------------------------------------------------------
+    console.log("\n# (f1) Loceni kljuci: prosnje ustvarjalca (5/h) in prijateljstva (30/h) se ne motijo");
+    await pool.query("TRUNCATE omejitve");
+    const P1 = await zazeni(3169);
+    const pr = []; for (let i = 0; i < 31; i++) pr.push((await prijatelj(P1, T)).status);
+    assert(pr.slice(0, 30).every((x) => x === 400) && pr[30] === 429, "31 prosenj za prijateljstvo: 30 x 400, 31. -> 429", pr);
+    await P1.ustavi();
+    // Svez proces (brez lokalnega zapisa »blokiran«): ena javna prosnja ustvarjalca z mejo 5 ne sme zmanjsati stevca prijateljev (31 -> 6).
+    const P2 = await zazeni(3170);
+    const javna = await prosnja(P2);
+    assert(javna.status === 400, "javna prosnja ustvarjalca je znotraj svoje meje (400)", javna.status);
+    await P2.ustavi();
+    // Drug svez proces (brez lokalnega zapisa), da ne odloca predpomnilnik, ampak stevec v bazi.
+    const P2b = await zazeni(3173);
+    const pozneje = await prijatelj(P2b, T);
+    assert(pozneje.status === 429, "stevec prijateljev se ni zmanjsal: 32. prosnja v isti uri -> 429 (meja 30/h ni obsla)", pozneje.status);
+    await P2b.ustavi();
+
+    console.log("\n# (f2) Blokada prosenj ustvarjalca ne blokira prosenj za prijateljstvo");
+    await pool.query("TRUNCATE omejitve");
+    const P3 = await zazeni(3171);
+    const bl = []; for (let i = 0; i < 6; i++) bl.push((await prosnja(P3)).status);
+    assert(bl.slice(0, 5).every((x) => x === 400) && bl[5] === 429, "6 prosenj ustvarjalca: 5 x 400, 6. -> 429", bl);
+    const prij = await prijatelj(P3, T);
+    assert(prij.status === 400, "prosnja za prijateljstvo z istega IP-ja ni blokirana (400, ne 429)", prij.status);
+    const prvo = await klic(P3, "POST", "/events/1/orders", T, { quantity: 1 });
+    assert(prvo.status !== 429, "nakup ni blokiran zaradi prosenj ustvarjalca", prvo.status);
+    await P3.ustavi();
+
+    // ------------------------------------------------------------------
+    console.log("\n# (f3) IPv6 na predponi /64, IPv4 polno");
+    await pool.query("TRUNCATE omejitve");
+    const P4 = await zazeni(3172);
+    const v6a = [];
+    for (let i = 0; i < 3; i++) v6a.push((await prosnja(P4, "2001:db8:1:2::1")).status);
+    for (let i = 0; i < 2; i++) v6a.push((await prosnja(P4, "2001:db8:1:2:aaaa:bbbb:cccc:dddd")).status);
+    assert(v6a.every((x) => x === 400), "5 poskusov z dveh naslovov istega /64 -> 400", v6a);
+    const v6b = await prosnja(P4, "2001:db8:1:2:ffff::9");
+    assert(v6b.status === 429, "tretji naslov istega /64 -> 429 (meja deljena)", v6b.status);
+    const v6c = await prosnja(P4, "2001:db8:1:3::1");
+    assert(v6c.status === 400, "drug /64 ima svojo mejo -> 400", v6c.status);
+    const v6d = await prosnja(P4, "2001:DB8:1:2:0:0:0:7");
+    assert(v6d.status === 429, "zapis z velikimi crkami in brez :: je isti /64 -> 429", v6d.status);
+    const v4 = []; for (let i = 0; i < 6; i++) v4.push((await prosnja(P4, "10.0.0.1")).status);
+    assert(v4.slice(0, 5).every((x) => x === 400) && v4[5] === 429, "IPv4: 5 x 400, 6. -> 429", v4);
+    const v4b = await prosnja(P4, "10.0.0.2");
+    assert(v4b.status === 400, "sosednji IPv4 naslov ima svojo mejo (polni naslov) -> 400", v4b.status);
+    const kl = (await pool.query("SELECT count(*)::int AS n FROM omejitve")).rows[0].n;
+    assert(kl === 4, "v bazi 4 vrstice: 2 x /64, 2 x IPv4", kl);
+    await P4.ustavi();
+
+    // ------------------------------------------------------------------
     console.log("\n# (e3) Čiščenje izteklih vrstic");
     await D.ustavi(); await E.ustavi();
     await pool.query("TRUNCATE omejitve");
     await pool.query("INSERT INTO omejitve (kljuc, okno_do, stevec) VALUES ('izteklo', now() - interval '5 minutes', 3), ('aktivno', now() + interval '30 minutes', 2)");
-    const G = await zazeni(3167, { OMEJEVALNIK_CISCENJE_MS: "300" });
-    await spi(1500);
+    // Poplava izteklih kljucev (botnet, mnogo IPv6 predpon): 30.000 vrstic, ciscenje na 1 s. Ena serija je 5000, torej
+    // brez zanke do polnih seri ne bi bilo pobrisano v 2,8 s (najvec 3 periode).
+    await pool.query("INSERT INTO omejitve (kljuc, okno_do, stevec) SELECT 'poplava' || g, now() - interval '2 minutes', 1 FROM generate_series(1, 30000) g");
+    const G = await zazeni(3167, { OMEJEVALNIK_CISCENJE_MS: "1000" });
+    await spi(2800);
     const ostalo = (await pool.query("SELECT kljuc FROM omejitve ORDER BY kljuc")).rows.map((r) => r.kljuc);
-    assert(ostalo.length === 1 && ostalo[0] === "aktivno", "iztekla vrstica pobrisana, aktivna ostane", ostalo);
+    assert(ostalo.length === 1 && ostalo[0] === "aktivno", "iztekle vrstice (tudi poplava 30.000) pobrisane, aktivna ostane", ostalo.slice(0, 3).concat(ostalo.length));
     await G.ustavi();
   } finally {
     for (const p of procesi) { try { p.srv.kill(); } catch (_) {} }

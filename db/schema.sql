@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 8BcQochwwmEhSuVbBfwxZrQYKjNaVNH7ulPQOAccnjVzCjdDt9fwEaNDd7afJwz
+\restrict 6hlk4xyF6LcsHhbjke2qM6E7aOCwq7gfCYpTQjdUEUKRdB8SRBKfNe2g0w0oLeZ
 
 -- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
@@ -584,7 +584,7 @@ WITH (fillfactor='70');
 -- Name: TABLE omejitve; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.omejitve IS 'Omejevalnik poskusov (issue #24): kljuc = HMAC(pot:IP), stevec poskusov v oknu. Kratkotrajno, UNLOGGED, ni v izvozu baze.';
+COMMENT ON TABLE public.omejitve IS 'Omejevalnik poskusov (issue #24): kljuc = HMAC(pot:meja:okno:IP), stevec poskusov v oknu. Kratkotrajno, UNLOGGED, ni v izvozu baze.';
 
 
 --
@@ -1710,5 +1710,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 8BcQochwwmEhSuVbBfwxZrQYKjNaVNH7ulPQOAccnjVzCjdDt9fwEaNDd7afJwz
+\unrestrict 6hlk4xyF6LcsHhbjke2qM6E7aOCwq7gfCYpTQjdUEUKRdB8SRBKfNe2g0w0oLeZ
 
