@@ -59,7 +59,7 @@ if [ "$RC" -ne 0 ]; then
   echo "::error::Izvoz ni uspel (curl koda $RC, HTTP ${STATUS:-000}). 401 = zeton, 403 = racun ni admin ALI e-naslov v Supabase ni potrjen (email_verified), 5xx/pretrganje = streznik."
   exit 1
 fi
-echo "Izvoz: HTTP $STATUS, $(stat -c %s "$IZHOD") B"
+echo "Izvoz: HTTP $STATUS"
 
 # --- 3. preverba vsebine (nepopolna ali prazna kopija NI kopija) ---
 if ! jq -e '

@@ -27,4 +27,4 @@ head -c 40 "$IZHOD" | grep -q 'age-encryption.org/v1' || { echo "::error::Izhod 
 if grep -q -a '"exported_at"' "$IZHOD"; then echo "::error::V sifrirani datoteki je golo besedilo!"; rm -f "$IZHOD"; exit 1; fi
 
 ( cd "$(dirname "$IZHOD")" && sha256sum "$(basename "$IZHOD")" > "$(basename "$IZHOD").sha256" )
-echo "Sifrirano: $(stat -c %s "$IZHOD") B (vhod $(stat -c %s "$VHOD") B), prejemnikov: $(( ${#PREJEMNIKI[@]} / 2 )), sha256 $(cut -c1-16 "$IZHOD.sha256")"
+echo "Sifrirano: $(stat -c %s "$IZHOD") B, prejemnikov: $(( ${#PREJEMNIKI[@]} / 2 )), sha256 $(cut -c1-16 "$IZHOD.sha256")"

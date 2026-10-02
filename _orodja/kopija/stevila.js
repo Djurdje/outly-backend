@@ -9,14 +9,14 @@
  *                                                        seznam migracij (datoteka + odtis) mora biti enak
  *   node _orodja/kopija/stevila.js padec <izvoz> <stevila.json>
  *                                                        BREZ baze: users/orders/tickets ne smejo pasti za > 20 % glede na
- *                                                        prejsnji zagon (<stevila.json> iz actions/cache); nato zapise nova stevila.
+ *                                                        prejsnji zagon (<stevila.json>: izhodisce, ki ga _orodja/kopija/padec.sh hrani SIFRIRANO v actions/cache); nato zapise nova stevila.
  *                                                        PADEC_POTRJEN=true: padec je namerno, nova stevila postanejo izhodisce.
  *   node _orodja/kopija/stevila.js povzetek <izvoz>     BREZ baze: izpise cas izvoza, tabele in stevila vrstic (hitri
  *                                                        mesecni preizkus po desifriranju, LOKALNO pri Martinu)
  * DATABASE_URL = ciljna lokalna baza (primerjaj, pocisti-seed).
  *
  * JAVNI DNEVNIK: v zagonu Actions (primerjaj, padec) se izpisujejo SAMO imena tabel in OK/NAPAKA - stevila uporabnikov,
- * narocil in vstopnic so poslovna informacija. Stevila vidi samo povzetek (lokalno) in cache (ni javno berljiv).
+ * narocil in vstopnic so poslovna informacija. Stevila vidi samo povzetek (lokalno) in sifrirano izhodisce v cachu (padec.sh).
  */
 const fs = require("fs");
 

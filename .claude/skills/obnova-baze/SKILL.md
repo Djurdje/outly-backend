@@ -14,12 +14,13 @@ ukaze s temi vrednostmi poganja Martin v svojem terminalu, agent mu jih pripravi
 - Prek `GET /admin/api/export` (servisni admin račun, prijava s Supabase) potegne **logični izvoz vseh tabel** kot JSON — isti izvoz in ista obnova
   (`db/obnovi_izvoz.js`) kot v `ARCHITECTURE.md`, razdelek »Varnostne kopije in obnova«. **Ni `pg_dump`**: zunanji dostop do `outly-db` je
   zaprt (STATE.md, 30. 9. 2026), GitHubovi runnerji pa nimajo stalnega IP-ja; z API-jem baza ostane zaprta.
-- Izvoz se stisne (gzip) in **šifrira z javnim ključem age**; v artefakt `outly-db-kopija-YYYY-MM-DD` gresta samo `outly-db-YYYY-MM-DD.json.gz.age`
+- Izvoz se stisne (gzip) in **šifrira z javnim ključem age**; v artefakt `outly-db-kopija-YYYY-MM-DD-rN-bM` gresta samo `outly-db-YYYY-MM-DD.json.gz.age`
   in `….sha256`. Hrani se 30 dni. Repo je javen, artefakt lahko prenese vsak prijavljen GitHub uporabnik — brez zasebnega ključa je neuporaben.
 - **Isti zagon takoj preizkusi obnovo** (pred šifriranjem): migracije v `postgres:16` → `db/obnovi_izvoz.js` → neodvisna primerjava števil vrstic po
   tabelah in seznama migracij (`_orodja/kopija/stevila.js`). Preverba popolnosti: **vsaka tabela migrirane sheme mora biti v izvozu** (tudi z 0 vrsticami),
   sicer je zagon rdeč. Preverba padca: če število vrstic `users`, `orders` ali `tickets` pade za > 20 % glede na prejšnji zagon (števila so v `actions/cache`,
-  ne v artefaktu), je zagon rdeč (kopija je vseeno shranjena); namerno čiščenje potrdiš z ročnim zagonom `potrdi_padec = true`.
+  **šifrirana** z `BACKUP_STEVILA_KLJUC`; ne v artefaktu). Brez izhodišča (prvi zagon, cache izgubljen, zamenjan ključ) je opozorilo in vrstica v povzetku;
+  če ga ni 2 zagona zapored, je zagon rdeč. Opomba: prag 20 % glede na prejšnji dan **ne ujame postopnega padca** (sprejeto tveganje), je zagon rdeč (kopija je vseeno shranjena); namerno čiščenje potrdiš z ročnim zagonom `potrdi_padec = true`.
   V javnem dnevniku in povzetku so samo imena tabel in OK/NAPAKA — števila uporabnikov/naročil so poslovna informacija.
 - Ob napaki ali prekinitvi: rdeč zagon (mail) + push na ntfy (`NTFY_TOPIC`). Healthchecks (`HC_URL_KOPIJE`, obvezen del nastavitve) javi, če kopija sploh ne steče.
 - Mesečno (`Preizkus kopije (mesecni)`, 1. v mesecu): preveri, da je shranjena kopija sveža (≤ 50 h), cela (sha256) in šifrirana, ter odpre issue-opomnik
@@ -28,35 +29,41 @@ ukaze s temi vrednostmi poganja Martin v svojem terminalu, agent mu jih pripravi
 **Česa kopija NE vsebuje:** Supabase Auth (gesla/prijave so v Supabase; v bazi je samo `users.supabase_uid`) — zanj velja Supabaseov paket;
 Cloudinary slike; Stripe; nastavitve Rendera. Časovni žigi so v izvozu zaokroženi na milisekundo (JS `Date`), kar ne vpliva na delovanje.
 
-## Nastavitev (enkratno, Martin, ~25 min)
+## Nastavitev (enkratno, Martin, ~30 min)
 
-1. **Ključ age.** Z https://github.com/FiloSottile/age/releases prenesi age za Windows (`age.exe`, `age-keygen.exe`), nato v PowerShellu:
+**Vrstni red je pomemben: environment mora obstajati PRED prvim zagonom.** Če ga ni, ga GitHub ob zagonu ustvari sam, brez omejitve vej.
+
+1. **Environment `kopije`.** Repo → Settings → Environments → *New environment* → ime `kopije`. Pri *Deployment branches and tags* izberi
+   *Selected branches and tags* in dodaj **samo `main`**. Skrivnosti in spremenljivke vpisuješ TAM (koraki 3–6), ne na raven repozitorija.
+   Nato v Settings → Secrets and variables → Actions preveri, da `BACKUP_*` in `HC_URL_KOPIJE` **NISO** tudi na ravni repozitorija (če so, jih izbriši:
+   repo-level secret je dosegljiv vsaki veji). `NTFY_TOPIC` ostane repo-level.
+2. **Ključ age.** Z https://github.com/FiloSottile/age/releases prenesi age za Windows (`age.exe`, `age-keygen.exe`), nato v PowerShellu:
    `.\age-keygen.exe -o outly-kopija-kljuc.txt` — izpiše vrstico `Public key: age1…`.
    - **Datoteka `outly-kopija-kljuc.txt` je ZASEBNI ključ.** Shrani jo v upravljalnik gesel in še eno kopijo na USB/izpis. **Nikoli** v GitHub, mail, chat ali repo.
      Brez nje so vse kopije neberljive; kdor jo ima, bere vse osebne podatke.
    - Javni ključ (`age1…`) ni skrivnost. Neobvezno naredi drugi ključ (rezerva) in oba vpiši, ločena s presledkom.
-2. **Poseben račun za kopije.** Ne uporabi `agent@outly.si` ali svojega računa. Backend za `GET /admin/api/export` zahteva vlogo **`admin`**
+   - V environment `kopije` → *Environment variables*: `BACKUP_AGE_PUBLIC_KEYS` = javni ključ(i).
+3. **Poseben račun za kopije.** Ne uporabi `agent@outly.si` ali svojega računa. Backend za `GET /admin/api/export` zahteva vlogo **`admin`**
    (`admin.use(requireAuth, requireRole("admin"))` v `index.js` velja za vse poti pod `/admin/api`; vloge `business`/`user` dobijo 403). Najmanjša vloga, ki zadošča, je torej
    `admin` — račun lahko tudi vse ostalo v admin panelu, zato mu daj dolgo naključno geslo, ki ga pozna samo GitHub, in ga ne uporabljaj drugje.
    *Predlog (ni implementirano):* Issue »vloga `backup` samo za izvoz« (nova vrednost v `users_role_chk`, `requireRole("admin","backup")` samo na `/export`), da uhajanje gesla ne pomeni polne admin pravice.
    - Supabase → Authentication → Users → *Add user*: npr. `kopije@outly.si`, **Auto Confirm User** obkljukan (backend poveže račun po e-naslovu samo, če je `email_verified` true),
      naključno geslo 24+ znakov. CAPTCHA in obvezen MFA (AAL2) za ta račun ne smeta biti vklopljena — prijava z geslom iz workflowa bi padla.
+   - V environment `kopije` → *Environment secrets*: `BACKUP_ADMIN_EMAIL` (`kopije@outly.si`) in `BACKUP_ADMIN_PASSWORD`.
    - Prvi zagon bo vrnil **403** (račun ob prvem klicu nastane v bazi z vlogo `user`). Nato: admin panel → Uporabniki → `kopije@outly.si` → vloga `admin`, in zagon ponovi.
-3. **GitHub environment `kopije` (varovalo pred uhajanjem gesla z veje).** Repo → Settings → Environments → *New environment* → ime `kopije`.
-   V *Deployment branches and tags* izberi *Selected branches and tags* in dodaj samo `main`. **Secrets/variables vpiši TAM, ne na ravni repozitorija:**
-   - *Environment variables*: `BACKUP_AGE_PUBLIC_KEYS` = javni ključ(i) `age1…`;
-   - *Environment secrets*: `BACKUP_ADMIN_EMAIL` (`kopije@outly.si`), `BACKUP_ADMIN_PASSWORD`, `HC_URL_KOPIJE` (korak 4).
-   Brez tega bi vsak zagon z druge veje (ročni zagon iz veje, spremenjen workflow) dobil geslo; z njim pade že pri »Branch not allowed«.
-   `NTFY_TOPIC` ostane repo-level secret (že obstaja).
-4. **Healthchecks.io (obvezno):** nov check »Outly kopija«, **Period 1 day, Grace 24 hours**, obvestilo na isti ntfy kanal; njegov ping URL → environment secret `HC_URL_KOPIJE`.
+4. **Ključ za šifriranje izhodišča števil** (za preverbo padca; števila vrstic so poslovna informacija, `actions/cache` v javnem repu pa je berljiv workflowom iz PR-jev,
+   zato so v cachu šifrirana). Naključen ključ ustvariš z `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` in ga vpišeš kot
+   environment secret `BACKUP_STEVILA_KLJUC` (drugam ga ni treba shraniti; ob izgubi ali menjavi se izhodišče samo nastavi na novo, en dan z opozorilom).
+5. **Healthchecks.io (obvezno):** nov check »Outly kopija«, **Period 1 day, Grace 24 hours**, obvestilo na isti ntfy kanal; ping URL → environment secret `HC_URL_KOPIJE`.
    Brez njega kopija, ki sploh ne steče (cron izpade, workflow onemogočen), ostane neopažena; zagon brez secreta izpiše opozorilo.
-5. **Prvi zagon:** Actions → *Varnostna kopija baze* → *Run workflow* (veja `main`). Zelen zagon = v *Artifacts* je kopija, v povzetku OK/NAPAKA po tabelah.
+6. **Prvi zagon:** Actions → *Varnostna kopija baze* → *Run workflow* (veja `main`). Zelen zagon = v *Artifacts* je kopija `outly-db-kopija-DATUM-rN-bM`
+   (`rN` = zaporedni poskus zagona, `b1` = izhodišče za padec je bilo prisotno, `b0` = ni), v povzetku OK/NAPAKA po tabelah. Prvi zagon ima vedno opozorilo »izhodišče ni«.
    Za preizkus alarma isti workflow z `test` = `true` (pošlje samo testni push).
-6. **Isti dan dešifriraj prvo kopijo** (ne čakaj na mesečni opomnik): prenesi artefakt, nato v mapi z datotekami
+7. **Isti dan dešifriraj prvo kopijo** (ne čakaj na mesečni opomnik): prenesi artefakt, nato v mapi z datotekami
    `.\age.exe -d -i outly-kopija-kljuc.txt -o izvoz.json.gz outly-db-YYYY-MM-DD.json.gz.age` in
    `node -e "require('fs').writeFileSync('izvoz.json', require('zlib').gunzipSync(require('fs').readFileSync('izvoz.json.gz')))"`, nato
    `node _orodja/kopija/stevila.js povzetek izvoz.json` (v kloniranem repozitoriju) mora pisati »Izvoz je cel«. Datoteke nato izbriši. Če ne gre, popravi takoj, ne čez mesec.
-7. Zunanjega dostopa do baze **ne odpiraj** (Render → Inbound IP Rules ostanejo prazna); kopija ga ne rabi.
+8. Zunanjega dostopa do baze **ne odpiraj** (Render → Inbound IP Rules ostanejo prazna); kopija ga ne rabi.
 
 ## Prenos in dešifriranje (Martin, Windows/PowerShell; enako na Linuxu)
 
@@ -123,7 +130,8 @@ razmisli, ali so artefakti (javni za prijavljene) že bili preneseni — prisiln
 | Znak v dnevniku | Pomen | Ukrep |
 |---|---|---|
 | `Branch not allowed` / job se ne zažene | zagon ne z veje `main` (environment `kopije`) | zaženi z `main` |
-| `Manjka nastavitve v environmentu kopije: …` | secret/variable ni vpisan v environment | Nastavitev, korak 3 |
+| `Manjka nastavitve v environmentu kopije: …` | secret/variable ni vpisan v environment | Nastavitev, koraki 2–5 |
+| `Izhodišče … ne da dekodirati` (opozorilo) | zamenjan `BACKUP_STEVILA_KLJUC` ali pokvarjen cache | en dan brez preverbe padca; če se ponovi 2 zagona zapored, je zagon rdeč: preglej ključ |
 | `Prijava … ni uspela (HTTP 400)` | napačen e-naslov/geslo ali uporabnika ni v Supabase | preveri secrets v environmentu, Supabase → Users |
 | `Izvoz ni uspel … HTTP 403` | (a) račun ni `admin` v bazi (prvi zagon vedno!) ali (b) `Email not verified`: e-naslov v Supabase ni potrjen (`email_verified`), backend ga brez tega ne poveže | (a) admin panel → Uporabniki → vloga `admin`; (b) Supabase → Users → potrdi e-naslov / Auto Confirm |
 | `Prijava … HTTP 400` s captcha/MFA | CAPTCHA ali obvezen MFA na Supabase | za ta račun izklopi; prijava z geslom iz workflowa ne more rešiti izziva |

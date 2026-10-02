@@ -12,12 +12,13 @@
 # Zato: (1) kopija je sifrirana z JAVNIM kljucem, zasebni kljuc je samo pri Martinu; (2) v dnevnik gredo samo
 # imena tabel, stevila vrstic, velikosti in odtis - nikoli vrednosti iz baze ali odgovori streznika.
 #
-# DOSTOP DO SKRIVNOSTI: job ima `environment: kopije`. Martin ustvari environment »kopije« z Deployment branches = SAMO `main`
+# DOSTOP DO SKRIVNOSTI: job ima `environment: kopije` (Martin ga mora ustvariti PRED prvim zagonom, sicer ga GitHub ob zagonu ustvari brez omejitve vej). Martin ustvari environment »kopije« z Deployment branches = SAMO `main`
 # in vanj (ne na raven repozitorija) vpise spodnje secrets/vars. Tako geslo admin racuna in javni kljuc ne pridejo do nobenega zagona z
 # druge veje (workflow_dispatch iz veje, spremenjen workflow v PR-ju): job tam pade ze pri »Branch not allowed«.
 #
 # Nastavitve (vpise Martin; koraki v opisu PR-ja in v .claude/skills/obnova-baze/SKILL.md):
 #   environment kopije: secrets.BACKUP_ADMIN_EMAIL, secrets.BACKUP_ADMIN_PASSWORD   POSEBEN racun z vlogo admin (Supabase prijava)
+#   environment kopije: secrets.BACKUP_STEVILA_KLJUC              naklucen kljuc (64 hex znakov) za sifriranje izhodisca stevil v actions/cache
 #   environment kopije: vars.BACKUP_AGE_PUBLIC_KEYS               javni kljuc(i) age1..., loceni s presledkom/novo vrstico
 #   environment kopije: secrets.HC_URL_KOPIJE                     Healthchecks check (Period 1 day, Grace 24 h): kopija, ki ne stece, drugace ostane neopazena
 #   repo secret NTFY_TOPIC (ze obstaja)                           push ob napaki, kot pri nadzor.yml
@@ -37,6 +38,7 @@ on:
 
 permissions:
   contents: read
+  actions: read   # seznam prejsnjih artefaktov (ali je izhodisce manjkalo ze prejsnji zagon)
 
 concurrency:
   group: varnostna-kopija-baze
@@ -86,12 +88,14 @@ jobs:
         env:
           E: ${{ secrets.BACKUP_ADMIN_EMAIL }}
           P: ${{ secrets.BACKUP_ADMIN_PASSWORD }}
+          S: ${{ secrets.BACKUP_STEVILA_KLJUC }}
           K: ${{ vars.BACKUP_AGE_PUBLIC_KEYS }}
           HC: ${{ secrets.HC_URL_KOPIJE }}
         run: |
           manjka=""
           [ -n "$E" ] || manjka+=" secrets.BACKUP_ADMIN_EMAIL"
           [ -n "$P" ] || manjka+=" secrets.BACKUP_ADMIN_PASSWORD"
+          [ -n "$S" ] || manjka+=" secrets.BACKUP_STEVILA_KLJUC"
           [ -n "$K" ] || manjka+=" vars.BACKUP_AGE_PUBLIC_KEYS"
           if [ -n "$manjka" ]; then
             echo "::error::Manjka nastavitve v environmentu kopije:$manjka (glej .claude/skills/obnova-baze/SKILL.md, razdelek Nastavitev)."
@@ -154,12 +158,31 @@ jobs:
             echo "Obnova: \`.claude/skills/obnova-baze/SKILL.md\` (potrebuje Martinov zasebni kljuc)."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Izhodisce za preverbo padca stevila vrstic: actions/cache v javnem repu je berljiv workflowom iz PR-jev, zato so stevila v cachu
+      # SIFRIRANA s kljucem BACKUP_STEVILA_KLJUC (environment kopije). Restore je PRED nalaganjem in obnovo, da se padec preveri tudi, ce obnova pade.
+      - name: Izhodisce stevil (cache, sifrirano)
+        if: env.TEST != 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/kopija-stevila
+          key: kopija-stevila-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: kopija-stevila-
+
+      - name: Stanje izhodisca
+        id: izhodisce
+        if: env.TEST != 'true'
+        env:
+          BACKUP_STEVILA_KLJUC: ${{ secrets.BACKUP_STEVILA_KLJUC }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash _orodja/kopija/padec.sh stanje "$RUNNER_TEMP/kopija-stevila"
+
+      # Ime artefakta nosi run_attempt (ponovni zagon istega dne ne sme pasti z 409) in -b1/-b0 = ali je bilo izhodisce prisotno.
       - name: Shrani sifrirano kopijo (30 dni)
         id: nalozi
         if: env.TEST != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: outly-db-kopija-${{ env.DATUM }}
+          name: outly-db-kopija-${{ env.DATUM }}-r${{ github.run_attempt }}-b${{ steps.izhodisce.outputs.izhodisce }}
           path: ${{ runner.temp }}/kopija/izhod/
           retention-days: 30
           compression-level: 0
@@ -171,22 +194,19 @@ jobs:
         if: env.TEST != 'true'
         run: bash _orodja/kopija/preizkus_obnove.sh "$RUNNER_TEMP/kopija/izvoz.json"
 
-      # Stevila prejsnjega zagona so v actions/cache (ni javno berljiv kot artefakt); v dnevnik gredo samo imena tabel.
-      - name: Prejsnja stevila vrstic (za preverbo padca)
-        id: stevila
-        if: env.TEST != 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ${{ runner.temp }}/kopija-stevila
-          key: kopija-stevila-${{ github.run_id }}
-          restore-keys: kopija-stevila-
-
       - name: Preverba padca stevila vrstic (users, orders, tickets)
         id: padec
         if: ${{ !cancelled() && steps.nalozi.outcome == 'success' }}
+        env:
+          BACKUP_STEVILA_KLJUC: ${{ secrets.BACKUP_STEVILA_KLJUC }}
+        run: bash _orodja/kopija/padec.sh preveri "$RUNNER_TEMP/kopija/izvoz.json" "$RUNNER_TEMP/kopija-stevila"
+
+      - name: Izhodisca ni 2 zagona zapored
+        id: dvakrat
+        if: ${{ !cancelled() && steps.izhodisce.outputs.dvakrat == 'true' }}
         run: |
-          mkdir -p "$RUNNER_TEMP/kopija-stevila"
-          node _orodja/kopija/stevila.js padec "$RUNNER_TEMP/kopija/izvoz.json" "$RUNNER_TEMP/kopija-stevila/stevila.json"
+          echo "::error::Izhodisce za preverbo padca manjka ze 2 zagona zapored (cache se ne ohranja ali se BACKUP_STEVILA_KLJUC menja). Kopija je shranjena."
+          exit 1
 
       - name: Pocisti golo besedilo z diska runnerja
         if: always() && env.TEST != 'true'
@@ -197,20 +217,28 @@ jobs:
         env:
           TOPIC: ${{ secrets.NTFY_TOPIC }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          S_NASTAVITVE: ${{ steps.nastavitve.outcome }}
-          S_IZVOZ: ${{ steps.izvoz.outcome }}
-          S_SIFRIRAJ: ${{ steps.sifriraj.outcome }}
           S_NALOZI: ${{ steps.nalozi.outcome }}
-          S_OBNOVA: ${{ steps.obnova.outcome }}
-          S_PADEC: ${{ steps.padec.outcome }}
+          IZIDI: >-
+            nastavitve=${{ steps.nastavitve.outcome }}
+            izvoz=${{ steps.izvoz.outcome }}
+            sifriranje=${{ steps.sifriraj.outcome }}
+            izhodisce=${{ steps.izhodisce.outcome }}
+            shranjevanje=${{ steps.nalozi.outcome }}
+            preizkus-obnove=${{ steps.obnova.outcome }}
+            padec-stevil=${{ steps.padec.outcome }}
+            izhodisca-ni-2x=${{ steps.dvakrat.outcome }}
         run: |
           if [ -z "$TOPIC" ]; then echo "NTFY_TOPIC ni nastavljen - push preskocen"; exit 0; fi
-          if [ "$S_NALOZI" = "success" ] && [ "$S_PADEC" = "failure" ]; then
-            SPOROCILO="Kopija baze je shranjena, a stevilo vrstic (users/orders/tickets) je padlo za vec kot 20 % ali tabela manjka. Preveri zagon."
-          elif [ "$S_NALOZI" = "success" ]; then
-            SPOROCILO="Kopija baze je shranjena, a PREIZKUS OBNOVE je padel (ali je bil zagon prekinjen). Preveri zagon."
+          RAZLOGI=""
+          for par in $IZIDI; do
+            case "${par#*=}" in failure|cancelled) RAZLOGI+="${par%%=*} (${par#*=}), " ;; esac
+          done
+          RAZLOGI="${RAZLOGI%, }"
+          [ -n "$RAZLOGI" ] || RAZLOGI="neznan korak (zagon prekinjen ali timeout)"
+          if [ "$S_NALOZI" = "success" ]; then
+            SPOROCILO="Kopija baze JE shranjena, a zagon ni cist: $RAZLOGI. Preveri zagon."
           else
-            SPOROCILO="Dnevna kopija baze NI uspela (nastavitve: $S_NASTAVITVE, izvoz: $S_IZVOZ, sifriranje: $S_SIFRIRAJ, shranjevanje: $S_NALOZI)."
+            SPOROCILO="Dnevna kopija baze NI shranjena: $RAZLOGI."
           fi
           curl -sS --max-time 20 \
             -H "Title: Outly varnostna kopija" -H "Priority: high" -H "Tags: rotating_light" -H "Click: $RUN_URL" \
