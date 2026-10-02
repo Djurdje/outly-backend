@@ -11,7 +11,10 @@ const app = express();
 // omejevanje veljalo za vse uporabnike skupaj.
 app.set("trust proxy", 1);
 
-app.use(cors());
+// CORS: allowedHeaders namenoma ni nastavljen - paket `cors` tedaj ponovi glave iz preflighta (Access-Control-Request-Headers),
+// zato brskalnik sme poslati Authorization, X-Outly-Club in Idempotency-Key (test_idempotenca.js to preveri).
+// exposedHeaders: brez tega JavaScript v brskalniku Retry-After (503/429/409) NE vidi; Idempotent-Replayed pove, da je odgovor ponovitev.
+app.use(cors({ exposedHeaders: ["Retry-After", "Idempotent-Replayed"] }));
 
 // Javni predpomnilnik (issue #114, invarianta I17): kratek predpomnilnik ze serializiranih javnih seznamov. TTL v ms
 // (JAVNI_PREDPOMNILNIK_MS, privzeto 3000, 0 = izklopljeno), najvec JAVNI_PREDPOMNILNIK_KLJUCEV kljucev (privzeto 300).
@@ -3150,8 +3153,175 @@ async function preveriStarostKupca(c, userId, minAge, kaj = "tickets for this ev
 const STAROST_PAKET_PIJACE = 18;
 const starostZaPaket = (minAgeDogodka, jePaket) => Math.max(Number(minAgeDogodka) || 0, jePaket ? STAROST_PAKET_PIJACE : 0);
 
+// ---------------------------
+// Idempotentni kljuc nakupa (issue #112, invarianta I18, migracija 028)
+// ---------------------------
+// Glava `Idempotency-Key` (UUID) na POST /events/:id/orders in POST /events/:id/tables/:tableId/orders. Ponovni poskus
+// istega nakupa (timeout, 503, dvojni pritisk, slaba povezava) z istim kljucem vrne ISTO narocilo, brez nove rezervacije.
+// Brez glave je obnasanje nespremenjeno (star odjemalec). Kljuc je vezan na uporabnika: unikaten je (user_id, key).
+//
+// Tri plasti, od najcenejse do dokoncne:
+//  1. PRED omejevalnikom in semaforjem (middleware `idempotenca`): ce narocilo s tem kljucem ze obstaja, takoj vrne
+//     isto telo (201 + `Idempotent-Replayed: true`); ponovitev ne porabi nakupnega poskusa (20/h) in ne caka v vrsti.
+//     Isti kljuc, druga vsebina (dogodek, kolicina, miza, paket) -> 422. Pred zavrniRazprodano, da ponovitev zadnje
+//     vstopnice ne dobi 409 »Only 0 tickets left«.
+//  2. Zahtevek, ki je s kljucem ze v teku v TEM procesu, ne vzame mesta v semaforju: ceka v pomnilniku (najvec
+//     IDEMPOTENCA_CAKANJE_MS) in dobi isti rezultat; ce prvi ne uspe, naslednji poskusi sam (neuspeh se ne zapomni);
+//     po izteku roka 409 request_in_progress + Retry-After.
+//  3. V nakupni transakciji (veljavno tudi med instancami): pg_advisory_xact_lock na kljuc, nato ponovno branje po
+//     kljucu. Dva hkratna zahtevka istega kljuca se tako vrstita, drugi vidi commit prvega in vrne isto narocilo;
+//     NE dobi »Only 0 tickets left« zaradi zaloge, ki jo je porabil prvi. Dokoncna resnica je unikaten indeks
+//     orders_idempotency_key (23505 -> preberi obstojece).
+const IDEM_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const IDEMPOTENCA_CAKANJE_MS = okoljeCelo("IDEMPOTENCA_CAKANJE_MS", 10000, 0, 60000);
+const IDEMPOTENCA_PREVERBA_MS = 3000;                                        // branje po kljucu pred semaforjem; ob preseganju velja plast 3
+const IDEMPOTENCA_STARO_MS = NAKUP_CAKANJE_MS + 4 * NAKUP_DB_TIMEOUT_MS + 5000;   // varovalka: zahtevek, ki visi dlje, ne drzi kljuca za vedno
+const idemVObdelavi = new Map();   // "<userId>:<kljuc>" -> { vsebina, od, vTransakciji, dokoncano, sprosti }
+
+// Vsebina nakupa, ki jo kljuc »podpisuje«: dogodek, kolicina, miza, paket. Cena (expected_price_cents) ni del identitete.
+// Vrne null, ce je zahtevek neveljaven: tedaj ga obravnavalec zavrne s 400, kot prej.
+function vsebinaNakupaVstopnic(req) {
+  const id = celoId(req.params.id);
+  const q = Number((req.body || {}).quantity ?? 1);
+  if (!id || !Number.isInteger(q) || q < 1 || q > NAJVEC_NA_NAROCILO) return null;
+  return { event_id: id, quantity: q, table_id: null, package_id: null };
+}
+function vsebinaNakupaMize(req) {
+  const id = vipId(req.params.id), mizaId = vipId(req.params.tableId);
+  if (!id || !mizaId) return null;
+  const b = req.body || {};
+  let paketId = null;
+  if (b.package_id !== undefined && b.package_id !== null) {
+    paketId = vipId(b.package_id);
+    if (paketId === null) return null;
+  }
+  return { event_id: id, quantity: 1, table_id: mizaId, package_id: paketId };
+}
+function idemIstaVsebina(a, b) {
+  return a.event_id === b.event_id && a.quantity === b.quantity
+    && (a.table_id ?? null) === (b.table_id ?? null) && (a.package_id ?? null) === (b.package_id ?? null);
+}
+// Branje po kljucu (uporabnik IZ ZETONA, nikoli iz zahteve: kljuc drugega uporabnika je neviden, I3).
+async function idemPoisci(db, userId, kljuc) {
+  const r = await db.query(
+    "SELECT id, event_id, quantity, table_id, package_id FROM orders WHERE user_id = $1 AND idempotency_key = $2", [userId, kljuc]);
+  return r.rows[0] || null;
+}
+// V transakciji: najprej serializiraj zahtevke istega kljuca (zaklep traja do COMMIT/ROLLBACK), nato preberi po kljucu.
+async function idemZakleniInPoisci(c, userId, kljuc) {
+  await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [`idem:${userId}:${kljuc}`]);
+  return idemPoisci(c, userId, kljuc);
+}
+// Telo odgovora nakupa (enako ob prvem nakupu in ob ponovitvi). db: odjemalec, ki ga klicatelj ze drzi, ali pool.
+async function odgovorNarocila(db, oid) {
+  const nr = await db.query(`SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name
+     FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id WHERE o.id = $1`, [oid]);
+  const vst = await vstopniceNarocil([oid], db);
+  return { mode: "test", order: nr.rows[0], tickets: vst[oid] || [] };
+}
+function idemNapacnaVsebina(res) {
+  return res.status(422).json({ error: "idempotency_key_reused",
+    message: "This Idempotency-Key was already used for a different purchase. Use a new key for a different event, quantity or table." });
+}
+// Obstojece narocilo s tem kljucem: isti nakup -> isto telo (201, kot ob prvem uspehu; odjemalec ne rabi posebne poti),
+// z glavo Idempotent-Replayed; drug nakup -> 422.
+async function idemOdgovori(res, db, obst, v) {
+  if (!idemIstaVsebina(obst, v)) return idemNapacnaVsebina(res);
+  const telo = await odgovorNarocila(db, obst.id);
+  console.log(`Nakup (ponovitev kljuca): naročilo ${obst.id}`);
+  res.set("Idempotent-Replayed", "true");
+  return res.status(201).json(telo);
+}
+// Po 23505 (unikatni indeks): zmagovalec je ze commitan, preberi ga. true = odgovor poslan.
+async function idemPoKonfliktu(req, res, c, v) {
+  try {
+    const obst = await idemPoisci(c, req.user.userId, req.idemKljuc);
+    if (!obst) return false;
+    await idemOdgovori(res, c, obst, v);
+    return true;
+  } catch (e) { console.error(e); return false; }
+}
+function sCasovnoMejo(obljuba, ms) {
+  let t;
+  return Promise.race([obljuba, new Promise((_, rej) => { t = setTimeout(() => rej(new Error("preverba kljuca predolga")), ms); })])
+    .finally(() => clearTimeout(t));
+}
+// Zahtevek postane »lastnik« kljuca v tem procesu; sprosti ga konec odgovora, ali zaprtje zveze PRED transakcijo
+// (odjemalec, ki odide iz vrste, ne kupi - I16). Po zaprtju sredi transakcije ostane do konca (commit se zgodi brez odjemalca).
+function idemZahtevaj(req, res, mapKljuc, v) {
+  let koncaj;
+  const z = { vsebina: v, od: Date.now(), vTransakciji: false, sproscen: false, dokoncano: new Promise((r) => { koncaj = r; }) };
+  z.sprosti = () => {
+    if (z.sproscen) return;
+    z.sproscen = true;
+    if (idemVObdelavi.get(mapKljuc) === z) idemVObdelavi.delete(mapKljuc);
+    koncaj();
+  };
+  idemVObdelavi.set(mapKljuc, z);
+  req.idem = z;
+  res.once("finish", z.sprosti);
+  res.once("close", () => { if (!z.vTransakciji) z.sprosti(); });
+}
+// "koncano" | "cas" | "preklic" (odjemalec je odsel med cakanjem)
+function idemCakaj(z, ms, res) {
+  return new Promise((resolve) => {
+    let t;
+    const konec = (izid) => { clearTimeout(t); res.off("close", naZaprtje); resolve(izid); };
+    const naZaprtje = () => konec("preklic");
+    t = setTimeout(() => konec("cas"), ms);
+    res.once("close", naZaprtje);
+    z.dokoncano.then(() => konec("koncano"));
+  });
+}
+// true = nadaljuj z obravnavalcem (kljuc je nas); false = odgovor je ze poslan (ali odjemalca ni vec).
+async function idemPreveri(req, res, v) {
+  const userId = req.user.userId, kljuc = req.idemKljuc;
+  const mapKljuc = userId + ":" + kljuc;
+  const rok = Date.now() + IDEMPOTENCA_CAKANJE_MS;
+  for (;;) {
+    if (res.destroyed) return false;
+    const obst = await sCasovnoMejo(idemPoisci(pool, userId, kljuc), IDEMPOTENCA_PREVERBA_MS);
+    if (res.destroyed) return false;   // odjemalec je odsel: ne postani lastnik in ne kupi (duh)
+    if (obst) { await idemOdgovori(res, pool, obst, v); return false; }
+    const tuji = idemVObdelavi.get(mapKljuc);
+    if (!tuji) { idemZahtevaj(req, res, mapKljuc, v); return true; }
+    if (Date.now() - tuji.od > IDEMPOTENCA_STARO_MS) { tuji.sprosti(); continue; }   // viseci lastnik: prevzemi
+    if (!idemIstaVsebina(tuji.vsebina, v)) { idemNapacnaVsebina(res); return false; }
+    const ostanek = rok - Date.now();
+    const izid = ostanek > 0 ? await idemCakaj(tuji, ostanek, res) : "cas";
+    if (izid === "preklic") return false;
+    if (izid === "cas") {
+      res.set("Retry-After", "2");
+      res.status(409).json({ error: "request_in_progress", message: "Your previous attempt is still being processed. Please try again in a moment." });
+      return false;
+    }
+    // "koncano": lastnik je zakljucil - ponovno preberi po kljucu (narocilo ali, ce ni uspel, nov poskus)
+  }
+}
+// Middleware (za requireAuth, PRED zavrniRazprodano in omeji). vsebinaIzZahteve: vsebinaNakupaVstopnic | vsebinaNakupaMize.
+function idempotenca(vsebinaIzZahteve) {
+  return async (req, res, next) => {
+    const surov = req.headers["idempotency-key"];
+    if (surov === undefined) return next();
+    if (typeof surov !== "string" || !IDEM_UUID.test(surov)) {
+      return res.status(400).json({ error: "invalid_idempotency_key", message: "Idempotency-Key must be a UUID." });
+    }
+    req.idemKljuc = surov.toLowerCase();
+    const v = vsebinaIzZahteve(req);
+    if (!v) return next();   // neveljavno telo: obravnavalec vrne 400
+    let dalje;
+    try { dalje = await idemPreveri(req, res, v); }
+    catch (e) {
+      // Preverba ni uspela (baza, cas): plasti 3 (zaklep + unikaten indeks v transakciji) sta neodvisni, zato nadaljuj.
+      console.error("[idempotenca] preverba pred semaforjem ni uspela:", e && e.message);
+      dalje = !res.headersSent && !res.destroyed;
+    }
+    if (dalje) next();
+  };
+}
+
 // POST /events/:id/orders — nakup. Telo: { quantity }.
-app.post("/events/:id/orders", requireAuth, zavrniRazprodano, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), zavrniRazprodano, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const id = celoId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const q = Number((req.body || {}).quantity ?? 1);
@@ -3166,8 +3336,15 @@ app.post("/events/:id/orders", requireAuth, zavrniRazprodano, omeji({ kljuc: "na
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+  if (req.idem) req.idem.vTransakciji = true;   // zaprtje zveze od tu naprej kljuca ne sprosti (commit se zgodi brez odjemalca)
+  const idemV = req.idemKljuc ? vsebinaNakupaVstopnic(req) : null;
   try {
     await nakupZacni(c);
+    if (idemV) {
+      // Plast 3: hkratni zahtevek z istim kljucem (tudi iz druge instance) pocaka na zaklepu, nato vidi commit prvega.
+      const obst = await idemZakleniInPoisci(c, req.user.userId, req.idemKljuc);
+      if (obst) { await c.query("ROLLBACK"); return await idemOdgovori(res, c, obst, idemV); }
+    }
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden
@@ -3195,9 +3372,9 @@ app.post("/events/:id/orders", requireAuth, zavrniRazprodano, omeji({ kljuc: "na
     // Sprožilec orders_rezerviraj zaklene dogodek in preveri zalogo še enkrat.
     const or = await c.query(
       `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency,
-                           application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'paid',$11,$12,NOW()) RETURNING id`,
-      [ref, req.user.userId, e.id, e.club_id, q, e.ticket_price_cents, skupaj, e.currency, provizija, e.vat_rate, pi, u.email]
+                           application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at, idempotency_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'paid',$11,$12,NOW(),$13) RETURNING id`,
+      [ref, req.user.userId, e.id, e.club_id, q, e.ticket_price_cents, skupaj, e.currency, provizija, e.vat_rate, pi, u.email, req.idemKljuc || null]
     );
     const oid = or.rows[0].id;
     await c.query(
@@ -3209,19 +3386,19 @@ app.post("/events/:id/orders", requireAuth, zavrniRazprodano, omeji({ kljuc: "na
     // pool: pri 10+ hkratnih nakupih (pool ima privzeto 10 povezav) bi vsak
     // zahtevek držal svojo povezavo in čakal na enajsto -> celoten backend
     // obvisi, dokler ga Render ne zažene znova (ugotovljeno s testom sočasnosti).
-    const nr = await c.query(`SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name
-       FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id WHERE o.id = $1`, [oid]);
-    const vst = await vstopniceNarocil([oid], c);
+    const telo = await odgovorNarocila(c, oid);
     console.log(`Nakup (test): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, ${q}x ${e.ticket_price_cents} c`);
-    return res.status(201).json({ mode: "test", order: nr.rows[0], tickets: vst[oid] || [] });
+    return res.status(201).json(telo);
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});
     if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+    // Unikatni indeks po kljucu je dokoncna resnica: zmagovalec je commitan, vrni njegovo narocilo (plast 3 to ze preprecuje).
+    if (idemV && err && err.code === "23505" && err.constraint === "orders_idempotency_key" && await idemPoKonfliktu(req, res, c, idemV)) return;
     // Sprožilec: "Ni dovolj vstopnic" pride kot check_violation.
     if (err && err.code === "23514") return res.status(409).send(/Ni dovolj/.test(err.message) ? "Not enough tickets left." : "Order rejected: " + (err.constraint || err.message));
     console.error(err);
     return res.status(500).send("Server error.");
-  } finally { try { c.release(); } finally { nakupIzstopi(); } }
+  } finally { try { c.release(); } finally { if (req.idem) req.idem.sprosti(); nakupIzstopi(); } }
 });
 
 // GET /me/orders — moja naročila z vstopnicami.
@@ -4201,7 +4378,7 @@ app.get("/events/:id/vip", async (req, res) => {
 // aktivne pakete; sicer izpusti ali null). Pravila nakupa (testni nacin, okno prodaje, starost) so ista
 // kot pri vstopnicah (napakaProdaje, preveriStarostKupca). Narocilo: quantity 1, cena = cena mize,
 // vstopnic = table_seats; ne steje v sold_count. Ista miza dvakrat: 409 (I13, unikaten indeks).
-app.post("/events/:id/tables/:tableId/orders", requireAuth, zavrniRazprodanoMizo, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaNakupaMize), zavrniRazprodanoMizo, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const id = vipId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const mizaId = vipId(req.params.tableId);
@@ -4226,8 +4403,15 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, zavrniRazprodanoMizo
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+  if (req.idem) req.idem.vTransakciji = true;   // zaprtje zveze od tu naprej kljuca ne sprosti (commit se zgodi brez odjemalca)
+  const idemV = req.idemKljuc ? vsebinaNakupaMize(req) : null;
   try {
     await nakupZacni(c);
+    if (idemV) {
+      // Plast 3 (glej POST /events/:id/orders): ponovitev iste mize z istim kljucem NI »miza ze zasedena«.
+      const obst = await idemZakleniInPoisci(c, req.user.userId, req.idemKljuc);
+      if (obst) { await c.query("ROLLBACK"); return await idemOdgovori(res, c, obst, idemV); }
+    }
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled,
               e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden
@@ -4278,23 +4462,25 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, zavrniRazprodanoMizo
     const or = await c.query(
       `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency,
                            application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at,
-                           table_id, table_label, table_seats, package_id, package_name, package_description)
-       VALUES ($1,$2,$3,$4,1,$5,$5,$6,$7,$8,'paid',$9,$10,NOW(),$11,$12,$13,$14,$15,$16) RETURNING id`,
+                           table_id, table_label, table_seats, package_id, package_name, package_description, idempotency_key)
+       VALUES ($1,$2,$3,$4,1,$5,$5,$6,$7,$8,'paid',$9,$10,NOW(),$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
       [ref, req.user.userId, e.id, e.club_id, cena, e.currency, provizija, e.vat_rate, pi, starost.email,
-       miza.id, miza.label, miza.seats, paket ? paket.id : null, paket ? paket.name : null, paket ? paket.description : null]
+       miza.id, miza.label, miza.seats, paket ? paket.id : null, paket ? paket.name : null, paket ? paket.description : null,
+       req.idemKljuc || null]
     );
     const oid = or.rows[0].id;
     await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, miza.seats]);
     await c.query("COMMIT");
 
     // Branje po COMMIT-u prek odjemalca c, NE prek pool (glej opombo pri POST /events/:id/orders).
-    const nr = await c.query(`SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name
-       FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id WHERE o.id = $1`, [oid]);
-    const vst = await vstopniceNarocil([oid], c);
+    const telo = await odgovorNarocila(c, oid);
     console.log(`Nakup mize (test): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, miza ${miza.id}, ${miza.seats} vstopnic, ${cena} c`);
-    return res.status(201).json({ mode: "test", order: nr.rows[0], tickets: vst[oid] || [] });
+    return res.status(201).json(telo);
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});
+    // Kljuc ima prednost pred »miza ze zasedena«: ce je mizo zasedlo ravno narocilo s TEM kljucem, je to ponovitev (ne 409, ne oznaka razprodano).
+    if (idemV && err && err.code === "23505" && (err.constraint === "orders_idempotency_key" || err.constraint === "orders_miza_dogodek_key")
+        && await idemPoKonfliktu(req, res, c, idemV)) return;
     if (err && err.code === "23505" && err.constraint === "orders_miza_dogodek_key") {
       razprodanoOznaci("m:" + id + ":" + mizaId);
       return res.status(409).send("This table is already booked.");
@@ -4302,7 +4488,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, zavrniRazprodanoMizo
     if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
     console.error(err);
     return res.status(500).send("Server error.");
-  } finally { try { c.release(); } finally { nakupIzstopi(); } }
+  } finally { try { c.release(); } finally { if (req.idem) req.idem.sprosti(); nakupIzstopi(); } }
 });
 
 // ---------------------------
