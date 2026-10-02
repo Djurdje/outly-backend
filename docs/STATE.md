@@ -171,7 +171,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 - **Idempotentni ključ nakupa (#112, I18).** Glava `Idempotency-Key: <UUID>` na obeh `POST …/orders` (brez nje vse kot prej): en UUID na pritisk »Kupi«, isti ob
   ponovitvi ISTEGA nakupa, nov ob spremembi nakupa. Ponovitev = 201 + `Idempotent-Replayed: true` s TRENUTNIM stanjem; neaktivno 409, drug nakup 422. iOS (#53) in splet (#29) ga pošiljata.
 - **Prenesena vstopnica v kupčevem pogledu naročil (#124, I7; od 2. 10. 2026):** `serial` je `null` (ključ ostane), `holder_email` ni (`GET /me/orders`, odgovor nakupa in ponovitev); nadomestilo
-  `holder_username` + `transferred`. Prejemnik (`GET /me/tickets`) in klub (poslovne poti) serial še imata. iOS: `serial` opcijski (outly-app #54); splet `/me/orders` ne kliče.
+  `holder_username` + `transferred`. Prejemnik (`GET /me/tickets`) in klub (poslovne poti) serial še imata. iOS: `serial` opcijski (outly-app #54); splet `/me/orders` ne kliče. **Isto za odgovor `POST /tickets/:id/transfer` (#140, od 2. 10. 2026):** pri prenosu po `user_id` je `ticket.holder_email` `null` (ključ ostane; pri prenosu po e-naslovu je vpisani naslov); odjemalci polja ne berejo (grep iOS `Outly/`, splet `webapp/`: 2. 10.).
 - Ostale pasti (AsyncImage brez okvirja, gnezden NavigationStack, pg BIGINT, Resend `{error}`, JSONB vs ARRAY)
   so v `CLAUDE.md` tega repa in iOS repa.
 

@@ -3786,10 +3786,13 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     await c.query("COMMIT");
     console.log(`Prenos vstopnice ${t.id}: uporabnik ${req.user.userId} -> ${p.id} (dogodek ${t.event_id})`);
     // Posiljatelj nove kode ne dobi — vstopnica ni vec njegova.
+    // E-naslov prejemnika (I7, issue #140): samo ce ga je posiljatelj vpisal sam; pri prenosu po user_id (prijatelj iz seznama)
+    // posiljatelj naslova ne pozna in ga ne sme izvedeti. Kljuc `holder_email` ostane (null), ker je odstranitev polja brisanje.
+    const naslovZnan = !prejemnikId;
     return res.status(200).json({
-      result: "ok", message: `Ticket sent to ${p.username || p.email}.`,
+      result: "ok", message: `Ticket sent to ${p.username || (naslovZnan ? p.email : "your friend")}.`,
       ticket: { id: u.rows[0].id, event_id: t.event_id, event_title: t.event_title, status: u.rows[0].status,
-                holder_username: p.username, holder_email: p.email, transferred: true }
+                holder_username: p.username, holder_email: naslovZnan ? p.email : null, transferred: true }
     });
   } catch (e) {
     await c.query("ROLLBACK").catch(() => {});

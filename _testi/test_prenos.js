@@ -277,6 +277,29 @@ async function api(method, path, token, body) {
   r = await api("POST", "/business/tickets/scan", T.lastnik, { serial: serialA1Novi });
   assert(r.status === 200 && r.body.result === "ok", "vratar skenira nov serial prejemnika -> 200", r.body);
 
+  console.log("\n# Odgovor prenosa posiljatelju: e-naslov prejemnika samo, ce ga je posiljatelj vpisal sam (issue #140, I7)");
+  // Prenos po user_id (prijatelj iz seznama): posiljatelj prijateljevega e-naslova ne pozna in ga ne sme izvedeti.
+  const idAnaPr = (await pool.query("SELECT id FROM users WHERE email='ana@outly.si'")).rows[0].id;
+  const idCenePr = (await pool.query("SELECT id FROM users WHERE email='cene@outly.si'")).rows[0].id;
+  await pool.query("INSERT INTO friendships (user_a, user_b) VALUES (LEAST($1::int,$2::int), GREATEST($1::int,$2::int))", [idAnaPr, idCenePr]);
+  r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Prenos po id", startAt: cezTri, ticketPriceCents: 1000, capacity: 100, minAge: 0 });
+  assert(r.status === 201, "dogodek za prenos po user_id ustvarjen", r.body);
+  const dogodekPoId = r.body.id;
+  r = await api("POST", `/events/${dogodekPoId}/orders`, T.ana, { quantity: 2 });
+  assert(r.status === 201 && r.body.tickets.length === 2, "ana kupi 2 vstopnici za prenos po user_id / e-naslovu", r.body);
+  const [vPoId, vPoEposti] = r.body.tickets.map(t => t.id);
+  r = await api("POST", `/tickets/${vPoId}/transfer`, T.ana, { user_id: idCenePr });
+  assert(r.status === 200 && r.body.result === "ok", "ana prenese vstopnico prijatelju Cenetu po user_id", r.body);
+  assert(r.body.ticket && "holder_email" in r.body.ticket && r.body.ticket.holder_email === null,
+    "prenos po user_id: holder_email je null (kljuc ostane)", r.body.ticket);
+  assert(r.body.ticket.holder_username === "cene" && r.body.ticket.transferred === true && r.body.message === "Ticket sent to cene.",
+    "prenos po user_id: holder_username, transferred in sporocilo ostanejo", r.body);
+  assert(!JSON.stringify(r.body).includes("cene@outly.si"), "prenos po user_id: e-naslova prejemnika ni nikjer v odgovoru", r.body);
+  // Prenos po e-naslovu, ki ga je vpisal posiljatelj: naslov mu je ze znan, odgovor ostane kot prej.
+  r = await api("POST", `/tickets/${vPoEposti}/transfer`, T.ana, { email: "Cene@Outly.si" });
+  assert(r.status === 200 && r.body.ticket.holder_email === "cene@outly.si" && r.body.ticket.holder_username === "cene",
+    "prenos po e-naslovu: holder_email je naslov, ki ga je vpisal posiljatelj", r.body.ticket);
+
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
   const napake = log.split("\n").filter(l => /error|TypeError|Unhandled/i.test(l) && !/Server error\./.test(l) && !/Resend/i.test(l));
   if (napake.length) console.log("\nLog backenda (sumljivo):\n" + napake.join("\n"));
