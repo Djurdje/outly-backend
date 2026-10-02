@@ -59,7 +59,7 @@ const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KE
 // po izteku se stevec ponastavi - enako kot prej v pomnilniku. Racun je poleg tega zascisten se z zaklepom
 // v tabeli users, ki NI odvisen od IP naslova.
 //
-// Zmogljivost: omejevalnik ima LASTEN majhen pool (OMEJEVALNIK_POOL_MAX, privzeto 4) s kratkimi casovnimi
+// Zmogljivost: omejevalnik ima LASTEN majhen pool (OMEJEVALNIK_POOL_MAX, privzeto 2) s kratkimi casovnimi
 // omejitvami, zato ne zaseda povezav glavnega poola in ne caka za dolgimi poizvedbami (npr. izvoz). Ko je
 // kljuc prekoracen, se "blokiran do" zapomni se v pomnilniku procesa (negativni predpomnilnik): napadalec, ki
 // bije v ze blokiran kljuc, baze ne obremenjuje vec. DB ostane vir resnice - predpomnilnik le skrajsa pot do
@@ -80,7 +80,7 @@ const OMEJEVALNIK_CISCENJE_MS = Number(process.env.OMEJEVALNIK_CISCENJE_MS) || 2
 const limiterPool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
-  max: Number(process.env.OMEJEVALNIK_POOL_MAX) || 4,
+  max: Number(process.env.OMEJEVALNIK_POOL_MAX) || 2,
   // Hitro odpove ali odpade: obvisel omejevalnik ne sme zadrzati zahtevka dlje kot ~3,5 s (nato velja priNapaki).
   // Povezava je z Renderjevo bazo v isti regiji (TLS ~deset ms), zato 2 s za vzpostavitev ni pretesno.
   connectionTimeoutMillis: 2000,
