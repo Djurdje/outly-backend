@@ -80,6 +80,12 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`.
 - **VIP 18+ na odjemalcih še ni:** iOS in splet polja `package_min_age` (lahko `undefined` na starem backendu — privzeto 18) še ne
   kažeta. 403 sta navadno besedilo (kot pri `min_age`); odjemalec starosti ne preverja sam.
 
+## Javni predpomnilnik (#114, ARCHITECTURE »Javni predpomnilnik«, I17; odločitev agenta, Martin je ni potrdil)
+
+- `/events`, `/clubs`, `/events/:id`, `/clubs/:id` so 3 s v pomnilniku; zapis ga izprazni, mimo API-ja (SQL, migracija, druga instanca) zaostane do 3 s.
+  Dnevnik `[predpomnilnik] 60 s: …` kaže zadetke/razveljavitve; izklop: `JAVNI_PREDPOMNILNIK_MS=0`. Nov javni GET, odvisen od uporabnika, NE sme vanj.
+- Za iOS/splet (neobvezno): `GET /events?lite=true` brez `description` (ključ manjka; model naj ga ima neobveznega), `ETag`/304.
+
 ## Spletna aplikacija (outly.si/app; podrobnosti v `outly_webpage/CLAUDE.md`)
 
 - **Ni javna** (Martin 29. 9.: »da lahko jaz prvo vse preverim«): dosegljiva samo z neposrednim URL-jem, `noindex`.
