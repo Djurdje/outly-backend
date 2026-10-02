@@ -18,8 +18,9 @@
  * Časovne meje (issue #115): ALTER TABLE rabi ACCESS EXCLUSIVE zaklep. Če tabelo takrat bere dolga transakcija (izvoz,
  * poročilo), migracija čaka, za njo pa se v vrsto postavijo VSA nova branja in pisanja te tabele — tudi sken vstopnic
  * na vratih. Zato migracija ne sme čakati:
- *   – MIGRACIJA_LOCK_TIMEOUT (privzeto 5s): kako dolgo sme ena migracija čakati na zaklep tabele. Ob preteku se vrne nazaj
- *     in se poskusi še MIGRACIJA_PONOVITVE-krat (privzeto 2) z MIGRACIJA_PREMOR (privzeto 10s) premora, da kratek izvoz ne
+ *   – MIGRACIJA_LOCK_TIMEOUT (privzeto 2s, namenoma kratko: čakajoči ALTER blokira nove poizvedbe po tabeli, tudi sken):
+ *     kako dolgo sme ena migracija čakati na zaklep tabele. Ob preteku se vrne nazaj
+ *     in se poskusi še MIGRACIJA_PONOVITVE-krat (privzeto 4) z MIGRACIJA_PREMOR (privzeto 10s) premora, da kratek izvoz ne
  *     podre deploya. Če zaklepa ni tudi po tem, migrate.js izide s kodo 1: deploy pade, Render obdrži staro različico,
  *     migracija se poskusi znova ob naslednjem deployu (v schema_migrations se zapiše šele ob uspehu).
  *   – MIGRACIJA_STATEMENT_TIMEOUT (privzeto 120s): najdaljši čas ENEGA stavka migracije (statement_timeout velja na stavek,
@@ -48,10 +49,10 @@ if (process.env.MIGRACIJE_MAPA && (process.env.RENDER || process.env.NODE_ENV ==
 const MAPA = process.env.MIGRACIJE_MAPA ? path.resolve(process.env.MIGRACIJE_MAPA) : path.join(__dirname, "migracije");
 const KLJUCAVNICA = 8274100; // poljubna, a stalna številka za pg_advisory_lock
 
-const PRIVZETI_LOCK_TIMEOUT = "5s";
+const PRIVZETI_LOCK_TIMEOUT = "2s";
 const PRIVZETI_STATEMENT_TIMEOUT = "120s";
 const PRIVZETI_KLJUCAVNICA_TIMEOUT = "60s";
-const PRIVZETE_PONOVITVE = 2;
+const PRIVZETE_PONOVITVE = 4;
 const PRIVZETI_PREMOR = "10s";
 
 // Prebere časovno mejo iz okolja in jo preveri, PREDEN se dotaknemo baze (napačna vrednost = jasna napaka, ne tihi privzetek).

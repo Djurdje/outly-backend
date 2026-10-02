@@ -300,6 +300,11 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   veljajo naprej. Strežnik ostane razsodnik (`scan-batch`); dva telefona brez povezave lahko spustita isto vstopnico — sprejeto tveganje.
   *vir/dokaz*: issue #86, backend PR "Sken brez povezave", `_testi/test_sken_brez_povezave.js` · *velja dokler*: — (rotacija ključa =
   zamenjava `QR_SECRET`, razveljavi vse kode) · *nadomeščena z*: —
+- 2026-10-02: **Odločitev agenta (predpostavka), Martin je ni potrdil:** javni seznami se predpomnijo v procesu, 3 s, brez Redisa; `Cache-Control: private` samo na osebnih različicah (issue #114; zanesljivost: 1000+ hkratnih
+  ogledov, sken na vratih ne sme pasti). Predpomni se samo javni del odgovora (ključ brez žetona), osebna polja se računajo posebej (I17).
+  Razveljavitev ob zapisu v procesu (izjeme: ARCHITECTURE »Javni predpomnilnik«); zaostanek drugih instanc največ TTL agent sprejema kot predpostavko. Zunanji predpomnilnik (Redis, CDN pravila) bi
+  stal denar ali nastavitve računov, zdaj ni potreben. *vir/dokaz*: PR #111 (meritev), PR tega commita (pred/po), `_testi/test_javni_predpomnilnik.js` ·
+  *velja dokler*: teče ena instanca; pri več instancah ali CDN-u pred API-jem preglej razveljavitev · *nadomeščena z*: —
 
 ## Način dela (odločeno 16. 9. 2026)
 

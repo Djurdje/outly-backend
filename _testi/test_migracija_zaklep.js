@@ -32,13 +32,14 @@ const spi = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Zagon migrate.js kot otrok; ob preseganju roka ga ubijemo (stara koda bi visela v nedogled), pid je samo nas.
 // NODE_ENV=test: MIGRACIJE_MAPA je dovoljena samo zunaj produkcije. PONOVITVE=0, razen kjer test preskusa ponovne poskuse.
-function zaganjajMigracijo(env, rokMs, argumenti = []) {
+function zaganjajMigracijo(env, rokMs, naIzpis = null) {
   const t0 = Date.now();
-  const otrok = spawn(process.execPath, ["db/migrate.js", ...argumenti], {
+  const otrok = spawn(process.execPath, ["db/migrate.js"], {
     cwd: KOREN, env: { ...process.env, NODE_ENV: "test", MIGRACIJA_PONOVITVE: "0", DATABASE_URL: ciljnaUrl.toString(), ...env }, stdio: ["ignore", "pipe", "pipe"],
   });
   let izpis = "";
-  otrok.stdout.on("data", (d) => izpis += d); otrok.stderr.on("data", (d) => izpis += d);
+  const dodaj = (d) => { izpis += d; if (naIzpis) naIzpis(izpis); };
+  otrok.stdout.on("data", dodaj); otrok.stderr.on("data", dodaj);
   return new Promise((resolve) => {
     let ubit = false;
     const rok = setTimeout(() => { ubit = true; otrok.kill("SIGKILL"); }, rokMs);
@@ -69,8 +70,8 @@ async function pocakaj(fn, rokMs) {
     await vzd.query(`CREATE DATABASE ${IME_BAZE}`);
     const polna = spawnSync(process.execPath, ["db/migrate.js"], { cwd: KOREN, env: { ...process.env, DATABASE_URL: ciljnaUrl.toString() }, encoding: "utf8", timeout: 120000 });
     assert(polna.status === 0, "npm run migrate na prazni bazi -> 0", (polna.stdout + polna.stderr).slice(-400));
-    assert(/lock_timeout 5s, statement_timeout 120s \(na stavek\), ponovitve 2 po 10s, čakanje na advisory lock 60s/.test(polna.stdout),
-      "privzete meje: lock 5s, statement 120s, 2 ponovitvi po 10s, advisory lock 60s", polna.stdout.slice(0, 200));
+    assert(/lock_timeout 2s, statement_timeout 120s \(na stavek\), ponovitve 4 po 10s, čakanje na advisory lock 60s/.test(polna.stdout),
+      "privzete meje: lock 2s, statement 120s, 4 ponovitve po 10s, advisory lock 60s", polna.stdout.slice(0, 200));
 
     ctrl = await odjemalec(ciljnaUrl);
     const vnos = async (datoteka) => (await ctrl.query("SELECT 1 FROM schema_migrations WHERE datoteka=$1", [datoteka])).rowCount;
@@ -127,12 +128,12 @@ async function pocakaj(fn, rokMs) {
     assert((await vnos("900_test_zaklep.sql")) === 1, "vnos v schema_migrations je zdaj zapisan");
     assert((await stolpec("zaklep_test_a")) === 1 && (await stolpec("zaklep_test_b")) === 1, "oba ALTER-ja sta uveljavljena");
 
-    console.log("\n# 3. Privzeti lock_timeout (brez env) je ~5 s; delna migracija se vrne nazaj (datoteka z BEGIN/COMMIT)");
+    console.log("\n# 3. Privzeti lock_timeout (brez env) je ~2 s; delna migracija se vrne nazaj (datoteka z BEGIN/COMMIT)");
     piši("901_test_zaklep_privzeto.sql", "BEGIN;\nALTER TABLE tickets ADD COLUMN zaklep_test_c INT;\nALTER TABLE tickets ADD COLUMN zaklep_test_d INT;\nCOMMIT;\n");
     await zadrzi();
     const privzeta = await zaganjajMigracijo(env, 25000);
     assert(!privzeta.ubit && privzeta.koda === 1, "brez env migracija pade s kodo 1", { koda: privzeta.koda, ubit: privzeta.ubit });
-    assert(privzeta.trajanjeMs >= 4500 && privzeta.trajanjeMs < 9000, `privzeti lock_timeout je ~5 s (${privzeta.trajanjeMs} ms)`, privzeta.trajanjeMs);
+    assert(privzeta.trajanjeMs >= 1700 && privzeta.trajanjeMs < 6000, `privzeti lock_timeout je ~2 s (${privzeta.trajanjeMs} ms)`, privzeta.trajanjeMs);
     assert((await vnos("901_test_zaklep_privzeto.sql")) === 0 && (await stolpec("zaklep_test_c")) === 0, "ni vnosa in ni delnega ucinka");
     await sprosti();
     const znova2 = await zaganjajMigracijo(env, 30000);
@@ -141,8 +142,14 @@ async function pocakaj(fn, rokMs) {
     console.log("\n# 4. Kratek izvoz ne podre deploya: ponovni poskusi po premoru");
     piši("902_test_ponovitve.sql", "ALTER TABLE tickets ADD COLUMN zaklep_test_e INT;\n");
     await zadrzi();
-    setTimeout(() => { sprosti().catch(() => {}); }, 1800); // zaklep se sprosti po ~1,8 s, drugi poskus (po 1 s + 1,5 s premora) uspe
-    const ponov = await zaganjajMigracijo({ ...env, MIGRACIJA_LOCK_TIMEOUT: "1s", MIGRACIJA_PONOVITVE: "2", MIGRACIJA_PREMOR: "1500ms" }, 30000);
+    // Zaklep sprostimo sele, ko je prvi poskus res padel (izpis otroka vsebuje "zaklep zaseden"), ne po fiksnem casu:
+    // na pocasnem CI bi se sicer zaklep sprostil, preden migracija sploh zacne cakati, in test bi bil lazno rdec.
+    let sproscen = false;
+    const ponovP = zaganjajMigracijo({ ...env, MIGRACIJA_LOCK_TIMEOUT: "1s", MIGRACIJA_PONOVITVE: "2", MIGRACIJA_PREMOR: "1500ms" }, 40000, (izpis) => {
+      if (!sproscen && /zaklep zaseden/.test(izpis)) { sproscen = true; sprosti().catch(() => {}); }
+    });
+    const ponov = await ponovP;
+    assert(sproscen, "prvi poskus je padel (zaklep zaseden), nato je bil zaklep sproscen");
     assert(ponov.koda === 0, "migracija uspe v ponovnem poskusu (koda 0)", ponov.izpis.slice(-400));
     assert(/poskus 1\/3/.test(ponov.izpis) && /poskus 2\)/.test(ponov.izpis), "izpis: prvi poskus zaseden, uspeh v poskusu 2", ponov.izpis.slice(-400));
     assert((await vnos("902_test_ponovitve.sql")) === 1 && (await stolpec("zaklep_test_e")) === 1, "migracija uveljavljena");
