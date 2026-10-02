@@ -62,7 +62,6 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/outly
       NODE_ENV: test
       TEST: ${{ github.event.inputs.test || 'false' }}
-      POTRDI_PADEC: ${{ github.event.inputs.potrdi_padec || 'false' }}
     steps:
       - name: Testno obvestilo (brez kopije)
         id: test
@@ -152,7 +151,9 @@ jobs:
         run: |
           DATUM=$(date -u +%F)
           echo "DATUM=$DATUM" >> "$GITHUB_ENV"
-          IME="outly-db-$DATUM-r${{ github.run_attempt }}.json.gz.age"
+          OZNAKA="${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "OZNAKA=$OZNAKA" >> "$GITHUB_ENV"
+          IME="outly-db-$DATUM-r$OZNAKA.json.gz.age"
           bash _orodja/kopija/sifriraj.sh "$RUNNER_TEMP/kopija/izvoz.json" "$RUNNER_TEMP/kopija/izhod/$IME"
 
       # Izhodisce stevil (za preverbo padca) je sifrirano v R2 (kopije/stanje/); stanje se prebere PRED nalaganjem danasnje kopije
@@ -176,7 +177,7 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: bash _orodja/kopija/nalozi_r2.sh "$RUNNER_TEMP/kopija/izhod" "$DATUM" "${{ github.run_attempt }}"
+        run: bash _orodja/kopija/nalozi_r2.sh "$RUNNER_TEMP/kopija/izhod" "$DATUM" "$OZNAKA"
 
       # Namenoma PO nalaganju: ce preizkus obnove pade (npr. deploy z novo migracijo je v teku), je kopija vseeno shranjena.
       - name: Preizkus obnove (service container postgres:16)
@@ -189,6 +190,7 @@ jobs:
         if: ${{ !cancelled() && steps.nalozi.outcome == 'success' }}
         env:
           BACKUP_STEVILA_KLJUC: ${{ secrets.BACKUP_STEVILA_KLJUC }}
+          POTRDI_PADEC: ${{ github.event.inputs.potrdi_padec || 'false' }}   # isto ime bere stevila.js (test_kopija_orodja.js to preverja)
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -202,7 +204,7 @@ jobs:
           echo "::error::Izhodisce za preverbo padca manjka ze 2 zagona zapored (BACKUP_STEVILA_KLJUC se menja ali shranjevanje izhodisca ne uspe). Kopija je shranjena."
           exit 1
 
-      # Hramba 30 dni: workflow sam brise stare kopije (zanesljivo, brez dodatnega klika); R2 lifecycle pravilo je neobvezna dodatna varovalka.
+      # Hramba 30 dni: workflow sam brise stare kopije (zanesljivo, brez dodatnega klika); R2 lifecycle pravila NE nastavljamo (izniclo bi varovalo »vedno 7 najnovejsih«).
       - name: Hramba - pobrisi kopije starejse od 30 dni (R2)
         id: hramba
         if: ${{ !cancelled() && steps.nalozi.outcome == 'success' }}

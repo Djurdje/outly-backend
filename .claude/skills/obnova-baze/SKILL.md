@@ -15,10 +15,12 @@ ukaze s temi vrednostmi poganja Martin v svojem terminalu, agent mu jih pripravi
   (`db/obnovi_izvoz.js`) kot v `ARCHITECTURE.md`, razdelek »Varnostne kopije in obnova«. **Ni `pg_dump`**: zunanji dostop do `outly-db` je
   zaprt (STATE.md, 30. 9. 2026), GitHubovi runnerji pa nimajo stalnega IP-ja; z API-jem baza ostane zaprta. Izvoz namenoma izpusti tabelo `omejitve` (števci omejevalnika).
 - Izvoz se stisne (gzip) in **šifrira z javnim ključem age**, nato se naloži v **zasebni Cloudflare R2 bucket** (EU jurisdikcija, S3 API prek `aws` CLI,
-  `_orodja/kopija/r2.sh`) in **prebere nazaj** (sha256). Ključi: `kopije/YYYY/MM/outly-db-YYYY-MM-DD-r<poskus>.json.gz.age` in `….sha256`.
+  `_orodja/kopija/r2.sh`) in **prebere nazaj** (sha256). Ključi: `kopije/YYYY/MM/outly-db-YYYY-MM-DD-r<run_id>-<poskus>.json.gz.age` in `….sha256`.
   **Nič ni v GitHub artefaktih** (repo je javen). Brez Martinovega zasebnega ključa age je kopija neberljiva tudi za nekoga, ki bi dobil dostop do bucketa.
-- **Hramba 30 dni:** workflow sam pobriše kopije, starejše od 30 dni (`cisti_stare.sh`; vedno pusti najnovejših 7, ne dotakne se `kopije/stanje/`). Zakaj tako in ne samo z
-  R2 lifecycle pravilom: deluje brez dodatnega klika, je vidno v dnevniku in v povzetku zagona, lifecycle pa je neobvezna druga varovalka.
+- **Hramba 30 dni:** workflow sam pobriše kopije, starejše od 30 dni (`cisti_stare.sh`; vedno pusti najnovejših 7, ne dotakne se `kopije/stanje/`; če se najnovejša kopija
+  od današnjega časa razlikuje za več kot 2 dni, ne briše ničesar). **R2 lifecycle pravila NE nastavljaj:** briše po času, ne glede na to, koliko kopij ostane, in bi izničilo
+  varovalo »vedno 7 najnovejših« (če bi kopije prenehale nastajati, bi po 35 dneh izginile vse).
+- **Nič se ne prepiše:** ključ vsebuje `run_id` in številko poskusa, zato cron in ročni zagon istega dne dasta dve kopiji; če bi ključ že obstajal, zagon pade.
 - **Isti zagon takoj preizkusi obnovo** (pred šifriranjem): migracije v `postgres:16` → `db/obnovi_izvoz.js` → neodvisna primerjava števil vrstic po
   tabelah in seznama migracij (`_orodja/kopija/stevila.js`). Preverba popolnosti: **vsaka tabela migrirane sheme mora biti v izvozu** (tudi z 0 vrsticami; izjema `omejitve`),
   sicer je zagon rdeč.
@@ -43,13 +45,14 @@ Cloudinary slike; Stripe; nastavitve Rendera. Časovni žigi so v izvozu zaokro�
    repo-level secret je dosegljiv vsaki veji). `NTFY_TOPIC` ostane repo-level.
 2. **Cloudflare R2 (zasebna hramba, brezplačno do meja).** Cloudflare → R2 → *Enable R2* (pri vklopu lahko zahteva plačilno sredstvo; do 10 GB hrambe in 1 M zapisov/mesec
    ni stroška — dnevna kopija 30 dni je nekaj MB do nekaj deset MB). Nato:
-   - **Bucket** `outly-kopije`, lokacija/**jurisdikcija EU** (jurisdikcije ni mogoče spremeniti pozneje).
+   - **Bucket** `outly-kopije`: pri ustvarjanju v razdelku *Location* izberi **»Specify jurisdiction« → »European Union (EU)«** (ne le »Location hint« Europe: samo jurisdikcija da
+     endpoint `.eu.`, ki ga workflow uporablja; sicer vsak klic vrne `NoSuchBucket`). Jurisdikcije ni mogoče spremeniti pozneje.
+   - **Javni dostop mora biti izklopljen:** bucket → *Settings* → *Public access*: *R2.dev subdomain* = **Disabled** in brez *Custom Domains*. Preveri po ustvarjanju.
    - **Token:** R2 → *Manage API tokens* → *Create API token*: dovoljenje **Object Read & Write**, *Apply to specific buckets only* → `outly-kopije`, brez poteka ali 1 leto
-     (ob poteku koledarski opomnik). Izpiše *Access Key ID* in *Secret Access Key* (druga se pokaže samo enkrat).
+     (ob poteku koledarski opomnik). Izpiše *Access Key ID* in *Secret Access Key* (druga se pokaže samo enkrat). Token sme brisati (workflow čisti stare kopije); omejen je na ta bucket.
    - V environment `kopije` → *Environment secrets*: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (= `outly-kopije`) in `R2_ACCOUNT_ID` (Cloudflare → R2 → Account ID).
      **Ne v chat, ne v mail.** Endpoint workflow sestavi sam (`https://<ACCOUNT_ID>.eu.r2.cloudflarestorage.com`).
-   - *(Neobvezno, dodatna varovalka)* bucket → *Settings* → *Object lifecycle rules* → pravilo »delete objects 35 days after upload«, predpona `kopije/20`.
-     Glavno hrambo (30 dni) opravi workflow sam.
+   - **Ne nastavljaj lifecycle pravila** (glej »Hramba 30 dni« zgoraj).
 3. **Ključ age.** Z https://github.com/FiloSottile/age/releases prenesi age za Windows (`age.exe`, `age-keygen.exe`), nato v PowerShellu:
    `.\age-keygen.exe -o outly-kopija-kljuc.txt` — izpiše vrstico `Public key: age1…`.
    - **Datoteka `outly-kopija-kljuc.txt` je ZASEBNI ključ.** Shrani jo v upravljalnik gesel in še eno kopijo na USB/izpis. **Nikoli** v GitHub, mail, chat ali repo.
@@ -76,11 +79,11 @@ Cloudinary slike; Stripe; nastavitve Rendera. Časovni žigi so v izvozu zaokro�
 
 ## Prenos in dešifriranje (Martin, Windows/PowerShell; enako na Linuxu)
 
-1. Prenesi iz R2: Cloudflare → R2 → `outly-kopije` → `kopije/YYYY/MM/` → `outly-db-YYYY-MM-DD-rN.json.gz.age` in njen `….sha256` → *Download*.
+1. Prenesi iz R2: Cloudflare → R2 → `outly-kopije` → `kopije/YYYY/MM/` → `outly-db-YYYY-MM-DD-r<številke>.json.gz.age` in njen `….sha256` → *Download*.
    (Ali z `aws` CLI: `aws s3 cp s3://outly-kopije/kopije/YYYY/MM/<ime> . --endpoint-url https://<ACCOUNT_ID>.eu.r2.cloudflarestorage.com --region auto` s ključi R2 v okolju; ukaze poganja Martin.)
-2. Preveri celovitost: `Get-FileHash .\outly-db-YYYY-MM-DD-rN.json.gz.age -Algorithm SHA256` mora dati isti odtis kot v `….sha256`
+2. Preveri celovitost: `Get-FileHash .\outly-db-YYYY-MM-DD-r<številke>.json.gz.age -Algorithm SHA256` mora dati isti odtis kot v `….sha256`
    (Linux: `sha256sum -c *.sha256`).
-3. Dešifriraj: `.\age.exe -d -i outly-kopija-kljuc.txt -o izvoz.json.gz outly-db-YYYY-MM-DD-rN.json.gz.age`
+3. Dešifriraj: `.\age.exe -d -i outly-kopija-kljuc.txt -o izvoz.json.gz outly-db-YYYY-MM-DD-r<številke>.json.gz.age`
 4. Razpakiraj (deluje povsod, kjer je Node): `node -e "require('fs').writeFileSync('izvoz.json', require('zlib').gunzipSync(require('fs').readFileSync('izvoz.json.gz')))"`
 5. Hiter pregled: `node _orodja/kopija/stevila.js povzetek izvoz.json` (iz korena klona repozitorija) — izpiše čas izvoza, tabele in števila vrstic;
    izvoz je cel, če piše »Izvoz je cel«.
@@ -143,7 +146,7 @@ da je izvoz obnovljiv in da je shranjena datoteka cela; **Martinov del dokazuje,
 | `Branch not allowed` / job se ne zažene | zagon ne z veje `main` (environment `kopije`) | zaženi z `main` |
 | `Manjka nastavitve v environmentu kopije: …` | secret/variable ni vpisan v environment | Nastavitev, koraki 2–6 |
 | `R2: napaka (…): AccessDenied` / `InvalidAccessKeyId` / `SignatureDoesNotMatch` | token potekel, napačen ključ ali token ni za ta bucket | nov token (Menjava ključev), preveri `R2_*` |
-| `R2: napaka (…): NoSuchBucket` | napačen `R2_BUCKET` ali bucket ni v EU jurisdikciji (endpoint `.eu.`) | preveri ime in jurisdikcijo bucketa |
+| `R2: napaka (…): NoSuchBucket` ali `vedro ni dosegljivo` | napačen `R2_BUCKET` ali bucket ni ustvarjen z jurisdikcijo EU (endpoint `.eu.`) | preveri ime; bucket mora biti ustvarjen s »Specify jurisdiction → European Union«; sicer ga izbriši (je prazen) in ustvari znova |
 | `R2: napaka (…): povezava ali neznano` | napačen `R2_ACCOUNT_ID` ali izpad Cloudflara | preveri ID računa, ponovi zagon |
 | `Kopija v R2 se po prenosu nazaj ne ujema` | okvara pri nalaganju | ponovi zagon; če se ponovi, INCIDENTI |
 | `Izhodišče … ne da dekodirati` (opozorilo) | zamenjan `BACKUP_STEVILA_KLJUC` ali pokvarjen objekt `kopije/stanje/stevila.enc` | en dan brez preverbe padca; če se ponovi 2 zagona zapored, je zagon rdeč: preglej ključ |

@@ -347,7 +347,7 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 - 2026-10-02: **Dnevna kopija baze izven Renderja: logični izvoz prek API-ja, šifriran z age, hranjen v ZASEBNEM Cloudflare R2 (EU); odločitev Martina v klepetu 2. 10. 2026** (issue #88).
   Workflow `Varnostna kopija baze` potegne `GET /admin/api/export` (poseben admin račun), šifrira z JAVNIM ključem (`vars.BACKUP_AGE_PUBLIC_KEYS`, zasebni samo pri Martinu),
   naloži v R2 bucket `outly-kopije` (S3 API, endpoint `<ACCOUNT_ID>.eu.r2.cloudflarestorage.com`) in prebere nazaj (sha256), v istem zagonu preizkusi obnovo v `postgres:16`
-  in po 30 dneh sam briše stare kopije (vedno pusti 7 najnovejših). Martin je izbral R2 namesto GitHub artefakta v javnem repu (A): kopije so zasebne, ne le šifrirane.
+  in po 30 dneh sam briše stare kopije (vedno pusti 7 najnovejših; R2 lifecycle pravila namenoma ni, ker bi to varovalo izničilo). Martin je izbral R2 namesto GitHub artefakta v javnem repu (A): kopije so zasebne, ne le šifrirane.
   Ne `pg_dump`: zunanji dostop do `outly-db` je zaprt (30. 9.), runnerji nimajo stalnega IP-ja; baza ostane zaprta, obnova je isti postopek kot v ARCHITECTURE.
   Dnevniki zagonov so javni: v njih so samo imena tabel, OK/NAPAKA in odtis, nikoli števila vrstic ali podatki o računu R2. Zasebnega ključa age NI v GitHub secrets
   (kdor bere secrets, bi bral tudi kopije); mesečno ga Martin uporabi lokalno, workflow pa preveri svežost in celovitost. Job teče v environmentu `kopije` (samo `main`);

@@ -54,7 +54,8 @@ case "$UKAZ" in
     povzetek "- **Izhodisce za preverbo padca:** $RAZLOG. Preverba padca ta dan preskocena, izhodisce nastavljeno na novo."
     izhod "izhodisce=0"
     # Prvi zagon? Se ni nobene kopije v R2 (stanje tece PRED nalaganjem danasnje).
-    BILE=$(bash "$R2" list "kopije/20" | grep -c . || true)
+    bash "$R2" list "kopije/20" > "$TMP/bile.tsv"      # napaka seznama = napaka (rdece), ne »prvi zagon«
+    BILE=$(grep -c . "$TMP/bile.tsv" || true)
     if [ "$BILE" -eq 0 ]; then
       echo "V R2 se ni nobene kopije: prvi zagon, odsotnost izhodisca je pricakovana."
       izhod "dvakrat=false"

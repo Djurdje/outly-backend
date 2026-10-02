@@ -3,7 +3,7 @@
 #   r2.sh put <lokalna-datoteka> <kljuc>      nalozi (multipart samo, ce je treba; aws s3 cp)
 #   r2.sh get <kljuc> <lokalna-datoteka>      prenese
 #   r2.sh list <predpona>                     vrstica na objekt: kljuc<TAB>cas-spremembe<TAB>velikost
-#   r2.sh exists <kljuc>                      koda 0 = obstaja, 1 = ne obstaja
+#   r2.sh exists <kljuc>                      koda 0 = obstaja, 1 = ne obstaja (vedro obstaja), 2 = napaka (tudi neobstojece vedro)
 #   r2.sh delete <kljuc>
 #
 # Okolje (GitHub environment »kopije«; NIKOLI se ne izpisuje):
@@ -56,8 +56,14 @@ case "$UKAZ" in
   exists)
     RC=0; aws --endpoint-url "$R2_ENDPOINT" s3api head-object --bucket "$R2_BUCKET" --key "${2:?kljuc}" > /dev/null 2> "$ERR" || RC=$?
     if [ "$RC" -ne 0 ]; then
-      # head-object vrne 404 (Not Found); vse ostalo (dovoljenja, povezava) je prava napaka
-      if grep -q -E 'Not Found|NoSuchKey|404' "$ERR"; then exit 1; fi
+      # head-object za manjkajoci kljuc vrne 404; enak 404 dobimo tudi za neobstojece vedro (brez telesa), zato ob 404
+      # se head-bucket: neobstojece vedro, dovoljenja ali povezava so napaka (exit 2), ne »ne obstaja«.
+      if grep -q -E 'An error occurred \((404|NoSuchKey)\)' "$ERR"; then
+        HB=0; aws --endpoint-url "$R2_ENDPOINT" s3api head-bucket --bucket "$R2_BUCKET" > /dev/null 2> "$ERR" || HB=$?
+        if [ "$HB" -eq 0 ]; then exit 1; fi
+        echo "R2: napaka (exists): vedro ni dosegljivo (preveri R2_BUCKET in jurisdikcijo EU)" >&2
+        exit 2
+      fi
       KODA=$(grep -o -m1 'An error occurred ([A-Za-z0-9]*)' "$ERR" | sed -E 's/.*\(([A-Za-z0-9]*)\).*/\1/' || true)
       echo "R2: napaka (exists): ${KODA:-povezava ali neznano}" >&2
       exit 2

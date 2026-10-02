@@ -10,7 +10,7 @@
  *   node _orodja/kopija/stevila.js padec <izvoz> <stevila.json>
  *                                                        BREZ baze: users/orders/tickets ne smejo pasti za > 20 % glede na
  *                                                        prejsnji zagon (<stevila.json>: izhodisce, ki ga _orodja/kopija/padec.sh hrani SIFRIRANO v zasebnem R2); nato zapise nova stevila.
- *                                                        PADEC_POTRJEN=true: padec je namerno, nova stevila postanejo izhodisce.
+ *                                                        POTRDI_PADEC=true: padec je namerno, nova stevila postanejo izhodisce.
  *   node _orodja/kopija/stevila.js povzetek <izvoz>     BREZ baze: izpise cas izvoza, tabele in stevila vrstic (hitri
  *                                                        mesecni preizkus po desifriranju, LOKALNO pri Martinu)
  * DATABASE_URL = ciljna lokalna baza (primerjaj, pocisti-seed).
@@ -58,7 +58,7 @@ if (ukaz === "padec") {
   for (const [ime, t] of Object.entries(izvoz.tables || {})) zdaj[ime] = t.count;
   let prej = null;
   try { prej = JSON.parse(fs.readFileSync(potStevil, "utf8")); } catch (_) { /* prvi zagon ali izhodisce izgubljeno */ }
-  const potrjen = process.env.PADEC_POTRJEN === "true";
+  const potrjen = process.env.POTRDI_PADEC === "true";
   const padle = [];
   if (!prej) {
     console.log("Prejsnjih stevil ni (prvi zagon ali izhodisce izgubljeno): preverba padca preskocena, nova stevila shranjena.");

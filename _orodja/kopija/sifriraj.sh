@@ -2,7 +2,7 @@
 # Dnevna kopija, korak 2: stisni (gzip) in sifriraj z JAVNIM kljucem (age). Uporaba:
 #   sifriraj.sh <izvoz.json> <izhod.json.gz.age>
 # Prejemniki: BACKUP_AGE_PUBLIC_KEYS = en ali vec javnih kljucev "age1...", locenih s presledkom ali novo vrstico.
-# Zasebni kljuc je samo pri Martinu — ta workflow ga nikoli ne vidi. Ob izpisu: velikost in odtis, nic drugega.
+# Zasebni kljuc je samo pri Martinu — ta workflow ga nikoli ne vidi. Ob izpisu: velikost (zaokrozena na MB) in odtis, nic drugega.
 set -euo pipefail
 
 VHOD="${1:?Uporaba: sifriraj.sh <izvoz.json> <izhod.json.gz.age>}"
@@ -27,4 +27,4 @@ head -c 40 "$IZHOD" | grep -q 'age-encryption.org/v1' || { echo "::error::Izhod 
 if grep -q -a '"exported_at"' "$IZHOD"; then echo "::error::V sifrirani datoteki je golo besedilo!"; rm -f "$IZHOD"; exit 1; fi
 
 ( cd "$(dirname "$IZHOD")" && sha256sum "$(basename "$IZHOD")" > "$(basename "$IZHOD").sha256" )
-echo "Sifrirano: $(stat -c %s "$IZHOD") B, prejemnikov: $(( ${#PREJEMNIKI[@]} / 2 )), sha256 $(cut -c1-16 "$IZHOD.sha256")"
+echo "Sifrirano: ~$(( ( $(stat -c %s "$IZHOD") + 1048575 ) / 1048576 )) MB, prejemnikov: $(( ${#PREJEMNIKI[@]} / 2 )), sha256 $(cut -c1-16 "$IZHOD.sha256")"
