@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-02 (sken brez povezave: scan-list z unpaid).
+Zadnja posodobitev: 2026-10-02 (VIP paket pijace 18+, issue #102).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -108,6 +108,17 @@ Vrstni red po nujnosti (samo kar ima rok ali blokira drugo):
   Odprta naloga `ios-dev`/`web-dev`: ob `unpaid` pokaži rdeče; `used` na seznamu še vedno pomeni že unovčeno.
 - Dostop: `scan-key` in `scan-list` vidijo vse vloge v klubu (tudi vratar) — vratar tako dobi seznam imen imetnikov vstopnic; e-naslovov ni.
 - Testi: `_testi/test_sken_brez_povezave.js` (v `npm test`). `test_vstopnice.js` in `test_vip.js` preverjata kode v2 z javnim ključem.
+
+## Kje smo (2. 10. 2026, VIP 18+, issue #102)
+
+- **Backend:** nakup mize s paketom in prenos vsake njene vstopnice zahtevata starost >= max(`min_age`, 18), brez datuma rojstva 403; miza brez
+  paketa in navadne vstopnice nespremenjeni. Brez migracije. Javni `GET /events/:id/vip` ima novo polje `package_min_age` (18 ali strozja meja dogodka).
+  Odlocitev: DECISIONS 2. 10. 2026; invarianta I8; test `_testi/test_vip_starost.js`.
+- **Za `web-dev` / `ios-dev`** (samo dodajanje, nic se ne preimenuje): pri izbiri paketa pokazi "18+" (`package_min_age`; polje je lahko `undefined` na starem
+  backendu - privzeto 18) in poskrbi, da kupec brez datuma rojstva dobi pot do profila; napake `403` so navadno besedilo (`Add your date of birth to buy a table
+  with a bottle package.` / `You must be at least 18 to buy a table with a bottle package.`, pri prenosu `Your friend must ... receive a ticket for a table
+  with a bottle package.`) - prikazi jih kot doslej pri `min_age`. Odjemalec starosti NE preverja sam (strezniska preverba je merodajna).
+- **Past:** vsak paket velja za alkohol; brezalkoholnih paketov ni mogoce oznaciti, dokler ne pride stolpec (DECISIONS 2. 10.).
 
 ## Kje smo (1. 10. 2026, VIP mize)
 
