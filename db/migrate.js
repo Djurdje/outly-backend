@@ -12,7 +12,16 @@
  *   – vodi evidenco v tabeli schema_migrations,
  *   – vsako neuporabljeno migracijo požene v svoji transakciji,
  *   – zavrne zagon, če je bila že uporabljena datoteka pozneje spremenjena,
- *   – uporabi ključavnico, da si dve instanci ne skačeta v besedo.
+ *   – uporabi ključavnico, da si dve instanci ne skačeta v besedo,
+ *   – vsaki migraciji nastavi lock_timeout in statement_timeout (glej spodaj).
+ *
+ * Časovni meji (issue #115): ALTER TABLE rabi ACCESS EXCLUSIVE zaklep. Če tabelo takrat bere dolga transakcija (izvoz,
+ * poročilo), migracija čaka, za njo pa se v vrsto postavijo VSA nova branja in pisanja te tabele — tudi sken vstopnic
+ * na vratih. Zato migracija ne sme čakati: po MIGRACIJA_LOCK_TIMEOUT (privzeto 5s) pade, migrate.js izide s kodo 1,
+ * Render deploya ne dokonča in obdrži staro različico, migracija pa se ob naslednjem deployu poskusi znova
+ * (v schema_migrations se zapiše šele ob uspehu, vse skupaj je ena transakcija). MIGRACIJA_STATEMENT_TIMEOUT
+ * (privzeto 120s) prepreči, da bi počasna migracija dolgo držala zaklep, ko ga enkrat dobi.
+ * Vrednost: število milisekund ali število s priponko ms|s|min (npr. 5s, 2min); 0 = brez meje.
  *
  * Zagon:
  *   node db/migrate.js            – uporabi vse neuporabljene
@@ -25,8 +34,25 @@ const path = require("path");
 const crypto = require("crypto");
 const { Pool } = require("pg");
 
-const MAPA = path.join(__dirname, "migracije");
+// MIGRACIJE_MAPA: samo za teste (_testi/test_migracija_zaklep.js), da lahko preskusijo migracijo v zacasni mapi.
+const MAPA = process.env.MIGRACIJE_MAPA ? path.resolve(process.env.MIGRACIJE_MAPA) : path.join(__dirname, "migracije");
 const KLJUCAVNICA = 8274100; // poljubna, a stalna številka za pg_advisory_lock
+
+const PRIVZETI_LOCK_TIMEOUT = "5s";
+const PRIVZETI_STATEMENT_TIMEOUT = "120s";
+
+// Prebere časovno mejo iz okolja in jo preveri, PREDEN se dotaknemo baze (napačna vrednost = jasna napaka, ne tihi privzetek).
+function casovnaMeja(ime, privzeto) {
+  const v = (process.env[ime] ?? "").trim();
+  if (v === "") return privzeto;
+  if (!/^\d+(ms|s|min)?$/.test(v)) {
+    console.error(`✖ ${ime}="${v}" ni veljavna vrednost. Dovoljeno: število ms ali število s priponko ms|s|min (npr. 5s, 2min), 0 = brez meje.`);
+    process.exit(1);
+  }
+  return v;
+}
+const lockTimeout = casovnaMeja("MIGRACIJA_LOCK_TIMEOUT", PRIVZETI_LOCK_TIMEOUT);
+const statementTimeout = casovnaMeja("MIGRACIJA_STATEMENT_TIMEOUT", PRIVZETI_STATEMENT_TIMEOUT);
 
 const args = process.argv.slice(2);
 const samoStanje = args.includes("--stanje");
@@ -149,6 +175,12 @@ async function glavno() {
 
       try {
         await odjemalec.query("BEGIN");
+        // set_config(..., true) = samo za to transakcijo (kot SET LOCAL); ob COMMIT/ROLLBACK se meji vrneta na prejšnji vrednosti.
+        // To deluje, ker migrate.js sam zavije migracijo v transakcijo (BEGIN/COMMIT iz datoteke odstrani, glej breztransakcije).
+        await odjemalec.query(
+          "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+          [lockTimeout, statementTimeout]
+        );
         await odjemalec.query(breztransakcije(vsebina));
         await odjemalec.query(
           "INSERT INTO schema_migrations (datoteka, odtis) VALUES ($1,$2)",
@@ -161,6 +193,18 @@ async function glavno() {
         console.log("PADLA");
         console.error(`\n✖ ${d} ni šla skozi. Baza je ostala nespremenjena.\n`);
         console.error(`   ${e.message}`);
+        if (e.code === "55P03") {
+          console.error(`
+   Migracija ni dobila zaklepa v ${lockTimeout} (lock timeout): tabelo je takrat uporabljala dolga transakcija
+   (npr. izvoz baze ali poročilo). Čakanje bi ustavilo vsa nova branja te tabele, zato je migracija odnehala.
+   Deploy pade, Render obdrži staro različico; migracija se poskusi znova ob naslednjem deployu (vpisa v
+   schema_migrations ni). Če se ponavlja, poišči dolgo transakcijo (pg_stat_activity) in počakaj, da se konča.`);
+        } else if (e.code === "57014") {
+          console.error(`
+   Migracija je tekla predolgo (statement timeout ${statementTimeout}) in je bila prekinjena, da ne bi dolgo držala zaklepa.
+   Deploy pade, Render obdrži staro različico. Počasno migracijo razdeli na manjše korake ali (če je res nujno)
+   za en deploy dvigni MIGRACIJA_STATEMENT_TIMEOUT na Renderju.`);
+        }
         if (e.detail) console.error(`   ${e.detail}`);
         if (e.hint) console.error(`   Namig: ${e.hint}`);
         console.error("");
