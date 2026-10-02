@@ -21,8 +21,8 @@
 // Seja: GET /events?upcoming=true  ->  nakljucen dogodek: GET /events/:id  ->  GET /clubs/:club_id  (premor med koraki).
 // Izpis: stevilo zahtevkov, napake po statusu, p50/p95/p99 po poti in skupaj, req/s, trajanje sej.
 //
-// !!! NIKOLI proti produkciji brez Martinovega DA (zaradi obremenitve prave baze in Render paketa). Skripta zavrne
-// cilje outly-backend-*.onrender.com, onrender.com in outly.si, razen ce je v okolju OUTLY_MARTIN_DA=DA.
+// !!! NIKOLI proti produkciji brez Martinovega DA (zaradi obremenitve prave baze in Render paketa). Skripta sprejme
+// samo lokalne cilje (localhost, 127.0.0.1, ::1); vse drugo zavrne, razen ce je v okolju OUTLY_MARTIN_DA=DA.
 // Lokalni testni podatki (30 klubov, 200 dogodkov) in postopek: orodja/obremenitev-podatki.sql
 
 const args = process.argv.slice(2);
@@ -44,9 +44,12 @@ const MEJA_CASA = opcija("timeout", 15000);
 const ZANKA = args.includes("--loop");
 
 let gostitelj;
-try { gostitelj = new URL(osnova).hostname; } catch { console.error("Neveljaven URL:", osnova); process.exit(2); }
-if (/(^|\.)onrender\.com$|(^|\.)outly\.si$/i.test(gostitelj) && process.env.OUTLY_MARTIN_DA !== "DA") {
-  console.error(`Zavrnjeno: ${gostitelj} je produkcija. Obremenitev proti produkciji rabi Martinov DA (nato OUTLY_MARTIN_DA=DA).`);
+try { gostitelj = new URL(osnova).hostname.toLowerCase().replace(/\.+$/, ""); } catch { console.error("Neveljaven URL:", osnova); process.exit(2); }
+// Dovoljena lista: brez Martinovega DA samo lokalni cilji. Vse drugo (produkcija, staging, tuji gostitelji, tudi
+// "outly.si." s koncno piko ali drugo ime za isti streznik) rabi OUTLY_MARTIN_DA=DA.
+const LOKALNI = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+if (!LOKALNI.has(gostitelj) && process.env.OUTLY_MARTIN_DA !== "DA") {
+  console.error(`Zavrnjeno: ${gostitelj} ni lokalni cilj (dovoljeno: localhost, 127.0.0.1, ::1). Obremenitev proti drugim ciljem rabi Martinov DA (nato OUTLY_MARTIN_DA=DA).`);
   process.exit(2);
 }
 if (UPORABNIKOV < 1 || TRAJANJE < 1) { console.error("--users in --duration morata biti >= 1"); process.exit(2); }
