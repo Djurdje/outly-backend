@@ -22,6 +22,8 @@
  *   5. Po koncu obremenitve backend takoj odgovarja: p95 20 zaporednih GET /events in 20 skenov < 500 ms.
  * Vrsta, prekinitve, 503 in sprostitev dovoljenja: _testi/test_nakup_vrsta.js.
  */
+const os = require("os"), path = require("path");
+const dc = require("diagnostics_channel"), { monitorEventLoopDelay } = require("perf_hooks");
 const crypto = require("crypto");
 const http = require("http");
 const { spawn } = require("child_process");
@@ -105,6 +107,47 @@ function jedroSysctl() {
   }
   return s;
 }
+// Sled zahtevkov skena (odjemalec): undici sporoca ustvaritev zahtevka, pisanje glav (vkljucno z lokalnim vratom vticnice) in
+// prihod odgovora. Skupaj s sledom strezniskega predala (_testi/sled_streznika.js) razdeli cas: cakanje odjemalca / sprejem
+// povezave na strezniku / obdelava / vrnitev. Brez pomena za trditve testa.
+const SLED_STREZNIK = path.join(os.tmpdir(), `outly-sled-obremenitev-${process.pid}.jsonl`);
+const sledSkenov = [], sledZahtevkov = new Map();
+dc.subscribe("undici:request:create", ({ request }) => { if (request.path.includes("/scan")) sledZahtevkov.set(request, { create: Date.now() }); });
+dc.subscribe("undici:client:sendHeaders", ({ request, socket }) => { const r = sledZahtevkov.get(request); if (r) { r.send = Date.now(); r.port = socket.localPort; } });
+dc.subscribe("undici:request:headers", ({ request }) => { const r = sledZahtevkov.get(request); if (r) { r.headers = Date.now(); sledSkenov.push(r); sledZahtevkov.delete(request); } });
+const zankaOdjemalca = monitorEventLoopDelay({ resolution: 10 }); zankaOdjemalca.enable();
+const sledZanke = [];
+const sledVrste = [];   // dolzina vrste sprejemanja (rx_queue vticnice LISTEN) na vratih backenda
+function dolzinaVrsteSprejemanja() {
+  try {
+    const vrstice = require("fs").readFileSync("/proc/net/tcp", "utf8").split("\n");
+    const hex = ":" + PORT.toString(16).toUpperCase().padStart(4, "0");
+    for (const l of vrstice) { const c = l.trim().split(/\s+/); if (c[3] === "0A" && c[1] && c[1].endsWith(hex)) return parseInt(c[4].split(":")[1], 16); }
+  } catch { /* ni Linux */ }
+  return null;
+}
+const sledCasovnik = setInterval(() => {
+  sledZanke.push({ t: Date.now(), max: Math.round(zankaOdjemalca.max / 1e6) }); zankaOdjemalca.reset();
+  const v = dolzinaVrsteSprejemanja(); if (v !== null) sledVrste.push({ t: Date.now(), v });
+}, 100);
+sledCasovnik.unref();
+function izpisiSledPocasnih(skeni, meja = 500) {
+  let streznik = [];
+  try { streznik = require("fs").readFileSync(SLED_STREZNIK, "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l)); } catch { /* predala ni */ }
+  const pocasni = sledSkenov.filter(r => r.headers - r.create > meja);
+  if (!pocasni.length) return;
+  const maxV = (a, b, k, vir) => Math.max(0, ...vir.filter(x => x.t >= a && x.t <= b).map(x => x[k]));
+  for (const r of pocasni.slice(0, 6)) {
+    const req = streznik.find(x => x.k === "req" && x.port === r.port && x.t >= r.send - 5);
+    const fin = req && streznik.find(x => x.k === "fin" && x.port === req.port && x.t >= req.t);
+    console.log("  (pocasen sken: " + JSON.stringify({
+      skupajMs: r.headers - r.create, odjemalecCakaMs: r.send - r.create, odPosiljanjaDoStreznikovegaZahtevkaMs: req ? req.t - r.send : null,
+      novaPovezava: req ? req.n === 1 : null, odSprejemaPovezaveDoZahtevkaMs: req && req.connT ? req.t - req.connT : null,
+      streznikObdelavaMs: fin ? fin.ms : null, odOdgovoraDoOdjemalcevihGlavMs: fin ? r.headers - fin.t : null,
+      zankaStreznikaMaxMs: maxV(r.create, r.headers, "max", streznik.filter(x => x.k === "loop")), zankaOdjemalcaMaxMs: maxV(r.create, r.headers, "max", sledZanke),
+      vrstaSprejemanjaMax: maxV(r.create, r.headers, "v", sledVrste) }) + ")");
+  }
+}
 function razlikaStevcev(pred, po) {
   if (!pred || !po) return null;
   const d = {};
@@ -121,7 +164,7 @@ function razlikaStevcev(pred, po) {
   // s predpomnilnikom 1000 bralcev istega kljuca postane ena poizvedba + 1000 x 100 kB odgovora, torej meri zasedenost
   // izvajalne zanke Node (p95 skena ~1,07 s v 2 od 3 zagonov, nestabilno), ne poolov. Predpomnilnik sam pokriva
   // test_javni_predpomnilnik.js; nakupi in sken predpomnilnika sploh ne uporabljajo (nakup ga celo izprazni).
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), JAVNI_PREDPOMNILNIK_MS: "0", SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require ${path.join(__dirname, "sled_streznika.js")}`.trim(), SLED_STREZNIK, PORT: String(PORT), JAVNI_PREDPOMNILNIK_MS: "0", SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
   for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
 
@@ -244,10 +287,14 @@ function razlikaStevcev(pred, po) {
   preveriSkene("navala nakupov", skeni);
 
   console.log("\n# 3b. Navala 300 nakupov + 1000 bralcev GET /events hkrati + sken (dogodek D)");
+  const tZacetek3b = Date.now();
   const jedroPred = jedroStevci();
   console.log(`  (jedro pred 3b: sysctl ${JSON.stringify(jedroSysctl())}, stevci ${JSON.stringify(jedroPred)})`);
   const d = await navala(dogodekD, BRALCEV);
   const jedroRazlika = razlikaStevcev(jedroPred, jedroStevci());
+  await new Promise(rs => setTimeout(rs, 300));   // predal strezniku zapisuje vsake 250 ms
+  izpisiSledPocasnih(d.skeni);
+  console.log(`  (vrsta sprejemanja na vratih ${PORT} med 3b: najvec ${Math.max(0, ...sledVrste.filter(x => x.t >= tZacetek3b).map(x => x.v))} povezav; zanka odjemalca najvec ${Math.max(0, ...sledZanke.filter(x => x.t >= tZacetek3b).map(x => x.max))} ms)`);
   if (jedroRazlika && Object.keys(jedroRazlika).length) {
     console.log(`  (jedro med 3b, razlika stevcev: ${JSON.stringify(jedroRazlika)})`);
     const pocasni = d.skeni.filter(x => x.ms > 500).map(x => `+${Math.round(x.zacetek)} ms: ${Math.round(x.ms)} ms`);
@@ -255,7 +302,7 @@ function razlikaStevcev(pred, po) {
     const zavrzeno = (jedroRazlika.ListenOverflows || 0) + (jedroRazlika.ListenDrops || 0) + (jedroRazlika.TCPReqQFullDrop || 0);
     if (zavrzeno > 0) console.log(`  !! jedro je med 3b zavrglo povezave (ListenOverflows+ListenDrops+TCPReqQFullDrop = ${zavrzeno}): vrsta sprejemanja/SYN je prepolna, ne zakasnitev aplikacije`);
     else if ((jedroRazlika.TCPSynRetrans || 0) > 0) console.log(`  !! ponovno poslanih SYN: ${jedroRazlika.TCPSynRetrans} (brez zavrzenih v ListenOverflows/Drops - SYN vrsta ali SYN piskoti)`);
-    else console.log("  (jedro ni zavrglo nobene povezave in ni bilo ponovnih SYN: pocasen sken ni krivda vrste povezav)");
+    else console.log("  (jedro ni zavrglo nobene povezave in ni bilo ponovnih SYN: zakasnitev, ce je je, ni zavrnitev jedra)");
   }
   const stD = steviloPoStatusu(d.nakupi);
   const bralciMs = d.bralciRez.map(x => x.ms).sort((a, b) => a - b);
@@ -299,6 +346,7 @@ function razlikaStevcev(pred, po) {
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
   const napake = log.split("\n").filter(l => /error|TypeError|Unhandled/i.test(l) && !/Server error\./.test(l) && !/Resend/i.test(l));
   if (napake.length) console.log("\nLog backenda (sumljivo):\n" + napake.slice(0, 20).join("\n"));
-  srv.kill(); jwksServer.close(); await pool.end();
+  srv.kill(); try { require("fs").unlinkSync(SLED_STREZNIK); } catch { /* ni datoteke */ }
+  jwksServer.close(); await pool.end();
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
