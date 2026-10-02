@@ -75,7 +75,7 @@ const PG_CONNECT_TIMEOUT_MS = okoljeCelo("PG_CONNECT_TIMEOUT_MS", 10000, 100, 60
 // Sken: kratek rok (telefon ob 503 hitro preklopi na preverjanje brez povezave), ne 10 s.
 const PG_SKEN_CONNECT_TIMEOUT_MS = okoljeCelo("PG_SKEN_CONNECT_TIMEOUT_MS", 2500, 100, 60000);
 
-function novPool(max, connectMs) {
+function novPool(max, connectMs, dodatno = {}) {
   const p = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
@@ -83,6 +83,7 @@ function novPool(max, connectMs) {
     // Varovalka: če zahtevek čaka na prosto povezavo (pool je zaseden ali se je zaklenil), dobi napako
     // namesto večnega čakanja. Brez tega bi en hrošč tipa "pool.query med držanjem odjemalca" obesil cel strežnik.
     connectionTimeoutMillis: connectMs,
+    ...dodatno,
   });
   // Baza lahko prekine povezavo, ki jo pool drzi (vzdrzevanje ali ponovni zagon baze na Renderju, izpad omrezja).
   // node-postgres odda 'error' na poolu (mirujoca povezava) oziroma na odjemalcu (izposojena povezava); brez
@@ -100,6 +101,43 @@ const pool = novPool(PG_POOL_MAX, PG_CONNECT_TIMEOUT_MS);
 // pool, ki ga uporabljajo SAMO POST /business/tickets/scan, scan-batch, GET .../scan-list in scan-key, vkljucno
 // z requireAuthSken / requireClubSken (iskanje uporabnika in kluba gre prek istega poola). Issue #89.
 const skenPool = novPool(PG_SKEN_POOL_MAX, PG_SKEN_CONNECT_TIMEOUT_MS);
+// GET /healthz (Renderjev Health Check Path) ima LASTEN pool z eno povezavo: ob navali nakupov je glavni pool zaseden, zdravje
+// v njegovi vrsti ne dobi povezave v roku, vrne 503 in Render instanco ponovno zazene - ravno med navalom (issue #117).
+// Ena povezava je dovolj (en SELECT 1 naenkrat; ostali zahtevki za zdravje cakajo kratek rok) in steje proti max_connections
+// baze (glej .env.example). Kratka roka: baza, ki ne odgovori v ~2 s, je za zdravje res nedosegljiva.
+// `query_timeout` je ODJEMALSKI rok: ce povezava obvisi (polodprt TCP, baza je ne zapre), `statement_timeout` na strezniku
+// nikoli ne steče; ob izteku pg poizvedbo zavrne, pool.query pa povezavo UNICI (release(err)), zato naslednji klic dobi novo.
+// Brez tega bi edina povezava obvisela za vedno in /healthz bi ostal 503 tudi po okrevanju (pregled PR #127).
+const zdraviPool = novPool(1, 2000, { statement_timeout: 2500, query_timeout: 2500, idleTimeoutMillis: 30000 });
+
+// ZASTOJ poola (puscanje povezav, obvisele transakcije) JE nezdrava instanca: restart ga popravi. PREOBREMENITEV ni: ob dolgem
+// navalu pool normalno krozi (povezave se ves cas vracajo), cakalna vrsta je lahko vseskozi neprazna - restart sredi navala
+// bi bil ista skoda kot #117 (pregled PR #127: simulacija max 4, 11 s od 12 s "zasicenosti" pri 936 uspesnih poizvedbah).
+// Zato signal NAPREDKA, ne dolzina vrste: pool.on("release") zapise `zadnjiNapredek`. Zastoj = vse povezave poola izposojene
+// (totalCount >= max IN idleCount == 0; ni pomembno, ali kdo caka - tudi pool brez prometa z vsemi puscenimi povezavami je
+// pokvarjen) IN od zacetka tega stanja ter od zadnje vrnjene povezave je minilo vec kot ZDRAVJE_ZASICEN_MS. Krozece povezave
+// (release vsakih nekaj ms) casovnik vedno ponastavijo. Privzeto 60 s: nakupna transakcija ima lock/statement timeout 10 s,
+// poizvedbe so kratke, zato 60 s brez ENE vrnjene povezave pri vseh izposojenih ni nobena legitimna obremenitev; hkrati je
+// dovolj dolgo, da kratek zastoj (restart baze, izpad omrezja z okrevanjem) ne sprozi restarta. Vzorci: vsakih 500 ms
+// in ob vsakem klicu /healthz. Nadzorovana sta glavni pool IN skenPool (sken na vratih je najkriticnejsa pot; sken je
+// ena kratka poizvedba, zato zastoj v njem pomeni puscanje in samo restart povrne sken; cena je en kratek restart, med
+// katerim telefon preklopi na sken brez povezave).
+const ZDRAVJE_ZASICEN_MS = okoljeCelo("ZDRAVJE_ZASICEN_MS", 60000, 100, 3600000);
+function nadzorZastoja(p, max) {
+  const st = { zadnjiNapredek: Date.now(), zasicenOd: null };
+  p.on("release", () => { st.zadnjiNapredek = Date.now(); });
+  // Vrne ms, odkar pool ni napredoval, medtem ko so vse povezave izposojene; 0, ce pool ni zasicen.
+  st.vzorci = () => {
+    const zasicen = p.totalCount >= max && p.idleCount === 0;
+    if (!zasicen) { st.zasicenOd = null; return 0; }
+    if (st.zasicenOd === null) st.zasicenOd = Date.now();
+    return Date.now() - Math.max(st.zasicenOd, st.zadnjiNapredek);
+  };
+  return st;
+}
+const zastojGlavni = nadzorZastoja(pool, PG_POOL_MAX);
+const zastojSken = nadzorZastoja(skenPool, PG_SKEN_POOL_MAX);
+setInterval(() => { zastojGlavni.vzorci(); zastojSken.vzorci(); }, 500).unref();
 
 // Hkratnost nakupov (issue #89, obremenitveni test). Nakup drzi povezavo z bazo od BEGIN do COMMIT, vsi nakupi
 // istega dogodka pa se v sprozilcu rezerviraj_zalogo() vrstijo na isti zaklenjeni vrstici. Ob navali (300 kupcev
@@ -633,11 +671,15 @@ function zeljeniKlub(req) {
 // Admin brez lastnega kluba dobi { clubId: null, role: 'admin' } — poti, ki
 // rabijo klub, mu vrnejo 404 kot do zdaj; poti za urejanje dogodkov ga spustijo.
 // Vratar (doorman) sme SAMO skenirati in gledati vstopnice dogodka.
+const INT4_MAX = 2147483647;
+const { jeNapakaPovezave } = require("./napaka_povezave");   // 503 samo za napake povezave/baze, ostalo 500
 function requireClubNa(db, vloge) {
   return async (req, res, next) => {
     try {
       if (!req.user) return res.status(401).send("Unauthorized.");
       const zeljeni = zeljeniKlub(req);
+      // Izrecno zahtevan klub izven obsega int4 ne obstaja (poizvedba bi sicer padla z 22003 -> 500).
+      if (zeljeni !== null && zeljeni > INT4_MAX) return res.status(404).send("Club not found.");
       let k = await klubUporabnika(req.user.userId, zeljeni, db);
       if (!k) {
         // Izrecno zahtevan klub, v katerem uporabnik ni: 404 (ne razkrivamo, ali obstaja).
@@ -652,7 +694,14 @@ function requireClubNa(db, vloge) {
       req.klub = k;
       next();
     } catch (e) {
-      console.error(e);
+      // Kot requireAuthNa (I10): napaka povezave/baze (izcrpan pool, prekinjena povezava, timeout) je zacasna tezava streznika,
+      // ne napaka zahtevka. Na sken poteh (requireClubSken) mora vratar dobiti 503 + Retry-After (telefon preklopi na sken brez
+      // povezave), ne 500 (issue #125). Vse drugo (programska/podatkovna napaka) ostane 500 s polnim skladom v dnevniku.
+      if (jeNapakaPovezave(e)) {
+        console.error("[klub] zacasna napaka pri iskanju kluba:", e && e.message);
+        return res.status(503).set("Retry-After", "5").send("Service temporarily unavailable. Please try again.");
+      }
+      console.error("[klub] nepricakovana napaka:", e);
       return res.status(500).send("Server error.");
     }
   };
@@ -667,8 +716,9 @@ app.get("/", (req, res) => {
 });
 
 // Render Health Check Path: Render novo kodo spusti v promet sele, ko ta pot vrne 2xx.
-// Preveri tudi bazo (SELECT 1) - backend brez baze ne streze nicesar. Omejeno na 3 s,
-// da zaseden pool (connectionTimeoutMillis 10 s) ne zadrzi odgovora cez Renderjev rok.
+// Preveri tudi bazo (SELECT 1) - backend brez baze ne streze nicesar. Gre prek LASTNEGA poola `zdraviPool` (ne glavnega):
+// preobremenjen glavni pool ni nezdrava instanca (I10, issue #117). Nedosegljiva baza je se vedno 503. Omejeno na 3 s,
+// da obvisela povezava ne zadrzi odgovora cez Renderjev rok.
 // `commit` = prvih 12 znakov RENDER_GIT_COMMIT (javni SHA, ni skrivnost): s tem se vidi, KATERA koda teče. Padel deploy
 // (npr. migracija brez zaklepa, #115) pusti staro različico živo in vrača 200, zato 200 sam ne dokaže, da teče nova koda.
 const COMMIT_KRATEK = (process.env.RENDER_GIT_COMMIT || "").slice(0, 12) || null;
@@ -676,12 +726,22 @@ app.get("/healthz", async (req, res) => {
   res.set("Cache-Control", "no-store");
   let casovnik;
   try {
+    for (const [ime, z, p] of [["glavni pool", zastojGlavni, pool], ["skenPool", zastojSken, skenPool]]) {
+      const zastojMs = z.vzorci();
+      if (zastojMs > ZDRAVJE_ZASICEN_MS) {
+        // Vse povezave izposojene in nobena se ne vraca (puscanje, obviseli zaklepi) -> naj Render instanco ponovno zazene.
+        console.error(`[zdravje] ${ime}: zastoj ${Math.round(zastojMs / 1000)} s brez vrnjene povezave (meja ${Math.round(ZDRAVJE_ZASICEN_MS / 1000)} s; ` +
+          `povezav ${p.totalCount}, cakajocih ${p.waitingCount}) -> 503`);
+        return res.status(503).json({ ok: false, commit: COMMIT_KRATEK });
+      }
+    }
     await Promise.race([
-      pool.query("SELECT 1"),
+      zdraviPool.query("SELECT 1"),
       new Promise((_, zavrni) => { casovnik = setTimeout(() => zavrni(new Error("timeout")), 3000); }),
     ]);
     res.json({ ok: true, commit: COMMIT_KRATEK });
   } catch (e) {
+    console.error("[zdravje] baza ni dosegljiva ->", 503, e && e.message);
     res.status(503).json({ ok: false, commit: COMMIT_KRATEK });
   } finally {
     clearTimeout(casovnik);
