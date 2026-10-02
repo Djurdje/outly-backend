@@ -159,6 +159,13 @@ ki tak JSON obnovi v **prazno, z migracijami pripravljeno** bazo. Kaj skripta za
 4. `node db/obnovi_izvoz.js <izvoz.json> --cilj-ni-localhost` → izpis po tabelah + »Obnova končana«.
 5. Backend preusmeri na novo bazo (Render → Environment → `DATABASE_URL`) in preveri `GET /clubs`, `GET /events`.
 
+**Izvoz je tok** (issue #23, 2. 10. 2026): strežnik piše JSON sproti, tabelo za tabelo in po 500 vrstic prek strežniškega kurzorja v
+eni `REPEATABLE READ` transakciji; poraba pomnilnika ni odvisna od velikosti baze (prej cel odgovor v pomnilniku: 120k vstopnic = 56 MB
+odgovora, RSS +170 MB, na 512 MB paketu OOM). Oblika izhoda je bajt za bajtom enaka kot prej (`{exported_at, postgres, tables:{ime:{count,
+columns, rows}}, sequences}`), zato obnova in stare kopije delujejo. Ob prekinitvi odjemalca se povezava iz poola sprosti (ROLLBACK).
+Ob napaki sredi toka se povezava prekine (odjemalec dobi napako, ne okrnjene kopije). Test: `_testi/test_export_tok.js`.
+Izvozu **ni več mogoče** dodati odgovora, ki bi zgradil celoten rezultat v pomnilniku (npr. `res.json(tables)`).
+
 Pozor: obnova iz starejšega izvoza **oživi že unovčene vstopnice**, ki so bile skenirane po izvozu — pred dogodkom
 naredi svež izvoz. Izvoz hrani osebne podatke; shrani ga zasebno (`outly/backup/`), nikoli v git.
 

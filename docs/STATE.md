@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-02 (sken brez povezave: scan-list z unpaid).
+Zadnja posodobitev: 2026-10-02 (izvoz baze v toku, issue #23).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -469,6 +469,11 @@ Kaj je v produkciji oz. na TestFlightu in kaj še ni preverjeno na napravi. Ta r
 
 ## Znane pasti (aktivne)
 
+- **Izvoz baze je tok; ne vračaj ga v `res.json` (2. 10. 2026, issue #23).** `GET /admin/api/export` piše odgovor po vrsticah (kurzor,
+  500 vrstic); če kdo spet zgradi cel objekt v pomnilniku, pri 3x več podatkih pade strežnik (512 MB). Glave so poslane takoj po
+  prvih poizvedbah, zato napaka sredi izvoza **prekine povezavo** (ne vrne 500). Admin panel (`admin/index.html`) odgovor v brskalniku še
+  vedno prebere v celoti (`res.json()` + `JSON.stringify`) — to je brskalnik, ne strežnik; za zelo velike baze bo treba prenos
+  shraniti neposredno (`fetch` → `Blob`). `_testi/test_export_tok.js` omeji kopico strežnika na 48 MB.
 - **iOS: `AsyncImage` ne uporabljaj — vedno `OutlyAsyncImage`** (Core/Components, od outly-app #33, 29. 9. 2026). Isti klici
   (`{ phase in }` ali `{ img in } placeholder: { }`). `AsyncImage` nima pomnilnika dekodiranih slik in plakat v polni
   locljivosti dekodira na glavni niti ob vsakem pojavu kartice -> zatikanje pri drsenju. `OutlyAsyncImage` pomanjsa na 1200 px

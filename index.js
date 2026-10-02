@@ -2515,43 +2515,96 @@ admin.get("/finance", async (req, res) => {
 // da so tabele med seboj skladne. Samo branje; nič se ne spremeni.
 // Namenjeno varnostnim kopijam pred večjimi migracijami (Render brezplačni
 // načrt kopij nima). Vsebuje tudi odtise gesel — datoteko hrani zasebno.
+//
+// IZVOZ JE TOK (issue #23): odgovor se piše sproti, tabelo za tabelo in
+// po IZVOZ_VRSTIC vrstic naenkrat prek strežniškega kurzorja, zato poraba
+// pomnilnika ni odvisna od velikosti baze (prej: 120k vstopnic = 56 MB
+// odgovora, RSS +170 MB; pri 512 MB paketu OOM). Oblika izhoda je BAJT ZA BAJTOM
+// enaka kot prej (isto kot JSON.stringify celotnega objekta) — obstoječe kopije in
+// db/obnovi_izvoz.js jo berejo: {exported_at, postgres, tables:{ime:{count,columns,rows}}, sequences}.
+// Test: _testi/test_export_tok.js (primerja z referenčno stari izvedbo, meri RSS, prekinitev odjemalca).
+const IZVOZ_VRSTIC = 500;
 admin.get("/export", async (req, res) => {
   const c = await pool.connect();
+  let prekinjeno = false;   // odjemalec je zaprl povezavo, preden smo končali
+  let napaka = false;       // povezave ni več varno vrniti v pool
+  let glavaPoslana = false;
+  const dogodekZapiranja = () => { if (!res.writableEnded) prekinjeno = true; };
+  res.on("close", dogodekZapiranja);
+  // Piše kos in upošteva povratni tlak (počasen odjemalec ne napolni pomnilnika).
+  const pisi = async (kos) => {
+    if (prekinjeno) throw new Error("odjemalec je prekinil izvoz");
+    if (!res.write(kos)) {
+      await new Promise((resolve) => {
+        const konec = () => { res.off("drain", konec); res.off("close", konec); resolve(); };
+        res.on("drain", konec); res.on("close", konec);
+      });
+    }
+    if (prekinjeno) throw new Error("odjemalec je prekinil izvoz");
+  };
   try {
     await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     const t = await c.query(
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name`
     );
+    const v = await c.query("SELECT version() AS version, NOW() AS now");
     // DATE (OID 1082) v izvozu kot besedilo "YYYY-MM-DD": privzeti razčlenjevalnik
     // naredi Date v lokalnem času procesa in toISOString ga v pasu z odmikom
     // (Europe/Ljubljana) premakne za dan nazaj — date_of_birth bi po obnovi
     // pomenil drug rojstni dan (ujeto v _testi/test_obnova.js). Samo za ta klic,
     // odgovori API-ja se ne spremenijo.
     const tipiIzvoza = { getTypeParser: (oid, fmt) => (oid === 1082 ? (v) => v : pgTipi.getTypeParser(oid, fmt)) };
-    const tables = {};
+    // Od tu naprej so glave poslane: napaka ne more več postati 500 (glej catch).
+    res.status(200);
+    res.set("Content-Type", "application/json; charset=utf-8");
+    res.set("Cache-Control", "no-store");
+    glavaPoslana = true;
+    await pisi(`{"exported_at":${JSON.stringify(v.rows[0].now)},"postgres":${JSON.stringify(v.rows[0].version)},"tables":{`);
+    let prvaTabela = true;
     for (const { table_name } of t.rows) {
-      const r = await c.query({ text: `SELECT * FROM "${table_name.replace(/"/g, '""')}"`, types: tipiIzvoza });
-      tables[table_name] = { count: r.rowCount, columns: r.fields.map((f) => f.name), rows: r.rows };
+      const ime = `"${table_name.replace(/"/g, '""')}"`;
+      // count mora biti pred vrsticami; isti posnetek (REPEATABLE READ), zato se ujema s prebranimi vrsticami.
+      const n = (await c.query(`SELECT COUNT(*)::int AS n FROM ${ime}`)).rows[0].n;
+      await c.query(`DECLARE izvoz_kurzor NO SCROLL CURSOR FOR SELECT * FROM ${ime}`);
+      let prva = true, bilaVrstica = false;
+      for (;;) {
+        const r = await c.query({ text: `FETCH ${IZVOZ_VRSTIC} FROM izvoz_kurzor`, types: tipiIzvoza });
+        let kos = "";
+        if (prva) {
+          // columns so v odgovoru FETCH tudi pri prazni tabeli
+          kos = `${prvaTabela ? "" : ","}${JSON.stringify(table_name)}:{"count":${n},"columns":${JSON.stringify(r.fields.map((f) => f.name))},"rows":[`;
+          prvaTabela = false; prva = false;
+        }
+        if (r.rows.length) {
+          kos += (bilaVrstica ? "," : "") + r.rows.map((vrstica) => JSON.stringify(vrstica)).join(",");
+          bilaVrstica = true;
+        }
+        if (r.rows.length < IZVOZ_VRSTIC) { await pisi(kos + "]}"); break; } // zadnji (nepolni ali prazni) kos
+        await pisi(kos);
+      }
+      await c.query("CLOSE izvoz_kurzor");
     }
     const s = await c.query(
       `SELECT sequencename AS name, last_value FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename`
     );
-    const v = await c.query("SELECT version() AS version, NOW() AS now");
     await c.query("COMMIT");
+    await pisi(`},"sequences":${JSON.stringify(s.rows)}}`);
+    res.end();
     console.log(`Admin ${req.user.userId} izvoz baze (${t.rows.length} tabel)`);
-    return res.json({
-      exported_at: v.rows[0].now,
-      postgres: v.rows[0].version,
-      tables,
-      sequences: s.rows,
-    });
   } catch (e) {
-    try { await c.query("ROLLBACK"); } catch (_) {}
-    console.error(e);
-    return res.status(500).send("Server error.");
+    try { await c.query("ROLLBACK"); } catch (_) { napaka = true; }
+    if (prekinjeno) {
+      console.log(`Admin ${req.user.userId}: izvoz prekinjen (odjemalec je zaprl povezavo)`);
+    } else {
+      console.error(e);
+      // Glave so že poslane: začet JSON se ne sme zaključiti kot da je poln — povezavo prekinemo,
+      // da odjemalec dobi napako, ne okrnjene kopije. Pred glavami je še vedno navaden 500.
+      if (glavaPoslana) res.destroy(); else res.status(500).send("Server error.");
+    }
   } finally {
-    c.release();
+    res.off("close", dogodekZapiranja);
+    c.release(napaka);
   }
 });
 
