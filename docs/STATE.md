@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-02 (zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
+Zadnja posodobitev: 2026-10-02 (prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -19,7 +19,7 @@ in stvari, ki jih nobeno orodje ne ve.
 
 **Zgodovina** (zaključeni sklopi, dnevniki sej, stari načrti in daljše prvotno besedilo pasti do 2. 10. 2026) je v
 [`docs/arhiv/STATE-do-2026-10-02.md`](arhiv/STATE-do-2026-10-02.md) — ni merodajna. Ta datoteka ima **največ 200 vrstic**;
-kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`STATE-do-2026-10-02b.md`](arhiv/STATE-do-2026-10-02b.md)).
+kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`STATE-do-2026-10-02d.md`](arhiv/STATE-do-2026-10-02d.md)).
 
 ## Odprte naloge
 
@@ -40,7 +40,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 - **Zunanji dostop do baze je zaprt** (Inbound IP Rules `outly-db` prazne; backend gre po notranjem omrežju, `10.x`). psql /
   pgAdmin z External Database URL ne dela: dodaj svoj IP (in ga odstrani) ali Render Shell. Pravili `0.0.0.0/0` na ravni
   workspacea in okolja ostaneta (veljata tudi za web servis) — ne zapiraj.
-- **Health Check Path = `/healthz`** (200 / 503 ob nedosegljivi bazi, `_testi/test_zdravje.js`); Render novo kodo spusti v promet
+- **Health Check Path = `/healthz`** (200 / 503 ob nedosegljivi bazi, `_testi/test_zdravje.js`; lasten pool `zdraviPool`; 503 tudi ob >60 s zastoju glavnega poola ali skenPool (nobena povezava se ne vrne), I10); Render novo kodo spusti v promet
   šele, ko odgovori. Interni klici health checka niso v request logih (prazni logi so pričakovani).
 
 ## Cloudflare Browser Cache TTL = 4 h (29. 9. 2026)
@@ -97,7 +97,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   imajo zato višjo specifičnost (`.karta.maplibregl-map`).
 - **Odprte najdbe pregleda faze 1** (29. 9., še brez Issueja): CSP velja samo za `/app` (seja v localStorage je skupna z vsem
   outly.si); `img-src https:` (poljuben https plakat/logo); `ticket_url`, `website`/`logo_url` brez preverbe `^https://` na strežniku
-  (splet filtrira z `varenUrl`, iOS ne); `JAVNI_STOLPCI_KLUBA` vsebuje `owner_user_id` (I4); nakup nima idempotenčnega ključa.
+  (splet filtrira z `varenUrl`, iOS ne).
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 
@@ -128,6 +128,8 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   ne sme sama klicati `COMMIT`/`SET lock_timeout`.
 - **Vsak `pool.connect()` z dolgo transakcijo** rabi `c.on("error")`, odklop počasnega bralca in `idle_in_transaction_session_timeout`
   (kot izvoz). Mirujoče in izposojene povezave že ujame `pool.on("error")` / `pool.on("connect")` (#106, `test_pool_napaka.js`).
+- **Express 4 ne ujame zavrnjene obljube ročnika** (#129): neujet `await` (npr. `pool.connect()` pred `try`) je ob zasičenem poolu sesul cel proces.
+  Varuje `asinhroni_rocniki.js` (503/500, I10); nov `Router`/`app` ga podeduje sam, ne dodajaj `process.on("unhandledRejection")`. Express 5 ovoj odpravi.
 - **Obnova izvoza zahteva POPOLNOMA prazno ciljno bazo**, migracija 007 pa vstavi `agent@outly.si` → pred obnovo na cilju
   `DELETE FROM users;` (ARCHITECTURE, postopek obnove). Past odpade, ko servisni račun ne bo več v migracijah.
 - **iOS `OutlyAsyncImage`** (29. 9., outly-app #33) pomanjša na 1200 px in predpomni po URL-ju: slika z novo vsebino na istem URL-ju bi
@@ -165,13 +167,11 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   Zelen Nadzor ne dokaže, da teče nova koda (Render ob neuspelem deployu pusti staro) — ob dvomu preveri novo polje v odgovoru.
 - **Headless preverjanje outly.si:** stubati je treba samo Supabase (`*.supabase.co`; supabase-js in Inter sta v `vendor/`,
   `assets/fonts/`). Playwright: `npm i playwright` v scratchpadu + `executablePath` `/opt/pw-browsers/chromium-*/chrome-linux/chrome`.
-- Splet: razred `.points` je kartica točk v profilu (`auth.js`); nov razdelek s tem razredom bi podedoval centriranje.
-- Docs-only merge v `main` vseeno sproži Render deploy (~60 s restarta, brez nevarnosti).
-- **`owner_user_id` ni več v javnih odgovorih klubov (2. 10. 2026, #113, I4).** Odstranjen iz `JAVNI_STOLPCI_KLUBA` (torej tudi iz
-  `GET /clubs`, `/clubs/:id`, `/me/clubs/following`, `/business/clubs/me`); admin (`ADMIN_STOLPCI_KLUBA`) ga še vrne.
-  Preveritev odjemalcev: iOS ga dekodira (`APIClub.ownerUserId`, `decodeIfPresent ?? 0`), a ga nikjer ne bere; splet in admin ga ne
-  bereta. Pade nič. Za **ios-dev** (neurgentno): odstrani `ownerUserId` iz `APIClub.swift` ob prvi priložnosti. Za lastništvo
-  uporabi `my_role` / `GET /me` (`clubs[].role`), nikoli primerjave ID-jev. Za **web-dev**: ni dela.
+- `owner_user_id` ni več v javnih odgovorih klubov (#113, I4; arhiv `STATE-do-2026-10-02c.md`). **ios-dev** (neurgentno): odstrani `APIClub.ownerUserId`.
+- **Idempotentni ključ nakupa (#112, I18).** Glava `Idempotency-Key: <UUID>` na obeh `POST …/orders` (brez nje vse kot prej): en UUID na pritisk »Kupi«, isti ob
+  ponovitvi ISTEGA nakupa, nov ob spremembi nakupa. Ponovitev = 201 + `Idempotent-Replayed: true` s TRENUTNIM stanjem; neaktivno 409, drug nakup 422. iOS (#53) in splet (#29) ga pošiljata.
+- **Prenesena vstopnica v kupčevem pogledu naročil (#124, I7; od 2. 10. 2026):** `serial` je `null` (ključ ostane), `holder_email` ni (`GET /me/orders`, odgovor nakupa in ponovitev); nadomestilo
+  `holder_username` + `transferred`. Prejemnik (`GET /me/tickets`) in klub (poslovne poti) serial še imata. iOS: `serial` opcijski (outly-app #54); splet `/me/orders` ne kliče.
 - Ostale pasti (AsyncImage brez okvirja, gnezden NavigationStack, pg BIGINT, Resend `{error}`, JSONB vs ARRAY)
   so v `CLAUDE.md` tega repa in iOS repa.
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
  * Test GET /healthz (Render Health Check Path): 200 {ok:true}, ko je baza dosegljiva,
- * in 503 (ne sesutje procesa, ne visenje), ko baza ni dosegljiva.
+ * in 503 (ne sesutje procesa, ne visenje), ko baza ni dosegljiva. Povezava zdravja, ki obvisi (polodprt TCP: paketi se
+ * izgubljajo, povezava se ne zapre), ne sme pustiti /healthz za vedno na 503 - po okrevanju mora spet vrniti 200 (query_timeout).
  * Zagon (lokalno, PG16):
  *   DATABASE_URL="postgres://postgres:postgres@localhost:5432/outly" node _testi/test_zdravje.js
  */
 const { spawn } = require("child_process");
+const net = require("net");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
@@ -54,6 +56,32 @@ async function zdravje(port) {
     const r2 = await fetch("http://127.0.0.1:3132/").then(x => x.status).catch(() => 0);
     assert(r2 === 200, "proces po napaki baze se tece", r2);
   } finally { b.srv.kill(); }
+
+  console.log("Povezava zdravja obvisi (polodprt TCP), nato se omrezje popravi:");
+  // TCP posrednik pred bazo: ob "zamrznitvi" odvrze ves promet v obe smeri, povezave pa ostanejo odprte (kot izgubljeni paketi).
+  let zamrznjeno = false;
+  const posrednik = net.createServer((odjemalec) => {
+    const u = new URL(DB);
+    const gor = net.connect(Number(u.port) || 5432, u.hostname);
+    odjemalec.on("data", d => { if (!zamrznjeno) gor.write(d); });
+    gor.on("data", d => { if (!zamrznjeno) odjemalec.write(d); });
+    for (const x of [odjemalec, gor]) { x.on("error", () => {}); x.on("close", () => { odjemalec.destroy(); gor.destroy(); }); }
+  });
+  await new Promise(r => posrednik.listen(0, "127.0.0.1", r));
+  const dbCezPosrednika = (() => { const u = new URL(DB); u.hostname = "localhost"; u.port = String(posrednik.address().port); return u.toString(); })();
+  const h = await zazeni(3135, dbCezPosrednika);
+  try {
+    let r = await zdravje(3135);
+    assert(r.status === 200, "pred zamrznitvijo: 200", r);
+    zamrznjeno = true;
+    r = await zdravje(3135);
+    assert(r.status === 503 && r.ms < 5000, "zamrznjena povezava: 503 v < 5 s (ne visi)", r);
+    zamrznjeno = false;
+    let r2 = null; const t0 = Date.now();
+    for (let i = 0; i < 15; i++) { r2 = await zdravje(3135); if (r2.status === 200) break; await new Promise(x => setTimeout(x, 500)); }
+    assert(r2 && r2.status === 200, "po okrevanju omrezja /healthz spet 200 (obvisela povezava je unicena, ne ostane za vedno 503)", r2);
+    console.log(`    (okrevanje po ${Date.now() - t0} ms)`);
+  } finally { h.srv.kill(); posrednik.close(); }
 
   console.log(`\n${ok} ok, ${fail} napak`);
   process.exit(fail ? 1 : 0);

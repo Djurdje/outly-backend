@@ -204,6 +204,9 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   stanja; (7) My Account: Language in Notifications pod novim **Preferences** (My preferences, Notifications, Language),
   isti slog kot obstoječi podzasloni. *vir/dokaz*: Martinovo naročilo 20. 9. (točke 1–7), design kanvas (ARCHITECTURE →
   Oblikovanje). *velja dokler*: Martin ne preveri builda 48 na napravi; prehodi z blurom so prvi osumljenec pri težavah.
+  *nadomeščena z*: točka (2) — 2026-09-20 pozneje: Martin je vrnil **sistemsko spodnjo vrstico** (outly-app PR #11, build 50),
+  `OutlyTabBar` in `ZStack` sta umaknjena; učinek zamegljenega Home se je vrnil 21. 9. kot »Kot Revolut« (prekrivne plasti nad
+  TabViewom, glej zgoraj). Točke (1), (3)–(7) veljajo naprej.
 - 2026-09-29: **Prehod Home <-> Search/Profile ostane "kot Revolut", a animira posnetke zaslona, ne zive vsebine**
   (agent, po Martinovi prijavi "steka / 15 fps"). Videz enak (vsebina raste iz polja "Where to?" oz. avatarja, Home se
   zamegli), izvedba: zamrznjene slike (outly-app #34, #35). Sistemski prehod bi bil vedno gladek, a bi opustil Martinovo
@@ -322,6 +325,17 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   Razveljavitev ob zapisu v procesu (izjeme: ARCHITECTURE »Javni predpomnilnik«); zaostanek drugih instanc največ TTL agent sprejema kot predpostavko. Zunanji predpomnilnik (Redis, CDN pravila) bi
   stal denar ali nastavitve računov, zdaj ni potreben. *vir/dokaz*: PR #111 (meritev), PR tega commita (pred/po), `_testi/test_javni_predpomnilnik.js` ·
   *velja dokler*: teče ena instanca; pri več instancah ali CDN-u pred API-jem preglej razveljavitev · *nadomeščena z*: —
+- 2026-10-02: **Idempotentni ključ nakupa** (glava `Idempotency-Key`, UUID; issue #112, I18, migracija 028). Dodajanje, ne brisanje: brez glave vse kot
+  prej. Odločitve agenta (Martin jih ni potrdil, vse povratne): (1) **ponovitev vrne 201 z istim naročilom in TRENUTNIM stanjem** (+ `Idempotent-Replayed: true`; po skenu `used`, po prenosu drug imetnik),
+  ne 200; neaktivno naročilo (vrnjeno, preklicano) 409 `order_not_active`, ker to ni uspeh: odjemalca (iOS `200...299`, splet `ok`) status ne razlikuje in oba ob uspehu pokažeta vstopnico, posebna pot za ponovitev bi bila
+  nepotreben vzorec za napako; (2) **hkratni zahtevek počaka in dobi isti rezultat** (v istem procesu v pomnilniku, brez mesta v semaforju I16;
+  med instancami ga vrsti `pg_advisory_xact_lock` na ključ), 409 `request_in_progress` + `Retry-After: 2` šele po `IDEMPOTENCA_CAKANJE_MS`
+  (10 s): odjemalec brez posebne logike ob timeoutu in ponovitvi tako dobi naročilo, ne napake, 409 bi ga prisilil v lastno zanko ponavljanja;
+  (3) **neuspeh se ne zapomni** (kot Stripe bi lahko vrnil staro napako, a tu je ponovni poskus po 503/409 ravno namen); (4) vsebina ključa =
+  dogodek, količina, miza, paket (cena ne), primerjava z vrstico naročila, ne s shranjenim odtisom; (5) ključ je vezan na uporabnika.
+  Migracija: nullable stolpec + delni unikaten indeks, `CREATE INDEX` brez `CONCURRENTLY` (ne gre v transakciji `migrate.js`; izmerjeno 62 ms pri
+  300.000 naročilih). *vir/dokaz*: issue #112, `_testi/test_idempotenca.js` (na stari kodi pade), ARCHITECTURE I18 · *velja dokler*: trajno; pri
+  Stripe plačilih (#19) se isti ključ prenese na PaymentIntent · *nadomeščena z*: —
 
 ## Način dela (odločeno 16. 9. 2026)
 
