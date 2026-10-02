@@ -229,9 +229,10 @@ analiza neskladij, interaktivni prototip domačega zaslona (Play) in specifikaci
 `outly_webpage/styles.css` (`:root`), `outly-app/Outly/Core/Themes/Colors.swift`, `outly-backend/admin/index.html` (`:root`).
 Odprte najdbe iz analize so v Issues (oznaka `agent`).
 
-**iOS navigacija** (od 20. 9., PR #10): `MainTabView` je `ZStack` — `HomeView` spodaj, `SearchView`/`MapView`/`ProfileView`
-kot plasti z lastnim `NavigationStack`, spodnja vrstica `OutlyTabBar` prek `safeAreaInset`. Vsi štirje zasloni so ves čas
-živi (stanje se ohrani), prehod je animacija (blur/scale Home, offset/opacity plasti).
+**iOS navigacija**: `MainTabView` je **sistemski `TabView`** (Martin, 20. 9., outly-app PR #11 — lastna vrstica `OutlyTabBar`
+iz PR #10 je bila isti dan umaknjena). Učinek »kot Revolut« (Luka, 21. 9.) je narejen s prekrivnimi plastmi NAD TabViewom
+(`VstopZavihka`, `ZabrisSloj`, `prosojnoOzadje`), ne z zamenjavo vrstice — glej DECISIONS 21. 9. in 29. 9. ter STATE
+(»iOS prehod Home -> Search/Profile«). Vsi štirje zasloni so ves čas živi (stanje se ohrani).
 
 ## Orodja za ročno preverjanje (mapa `outly/` na Martinovem računalniku, niso v repih)
 
