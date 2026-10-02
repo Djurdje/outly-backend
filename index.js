@@ -5,6 +5,10 @@ const crypto = require("crypto");
 const net = require("net");
 const { Resend } = require("resend");
 const path = require("path");
+// Express 4 ne ujame zavrnjenih obljub asinhronih rocnikov: neujet `await pool.connect()` je sesul CEL proces (issue #129).
+// Ovoj (asinhroni_rocniki.js) zavrnitev preusmeri v next(err); napakaRocnik na koncu datoteke jo prevede v 503/500.
+const { namestiAsinhroniOvoj, napakaRocnik } = require("./asinhroni_rocniki");
+namestiAsinhroniOvoj();
 
 const app = express();
 // Render stoji za proxyjem. Brez tega je req.ip naslov proxyja in bi
@@ -5177,6 +5181,9 @@ app.get("/business/team/:userId/scans", requireAuth, requireClub("owner", "manag
     return res.json({ events: r.rows });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
+
+// Obravnavalnik napak: MORA biti zadnji (za vsemi potmi). Napaka povezave -> 503 + Retry-After 5, ostalo 500 (issue #129, I10).
+app.use(napakaRocnik);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("Server running on port", port));
