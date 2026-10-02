@@ -29,6 +29,16 @@ const pool = new Pool({
   connectionTimeoutMillis: 10000,
 });
 
+// Baza lahko prekine povezavo, ki jo pool drzi (vzdrzevanje ali ponovni zagon baze na Renderju, izpad omrezja).
+// node-postgres odda 'error' na poolu (mirujoca povezava) oziroma na odjemalcu (izposojena povezava); brez
+// poslusalca je to "Unhandled 'error' event" in CEL proces pade (tudi skeniranje na vratih, nakupi).
+// Pokvarjenega odjemalca pool sam zavrze in ob naslednjem zahtevku odpre novega; mi samo zapisemo v dnevnik.
+// Poslusalec na vsakem odjemalcu pokrije tudi izposojene povezave (transakcije v potekah), ne le mirujoce.
+pool.on("error", (e) => console.error("[pool] mirujoca povezava s bazo prekinjena:", e && e.message));
+pool.on("connect", (odjemalec) => {
+  odjemalec.on("error", (e) => console.error("[pool] povezava s bazo prekinjena:", e && e.message));
+});
+
 // Resend init
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
