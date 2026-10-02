@@ -676,7 +676,7 @@ function zeljeniKlub(req) {
 // rabijo klub, mu vrnejo 404 kot do zdaj; poti za urejanje dogodkov ga spustijo.
 // Vratar (doorman) sme SAMO skenirati in gledati vstopnice dogodka.
 const INT4_MAX = 2147483647;
-const { jeNapakaPovezave } = require("./napaka_povezave");   // 503 samo za napake povezave/baze, ostalo 500
+const { jeNapakaPovezave, odgovoriNaNapako } = require("./napaka_povezave");   // 503 samo za napake povezave/baze, ostalo 500
 function requireClubNa(db, vloge) {
   return async (req, res, next) => {
     try {
@@ -2443,6 +2443,8 @@ const admin = express.Router();
 admin.use(requireAuth, requireRole("admin"));
 
 function celoId(v) { return /^\d+$/.test(String(v)) ? Number(v) : null; }
+// Kot celoId, a samo v obsegu int4 (users.id je INTEGER): vecji id bi dal 22003 -> 500 namesto 400 (issue #132).
+function celoId4(v) { const n = celoId(v); return n !== null && n <= 2147483647 ? n : null; }
 
 // --- pregled ---
 admin.get("/summary", async (req, res) => {
@@ -3723,7 +3725,7 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
   // Po id sme samo prijatelju — sicer bi se dalo z ugibanjem id-jev posiljati vstopnice
   // (in izvedeti uporabniska imena) neznancem.
   const b0 = req.body || {};
-  const prejemnikId = b0.user_id !== undefined ? celoId(b0.user_id) : null;
+  const prejemnikId = b0.user_id !== undefined ? celoId4(b0.user_id) : null;
   const email = prejemnikId ? "" : String(b0.email || "").trim().toLowerCase();
   if (b0.user_id !== undefined && !prejemnikId) return res.status(400).send("Invalid user_id.");
   if (!prejemnikId && (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return res.status(400).send("A valid email is required.");
@@ -3832,7 +3834,7 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (re
       return res.status(409).json({ result: "already_used", message: "Ticket was already scanned." });
     }
     return res.status(200).json({ result: "ok", message: "Welcome in.", ticket: { ...t, ...u.rows[0] } });
-  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+  } catch (e) { return odgovoriNaNapako(res, e, "POST /business/tickets/scan"); }
 });
 
 // ---------------------------
@@ -3891,7 +3893,7 @@ app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken(), as
     res.set("ETag", etag);
     res.set("Cache-Control", "private, no-cache");
     return res.json({ event_id: id, generated_at: new Date().toISOString(), kid, tickets, transferred_serials });
-  } catch (e) { console.error(e); return res.status(500).json({ error: "server_error", message: "Server error." }); }
+  } catch (e) { return odgovoriNaNapako(res, e, "GET /business/events/:id/scan-list"); }
 });
 
 // POST /business/tickets/scan-batch — skeni, opravljeni brez povezave. Telo: { scans: [{ client_scan_id, qr | serial, scanned_at, device_id }] }.
@@ -4015,7 +4017,7 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken(), jso
     const stevilo = (r) => rezultati.filter(x => x.result === r).length;
     console.log(`Sken-batch: klub ${klub}, uporabnik ${req.user.userId}: ${n} skenov, ok ${stevilo("ok")}, already_used ${stevilo("already_used")}, transferred ${stevilo("transferred")}, error ${stevilo("error")}`);
     return res.status(200).json({ results: rezultati });
-  } catch (e) { console.error(e); return res.status(500).json({ error: "server_error", message: "Server error." }); }
+  } catch (e) { return odgovoriNaNapako(res, e, "POST /business/tickets/scan-batch"); }
 });
 
 // ---------------------------
