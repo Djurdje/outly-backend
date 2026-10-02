@@ -252,7 +252,8 @@ function razlikaStevcev(pred, po) {
     const bralci = Array.from({ length: bralcev }, () => api("GET", "/events?upcoming=true"));   // hkrati z nakupi
     // Informativno (brez meje): sken z NOVO povezavo ob navali. Nepoznan, a veljaven serial -> 404 "unknown" (isto pot kot sken,
     // brez porabe kode). Cas pokaze, kako dolgo nova povezava caka v vrsti sprejemanja (glej opombo pri agentiSken).
-    const sonde = bralcev ? vratarji.map(v => apiHttp(false, "POST", "/business/tickets/scan", v.token, { serial: crypto.randomUUID() })) : [];
+    // Sonde zacnejo ~400 ms po zacetku navale (tam so se na CI skenerji ostali brez povezave): odjemalec, ki se ponovno poveze sredi navale.
+    const sonde = bralcev ? vratarji.map(async v => { await new Promise(rs => setTimeout(rs, 400)); return apiHttp(false, "POST", "/business/tickets/scan", v.token, { serial: crypto.randomUUID() }); }) : [];
     const nakupi = await Promise.all(kupci.map((tok, i) => api("POST", `/events/${dogodek}/orders`, tok, { quantity: 1 }, ipUporabnika(i))));
     const trajanje = performance.now() - t;
     nakupiKonec = true;
