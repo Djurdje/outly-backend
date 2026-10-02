@@ -12,6 +12,46 @@ const app = express();
 app.set("trust proxy", 1);
 
 app.use(cors());
+
+// Javni predpomnilnik (issue #114, invarianta I17): kratek predpomnilnik ze serializiranih javnih seznamov. TTL v ms
+// (JAVNI_PREDPOMNILNIK_MS, privzeto 3000, 0 = izklopljeno), najvec JAVNI_PREDPOMNILNIK_KLJUCEV kljucev (privzeto 300).
+const { ustvariPredpomnilnik } = require("./javni_predpomnilnik");
+function stevilkaIzOkolja(ime, privzeto, najvec) {
+  const surova = process.env[ime];
+  if (surova === undefined || surova === "") return privzeto;
+  const n = Number(surova);
+  if (!Number.isFinite(n) || n < 0) { console.error(`[predpomnilnik] ${ime}="${surova}" ni veljavno, uporabljam ${privzeto}`); return privzeto; }
+  return Math.min(Math.floor(n), najvec);
+}
+const javniPredpomnilnik = ustvariPredpomnilnik({
+  ttlMs: stevilkaIzOkolja("JAVNI_PREDPOMNILNIK_MS", 3000, 60000),
+  najvecKljucev: stevilkaIzOkolja("JAVNI_PREDPOMNILNIK_KLJUCEV", 300, 5000),
+  // Obviselo poizvedbo vodje kljuc spusti po tem casu (ms); cakajoci poskusijo sami. 0 = privzeto.
+  cakanjeMs: stevilkaIzOkolja("JAVNI_PREDPOMNILNIK_CAKANJE_MS", 8000, 60000) || 8000,
+});
+// Dnevnik stevcev (brez osebnih podatkov) na minuto, samo ce je bilo kaj prometa: po deployu vidno v Render logih.
+setInterval(() => {
+  const p = javniPredpomnilnik.porocilo();
+  if (p.zadetki + p.zgresitve + p.zdruzeno + p.razveljavitve > 0) {
+    console.log(`[predpomnilnik] 60 s: zadetki=${p.zadetki} zgresitve=${p.zgresitve} zdruzeno=${p.zdruzeno} razveljavitve=${p.razveljavitve} izpodrivi=${p.izpodrivi} casovneMeje=${p.casovneMeje} kljucev=${p.kljucev}`);
+  }
+}, 60 * 1000).unref();
+// Vsak zapis v tem procesu izprazni predpomnilnik; izjeme so pogosti zapisi, ki javnih seznamov ne spremenijo.
+app.use(javniPredpomnilnik.razveljaviOdPisanja([
+  { metoda: "POST", pot: /^\/views$/ },
+  { metoda: "POST", pot: /^\/business\/tickets\/scan(-batch)?$/ },
+  { metoda: "POST", pot: /^\/me\/(club-events|tickets\/received)\/[^/]+\/seen$/ },
+  { metoda: "POST", pot: /^\/uploads\/cloudinary-signature$/ },
+  // Zapisi, ki ne vplivajo na nobeno polje predpomnjenih odgovorov (dogodek: stolpci events + sold_count iz orders +
+  // interested_count + VIP; klub: stolpci clubs + followers_count). Preverjeno po tabelah: users, friendships,
+  // friend_requests, event_favorites, ticket_transfers/tickets. NE sem: interest, follow (stevca), nakupi, DELETE /me.
+  { metoda: "PATCH", pot: /^\/me(\/avatar)?$/ },
+  { metoda: "POST", pot: /^\/me\/friends\/requests(\/\d+\/(accept|decline))?$/ },
+  { metoda: "DELETE", pot: /^\/me\/friends\/(requests\/)?\d+$/ },
+  { metoda: "PUT", pot: /^\/me\/favorites\/\d+$/ },
+  { metoda: "DELETE", pot: /^\/me\/favorites\/\d+$/ },
+  { metoda: "POST", pot: /^\/tickets\/\d+\/transfer$/ },
+]));
 // Privzeta omejitev telesa (100 kB) povsod, razen pri paketu skenov brez povezave (do 500 elementov, ima svoj razčlenjevalnik).
 const jsonPrivzeti = express.json();
 app.use((req, res, next) => (req.path === "/business/tickets/scan-batch" ? next() : jsonPrivzeti(req, res, next)));
@@ -516,6 +556,9 @@ app.get("/", (req, res) => {
 // Render Health Check Path: Render novo kodo spusti v promet sele, ko ta pot vrne 2xx.
 // Preveri tudi bazo (SELECT 1) - backend brez baze ne streze nicesar. Omejeno na 3 s,
 // da zaseden pool (connectionTimeoutMillis 10 s) ne zadrzi odgovora cez Renderjev rok.
+// `commit` = prvih 12 znakov RENDER_GIT_COMMIT (javni SHA, ni skrivnost): s tem se vidi, KATERA koda teče. Padel deploy
+// (npr. migracija brez zaklepa, #115) pusti staro različico živo in vrača 200, zato 200 sam ne dokaže, da teče nova koda.
+const COMMIT_KRATEK = (process.env.RENDER_GIT_COMMIT || "").slice(0, 12) || null;
 app.get("/healthz", async (req, res) => {
   res.set("Cache-Control", "no-store");
   let casovnik;
@@ -524,9 +567,9 @@ app.get("/healthz", async (req, res) => {
       pool.query("SELECT 1"),
       new Promise((_, zavrni) => { casovnik = setTimeout(() => zavrni(new Error("timeout")), 3000); }),
     ]);
-    res.json({ ok: true });
+    res.json({ ok: true, commit: COMMIT_KRATEK });
   } catch (e) {
-    res.status(503).json({ ok: false });
+    res.status(503).json({ ok: false, commit: COMMIT_KRATEK });
   } finally {
     clearTimeout(casovnik);
   }
@@ -896,11 +939,13 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 // ---------------------------
 // CLUBS (public + business create)
 // ---------------------------
+// owner_user_id NI tu (issue #113, I4): notranji ID uporabnika ne sodi na javno pot, nobena
+// aplikacija ga ne bere; lastnika pove `my_role` / `GET /me`, admin ga dobi iz ADMIN_STOLPCI_KLUBA.
 // Stolpci, ki smejo ven javno. NAMENOMA ni "SELECT *": migracija 002 je
 // klubom dodala stripe_account_id, ki z zvezdico ni bil viden nikomur v
 // pregledu, javno pa bi ga vrnil vsak klic /clubs. Vsak nov stolpec je
 // treba tu dodati zavestno.
-const JAVNI_STOLPCI_KLUBA = `id, owner_user_id, name, logo_url, banner_url, description,
+const JAVNI_STOLPCI_KLUBA = `id, name, logo_url, banner_url, description,
   contact_email, contact_phone, instagram, website, address, city, country,
   lat, lng, min_age, genres, created_at, bar_prices, gallery_urls, video_url,
   (SELECT COUNT(*)::int FROM club_follows cf WHERE cf.club_id = clubs.id) AS followers_count`;
@@ -936,8 +981,29 @@ function stevilo(vrednost, privzeto, najvec) {
   if (Number.isNaN(n) || n < 0) return privzeto;
   return Math.min(n, najvec);
 }
+// Kljuc javnega predpomnilnika (I17): SAMO kanonicni parametri poizvedbe, nikoli zeton/glava/IP. JSON.stringify seznama je
+// injektiven (brez zlepljanja "a|b" + "c" = "a" + "b|c"). null = nenavadni parametri (seznam, objekt, predolg niz) ->
+// zahtevek gre mimo predpomnilnika, kot pred #114.
+function nenavadniParametri(vrednosti, najdaljsiNiz = 100) {
+  return vrednosti.some((v) => v !== undefined && (typeof v !== "string" || v.length > najdaljsiNiz));
+}
+// Osebna razlicica odgovora (prijavljen uporabnik): "private" + "Vary: Authorization", da skupni predpomnilnik (CDN, proxy)
+// osebnih polj nikoli ne shrani; javna razlicica (gost) ima samo Vary, da se loci od osebne.
+const GLAVE_OSEBNO = { "Cache-Control": "private", Vary: "Authorization" };
+function kljucId(vrsta, id) {
+  return id.length > 15 ? null : JSON.stringify([vrsta, id]);
+}
+function kljucKlubov(q) {
+  const { limit, offset, city, q: iskanje, withCoords } = q;
+  if (nenavadniParametri([limit, offset, city, iskanje, withCoords])) return null;
+  if (iskanje) return null;   // prosto iskanje se ne predpomni: poplava razlicnih iskalnih nizov ne sme izpodrivati vrocih kljucev
+  return JSON.stringify(["clubs", stevilo(limit, 100, 200), stevilo(offset, 0, 100000), city || null, withCoords === "true"]);
+}
+
 app.get("/clubs", async (req, res) => {
   try {
+    // city je prosto besedilo: loceni majhen proracun (`prosto`), da poplava mest ne izpodrine vrocih kljucev.
+    const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucKlubov(req.query), async () => {
     const limit  = stevilo(req.query.limit, 100, 200);
     const offset = stevilo(req.query.offset, 0, 100000);
 
@@ -967,8 +1033,9 @@ app.get("/clubs", async (req, res) => {
 
     // Skupno stevilo v glavi, da telo ostane navaden seznam in se aplikaciji
     // ni treba spreminjati. Dekoder v Swiftu pricakuje [APIClub].
-    res.set("X-Total-Count", String(skupaj.rows[0].n));
-    res.json(r.rows);
+    return { status: 200, json: r.rows, glave: { "X-Total-Count": String(skupaj.rows[0].n) } };
+    }, { prosto: !!req.query.city });
+    return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
@@ -1011,20 +1078,22 @@ app.get("/clubs/map", async (req, res) => {
 app.get("/clubs/:id", neobveznaPrijava, async (req, res) => {
   try {
     if (!/^\d+$/.test(req.params.id)) return res.status(400).send("Invalid club id.");
-    const r = await pool.query(
-      `SELECT ${JAVNI_STOLPCI_KLUBA} FROM clubs WHERE id=$1 AND hidden = FALSE`, [req.params.id]
-    );
-    if (r.rows.length === 0) return res.status(404).send("Club not found.");
-
-    let sledim = false;
-    if (req.user) {
-      const f = await pool.query(
-        "SELECT 1 FROM club_follows WHERE club_id=$1 AND user_id=$2",
-        [req.params.id, req.user.userId]
+    // Predpomnimo samo javni del (vrstica kluba); is_following je osebno polje in se doda po branju (I17).
+    const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucId("club", req.params.id), async () => {
+      const r = await pool.query(
+        `SELECT ${JAVNI_STOLPCI_KLUBA} FROM clubs WHERE id=$1 AND hidden = FALSE`, [req.params.id]
       );
-      sledim = f.rowCount > 0;
-    }
-    res.json({ ...r.rows[0], is_following: sledim });
+      if (r.rows.length === 0) return { status: 404, besedilo: "Club not found." };
+      return { status: 200, json: { ...r.rows[0], is_following: false }, podatki: r.rows[0], glave: { Vary: "Authorization" } };
+    });
+    if (vnos.status !== 200 || !req.user) return javniPredpomnilnik.poslji(req, res, vnos, stanje);
+
+    const f = await pool.query(
+      "SELECT 1 FROM club_follows WHERE club_id=$1 AND user_id=$2",
+      [req.params.id, req.user.userId]
+    );
+    return javniPredpomnilnik.poslji(req, res,
+      javniPredpomnilnik.pripravi({ status: 200, json: { ...vnos.podatki, is_following: f.rowCount > 0 }, glave: GLAVE_OSEBNO }), stanje);
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
@@ -1440,6 +1509,11 @@ const STOLPCI_DOGODKA = `
         ${VIP_OD_CENTOV} IS NOT NULL AS vip_enabled,
         ${VIP_OD_CENTOV} AS vip_from_cents`;
 
+// Lahka razlicica seznama (GET /events?lite=true, #114): brez `description` (pri 200 dogodkih je to vecina teze odgovora).
+// Polje je IZPUSCENO (ne null). Privzeti odgovor ostane nespremenjen (pravilo "spremembe API-ja so samo dodajanje").
+const STOLPCI_DOGODKA_LAHKI = STOLPCI_DOGODKA.replace(/^\s*description,\s*$/m, "");
+if (STOLPCI_DOGODKA_LAHKI === STOLPCI_DOGODKA) throw new Error("STOLPCI_DOGODKA_LAHKI: stolpca description ni mogoce izlociti");
+
 // Vsi dogodki lastnega kluba, tudi osnutki in odpovedani. Samo za lastnika.
 app.get("/business/events", requireAuth, requireClub(), async (req, res) => {
   try {
@@ -1479,25 +1553,35 @@ async function popularniDogodkiKluba(clubId, najvec = NAJVEC_POPULARNIH) {
   return r.rows.map(x => x.id);
 }
 
+// Kljuc predpomnilnika za /events (I17): samo kanonicni parametri; clubId mora biti kratek niz.
+function kljucDogodkov(q) {
+  const { clubId, upcoming, popular, lite } = q;
+  if (nenavadniParametri([clubId, upcoming, popular, lite], 20)) return null;
+  const pop = popular === "true";
+  return JSON.stringify(["events", clubId || null, pop ? null : (upcoming === "true" || upcoming === "false" ? upcoming : null), pop, lite === "true"]);
+}
+
 app.get("/events", async (req, res) => {
   try {
     const { clubId, upcoming, popular } = req.query;
+    const stolpci = req.query.lite === "true" ? STOLPCI_DOGODKA_LAHKI : STOLPCI_DOGODKA;
 
+    const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucDogodkov(req.query), async () => {
     // ?clubId=..&popular=true -> najvec 3 koncani dogodki kluba po prodanih vstopnicah
     // (stran kluba, razdelek "Popular"). Brez omejitve na 7 dni, ki velja za ?upcoming=false:
     // posnetek dogodka je smiseln tudi cez mesec dni. Nova pot, stara ostane nespremenjena.
     if (popular === "true") {
-      if (!clubId || !/^\d+$/.test(String(clubId))) return res.status(400).send("popular=true requires clubId.");
+      if (!clubId || !/^\d+$/.test(String(clubId))) return { status: 400, besedilo: "popular=true requires clubId." };
       const skriti = await pool.query("SELECT 1 FROM clubs WHERE id=$1 AND hidden", [clubId]);
-      if (skriti.rowCount > 0) return res.json([]);
+      if (skriti.rowCount > 0) return { status: 200, json: [] };
       const ids = await popularniDogodkiKluba(clubId);
-      if (ids.length === 0) return res.json([]);
+      if (ids.length === 0) return { status: 200, json: [] };
       const r = await pool.query(
-        `SELECT ${STOLPCI_DOGODKA} FROM events WHERE id = ANY($1::int[])
+        `SELECT ${stolpci} FROM events WHERE id = ANY($1::int[])
           ORDER BY sold_count DESC, start_at DESC`,
         [ids]
       );
-      return res.json(r.rows);
+      return { status: 200, json: r.rows };
     }
 
     const params = [];
@@ -1522,7 +1606,7 @@ app.get("/events", async (req, res) => {
     where.push(`club_id NOT IN (SELECT id FROM clubs WHERE hidden)`);
 
     const sql = `
-      SELECT ${STOLPCI_DOGODKA}
+      SELECT ${stolpci}
       FROM events
       WHERE ${where.join(" AND ")}
       ORDER BY start_at ASC
@@ -1530,7 +1614,9 @@ app.get("/events", async (req, res) => {
     `;
 
     const r = await pool.query(sql, params);
-    res.json(r.rows);
+    return { status: 200, json: r.rows };
+    });
+    return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
@@ -1539,51 +1625,51 @@ app.get("/events", async (req, res) => {
 
 // neobveznaPrijava: brez zetona pot dela naprej (javna stran dogodka), z zetonom pove
 // se moj_plan in nacrte prijateljev (glej ZANIMANJE ZA DOGODEK spodaj, migracija 020).
+// Predpomnimo samo javni del (vrstica dogodka); my_plan, friends_going, friends_interested so osebni in se
+// izracunajo po branju iz predpomnilnika, v svoji kopiji (I17, I11).
 app.get("/events/:id", neobveznaPrijava, async (req, res) => {
   try {
     if (!/^\d+$/.test(req.params.id)) return res.status(400).send("Invalid event id.");
-    const r = await pool.query(
-      `SELECT ${STOLPCI_DOGODKA} FROM events
-       WHERE id=$1 AND status='published'
-         AND club_id NOT IN (SELECT id FROM clubs WHERE hidden)`,
-      [req.params.id]
-    );
-
-    if (r.rows.length === 0) return res.status(404).send("Event not found.");
-    const dogodek = r.rows[0];
-
-    let my_plan = null;
-    let friends_going = [];
-    let friends_interested = [];
-    if (req.user) {
-      my_plan = await mojNacrtNaDogodku(req.params.id, req.user.userId);
-      const f = await pool.query(
-        `WITH pr AS (
-           SELECT CASE WHEN user_a=$2 THEN user_b ELSE user_a END AS id
-             FROM friendships WHERE user_a=$2 OR user_b=$2
-         ), gredo AS (
-           SELECT DISTINCT ${IMETNIK} AS uid
-             FROM tickets t JOIN orders o ON o.id=t.order_id
-            WHERE t.event_id=$1 AND t.status='valid' AND o.status IN ('paid','partially_refunded')
-              AND ${IMETNIK} IN (SELECT id FROM pr)
-         ), zanimajo AS (
-           -- Oseba z vstopnico IN v event_interest je samo v gredo (going), ne dvakrat.
-           SELECT ei.user_id AS uid FROM event_interest ei
-            WHERE ei.event_id=$1 AND ei.user_id IN (SELECT id FROM pr)
-              AND ei.user_id NOT IN (SELECT uid FROM gredo)
-         )
-         SELECT
-           (SELECT COALESCE(jsonb_agg(jsonb_build_object('id', u.id, 'username', u.username, 'avatar_url', u.avatar_url) ORDER BY LOWER(u.username)), '[]'::jsonb)
-              FROM gredo g JOIN users u ON u.id = g.uid WHERE u.share_plans_with_friends) AS friends_going,
-           (SELECT COALESCE(jsonb_agg(jsonb_build_object('id', u.id, 'username', u.username, 'avatar_url', u.avatar_url) ORDER BY LOWER(u.username)), '[]'::jsonb)
-              FROM zanimajo z JOIN users u ON u.id = z.uid WHERE u.share_plans_with_friends) AS friends_interested`,
-        [req.params.id, req.user.userId]
+    const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucId("event", req.params.id), async () => {
+      const r = await pool.query(
+        `SELECT ${STOLPCI_DOGODKA} FROM events
+         WHERE id=$1 AND status='published'
+           AND club_id NOT IN (SELECT id FROM clubs WHERE hidden)`,
+        [req.params.id]
       );
-      friends_going = f.rows[0].friends_going;
-      friends_interested = f.rows[0].friends_interested;
-    }
+      if (r.rows.length === 0) return { status: 404, besedilo: "Event not found." };
+      return { status: 200, json: { ...r.rows[0], my_plan: null, friends_going: [], friends_interested: [] }, podatki: r.rows[0], glave: { Vary: "Authorization" } };
+    });
+    if (vnos.status !== 200 || !req.user) return javniPredpomnilnik.poslji(req, res, vnos, stanje);
 
-    res.json({ ...dogodek, my_plan, friends_going, friends_interested });
+    const my_plan = await mojNacrtNaDogodku(req.params.id, req.user.userId);
+    const f = await pool.query(
+      `WITH pr AS (
+         SELECT CASE WHEN user_a=$2 THEN user_b ELSE user_a END AS id
+           FROM friendships WHERE user_a=$2 OR user_b=$2
+       ), gredo AS (
+         SELECT DISTINCT ${IMETNIK} AS uid
+           FROM tickets t JOIN orders o ON o.id=t.order_id
+          WHERE t.event_id=$1 AND t.status='valid' AND o.status IN ('paid','partially_refunded')
+            AND ${IMETNIK} IN (SELECT id FROM pr)
+       ), zanimajo AS (
+         -- Oseba z vstopnico IN v event_interest je samo v gredo (going), ne dvakrat.
+         SELECT ei.user_id AS uid FROM event_interest ei
+          WHERE ei.event_id=$1 AND ei.user_id IN (SELECT id FROM pr)
+            AND ei.user_id NOT IN (SELECT uid FROM gredo)
+       )
+       SELECT
+         (SELECT COALESCE(jsonb_agg(jsonb_build_object('id', u.id, 'username', u.username, 'avatar_url', u.avatar_url) ORDER BY LOWER(u.username)), '[]'::jsonb)
+            FROM gredo g JOIN users u ON u.id = g.uid WHERE u.share_plans_with_friends) AS friends_going,
+         (SELECT COALESCE(jsonb_agg(jsonb_build_object('id', u.id, 'username', u.username, 'avatar_url', u.avatar_url) ORDER BY LOWER(u.username)), '[]'::jsonb)
+            FROM zanimajo z JOIN users u ON u.id = z.uid WHERE u.share_plans_with_friends) AS friends_interested`,
+      [req.params.id, req.user.userId]
+    );
+    return javniPredpomnilnik.poslji(req, res, javniPredpomnilnik.pripravi({
+      status: 200,
+      json: { ...vnos.podatki, my_plan, friends_going: f.rows[0].friends_going, friends_interested: f.rows[0].friends_interested },
+      glave: GLAVE_OSEBNO,
+    }), stanje);
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
