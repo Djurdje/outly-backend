@@ -498,6 +498,8 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
   await api("PUT", `/business/events/${EPAR}/vip`, T.lastnik, { enabled: true });
   const kupciMes = ["p1", "p2", "p3"].map((k, i) => zeton(`${k}@outly.si`, uuid(200 + i)));
   for (const t of kupciMes) await api("GET", "/me", t);
+  // Miza s paketom pijace zahteva datum rojstva (>= 18, #102): ti kupci ga potrebujejo (glej test_vip_starost.js).
+  await pool.query("UPDATE users SET date_of_birth = (CURRENT_DATE - INTERVAL '30 years')::date WHERE email LIKE 'p_@outly.si'");
   const vsi = await Promise.all([
     api("PUT", "/business/vip", T.lastnik, delTelo), api("PUT", "/business/vip", T.manager, delTelo), api("PUT", "/business/vip", T.lastnik, delTelo),
     ...[M1, M2, M3novi].map((m, i) => api("POST", `/events/${EPAR}/tables/${m}/orders`, kupciMes[i], { package_id: P1 })),
@@ -514,6 +516,7 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
   await api("PUT", `/business/events/${EI13}/vip`, T.lastnik, { enabled: true });
   const kupci12 = Array.from({ length: 12 }, (_, i) => zeton(`i13_${i}@outly.si`, uuid(300 + i)));
   for (const t of kupci12) await api("GET", "/me", t);
+  await pool.query("UPDATE users SET date_of_birth = (CURRENT_DATE - INTERVAL '30 years')::date WHERE email LIKE 'i13\\_%@outly.si'");
   const rez12 = await Promise.all(kupci12.map(t => api("POST", `/events/${EI13}/tables/${M3novi}/orders`, t, { package_id: P1 })));
   nakupov += 12;
   const ok201 = rez12.filter(x => x.status === 201).length, k409 = rez12.filter(x => x.status === 409).length;

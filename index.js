@@ -2700,16 +2700,23 @@ function napakaProdaje(e, { zahtevajCeno }) {
 // Starost: datum rojstva je izjava uporabnika (glej 003), a 17-letniku vstopnice za 18+ ne prodamo.
 // Brez datuma rojstva nakup za 18+ ni mogoc (I8). c = odjemalec znotraj transakcije nakupa.
 // Vrne { napaka: [status, besedilo] } ali { email }.
-async function preveriStarostKupca(c, userId, minAge) {
+// kaj = besedilo za sporocilo napake (privzeto vstopnice za dogodek; VIP miza s paketom pijace ima svoje).
+async function preveriStarostKupca(c, userId, minAge, kaj = "tickets for this event") {
   const ur = await c.query("SELECT email, starost(date_of_birth) AS leta FROM users WHERE id=$1", [userId]);
   if (ur.rows.length === 0) return { napaka: [404, "User not found."] };
   const u = ur.rows[0];
   if (minAge > 0) {
-    if (u.leta === null) return { napaka: [403, "Add your date of birth to buy tickets for this event."] };
-    if (u.leta < minAge) return { napaka: [403, `You must be at least ${minAge} to buy tickets for this event.`] };
+    if (u.leta === null) return { napaka: [403, `Add your date of birth to buy ${kaj}.`] };
+    if (u.leta < minAge) return { napaka: [403, `You must be at least ${minAge} to buy ${kaj}.`] };
   }
   return { email: u.email };
 }
+
+// Paket pijace pri VIP mizi (issue #102, ZOPA 7/1): bottle paket je po zasnovi pijaca (alkohol), zato za mizo
+// Z IZBRANIM PAKETOM velja starost >= 18 ne glede na min_age dogodka (ce je ta visji, velja ta). Polja
+// "vsebuje alkohol" v shemi ni, zato vsak paket stejemo kot alkohol (najmanjsa varna resitev brez migracije).
+const STAROST_PAKET_PIJACE = 18;
+const starostZaPaket = (minAgeDogodka, jePaket) => Math.max(Number(minAgeDogodka) || 0, jePaket ? STAROST_PAKET_PIJACE : 0);
 
 // POST /events/:id/orders — nakup. Telo: { quantity }.
 app.post("/events/:id/orders", requireAuth, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600 }), async (req, res) => {
@@ -3042,7 +3049,7 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     await c.query("BEGIN");
     const tr = await c.query(
       `SELECT t.id, t.serial, t.status, t.event_id, ${IMETNIK} AS holder_id, o.status AS order_status,
-              e.title AS event_title, e.start_at, e.min_age
+              e.title AS event_title, e.start_at, e.min_age, o.package_id
        FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id
        WHERE t.id = $1 FOR UPDATE OF t`, [id]
     );
@@ -3062,9 +3069,12 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     const p = pr.rows[0];
     if (Number(p.id) === Number(req.user.userId)) { await c.query("ROLLBACK"); return res.status(400).send("You already hold this ticket."); }
     if (!p.email_verified) { await c.query("ROLLBACK"); return res.status(409).send("Your friend's account is not verified yet."); }
-    if (t.min_age > 0) {
-      if (p.leta === null) { await c.query("ROLLBACK"); return res.status(403).send("Your friend must add a date of birth before receiving a ticket for this event."); }
-      if (p.leta < t.min_age) { await c.query("ROLLBACK"); return res.status(403).send(`Your friend must be at least ${t.min_age} for this event.`); }
+    // Vstopnica mize s paketom pijace: prejemnik mora imeti najmanj 18 let (#102), pri strozji meji dogodka velja ta.
+    const potrebnaStarost = starostZaPaket(t.min_age, t.package_id !== null);
+    if (potrebnaStarost > 0) {
+      const zaMizo = potrebnaStarost > t.min_age; // meja izhaja iz paketa, ne iz dogodka
+      if (p.leta === null) { await c.query("ROLLBACK"); return res.status(403).send(zaMizo ? "Your friend must add a date of birth before receiving a ticket for a table with a bottle package." : "Your friend must add a date of birth before receiving a ticket for this event."); }
+      if (p.leta < potrebnaStarost) { await c.query("ROLLBACK"); return res.status(403).send(zaMizo ? `Your friend must be at least ${potrebnaStarost} to receive a ticket for a table with a bottle package.` : `Your friend must be at least ${t.min_age} for this event.`); }
     }
 
     const u = await c.query(
@@ -3704,7 +3714,7 @@ app.get("/events/:id/vip", async (req, res) => {
     const id = vipId(req.params.id);
     if (!id) return res.status(400).send("Invalid event id.");
     const er = await pool.query(
-      `SELECT e.id, e.club_id, e.vip_enabled, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at
+      `SELECT e.id, e.club_id, e.vip_enabled, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.min_age
          FROM events e JOIN clubs c ON c.id = e.club_id
         WHERE e.id = $1 AND e.status = 'published' AND NOT c.hidden`, [id]);
     if (er.rows.length === 0) return res.status(404).send("Event not found.");
@@ -3745,6 +3755,8 @@ app.get("/events/:id/vip", async (req, res) => {
       plan,
       tables: enabled ? mize : [],
       packages: paketi,
+      // Najmanjsa starost za mizo Z IZBRANIM PAKETOM (paket = pijaca, #102): najmanj 18, pri strozji meji dogodka ta.
+      package_min_age: starostZaPaket(e.min_age, true),
     });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
@@ -3812,8 +3824,10 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, omeji({ kljuc: "naku
       await c.query("ROLLBACK"); return res.status(400).send("Choose a bottle package.");
     }
 
-    // Starost (I8): ista preverba kot pri vstopnicah.
-    const starost = await preveriStarostKupca(c, req.user.userId, e.min_age);
+    // Starost (I8): ista preverba kot pri vstopnicah; miza s paketom pijace zahteva najmanj 18 let (#102).
+    const potrebnaStarost = starostZaPaket(e.min_age, paket !== null);
+    const starost = await preveriStarostKupca(c, req.user.userId, potrebnaStarost,
+      potrebnaStarost > e.min_age ? "a table with a bottle package" : undefined);
     if (starost.napaka) { await c.query("ROLLBACK"); return res.status(starost.napaka[0]).send(starost.napaka[1]); }
 
     const cena = miza.price_cents;
