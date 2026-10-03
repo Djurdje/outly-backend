@@ -99,7 +99,29 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   outly.si); `img-src https:` (poljuben https plakat/logo); `ticket_url`, `website`/`logo_url` brez preverbe `^https://` na strežniku
   (splet filtrira z `varenUrl`, iOS ne).
 
+## Stripe plačila (od 3. 10. 2026; issue #19, `placila_stripe.js`, DECISIONS 3. 10., I19)
+
+- Sandbox račun »Outly sandbox« (Martinov Stripe), Connect vklopljen kot marketplace. Ključi na Renderju: `STRIPE_SECRET_KEY`
+  (`sk_test_…`), `STRIPE_WEBHOOK_SECRET` (`whsec_…`) — nastavi Martin. Brez webhook skrivnosti Stripe nakupi vrnejo 503.
+- Webhook endpoint `https://outly-backend-roy3.onrender.com/stripe/webhook`, dogodki: `checkout.session.completed`,
+  `checkout.session.expired`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`,
+  `charge.refunded`, `account.updated`. Če je `account.updated` za povezane račune na ločenem endpointu: `STRIPE_CONNECT_WEBHOOK_SECRET`.
+- Poti: `POST /business/stripe/onboard` (lastnik → `{url}` Stripovega obrazca), `GET /business/stripe/status` (lastnik/manager),
+  `POST /business/stripe/dashboard` (lastnik → Express pregled). Nakup v Stripe načinu vrne `mode:"stripe"`, `checkout_url`, `tickets: []`.
+- **Odjemalci še ne znajo `checkout_url`:** iOS in splet morata ob `mode:"stripe"` odpreti `checkout_url` (iOS: Safari/SFSafariViewController,
+  brez paketa), nato osvežiti `GET /me/orders`. Do takrat Stripe nakup deluje samo za klube z dokončanim onboardingom; ostali v sandboxu kupujejo testno.
+- **Vračil prek API-ja ni** (poti ni): vračilo se naredi v Stripovi nadzorni plošči, webhook `charge.refunded` ga zapiše (`refunded_cents`, stanje, vstopnice).
+- **Potrdila po e-pošti ni** (pravna analiza 1. 10., točka 3): do takrat samo Stripov račun, če je v nadzorni plošči vklopljen (Settings → Emails → Successful payments).
+- **Past:** plačilo za že preklicano naročilo (seja potekla, nato vseeno plačana — redko) se NE vknjiži samodejno: dnevnik izpiše
+  `POZOR: placilo za neaktivno narocilo …`, vrni ga ročno v Stripu.
+- Klic Stripa (ustvarjanje seje, ~0,5–1,5 s) teče znotraj nakupnega mesta (`NAKUP_VZPOREDNO`, I16) — pod navalom manjša prepustnost.
+- Pospravljalec vsakih 5 min (`STRIPE_POSPRAVI_MS`) preveri `pending` naročila s preteklim rokom pri Stripu (zaključi, preklice ali vknjiži).
+
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
+
+- **Stripe v sandboxu (3. 10.):** klub brez dokončanega Connect onboardinga v sandboxu še vedno prodaja v testnem načinu (da demo klubi
+  in TestFlight ne obstanejo). Z `sk_live_` takega nakupa ni (409). Povratni naslovi Checkouta in onboardinga vodijo na `outly.si/app`
+  (`/app/tickets`, `/app/event/:id`, `/app/business/:klub/settings?stripe=vrnitev|osvezi`) — splet jih še ne obravnava posebej.
 
 - **Prijatelji (20. 9., backend #45; čaka Martina v #47):** (1) iskanje po uporabniškem imenu (`GET /users/search`, predpona,
   samo potrjeni, največ 10, 120/h); (2) `users.share_plans_with_friends` privzeto VKLOPLJENO; (3) »Invite more« deli

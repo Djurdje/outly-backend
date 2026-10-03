@@ -60,8 +60,9 @@ app.use(javniPredpomnilnik.razveljaviOdPisanja([
   { metoda: "POST", pot: /^\/tickets\/\d+\/transfer$/ },
 ]));
 // Privzeta omejitev telesa (100 kB) povsod, razen pri paketu skenov brez povezave (do 500 elementov, ima svoj razčlenjevalnik).
+// Stripe webhook rabi SUROVO telo (podpis se preverja nad bajti), zato ga JSON razclenjevalnik preskoci.
 const jsonPrivzeti = express.json();
-app.use((req, res, next) => (req.path === "/business/tickets/scan-batch" ? next() : jsonPrivzeti(req, res, next)));
+app.use((req, res, next) => (req.path === "/business/tickets/scan-batch" || req.path === "/stripe/webhook" ? next() : jsonPrivzeti(req, res, next)));
 
 // BIGINT (OID 20) pride iz pg kot niz ("1"); orders.id in tickets.id sta BIGSERIAL
 // in aplikacija ju dekodira kot Int. Vrednosti so daleč pod 2^53, zato je varno.
@@ -3113,6 +3114,115 @@ function testniNacinPlacil() {
   return !process.env.STRIPE_SECRET_KEY;
 }
 
+// ---------------------------
+// STRIPE (issue #19): Checkout + Connect Express. Logika je v placila_stripe.js; tu so poti.
+// ---------------------------
+const placilaStripe = require("./placila_stripe");
+const stripePlacila = placilaStripe.ustvari({ pool });
+stripePlacila.zazeni();
+app.post("/stripe/webhook", express.raw({ type: "*/*", limit: "1mb" }), stripePlacila.webhook);
+
+// Klub, za katerega gre (requireClub). Admin brez izbranega kluba ga mora izbrati (glava X-Outly-Club).
+async function stripeKlub(req, res) {
+  if (!req.klub || !req.klub.clubId) { res.status(400).send("Choose a club."); return null; }
+  const r = await pool.query("SELECT id, name, stripe_account_id, stripe_charges_enabled, stripe_payouts_enabled FROM clubs WHERE id=$1", [req.klub.clubId]);
+  if (!r.rows.length) { res.status(404).send("Club not found."); return null; }
+  return r.rows[0];
+}
+function stripeNapaka(res, e, kaj) {
+  console.error(`[stripe] ${kaj}:`, e && (e.message || e));
+  return res.status(502).send("Payment provider error. Please try again.");
+}
+
+// POST /business/stripe/onboard — lastnik: ustvari (ce se ni) Express racun kluba in vrne povezavo do Stripovega obrazca.
+// Odgovor: { url }. Povratni naslovi vodijo v spletne nastavitve kluba (?stripe=vrnitev | ?stripe=osvezi).
+app.post("/business/stripe/onboard", requireAuth, requireClub("owner"), async (req, res) => {
+  const s = placilaStripe.stripe();
+  if (!s) return res.status(503).send("Payments are not configured yet.");
+  try {
+    const k = await stripeKlub(req, res);
+    if (!k) return;
+    let racun = k.stripe_account_id;
+    if (!racun) {
+      const u = await pool.query("SELECT email FROM users WHERE id=$1", [req.user.userId]);
+      const nov = await s.accounts.create({
+        type: "express",
+        country: "SI",
+        email: u.rows[0] ? u.rows[0].email : undefined,
+        capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
+        business_profile: { name: k.name },
+        metadata: { club_id: String(k.id) },
+      }, { idempotencyKey: `outly-klub-${k.id}-racun` });
+      // Hkratna zahtevka: idempotentni kljuc vrne isti racun; v bazo ga zapise samo prvi.
+      const z = await pool.query("UPDATE clubs SET stripe_account_id=$2 WHERE id=$1 AND stripe_account_id IS NULL RETURNING stripe_account_id", [k.id, nov.id]);
+      racun = z.rows.length ? z.rows[0].stripe_account_id
+        : (await pool.query("SELECT stripe_account_id FROM clubs WHERE id=$1", [k.id])).rows[0].stripe_account_id;
+      console.log(`[stripe] klub ${k.id}: nov Connect racun`);
+    }
+    const nastavitve = `${placilaStripe.osnovaSpleta()}/app/business/${k.id}/settings`;
+    const povezava = await s.accountLinks.create({
+      account: racun, type: "account_onboarding",
+      refresh_url: `${nastavitve}?stripe=osvezi`, return_url: `${nastavitve}?stripe=vrnitev`,
+    });
+    return res.json({ url: povezava.url });
+  } catch (e) { return stripeNapaka(res, e, "onboarding"); }
+});
+
+// GET /business/stripe/status — lastnik/manager: ali klub sprejema placila. Osvezi stanje iz Stripa (ce webhook zamuja).
+// stripe_account_id se NE vraca (STATE: lastnik ga ne vidi).
+app.get("/business/stripe/status", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  try {
+    const k = await stripeKlub(req, res);
+    if (!k) return;
+    const s = placilaStripe.stripe();
+    const osnova = { configured: !!s, sandbox: placilaStripe.jeSandbox(), connected: !!k.stripe_account_id,
+      charges_enabled: k.stripe_charges_enabled, payouts_enabled: k.stripe_payouts_enabled, details_submitted: false, requirements_due: [] };
+    if (!s || !k.stripe_account_id) return res.json(osnova);
+    const a = await s.accounts.retrieve(k.stripe_account_id);
+    await pool.query(
+      `UPDATE clubs SET stripe_charges_enabled=$2, stripe_payouts_enabled=$3,
+              stripe_onboarded_at = CASE WHEN $4 AND stripe_onboarded_at IS NULL THEN NOW() ELSE stripe_onboarded_at END
+        WHERE id=$1`, [k.id, !!a.charges_enabled, !!a.payouts_enabled, !!a.details_submitted]);
+    return res.json({ ...osnova, charges_enabled: !!a.charges_enabled, payouts_enabled: !!a.payouts_enabled,
+      details_submitted: !!a.details_submitted, requirements_due: (a.requirements && a.requirements.currently_due) || [],
+      disabled_reason: (a.requirements && a.requirements.disabled_reason) || null });
+  } catch (e) { return stripeNapaka(res, e, "status"); }
+});
+
+// POST /business/stripe/dashboard — lastnik: enkratna povezava v Stripov Express pregled (izplacila, vracila, podatki).
+app.post("/business/stripe/dashboard", requireAuth, requireClub("owner"), async (req, res) => {
+  const s = placilaStripe.stripe();
+  if (!s) return res.status(503).send("Payments are not configured yet.");
+  try {
+    const k = await stripeKlub(req, res);
+    if (!k) return;
+    if (!k.stripe_account_id) return res.status(409).send("Connect Stripe first.");
+    const l = await s.accounts.createLoginLink(k.stripe_account_id);
+    return res.json({ url: l.url });
+  } catch (e) {
+    if (e && e.type === "StripeInvalidRequestError") return res.status(409).send("Finish Stripe onboarding first.");
+    return stripeNapaka(res, e, "dashboard");
+  }
+});
+
+// Po COMMIT-u nakupa v Stripe nacinu: Checkout seja za cakajoce narocilo. Ob napaki narocilo -> failed (sprosti zalogo/mizo).
+// Vrne true, ce je seja ustvarjena; sicer je odgovor 502 ze poslan.
+async function nakupStripeSeja(res, c, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId }) {
+  try {
+    const nr = await c.query("SELECT id, public_ref, currency, application_fee_cents FROM orders WHERE id=$1", [oid]);
+    const seja = await placilaStripe.ustvariCheckout({ narocilo: nr.rows[0], opis, kolicina, cenaEnoteCents, racunKluba, email, eventId });
+    await c.query(
+      "UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4) WHERE id=$1",
+      [oid, seja.id, seja.url, seja.expires_at]);
+    return true;
+  } catch (e) {
+    console.error(`[stripe] Checkout seja za narocilo ${oid} ni uspela:`, e && (e.message || e));
+    await c.query("UPDATE orders SET status='failed', cancelled_at=NOW() WHERE id=$1 AND status='pending'", [oid]).catch(() => {});
+    res.status(502).send("Payment provider is unavailable. Please try again.");
+    return false;
+  }
+}
+
 // Koda QR: podpisan JSON, da jo skener preveri tudi brez omrežja (opomba 3 v 002).
 // Skrivnost je QR_SECRET, sicer JWT_SECRET. Zamenjava skrivnosti razveljavi vse kode.
 //
@@ -3193,7 +3303,7 @@ function javnaRef() {
 
 const STOLPCI_NAROCILA = `o.id, o.public_ref, o.event_id, o.club_id, o.quantity, o.unit_price_cents, o.total_cents,
   o.currency, o.application_fee_cents, o.status, o.buyer_email, o.created_at, o.paid_at, o.cancelled_at,
-  o.refunded_cents, (o.stripe_payment_intent_id LIKE 'test_%') AS is_test,
+  o.refunded_cents, COALESCE(o.stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test,
   (o.table_id IS NOT NULL) AS is_vip, o.table_id, o.table_label, o.table_seats, o.package_name, o.package_description`;
 const STOLPCI_VSTOPNICE = `t.id, t.order_id, t.event_id, t.serial, t.status, t.used_at, t.created_at, t.holder_user_id`;
 // VIP polja vstopnice (migracija 025): VIP vstopnica je vstopnica narocila z mizo. Zahteva alias `o` = orders.
@@ -3314,7 +3424,7 @@ function idemIstaVsebina(a, b) {
 // Branje po kljucu (uporabnik IZ ZETONA, nikoli iz zahteve: kljuc drugega uporabnika je neviden, I3).
 async function idemPoisci(db, userId, kljuc) {
   const r = await db.query(
-    "SELECT id, event_id, quantity, table_id, package_id, status FROM orders WHERE user_id = $1 AND idempotency_key = $2", [userId, kljuc]);
+    "SELECT id, event_id, quantity, table_id, package_id, status, checkout_url FROM orders WHERE user_id = $1 AND idempotency_key = $2", [userId, kljuc]);
   return r.rows[0] || null;
 }
 // V transakciji: najprej serializiraj zahtevke istega kljuca (zaklep traja do COMMIT/ROLLBACK), nato preberi po kljucu.
@@ -3324,10 +3434,16 @@ async function idemZakleniInPoisci(c, userId, kljuc) {
 }
 // Telo odgovora nakupa (enako ob prvem nakupu in ob ponovitvi). db: odjemalec, ki ga klicatelj ze drzi, ali pool.
 async function odgovorNarocila(db, oid) {
-  const nr = await db.query(`SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name
+  const nr = await db.query(`SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name,
+       CASE WHEN o.status = 'pending' THEN o.checkout_url END AS checkout_url
      FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id WHERE o.id = $1`, [oid]);
   const vst = await vstopniceNarocil([oid], db);
-  return { mode: "test", order: nr.rows[0], tickets: vst[oid] || [] };
+  const o = nr.rows[0];
+  // mode: "test" (takoj placano, nic zaracunano) | "stripe" (placa na checkout_url; vstopnice nastanejo po placilu).
+  // checkout_url je samo pri cakajocem Stripe narocilu (spremembe API-ja so samo dodajanje: star odjemalec ga spregleda).
+  const telo = { mode: o.is_test ? "test" : "stripe", order: o, tickets: vst[oid] || [] };
+  if (!o.is_test) telo.checkout_url = o.status === "pending" ? o.checkout_url : null;
+  return telo;
 }
 function idemNapacnaVsebina(res) {
   return res.status(422).json({ error: "idempotency_key_reused",
@@ -3340,7 +3456,12 @@ const IDEM_AKTIVNA_NAROCILA = ["paid", "partially_refunded"];
 // order_not_active (kljuc ostane vezan nanj, za nov nakup rabi odjemalec nov kljuc).
 async function idemOdgovori(res, db, obst, v) {
   if (!idemIstaVsebina(obst, v)) return idemNapacnaVsebina(res);
-  if (!IDEM_AKTIVNA_NAROCILA.includes(obst.status)) {
+  // Stripe: narocilo caka na placilo -> ponovitev vrne ISTI checkout_url (seja se ni ustvarjena -> se v teku).
+  if (obst.status === "pending" && !obst.checkout_url) {
+    res.set("Retry-After", "2");
+    return res.status(409).json({ error: "request_in_progress", message: "Your previous attempt is still being processed. Please try again in a moment." });
+  }
+  if (!IDEM_AKTIVNA_NAROCILA.includes(obst.status) && obst.status !== "pending") {
     return res.status(409).json({ error: "order_not_active",
       message: "The order for this Idempotency-Key is no longer active (refunded, cancelled or unpaid). Use a new Idempotency-Key to buy again." });
   }
@@ -3446,11 +3567,6 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
   if (!Number.isInteger(q) || q < 1 || q > NAJVEC_NA_NAROCILO) {
     return res.status(400).send(`quantity must be an integer between 1 and ${NAJVEC_NA_NAROCILO}.`);
   }
-  if (!testniNacinPlacil()) {
-    // Stripe je nastavljen, testna pot je izklopljena; prava pot še ni napisana.
-    return res.status(503).send("Payments are not available yet.");
-  }
-
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
@@ -3465,7 +3581,8 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     }
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
-              e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden
+              e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
+              c.stripe_account_id, c.stripe_charges_enabled
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]
     );
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
@@ -3482,30 +3599,43 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     if (starost.napaka) { await c.query("ROLLBACK"); return res.status(starost.napaka[0]).send(starost.napaka[1]); }
     const u = { email: starost.email };
 
+    // Nacin placila (placila_stripe.js): test = takoj placano; stripe = cakajoce narocilo + Checkout seja po COMMIT-u.
+    const nacin = placilaStripe.nacinPlacila(e);
+    if (nacin === "nastavitve") { await c.query("ROLLBACK"); return res.status(503).send("Payments are not available yet."); }
+    if (nacin === "klub") { await c.query("ROLLBACK"); return res.status(409).send("This club does not accept online payments yet."); }
+    const test = nacin === "test";
+
     const skupaj = e.ticket_price_cents * q;
     const provizija = Math.round(skupaj * PROVIZIJA_ODSTOTEK / 100);
     const ref = javnaRef();
-    const pi = "test_" + crypto.randomUUID();
+    const pi = test ? "test_" + crypto.randomUUID() : null;
 
-    // Sprožilec orders_rezerviraj zaklene dogodek in preveri zalogo še enkrat.
+    // Sprožilec orders_rezerviraj zaklene dogodek in preveri zalogo še enkrat (tudi za cakajoce narocilo: zaloga je rezervirana).
     const or = await c.query(
       `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency,
-                           application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at, idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'paid',$11,$12,NOW(),$13) RETURNING id`,
-      [ref, req.user.userId, e.id, e.club_id, q, e.ticket_price_cents, skupaj, e.currency, provizija, e.vat_rate, pi, u.email, req.idemKljuc || null]
+                           application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at, idempotency_key,
+                           stripe_account_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $11 = 'paid' THEN NOW() END,$14,$15) RETURNING id`,
+      [ref, req.user.userId, e.id, e.club_id, q, e.ticket_price_cents, skupaj, e.currency, provizija, e.vat_rate,
+       test ? "paid" : "pending", pi, u.email, req.idemKljuc || null, test ? null : e.stripe_account_id]
     );
     const oid = or.rows[0].id;
-    await c.query(
-      `INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, q]
-    );
+    if (test) {
+      await c.query(
+        `INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, q]
+      );
+    }
     await c.query("COMMIT");
+
+    if (!test && !(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – ${q === 1 ? "1 ticket" : q + " tickets"}`,
+      kolicina: q, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: u.email, eventId: e.id }))) return;
 
     // POZOR: tu še držimo odjemalca c. Branje po COMMIT-u gre prek c, NE prek
     // pool: pri 10+ hkratnih nakupih (pool ima privzeto 10 povezav) bi vsak
     // zahtevek držal svojo povezavo in čakal na enajsto -> celoten backend
     // obvisi, dokler ga Render ne zažene znova (ugotovljeno s testom sočasnosti).
     const telo = await odgovorNarocila(c, oid);
-    console.log(`Nakup (test): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, ${q}x ${e.ticket_price_cents} c`);
+    console.log(`Nakup (${nacin}): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, ${q}x ${e.ticket_price_cents} c`);
     return res.status(201).json(telo);
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});
@@ -3523,9 +3653,11 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
 app.get("/me/orders", requireAuth, async (req, res) => {
   try {
     const r = await pool.query(
-      `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name
+      `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name,
+              CASE WHEN o.status = 'pending' THEN o.checkout_url END AS checkout_url
        FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id
-       WHERE o.user_id = $1 ORDER BY o.created_at DESC LIMIT 100`, [req.user.userId]
+       WHERE o.user_id = $1 AND NOT (o.status IN ('cancelled','failed') AND o.paid_at IS NULL)
+       ORDER BY o.created_at DESC LIMIT 100`, [req.user.userId]
     );
     const vst = await vstopniceNarocil(r.rows.map(o => o.id));
     return res.json(r.rows.map(o => ({ ...o, tickets: vst[o.id] || [] })));
@@ -4516,11 +4648,6 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     if (!Number.isInteger(b.expected_price_cents) || b.expected_price_cents < 0) return res.status(400).send("expected_price_cents must be a non-negative integer (cents).");
     pricakovana = b.expected_price_cents;
   }
-  if (!testniNacinPlacil()) {
-    // Stripe je nastavljen, testna pot je izklopljena; prava pot še ni napisana.
-    return res.status(503).send("Payments are not available yet.");
-  }
-
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
@@ -4535,7 +4662,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     }
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled,
-              e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden
+              e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled
          FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
     const e = er.rows[0];
@@ -4573,29 +4700,38 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
       potrebnaStarost > e.min_age ? "a table with a bottle package" : undefined);
     if (starost.napaka) { await c.query("ROLLBACK"); return res.status(starost.napaka[0]).send(starost.napaka[1]); }
 
+    const nacin = placilaStripe.nacinPlacila(e);
+    if (nacin === "nastavitve") { await c.query("ROLLBACK"); return res.status(503).send("Payments are not available yet."); }
+    if (nacin === "klub") { await c.query("ROLLBACK"); return res.status(409).send("This club does not accept online payments yet."); }
+    const test = nacin === "test";
+
     const cena = miza.price_cents;
     const provizija = Math.round(cena * PROVIZIJA_ODSTOTEK / 100);
     const ref = javnaRef();
-    const pi = "test_" + crypto.randomUUID();
+    const pi = test ? "test_" + crypto.randomUUID() : null;
 
     // Sprozilec orders_rezerviraj narocilo z mizo preskoci (ne steje v capacity). Zasedenost mize varuje
     // unikaten indeks orders_miza_dogodek_key (I13): ob hkratnem nakupu druga vstavitev pade z 23505.
     const or = await c.query(
       `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency,
                            application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at,
-                           table_id, table_label, table_seats, package_id, package_name, package_description, idempotency_key)
-       VALUES ($1,$2,$3,$4,1,$5,$5,$6,$7,$8,'paid',$9,$10,NOW(),$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
+                           table_id, table_label, table_seats, package_id, package_name, package_description, idempotency_key,
+                           stripe_account_id)
+       VALUES ($1,$2,$3,$4,1,$5,$5,$6,$7,$8,$18,$9,$10,CASE WHEN $18 = 'paid' THEN NOW() END,$11,$12,$13,$14,$15,$16,$17,$19) RETURNING id`,
       [ref, req.user.userId, e.id, e.club_id, cena, e.currency, provizija, e.vat_rate, pi, starost.email,
        miza.id, miza.label, miza.seats, paket ? paket.id : null, paket ? paket.name : null, paket ? paket.description : null,
-       req.idemKljuc || null]
+       req.idemKljuc || null, test ? "paid" : "pending", test ? null : e.stripe_account_id]
     );
     const oid = or.rows[0].id;
-    await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, miza.seats]);
+    if (test) await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, miza.seats]);
     await c.query("COMMIT");
+
+    if (!test && !(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – VIP ${miza.label}${paket ? " + " + paket.name : ""}`,
+      kolicina: 1, cenaEnoteCents: cena, racunKluba: e.stripe_account_id, email: starost.email, eventId: e.id }))) return;
 
     // Branje po COMMIT-u prek odjemalca c, NE prek pool (glej opombo pri POST /events/:id/orders).
     const telo = await odgovorNarocila(c, oid);
-    console.log(`Nakup mize (test): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, miza ${miza.id}, ${miza.seats} vstopnic, ${cena} c`);
+    console.log(`Nakup mize (${nacin}): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, miza ${miza.id}, ${miza.seats} vstopnic, ${cena} c`);
     return res.status(201).json(telo);
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});

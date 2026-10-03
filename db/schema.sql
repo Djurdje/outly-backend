@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–029, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–030, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,10 +15,10 @@
 -- PostgreSQL database dump
 --
 
-\restrict EP67NgbND2ACwjqm82n7JJ5KGkLf1CHBzHE0qdtvoihllUtIi6XFrfiesvSWXWt
+\restrict JcGvKoV8GNqSpOz0mJtL8JOAqiH45tEdKSNomDtIUgbKbnP9dZjbujr7g55GHYf
 
--- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
--- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
+-- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
+-- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -619,6 +619,9 @@ CREATE TABLE public.orders (
     package_name text,
     package_description text,
     idempotency_key uuid,
+    stripe_checkout_session_id text,
+    checkout_url text,
+    checkout_expires_at timestamp with time zone,
     CONSTRAINT orders_fee_chk CHECK (((application_fee_cents >= 0) AND (application_fee_cents <= total_cents))),
     CONSTRAINT orders_paid_chk CHECK (((status <> 'paid'::text) OR (paid_at IS NOT NULL))),
     CONSTRAINT orders_price_chk CHECK (((unit_price_cents >= 0) AND (total_cents >= 0))),
@@ -635,6 +638,27 @@ CREATE TABLE public.orders (
 --
 
 COMMENT ON COLUMN public.orders.idempotency_key IS 'Glava Idempotency-Key ob nakupu (UUID, issue #112, I18). NULL = nakup brez kljuca. Unikaten po (user_id, idempotency_key).';
+
+
+--
+-- Name: COLUMN orders.stripe_checkout_session_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.stripe_checkout_session_id IS 'Stripe Checkout seja (cs_...), issue #19. NULL pri testnih narocilih.';
+
+
+--
+-- Name: COLUMN orders.checkout_url; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.checkout_url IS 'URL Stripove placilne strani za cakajoce narocilo (ponovitev z Idempotency-Key vrne istega).';
+
+
+--
+-- Name: COLUMN orders.checkout_expires_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.checkout_expires_at IS 'Potek Checkout seje; pospravljalec po njem narocilo preveri pri Stripu in preklice.';
 
 
 --
@@ -665,6 +689,24 @@ CREATE TABLE public.schema_migrations (
     odtis text NOT NULL,
     uporabljen timestamp with time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: stripe_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.stripe_events (
+    id text NOT NULL,
+    type text NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE stripe_events; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.stripe_events IS 'Ze obdelani Stripe webhook dogodki (idempotenca, issue #19).';
 
 
 --
@@ -1048,6 +1090,14 @@ ALTER TABLE ONLY public.schema_migrations
 
 
 --
+-- Name: stripe_events stripe_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.stripe_events
+    ADD CONSTRAINT stripe_events_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: ticket_transfers ticket_transfers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1247,6 +1297,13 @@ CREATE INDEX omejitve_okno_do_idx ON public.omejitve USING btree (okno_do);
 
 
 --
+-- Name: orders_checkout_session_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX orders_checkout_session_key ON public.orders USING btree (stripe_checkout_session_id) WHERE (stripe_checkout_session_id IS NOT NULL);
+
+
+--
 -- Name: orders_club_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1272,6 +1329,13 @@ CREATE UNIQUE INDEX orders_idempotency_key ON public.orders USING btree (user_id
 --
 
 CREATE UNIQUE INDEX orders_miza_dogodek_key ON public.orders USING btree (event_id, table_id) WHERE ((table_id IS NOT NULL) AND (status = ANY (ARRAY['pending'::text, 'paid'::text, 'partially_refunded'::text])));
+
+
+--
+-- Name: orders_pending_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_pending_idx ON public.orders USING btree (created_at) WHERE (status = 'pending'::text);
 
 
 --
@@ -1732,5 +1796,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict EP67NgbND2ACwjqm82n7JJ5KGkLf1CHBzHE0qdtvoihllUtIi6XFrfiesvSWXWt
+\unrestrict JcGvKoV8GNqSpOz0mJtL8JOAqiH45tEdKSNomDtIUgbKbnP9dZjbujr7g55GHYf
 
