@@ -117,6 +117,16 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 - 2026-09: **Testni način plačil**: dokler `STRIPE_SECRET_KEY` ni nastavljen, je naročilo takoj `paid` z oznako `test_`;
   aplikacija to jasno kaže. Ob nastavitvi ključa testna pot vrne 503.
   *velja dokler*: `STRIPE_SECRET_KEY` ni nastavljen na Renderju — takrat se ta pot izklopi sama, brez spremembe kode.
+  *nadomeščena z*: 2026-10-03 »Stripe Checkout + Connect« (spodaj): s SANDBOX ključem testna pot ostane za klube brez Stripa.
+- 2026-10-03: **Stripe Checkout + Connect Express** (issue #19, `placila_stripe.js`, migracija 030). Destination charge z
+  `application_fee_amount` (10 %) **in `on_behalf_of` = račun kluba**, da je klub tudi »business of record« (pravna analiza
+  1. 10. 2026, tveganje V1: brez `on_behalf_of` bi bil to NEXT DIMENSIONS). Naročilo je `pending`, dokler ga ne potrdi
+  **webhook** (`checkout.session.completed`) ali pospravljalec, ki sejo preveri pri Stripu; odjemalec plačila nikoli ne potrdi sam.
+  Seja traja 30 min, zaloga/miza je med tem rezervirana. Način: brez ključa = test; `sk_test_` + klub s `charges_enabled` = Stripe,
+  klub brez Stripa = še vedno test (demo klubi in TestFlight delajo naprej); `sk_live_` + klub brez Stripa = 409.
+  API različica pripeta (`2025-03-31.basil`). *vir/dokaz*: Martin v pogovoru 3. 10. 2026 (»danes rabi biti testni Stripe«),
+  sandbox »Outly sandbox« z vklopljenim Connect (marketplace), `_testi/test_stripe.js` · *velja dokler*: je Outly posrednik ·
+  *nadomeščena z*: —
 
 - 2026-09-29: **Spletna aplikacija (PWA) na `outly.si/app`, v repozitoriju `outly_webpage`, brez builda** (Martin, izbira A).
   Isti backend, baza in prijava kot iOS - nov odjemalec za ljudi brez aplikacije (deljena povezava na dogodek) in za Android
