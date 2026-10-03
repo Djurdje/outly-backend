@@ -36,7 +36,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 
 ## Render (od 30. 9. 2026; paketa v ARCHITECTURE, Produkcija)
 
-- **Zmogljivost (lokalno, ne napoved produkcije):** `orodja/obremenitev.mjs` + `_testi/test_obremenitev.js`; z bazo 0,1 CPU je streha javnih poti ~90 req/s (ozko grlo je baza); proti produkciji ni merjeno (#89, I16).
+- **Zmogljivost (lokalno, ne napoved produkcije):** `orodja/obremenitev.mjs` + `_testi/test_obremenitev.js`; z bazo 0,1 CPU je streha javnih poti ~90 req/s (ozko grlo je baza); proti produkciji ni merjeno (#89, I16). **Past (#139, 2. 10.):** med navalo 300 nakupov + 1000 bralcev (3b) NOVA TCP povezava skena caka 0,4-3,2 s (CI, izmerjeno; stara koda: 3 od 3 prvih zagonov rdeca, p95 skena 2,4-3,15 s), vzdrzevana (keep-alive) pa ne: mediana 12-16 ms, p95 0,25-0,41 s, max 0,69 s (9 zagonov). Jedro ni zavrglo nobene povezave (ListenOverflows/Drops/TCPReqQFullDrop/TCPSynRetrans = 0); z backlogom 511 lokalno ListenOverflows ~1400 (trditev v testu pade). **Mehanizem je DELOVNA HIPOTEZA:** Node sprejme ~1 povezavo na obdelan zahtevek, ko je zanka zasedena (mikro poskus; v casovnici dva nacina: job 111072748721 vseh 1003 sprejetih v prvih 250 ms, job 111071140689 704, nato 7-13 na 250 ms). Zato test skenira prek vzdrzevane povezave, nova je sonda (< 8 s). Tveganje v produkciji: sken brez proste povezave (#139 ostane odprt).
 - **Zunanji dostop do baze je zaprt** (Inbound IP Rules `outly-db` prazne; backend gre po notranjem omrežju, `10.x`). psql /
   pgAdmin z External Database URL ne dela: dodaj svoj IP (in ga odstrani) ali Render Shell. Pravili `0.0.0.0/0` na ravni
   workspacea in okolja ostaneta (veljata tudi za web servis) — ne zapiraj.
