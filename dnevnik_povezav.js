@@ -28,8 +28,9 @@ function zagoniDnevnikPovezav(streznik, oknoMs, izpis = console.log) {
   zanka.enable();
   // Branje v setImmediate, ne v casovniku: po daljsem zastoju zanke se casovnik okna lahko izvede PRED vzorcem histograma
   // (oba sta v isti fazi casovnikov), reset() pa zavrze naslednji vzorec - zastoj bi izpadel iz dnevnika. Faza `check`
-  // pride po vseh casovnikih te iteracije, zato je vzorec zastoja ze v histogramu. Znana nenatancnost: reset() zavrze prvi
-  // vzorec po sebi (~10 ms na okno), zastoj, ki bi zacel v teh 10 ms, bi izpadel.
+  // pride po vseh casovnikih te iteracije, zato je vzorec zastoja ze v histogramu. Znana nenatancnost: reset() zavrze en obrat
+  // casovnika histograma (prvi vzorec po sebi), tudi ce je bil ta obrat dolg - zastoj, ki bi se koncal v tem obratu (vkljucno
+  // z zastojem v poll fazi tistega obrata), izpade iz dnevnika. Verjetnost ~10 ms na okno, zato jo sprejmemo.
   const izpisiOkno = () => {
     const novih = noviVOknu, zahtevkov = zahtevkiVOknu;
     noviVOknu = 0; zahtevkiVOknu = 0;

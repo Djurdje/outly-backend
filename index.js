@@ -27,7 +27,7 @@ function stevilkaIzOkolja(ime, privzeto, najvec) {
   const surova = process.env[ime];
   if (surova === undefined || surova === "") return privzeto;
   const n = Number(surova);
-  if (!Number.isFinite(n) || n < 0) { console.error(`[predpomnilnik] ${ime}="${surova}" ni veljavno, uporabljam ${privzeto}`); return privzeto; }
+  if (!Number.isFinite(n) || n < 0) { console.error(`[okolje] ${ime}="${surova}" ni veljavno, uporabljam ${privzeto}`); return privzeto; }
   return Math.min(Math.floor(n), najvec);
 }
 const javniPredpomnilnik = ustvariPredpomnilnik({

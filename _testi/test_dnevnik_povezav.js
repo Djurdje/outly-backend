@@ -4,8 +4,8 @@
  * povezav in zamikom zanke dogodkov; brez prometa ni vrstice; DNEVNIK_POVEZAV_MS=0 izklopi dnevnik.
  * Zagon (lokalno, PG16, baza z vsemi migracijami; baza je potrebna samo, da proces zazene):
  *   DATABASE_URL="postgres://postgres:postgres@localhost:5432/outly" node _testi/test_dnevnik_povezav.js
- * Porta 3180 (dnevnik vklopljen, okno 300 ms) in 3181 (izklopljen). Brez trditev, ki bi odvisne od casovanja: vsaka vrstica se
- * caka POGOJNO (do 15 s), stevila so tocna (v procesu ni drugega prometa, ker se pripravljenost bere iz izpisa, ne s sondo).
+ * Porta 3180 (dnevnik vklopljen, okno 300 ms) in 3181 (izklopljen). Trditve niso odvisne od casovanja ali meje okna: vsaka vrstica se
+ * caka POGOJNO (do 15 s), stevila so vsote cez vsa okna in tocna (v procesu ni drugega prometa, ker se pripravljenost bere iz izpisa, ne s sondo).
  * Negativni trditvi (ni vrstice brez prometa / ob izklopu) cakata fiksen cas, ki lahko test le zamudi, nikoli pokvari.
  */
 const { spawn } = require("child_process");
@@ -83,8 +83,11 @@ function getNovaPovezava(port) {
       vtici.push(s);
     }
     await pocakaj(() => vtici.every(s => /^HTTP\/1\.1 200/.test(s.odgovor())), "vse 3 povezave dobijo odgovor 200");
-    const z = await pocakaj(() => A.razclenjene().slice(stVrstic).find(v => v && v.odprtih === 3), "vrstica z odprtih 3");
-    assert(z && z.novih >= 1 && z.zahtevkov >= 1, "novih/zahtevkov v vrstici z odprtimi povezavami", z);
+    const odOd = (k) => A.razclenjene().slice(stVrstic).filter(Boolean).reduce((a, v) => a + v[k], 0);
+    const z = await pocakaj(() => A.razclenjene().slice(stVrstic).find(v => v && v.odprtih === 3 && v.zahtevkov >= 1), "vrstica z odprtih 3 in vsaj 1 zahtevkom");
+    assert(!!z, "vrstica z `odprtih 3` (3 mirujoce vzdrzevane povezave)", z);
+    await pocakaj(() => odOd("novih") >= 3 && odOd("zahtevkov") >= 3, "vrstice zajamejo 3 nove povezave in 3 zahtevke");
+    assert(odOd("novih") === 3 && odOd("zahtevkov") === 3, "tocno 3 nove povezave in 3 zahtevki (vsota cez okna)", { novih: odOd("novih"), zahtevkov: odOd("zahtevkov") });
     for (const s of vtici) s.destroy();
 
     console.log("Zamik zanke (zanka stoji 400 ms):");
