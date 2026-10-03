@@ -19,12 +19,15 @@
  * 10. Najvec 1 hkratni izvoz na proces: med zaklenjeno tabelo `tickets` drugi izvoz (admin ali backup) = 429 + Retry-After,
  *     po koncu (in po prekinitvi odjemalca) spet 200. Brez spanja: cakamo na pogoj (pg_stat_activity, ponavljanje).
  * 11. izvoz.sh (kopija) 429 ponovi in uspe.
+ * 13. Odjemalec odide PREDEN rocnik izvoza steče (surov TCP: GET z veljavnim zetonom + takojsnje zaprtje; tudi med zadrzano avtentikacijo,
+ *     deterministicno z zaklepom tabele users): stevec izvozov se vedno sprosti (izvoz spet 200, ne trajno 429) in ni sej 'idle in transaction'.
  * 12. Izpad baze pri iskanju uporabnika (statement_timeout nad zaklenjeno tabelo users) = 503 + Retry-After 5, NE 403/401, tudi za backup.
  */
 const crypto = require("crypto");
 const http = require("http");
 const { spawn, spawnSync } = require("child_process");
 const path = require("path");
+const net = require("net");
 const { Pool } = require("pg");
 
 const DB = process.env.DATABASE_URL;
@@ -300,6 +303,32 @@ async function api(method, path, token, body) {
       assert(/poskus 1\/3: curl koda 22, HTTP 429/.test(rc.izpis), "izvoz.sh izpise HTTP 429 (brez vsebine odgovora)", rc.izpis.slice(-300));
       try { require("fs").unlinkSync(izhod); } catch (_) { /* ni ostanka */ }
     }
+
+    console.log("\n# 13. Odjemalec odide pred rocnikom izvoza (surov TCP) -> stevec se sprosti");
+    const surovoInZapri = (zeton) => new Promise((resolve) => {
+      const sock = net.connect(PORT, "127.0.0.1", () => {
+        sock.write(`GET /admin/api/export HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${zeton}\r\n\r\n`, () => { sock.destroy(); resolve(); });
+      });
+      sock.on("error", () => resolve());
+    });
+    const txMirujoce = async () => (await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND state LIKE 'idle in transaction%' AND pid <> pg_backend_pid()")).rows[0].n;
+    // (a) deterministicno: avtentikacijski stavek caka na zaklep users, odjemalec odide, sele nato se zaklep sprosti -> rocnik steče z unicenim res
+    const zUsers = await pool.connect();
+    await zUsers.query("BEGIN"); await zUsers.query("LOCK TABLE users IN ACCESS EXCLUSIVE MODE");
+    const cakaAvtent = async () => (await pool.query(
+      "SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%FROM users%'")).rows[0].n >= 2;
+    const odhodniA = [surovoInZapri(T.kopija), surovoInZapri(T.admin)];
+    await Promise.all(odhodniA);
+    assert(await cakajNa(cakaAvtent, "dve avtentikaciji cakata na zaklep users"), "dve avtentikaciji cakata na zaklep users, odjemalca sta ze odsla");
+    await zUsers.query("ROLLBACK"); zUsers.release();
+    // (b) vec zaporednih surovih zahtevkov z zaprtjem (kot v poročilu pregleda)
+    for (let i = 0; i < 10; i++) await surovoInZapri(i % 2 ? T.kopija : T.admin);
+    // Pogoj, ne spanje: izvoz mora postati mogoc (200). Ob stalno zasedenem stevcu bi ostal 429 in pogoj ne bi bil izpolnjen.
+    pozno = await izvozPoznejsi(T.kopija);
+    assert(pozno.koncal && pozno.k.status === 200, "po odhodih odjemalcev pred rocnikom izvoz spet 200 (ne trajno 429)", pozno.k && pozno.k.status);
+    r = await api("GET", "/admin/api/export", T.admin);
+    assert(r.status === 200, "se en izvoz (admin) -> 200", r.status);
+    assert(await cakajNa(async () => (await txMirujoce()) === 0, "brez sej idle in transaction"), "po odhodih ni seje 'idle in transaction'", await txMirujoce());
 
     console.log("\n# 12. Izpad baze pri iskanju uporabnika -> 503 (ne 403/401), tudi za backup");
     srvB = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT_B), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", PGOPTIONS: "-c statement_timeout=400" }, stdio: ["ignore", "pipe", "pipe"] });

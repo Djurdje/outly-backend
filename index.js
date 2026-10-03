@@ -2963,8 +2963,11 @@ const IZVOZ_VRSTIC = 500;
 const IZVOZ_DRAIN_MS = Number(process.env.EXPORT_DRAIN_TIMEOUT_MS) || 60000;
 // Najvec 1 hkratni izvoz na proces (issue #116, pregled): izvoz drzi transakcijo in povezavo iz poola, racun za kopije pa je
 // dosegljiv z enim geslom; vec hkratnih izvozov bi zasedlo pool in upocasnilo (ali zaustavilo) nakupe in sken. Drugi hkratni
-// klic (admin ali backup) dobi 429 + Retry-After. Stevec je v pomnilniku procesa; sprosti se
-// v `finally`, torej tudi ob prekinitvi odjemalca, napaki baze in izpadu povezave.
+// klic (admin ali backup) dobi 429 + Retry-After. Stevec je v pomnilniku procesa. Sprosti se vedno, ko rocnik konca:
+//  - odjemalec je odsel ze PRED rocnikom ali med cakanjem na pool.connect() (res je ze unicen, 'close' je ze bil oddan,
+//    zato ga ne cakamo, ampak preverimo res.destroyed): rocnik takoj vrne povezavo in sprosti stevec;
+//  - sicer v `finally` (konec, prekinitev odjemalca, napaka baze, izpad povezave, bralec, ki ne bere IZVOZ_DRAIN_MS).
+// Ni pa omejen cas, ko izvoz caka na zaklep tabele ali pocasen stavek v bazi: do takrat stevec ostane zaseden.
 const IZVOZ_NAJVEC_HKRATNO = 1;
 const IZVOZ_RETRY_AFTER_S = 30;
 let izvozovTece = 0;
@@ -2976,15 +2979,19 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
     return res.status(429).set("Retry-After", String(IZVOZ_RETRY_AFTER_S))
       .json({ error: "export_busy", message: "Another export is already running. Try again later." });
   }
-  izvozovTece++; // sprosti se v `finally` spodaj (ali ob napaki pri pool.connect)
-  let c;
-  try { c = await pool.connect(); } catch (err) { izvozovTece--; throw err; }
+  // Odjemalec je ze odsel (zaprl povezavo med avtentikacijo): 'close' je ze oddan in ga ne bomo dobili vec.
+  const odjemalecOdsel = () => res.destroyed || !res.socket || res.socket.destroyed;
+  if (odjemalecOdsel()) return;
+  izvozovTece++; // sprosti se natanko enkrat: spodaj (konec ali napaka pri pool.connect, odjemalec je odsel) ali v `finally`
   let prekinjeno = false;   // odjemalec je zaprl povezavo (ali smo jo zaprli mi), preden smo končali
+  const dogodekZapiranja = () => { if (!res.writableEnded) prekinjeno = true; };
+  res.on("close", dogodekZapiranja); // PRED pool.connect(): odjemalec lahko odide med cakanjem na povezavo
+  let c;
+  try { c = await pool.connect(); } catch (err) { res.off("close", dogodekZapiranja); izvozovTece--; throw err; }
+  if (prekinjeno || odjemalecOdsel()) { res.off("close", dogodekZapiranja); izvozovTece--; c.release(); return; }
   let napaka = false;       // povezave ni več varno vrniti v pool
   let glavaPoslana = false;
   let razlog = "";          // zakaj je izvoz prekinjen (samo za log)
-  const dogodekZapiranja = () => { if (!res.writableEnded) prekinjeno = true; };
-  res.on("close", dogodekZapiranja);
   // Povezava do baze se je med izvozom pokvarila (pg_terminate_backend, vzdrževanje, idle meja). Brez poslušalca bi
   // 'error' na odjemalcu, ki je izposojen iz poola, sesul CEL proces (Unhandled 'error' event): padel bi tudi sken na vratih.
   const naNapakoPovezave = (err) => {
@@ -2995,16 +3002,19 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
   c.on("error", naNapakoPovezave);
   // Piše kos in upošteva povratni tlak (počasen odjemalec ne napolni pomnilnika). Bralec, ki ne bere dlje kot
   // IZVOZ_DRAIN_MS, je prekinjen: sicer bi transakcija (in zaklepi) ostala odprta za nedoločen čas.
+  // Obljuba se vedno razresi: 'drain', 'close' ali rok; ce je res ze unicen, ne cakamo na dogodek, ki ga ne bo vec.
   const pisi = async (kos) => {
-    if (prekinjeno) throw new Error("odjemalec je prekinil izvoz");
+    if (prekinjeno || res.destroyed) throw new Error("odjemalec je prekinil izvoz");
     if (!res.write(kos)) {
       await new Promise((resolve) => {
-        const rok = setTimeout(() => { razlog = `bralec ne bere ${IZVOZ_DRAIN_MS} ms`; res.destroy(); }, IZVOZ_DRAIN_MS);
+        if (res.destroyed) return resolve();
+        let rok = null;
         const konec = () => { clearTimeout(rok); res.off("drain", konec); res.off("close", konec); resolve(); };
+        rok = setTimeout(() => { razlog = `bralec ne bere ${IZVOZ_DRAIN_MS} ms`; res.destroy(); konec(); }, IZVOZ_DRAIN_MS);
         res.on("drain", konec); res.on("close", konec);
       });
     }
-    if (prekinjeno) throw new Error("odjemalec je prekinil izvoz");
+    if (prekinjeno || res.destroyed) throw new Error("odjemalec je prekinil izvoz");
   };
   try {
     await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -3071,12 +3081,12 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
       if (glavaPoslana) res.destroy(); else res.status(500).send("Server error.");
     }
   } finally {
+    izvozovTece--; // PRVO: izjema v naslednjih vrsticah ne sme za vedno zakleniti stevca (potem bi kopija trajno dobivala 429)
     res.off("close", dogodekZapiranja);
     c.off("error", naNapakoPovezave);
     // Zavrzena povezava lahko izda se kasen 'error' (socket se zapre po release): ne sme sesuti procesa.
     if (napaka) c.on("error", () => {});
     c.release(napaka);
-    izvozovTece--;
   }
 });
 
