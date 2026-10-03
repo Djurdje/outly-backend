@@ -27,7 +27,7 @@ function stevilkaIzOkolja(ime, privzeto, najvec) {
   const surova = process.env[ime];
   if (surova === undefined || surova === "") return privzeto;
   const n = Number(surova);
-  if (!Number.isFinite(n) || n < 0) { console.error(`[predpomnilnik] ${ime}="${surova}" ni veljavno, uporabljam ${privzeto}`); return privzeto; }
+  if (!Number.isFinite(n) || n < 0) { console.error(`[okolje] ${ime}="${surova}" ni veljavno, uporabljam ${privzeto}`); return privzeto; }
   return Math.min(Math.floor(n), najvec);
 }
 const javniPredpomnilnik = ustvariPredpomnilnik({
@@ -5204,4 +5204,6 @@ const port = process.env.PORT || 3000;
 // backlog 4096 (privzeto v Node 511): ob navalu (test_obremenitev 3b: 300 nakupov + 1000 bralcev + sken) je polna vrsta
 // novih povezav jedro zavrglo 1100-1400 povezav na zagon; odjemalec (tudi vratarjev sken) jo je ponovil sele po ~1-3 s.
 // Jedro omeji na net.core.somaxconn (4096 na sodobnem Linuxu, tudi GitHub Actions).
-app.listen({ port, backlog: 4096 }, () => console.log("Server running on port", port));
+const streznik = app.listen({ port, backlog: 4096 }, () => console.log("Server running on port", port));
+// Dnevnik povezav (#139): enkrat na DNEVNIK_POVEZAV_MS (privzeto 60000, 0 = izklop) vrstica `[povezave] ...`, samo ob prometu.
+require("./dnevnik_povezav").zagoniDnevnikPovezav(streznik, stevilkaIzOkolja("DNEVNIK_POVEZAV_MS", 60000, 3600000));
