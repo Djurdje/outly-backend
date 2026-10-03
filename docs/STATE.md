@@ -117,8 +117,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 
 - **Omejevalnik poskusov je v bazi (`omejitve`, #24, I15) in šteje po IP** (IPv6 po /64; prošnji ustvarjalca in prijateljev imata od #110 ločena ključa): meje preživijo deploy, blokada traja do konca okna (največ 1 h);
   sprostitev = oštevilčena migracija `TRUNCATE omejitve` + restart servisa (proces si blokado zapomni do konca okna). CGNAT ali skupni Wi-Fi kluba lahko zadene 20 nakupov/h na IP.
-- **Izvoz baze je tok; ne vračaj ga v `res.json`** (#23; ARCHITECTURE »Varnostne kopije«). Admin panel odgovor v brskalniku še
-  prebere v celoti (`res.json()`) — za zelo velike baze prenos shrani neposredno (`fetch` → `Blob`).
+- **Izvoz baze je tok; ne vračaj ga v `res.json`** (#23; ARCHITECTURE »Varnostne kopije«). Panel odgovor še prebere v celoti (`res.json()`): pri zelo velikih bazah prenos shrani neposredno.
 - **Migracija brez zaklepa pade, deploy pade, stara različica ostane živa** (#115, `db/migrate.js`, test `test_migracija_zaklep.js`): vsaka
   migracija teče v transakciji z `lock_timeout` 2 s (kratko: čakajoči ALTER blokira nove poizvedbe, tudi sken), `statement_timeout` 120 s (na stavek) in 4
   ponovnimi poskusi po 10 s ob zaklepu; advisory lock čaka največ 60 s (env `MIGRACIJA_*`, `.env.example`). Nato izhod 1: `npm start` se ne zažene, Render obdrži
@@ -126,10 +125,11 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   tega ne vidi** (alarma za to ni): po merge-u preveri `list_deploys` (zadnji deploy za commit = live) ali da `/healthz` vrne `commit`
   z `main` (prvih 12 znakov). Ukrep: poišči dolgo transakcijo (`pg_stat_activity`), počakaj, ponovno sproži deploy. Migracija
   ne sme sama klicati `COMMIT`/`SET lock_timeout`.
-- **Vsak `pool.connect()` z dolgo transakcijo** rabi `c.on("error")`, odklop počasnega bralca in `idle_in_transaction_session_timeout`
-  (kot izvoz). Mirujoče in izposojene povezave že ujame `pool.on("error")` / `pool.on("connect")` (#106, `test_pool_napaka.js`).
-- **Express 4 ne ujame zavrnjene obljube ročnika** (#129): neujet `await` (npr. `pool.connect()` pred `try`) je ob zasičenem poolu sesul cel proces.
-  Varuje `asinhroni_rocniki.js` (503/500, I10); nov `Router`/`app` ga podeduje sam, ne dodajaj `process.on("unhandledRejection")`. Express 5 ovoj odpravi.
+- **Vsak `pool.connect()` z dolgo transakcijo** rabi `c.on("error")`, odklop počasnega bralca in `idle_in_transaction_session_timeout` (kot izvoz); mirujoče povezave ujame `pool.on("error")` (#106, `test_pool_napaka.js`).
+- **Express 4 ne ujame zavrnjene obljube ročnika** (#129): neujet `await` (npr. `pool.connect()` pred `try`) je sesul cel proces. Varuje `asinhroni_rocniki.js` (503/500, I10); nov `Router`/`app` ga podeduje, ne dodajaj `process.on("unhandledRejection")`.
+- **Vloga `backup` (#116, migracija 029) sme SAMO `GET /admin/api/export`**: `requireAuthNa` jo povsod drugje zavrne (403), `neobveznaPrijava` jo šteje za neprijavljeno, izvoz je na `app` (ne na routerju `admin`). Nova pot je zanjo varna brez dela.
+  Račun za kopije je do Martinovega preklopa (skill `obnova-baze`) še `agent@outly.si` (admin). Vrstica `users` nastane ob prvem klicu z žetonom (tudi ob 403):
+  šele nato admin nastavi `backup` (panel → Uporabniki ali `PATCH /admin/api/users/:id`). Izvoz z vlogo `backup` obnovi samo baza z migracijo 029 (obnova to že zahteva).
 - **Obnova izvoza zahteva POPOLNOMA prazno ciljno bazo**, migracija 007 pa vstavi `agent@outly.si` → pred obnovo na cilju
   `DELETE FROM users;` (ARCHITECTURE, postopek obnove). Past odpade, ko servisni račun ne bo več v migracijah.
 - **iOS `OutlyAsyncImage`** (29. 9., outly-app #33) pomanjša na 1200 px in predpomni po URL-ju: slika z novo vsebino na istem URL-ju bi

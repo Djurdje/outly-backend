@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–028, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–029, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,10 +15,10 @@
 -- PostgreSQL database dump
 --
 
-\restrict gg2vofsrICnDY7O6Rdjwiy1ORvbHDezcmolpHjP1Rmtdy61X8Nb6pPguD4UnXd4
+\restrict EP67NgbND2ACwjqm82n7JJ5KGkLf1CHBzHE0qdtvoihllUtIi6XFrfiesvSWXWt
 
--- Dumped from database version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
--- Dumped by pg_dump version 16.13 (Ubuntu 16.13-0ubuntu0.24.04.1)
+-- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
+-- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -769,8 +769,15 @@ CREATE TABLE public.users (
     CONSTRAINT users_dob_chk CHECK (((date_of_birth IS NULL) OR ((date_of_birth < CURRENT_DATE) AND (date_of_birth > (CURRENT_DATE - '120 years'::interval))))),
     CONSTRAINT users_email_chk CHECK ((POSITION(('@'::text) IN (email)) > 1)),
     CONSTRAINT users_phone_chk CHECK (((phone IS NULL) OR (phone ~ '^\+[1-9][0-9]{7,14}$'::text))),
-    CONSTRAINT users_role_chk CHECK ((role = ANY (ARRAY['user'::text, 'business'::text, 'admin'::text])))
+    CONSTRAINT users_role_chk CHECK ((role = ANY (ARRAY['user'::text, 'business'::text, 'admin'::text, 'backup'::text])))
 );
+
+
+--
+-- Name: CONSTRAINT users_role_chk ON users; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON CONSTRAINT users_role_chk ON public.users IS 'Dovoljene vloge: user, business, admin, backup (backup = samo GET /admin/api/export, issue #116).';
 
 
 --
@@ -1725,5 +1732,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict gg2vofsrICnDY7O6Rdjwiy1ORvbHDezcmolpHjP1Rmtdy61X8Nb6pPguD4UnXd4
+\unrestrict EP67NgbND2ACwjqm82n7JJ5KGkLf1CHBzHE0qdtvoihllUtIi6XFrfiesvSWXWt
 

@@ -367,7 +367,7 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   **Sprejeto tveganje (Martin, 2. 10. 2026: preprostost):** geslo je v GitHub secrets (environment `kopije`, samo `main`), zato kdor lahko bere secrets tega okolja, lahko odsifrira kopije (prej predvideni
   zasebni ključ age samo pri Martinu je opuščen, ker Martin ročnega upravljanja ključev ne zmore). Utemeljitev: bucket je zaseben in v EU, dostop do secretov imajo samo lastnik repozitorija in workflowi na `main`
   (spremembe workflowov zahtevajo oznako `odobril-martin`), v zameno dobimo polni samodejni mesečni preizkus obnove. Nasprotni dokaz: kdor prevzame GitHub račun ali R2 in secrets hkrati, dobi kopije z osebnimi podatki.
-  Servisni račun za izvoz je obstoječi `agent@outly.si` (ne poseben račun; vloga `admin` je potrebna za `/admin/api`; predlog vloge samo-za-izvoz ostaja).
+  Servisni račun za izvoz je do preklopa obstoječi `agent@outly.si` (vloga `admin`). Vloga samo-za-izvoz `backup` je v kodi od #116 (migracija 029); preklop računa je Martinov korak (skill `obnova-baze`).
   Izhodišče števil za preverbo padca (> 20 % za users/orders/tickets) je JSON v R2 **nešifriran**: števila vrstic niso osebni podatek, bucket je zaseben, ločen ključ bi bil še en del, ki se lahko pokvari.
   Dnevniki zagonov so javni: v njih so samo imena tabel, OK/NAPAKA in odtis, nikoli števila vrstic, podatki o računu R2 ali geslo. Prag 20 % glede na prejšnji zagon **ne ujame postopnega padca** (sprejeto tveganje).
   Strošek 0 EUR do 10 GB/1 M zapisov na mesec (Cloudflare lahko ob vklopu R2 zahteva plačilno sredstvo). Rok hrambe 30 dni (in dejstvo, da šifrirani osebni podatki ležijo pri Cloudflare) v politiki zasebnosti

@@ -601,12 +601,17 @@ async function razberiUporabnika(token, db = pool) {
 // 401 SAMO za znano napako zetona (oblika, podpis, potek, izbrisan racun): aplikacija ob 401 uporabnika odjavi
 // (SessionStore). Vse drugo - izpad Supabase, izpad baze, izcrpan pool, prekinjena povezava, kakrsnakoli napaka brez
 // kode - je zacasna tezava streznika: 503 + Retry-After, uporabnik ostane prijavljen (invarianta I10).
-async function requireAuthNa(db, req, res, next) {
+//
+// Vloga `backup` (issue #116, migracija 029) je racun za dnevno varnostno kopijo in sme SAMO GET /admin/api/export.
+// Zato je privzeto ZAVRNJENA na vsaki poti, ki gre skozi requireAuth/requireAuthSken (403); edina izjema je izvoz
+// (requireAuthIzvoz). Nova pot je tako varna brez dodatnega dela: pozabljen requireRole ne odpre poti racunu backup.
+async function requireAuthNa(db, req, res, next, dovoliBackup = false) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!token) return res.status(401).send("Missing token.");
   try {
     req.user = await razberiUporabnika(token, db);
+    if (req.user.role === "backup" && !dovoliBackup) return res.status(403).send("Forbidden.");
     return next();
   } catch (err) {
     if (err && err.jwks) {
@@ -621,6 +626,8 @@ async function requireAuthNa(db, req, res, next) {
 }
 function requireAuth(req, res, next) { return requireAuthNa(pool, req, res, next); }
 function requireAuthSken(req, res, next) { return requireAuthNa(skenPool, req, res, next); }
+// Samo za GET /admin/api/export: spusti tudi vlogo `backup` (requireRole("admin", "backup") nato presoja vlogo).
+function requireAuthIzvoz(req, res, next) { return requireAuthNa(pool, req, res, next, true); }
 
 // ---------------------------
 // Role middleware
@@ -2317,6 +2324,7 @@ async function neobveznaPrijava(req, res, next) {
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!token) return next();
   try { req.user = await razberiUporabnika(token); } catch (_) { /* neprijavljen */ }
+  if (req.user && req.user.role === "backup") req.user = undefined; // racun za kopije je povsod razen na izvozu kot neprijavljen
   next();
 }
 
@@ -2770,7 +2778,7 @@ admin.patch("/users/:id", async (req, res) => {
     let prekliciZetone = false;
 
     if (b.role !== undefined) {
-      if (!["user", "business", "admin"].includes(b.role)) return res.status(400).send("role must be user, business or admin.");
+      if (!["user", "business", "admin", "backup"].includes(b.role)) return res.status(400).send("role must be user, business, admin or backup.");
       // Admin si sam ne more vzeti vloge: sicer bi lahko ostal panel brez admina.
       if (id === req.user.userId && b.role !== "admin") return res.status(400).send("You cannot remove your own admin role.");
       dodaj("role", b.role);
@@ -2954,7 +2962,9 @@ const IZVOZ_VRSTIC = 500;
 // Drain mora biti krajši od idle, sicer prekine Postgres. Okolje je samo za teste (kratke meje).
 const IZVOZ_DRAIN_MS = Number(process.env.EXPORT_DRAIN_TIMEOUT_MS) || 60000;
 const IZVOZ_IDLE_TX_MS = Number(process.env.EXPORT_IDLE_TX_MS) || 120000;
-admin.get("/export", async (req, res) => {
+// Pot je NAMENOMA na app (ne na routerju `admin`) in pred njim: `admin` zahteva vlogo admin, izvoz pa sme tudi `backup`
+// (issue #116). Vse druge poti pod /admin/api gredo skozi `admin` in `backup` jih zavrne requireAuthNa (privzeto 403).
+app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), async (req, res) => {
   const c = await pool.connect();
   let prekinjeno = false;   // odjemalec je zaprl povezavo (ali smo jo zaprli mi), preden smo končali
   let napaka = false;       // povezave ni več varno vrniti v pool
@@ -3036,11 +3046,11 @@ admin.get("/export", async (req, res) => {
     await c.query("COMMIT");
     await pisi(`},"sequences":${JSON.stringify(s.rows)}}`);
     res.end();
-    console.log(`Admin ${req.user.userId} izvoz baze (${t.rows.length} tabel)`);
+    console.log(`Izvoz baze (${req.user.role} ${req.user.userId}, ${t.rows.length} tabel)`);
   } catch (e) {
     try { await c.query("ROLLBACK"); } catch (_) { napaka = true; }
     if (prekinjeno || razlog) {
-      console.log(`Admin ${req.user.userId}: izvoz prekinjen (${razlog || "odjemalec je zaprl povezavo"})`);
+      console.log(`Izvoz (${req.user.role} ${req.user.userId}) prekinjen (${razlog || "odjemalec je zaprl povezavo"})`);
     } else {
       console.error(e);
       // Glave so že poslane: začet JSON se ne sme zaključiti kot da je poln — povezavo prekinemo,
