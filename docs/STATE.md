@@ -115,6 +115,9 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 - **Past:** plačilo za že preklicano naročilo (seja potekla, nato vseeno plačana — redko) se NE vknjiži samodejno: dnevnik izpiše
   `POZOR: placilo za neaktivno narocilo …`, vrni ga ročno v Stripu.
 - Klic Stripa (ustvarjanje seje, ~0,5–1,5 s) teče znotraj nakupnega mesta (`NAKUP_VZPOREDNO`, I16) — pod navalom manjša prepustnost.
+- **Stripe politika »Accounts v1 support« je vklopljena v sandboxu** (3. 10., Martin): Stripe sicer zavrne `accounts.create` (Express v1).
+  Pred live jo vklopi tudi v živem računu ali preklopi na Accounts v2 (`/v2/core/accounts`). Ustvarjanje računa kluba je brez
+  Stripovega idempotentnega ključa (zapomni si tudi zavrnitev 24 h), hkratne klike serializira `pg_advisory_xact_lock` na klub.
 - Pospravljalec vsakih 5 min (`STRIPE_POSPRAVI_MS`) preveri `pending` naročila s preteklim rokom pri Stripu (zaključi, preklice ali vknjiži).
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
