@@ -206,7 +206,13 @@ async function izvozKosi(token) {
   for (let i = 0; i < 15; i++) {
     const ac = new AbortController();
     try {
-      const rr = await fetch(BASE + "/admin/api/export", { headers: { authorization: "Bearer " + T.admin }, signal: ac.signal });
+      // Od #116 je dovoljen 1 hkratni izvoz: prejsnji prekinjeni izvoz se sprosti sele, ko dokonca tekoci FETCH -> pocakaj na pogoj (ne spanje).
+      let rr = await fetch(BASE + "/admin/api/export", { headers: { authorization: "Bearer " + T.admin }, signal: ac.signal });
+      for (let t = 0; rr.status === 429 && t < 100; t++) {
+        await rr.arrayBuffer(); await new Promise((r) => setTimeout(r, 50));
+        rr = await fetch(BASE + "/admin/api/export", { headers: { authorization: "Bearer " + T.admin }, signal: ac.signal });
+      }
+      assert(rr.status === 200, `prekinitev ${i + 1}: izvoz se je zacel (200)`, rr.status);
       const rd = rr.body.getReader();
       await rd.read(); // prvi kos je prisel, izvoz je sredi poti
       ac.abort();

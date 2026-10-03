@@ -525,7 +525,7 @@ async function naloziUporabnike() {
         <td class="mono">${x.id}</td>
         <td>${ubezi(x.email)}${x.phone ? `<span class="drobno">${ubezi(x.phone)}</span>` : ""}</td>
         <td>${ubezi(x.username)}${x.country ? `<span class="drobno">${ubezi(x.country)}</span>` : ""}</td>
-        <td><select id="uVloga${x.id}" style="width:auto" onchange="uVloga(${x.id})">${["user", "business", "admin"].map(r => `<option ${r === x.role ? "selected" : ""}>${r}</option>`).join("")}</select></td>
+        <td><select id="uVloga${x.id}" style="width:auto" onchange="uVloga(${x.id})">${["user", "business", "admin", "backup"].map(r => `<option ${r === x.role ? "selected" : ""}>${r}</option>`).join("")}</select></td>
         <td>${x.email_verified ? '<span class="znacka ok">potrjen</span>' : `<span class="znacka opoz">nepotrjen</span> <button class="tih mali" onclick="uPotrdi(${x.id})">Potrdi e-naslov</button>`}</td>
         <td>${zaklenjen(x) ? `<span class="znacka slabo">do ${datum(x.locked_until)}</span> <button class="tih mali" onclick="uOdkleni(${x.id})">Odkleni</button>` : (x.failed_login_count ? `${x.failed_login_count} nap. poskusov` : "—")}</td>
         <td class="mono">${x.club_count}</td>

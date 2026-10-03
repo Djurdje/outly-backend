@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Dnevna kopija, korak 1: prijava servisnega admin racuna (Supabase Auth) in prenos
+# Dnevna kopija, korak 1: prijava servisnega racuna (Supabase Auth) in prenos
 # GET /admin/api/export v datoteko. Uporaba: izvoz.sh <izhodna-datoteka.json>
 #
 # Skrivnosti prihajajo SAMO iz okolja (GitHub secrets):
-#   BACKUP_ADMIN_EMAIL, BACKUP_ADMIN_PASSWORD  racun z vlogo admin
+#   BACKUP_ADMIN_EMAIL, BACKUP_ADMIN_PASSWORD  racun z vlogo backup (samo izvoz, #116) ali admin (imeni secretov ostaneta zaradi kopija.yml)
 # Preglasitve za lokalni preizkus: BACKEND_URL, SUPABASE_URL, SUPABASE_APIKEY.
 #
 # V dnevnik (javen!) pride samo: HTTP status, velikost, imena tabel in stevila vrstic.
@@ -43,7 +43,7 @@ echo "::add-mask::$TOKEN"
 rm -f "$DELOVNA/prijava.json" "$DELOVNA/odgovor.json"
 echo "Prijava: OK"
 
-# --- 2. izvoz (tok; streznik ga piše sproti). Do 3 poskusi po najvec 600 s (+ 2 x 30 s pavze = 31 min, workflow ima 50 min);
+# --- 2. izvoz (tok; streznik ga piše sproti; 429 = drug izvoz ze tece, ponovi se po pavzi). Do 3 poskusi po najvec 600 s (+ 2 x 30 s pavze = 31 min, workflow ima 50 min);
 #     4xx (zeton, vloga, e-naslov ni potrjen) se ne ponavlja ---
 for POSKUS in 1 2 3; do
   RC=0
@@ -56,7 +56,7 @@ for POSKUS in 1 2 3; do
   if [ "$POSKUS" -lt 3 ]; then sleep "${IZVOZ_PAVZA_S:-30}"; fi
 done
 if [ "$RC" -ne 0 ]; then
-  echo "::error::Izvoz ni uspel (curl koda $RC, HTTP ${STATUS:-000}). 401 = zeton, 403 = racun ni admin ALI e-naslov v Supabase ni potrjen (email_verified), 5xx/pretrganje = streznik."
+  echo "::error::Izvoz ni uspel (curl koda $RC, HTTP ${STATUS:-000}). 401 = zeton, 403 = racun nima vloge backup/admin ALI e-naslov v Supabase ni potrjen (email_verified), 5xx/pretrganje = streznik."
   exit 1
 fi
 echo "Izvoz: HTTP $STATUS"
