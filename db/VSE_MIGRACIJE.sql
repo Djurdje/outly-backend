@@ -1773,6 +1773,20 @@ COMMENT ON COLUMN orders.checkout_expires_at IS 'Potek Checkout seje; pospravlja
 COMMENT ON TABLE stripe_events IS 'Ze obdelani Stripe webhook dogodki (idempotenca, issue #19).';
 
 
+-- 031_provizija_po_klubu.sql
+-- Provizija Outlyja po klubu (Martin 3. 10. 2026: "z vsakim klubom drugacna provizija, nekje 5 %, nekje 2 %").
+-- clubs.commission_bps = provizija v BAZNIH TOCKAH (1 % = 100, 2,5 % = 250), celo stevilo (I9: brez plavajoce vejice).
+-- NULL = privzeta provizija iz okolja (PROVIZIJA_ODSTOTEK, 10 %). Nastavi jo samo admin (admin panel); klub je ne vidi.
+-- Ob nakupu se izracuna in zamrzne v orders.application_fee_cents (002), zato sprememba ne vpliva na stara narocila.
+--
+-- Samo DODAJANJE: en nullable stolpec in omejitev. Obstojecih podatkov ne bere in ne spreminja (vsi klubi ostanejo na privzeti).
+
+ALTER TABLE clubs ADD COLUMN IF NOT EXISTS commission_bps INTEGER;
+ALTER TABLE clubs DROP CONSTRAINT IF EXISTS clubs_commission_bps_chk;
+ALTER TABLE clubs ADD CONSTRAINT clubs_commission_bps_chk CHECK (commission_bps IS NULL OR (commission_bps >= 0 AND commission_bps <= 5000));
+
+COMMENT ON COLUMN clubs.commission_bps IS 'Provizija Outlyja za ta klub v baznih tockah (100 = 1 %). NULL = privzeta (PROVIZIJA_ODSTOTEK). Nastavi admin.';
+
 
 -- =============================================================================
 -- Vpis v evidenco
@@ -1808,7 +1822,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('027_omejitve.sql', '2938840adb0a704b'),
     ('028_idempotentni_kljuc.sql', 'd230b198d3ba69fb'),
     ('029_vloga_backup.sql', 'c63e8819203fe8d8'),
-    ('030_stripe_checkout.sql', 'cf18e6af0cd63066')
+    ('030_stripe_checkout.sql', 'cf18e6af0cd63066'),
+    ('031_provizija_po_klubu.sql', '68135f70b950c27d')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
