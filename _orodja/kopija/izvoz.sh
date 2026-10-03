@@ -43,7 +43,7 @@ echo "::add-mask::$TOKEN"
 rm -f "$DELOVNA/prijava.json" "$DELOVNA/odgovor.json"
 echo "Prijava: OK"
 
-# --- 2. izvoz (tok; streznik ga piše sproti). Do 3 poskusi po najvec 600 s (+ 2 x 30 s pavze = 31 min, workflow ima 50 min);
+# --- 2. izvoz (tok; streznik ga piše sproti; 429 = drug izvoz ze tece, ponovi se po pavzi). Do 3 poskusi po najvec 600 s (+ 2 x 30 s pavze = 31 min, workflow ima 50 min);
 #     4xx (zeton, vloga, e-naslov ni potrjen) se ne ponavlja ---
 for POSKUS in 1 2 3; do
   RC=0

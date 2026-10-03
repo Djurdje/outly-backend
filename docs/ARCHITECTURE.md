@@ -194,7 +194,9 @@ ki tak JSON obnovi v **prazno, z migracijami pripravljeno** bazo. Kaj skripta za
 **Vloga `backup`** (issue #116, migracija 029; najmanjše pravice): račun dnevne kopije (`kopija.yml`) sme SAMO `GET /admin/api/export`, nič drugega v admin
 panelu ali API-ju. Pot izvoza je registrirana na `app` pred routerjem `admin` z `requireAuthIzvoz` + `requireRole("admin", "backup")`; **vsaka druga pot** (admin in navadne) gre
 skozi `requireAuthNa`, ki vlogo `backup` privzeto zavrne s 403, zato nova pot brez dodatnega dela ni odprta zanjo (`neobveznaPrijava` jo šteje za neprijavljeno). Vloga se,
-kot vse, bere iz baze ob vsakem klicu: odvzem velja takoj. Uhajanje gesla tega računa tako odkrije le izvoz (osebni podatki, odtisi gesel), ne pa pisanja ali admin dejanj.
+kot vse, bere iz baze ob vsakem klicu: odvzem velja takoj. Uhajanje gesla tega računa tako razkrije samo vsebino izvoza (osebni podatki, odtisi gesel), ne pa pisanja ali admin dejanj. Razpoložljivost: **največ 1 hkraten izvoz na proces**
+(števec v pomnilniku, sprosti se v `finally`, tudi ob prekinitvi odjemalca; drugi klic admina ali backup dobi 429 + `Retry-After: 30`, `_orodja/kopija/izvoz.sh` ga ponovi), zato izvoz ne more zasesti poola. Račun `backup` je drugim
+skrit: `GET /users/search` ga ne vrne, prošnja za prijateljstvo nanj da enak 404 `no_account` kot za neobstoječega. Znano: `HEAD /admin/api/export` Express usmeri na GET, torej izvede izvoz (telo zavrže).
 Vloga je v bazi omejena z `users_role_chk`; dodeli jo admin (panel → Uporabniki ali `PATCH /admin/api/users/:id`). Test: `_testi/test_vloga_izvoz.js`.
 
 **Izvoz je tok** (issue #23, 2. 10. 2026): strežnik piše JSON sproti, tabelo za tabelo in po 500 vrstic prek strežniškega kurzorja v

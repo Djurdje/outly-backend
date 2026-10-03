@@ -2961,11 +2961,24 @@ const IZVOZ_VRSTIC = 500;
 //  - IZVOZ_IDLE_TX_MS: Postgres sam prekine sejo, ki miruje v transakciji (SET LOCAL idle_in_transaction_session_timeout).
 // Drain mora biti krajši od idle, sicer prekine Postgres. Okolje je samo za teste (kratke meje).
 const IZVOZ_DRAIN_MS = Number(process.env.EXPORT_DRAIN_TIMEOUT_MS) || 60000;
+// Najvec 1 hkratni izvoz na proces (issue #116, pregled): izvoz drzi transakcijo in povezavo iz poola, racun za kopije pa je
+// dosegljiv z enim geslom; vec hkratnih izvozov bi zasedlo pool in upocasnilo (ali zaustavilo) nakupe in sken. Drugi hkratni
+// klic (admin ali backup) dobi 429 + Retry-After. Stevec je v pomnilniku procesa; sprosti se
+// v `finally`, torej tudi ob prekinitvi odjemalca, napaki baze in izpadu povezave.
+const IZVOZ_NAJVEC_HKRATNO = 1;
+const IZVOZ_RETRY_AFTER_S = 30;
+let izvozovTece = 0;
 const IZVOZ_IDLE_TX_MS = Number(process.env.EXPORT_IDLE_TX_MS) || 120000;
 // Pot je NAMENOMA na app (ne na routerju `admin`) in pred njim: `admin` zahteva vlogo admin, izvoz pa sme tudi `backup`
 // (issue #116). Vse druge poti pod /admin/api gredo skozi `admin` in `backup` jih zavrne requireAuthNa (privzeto 403).
 app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), async (req, res) => {
-  const c = await pool.connect();
+  if (izvozovTece >= IZVOZ_NAJVEC_HKRATNO) {
+    return res.status(429).set("Retry-After", String(IZVOZ_RETRY_AFTER_S))
+      .json({ error: "export_busy", message: "Another export is already running. Try again later." });
+  }
+  izvozovTece++; // sprosti se v `finally` spodaj (ali ob napaki pri pool.connect)
+  let c;
+  try { c = await pool.connect(); } catch (err) { izvozovTece--; throw err; }
   let prekinjeno = false;   // odjemalec je zaprl povezavo (ali smo jo zaprli mi), preden smo končali
   let napaka = false;       // povezave ni več varno vrniti v pool
   let glavaPoslana = false;
@@ -3063,6 +3076,7 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
     // Zavrzena povezava lahko izda se kasen 'error' (socket se zapre po release): ne sme sesuti procesa.
     if (napaka) c.on("error", () => {});
     c.release(napaka);
+    izvozovTece--;
   }
 });
 
@@ -4858,7 +4872,7 @@ app.get("/users/search", requireAuth, omeji({ kljuc: "iskanje", najvec: 120, okn
                   AND GREATEST(r.from_user_id, r.to_user_id) = GREATEST(u.id,$2::int)
                 LIMIT 1) AS req_relation
          FROM users u
-        WHERE u.username ILIKE $1 || '%' ESCAPE '\\' AND u.id <> $2 AND u.email_verified
+        WHERE u.username ILIKE $1 || '%' ESCAPE '\\' AND u.id <> $2 AND u.email_verified AND u.role <> 'backup'
         ORDER BY (LOWER(u.username) = LOWER($1)) DESC, LOWER(u.username)
         LIMIT 10`,
       [vzorec, req.user.userId]
@@ -4985,15 +4999,16 @@ app.post("/me/friends/requests", requireAuth, omeji({ kljuc: "prijatelji", najve
     if (b.user_id !== undefined) {
       const id = celoId(b.user_id);
       if (!id) return res.status(400).send("Invalid user_id.");
-      const r = await pool.query(`SELECT ${POLJA_PRIJATELJA}, u.email_verified FROM users u WHERE u.id = $1`, [id]);
+      const r = await pool.query(`SELECT ${POLJA_PRIJATELJA}, u.email_verified, u.role FROM users u WHERE u.id = $1`, [id]);
       cilj = r.rows[0] || null;
     } else if (typeof b.username === "string") {
       const ime = b.username.trim();
       if (!/^[a-zA-Z0-9_]{3,20}$/.test(ime)) return res.status(400).send("Invalid username.");
-      const r = await pool.query(`SELECT ${POLJA_PRIJATELJA}, u.email_verified FROM users u WHERE LOWER(u.username) = LOWER($1)`, [ime]);
+      const r = await pool.query(`SELECT ${POLJA_PRIJATELJA}, u.email_verified, u.role FROM users u WHERE LOWER(u.username) = LOWER($1)`, [ime]);
       cilj = r.rows[0] || null;
     } else return res.status(400).send("user_id or username is required.");
-    if (!cilj || !cilj.email_verified) return res.status(404).json({ error: "no_account", message: "No Outly account with this username." });
+    // Racun za kopije (vloga backup, #116) drugim ni viden: obnasa se kot neobstojec uporabnik (isti odgovor kot za neznano ime).
+    if (!cilj || !cilj.email_verified || cilj.role === "backup") return res.status(404).json({ error: "no_account", message: "No Outly account with this username." });
     if (Number(cilj.id) === Number(req.user.userId)) return res.status(400).send("You can't add yourself.");
     if (await staPrijatelja(req.user.userId, cilj.id)) return res.status(409).json({ error: "already_friends", message: "You are already friends." });
 

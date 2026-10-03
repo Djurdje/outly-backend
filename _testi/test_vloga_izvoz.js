@@ -14,15 +14,22 @@
  *  5. Navaden uporabnik, business, brez zetona, ponarejen zeton: izvoz 403 / 403 / 401 / 401.
  *  6. Sprememba vloge velja takoj (vloga iz baze): backup -> user = izvoz 403; admin ga lahko postavi prek PATCH /admin/api/users/:id.
  *  7. backup ne more sam sebi dati vecjih pravic (PATCH /admin/api/users/:id = 403, vloga ostane).
+ *  8. Racun backup drugim ni viden: GET /users/search ga ne najde, prosnja za prijateljstvo nanj = enak 404 kot za neobstojec racun.
+ *  9. HEAD /admin/api/export: Express usmeri HEAD na GET rocnik -> backup in admin dobita 200 (izvoz se izvede, telo se zavrze); HEAD na drugo admin pot = 403.
+ * 10. Najvec 1 hkratni izvoz na proces: med zaklenjeno tabelo `tickets` drugi izvoz (admin ali backup) = 429 + Retry-After,
+ *     po koncu (in po prekinitvi odjemalca) spet 200. Brez spanja: cakamo na pogoj (pg_stat_activity, ponavljanje).
+ * 11. izvoz.sh (kopija) 429 ponovi in uspe.
+ * 12. Izpad baze pri iskanju uporabnika (statement_timeout nad zaklenjeno tabelo users) = 503 + Retry-After 5, NE 403/401, tudi za backup.
  */
 const crypto = require("crypto");
 const http = require("http");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
+const path = require("path");
 const { Pool } = require("pg");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const PORT = 3126, JWKS_PORT = 3965;
+const PORT = 3126, PORT_B = 3127, PORT_IZVOZ_LAZNI = 3128, JWKS_PORT = 3965;
 const BASE = `http://127.0.0.1:${PORT}`;
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
@@ -55,7 +62,7 @@ async function api(method, path, token, body) {
   await pool.query("TRUNCATE omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
-  let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
+  let log = "", logB = "", srvB = null; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
   for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
 
   try {
@@ -188,10 +195,137 @@ async function api(method, path, token, body) {
     r = await api("PATCH", `/admin/api/users/${navadenId}`, T.admin, { role: "business" });
     assert(r.status === 200 && r.body.role === "business", "admin: PATCH vloga business se vedno dela", r.body);
 
+    console.log("\n# 8. Racun backup drugim ni viden");
+    r = await api("GET", "/users/search?q=kopija", T.navaden);
+    assert(r.status === 200 && Array.isArray(r.body.users) && r.body.users.length === 0, "iskanje 'kopija' ne najde racuna backup", r.body);
+    r = await api("GET", "/users/search?q=lastnik", T.navaden);
+    assert(r.status === 200 && r.body.users.some(u => u.username === "lastnik"), "kontrola: iskanje navadnega uporabnika deluje", r.body);
+    const neobstojec = await api("POST", "/me/friends/requests", T.navaden, { username: "ni_takega_uporabnika" });
+    assert(neobstojec.status === 404 && neobstojec.body.error === "no_account", "kontrola: prosnja za neobstojecega = 404 no_account", neobstojec);
+    r = await api("POST", "/me/friends/requests", T.navaden, { username: "kopija" });
+    assert(r.status === 404 && JSON.stringify(r.body) === JSON.stringify(neobstojec.body), "prosnja za backup po imenu = isti 404 kot za neobstojec racun", r);
+    r = await api("POST", "/me/friends/requests", T.navaden, { user_id: kopijaId });
+    assert(r.status === 404 && JSON.stringify(r.body) === JSON.stringify(neobstojec.body), "prosnja za backup po user_id = isti 404", r);
+    const prijateljstvo = (await pool.query("SELECT (SELECT COUNT(*)::int FROM friend_requests) AS prosnje, (SELECT COUNT(*)::int FROM friendships) AS prijatelji")).rows[0];
+    assert(prijateljstvo.prosnje === 0 && prijateljstvo.prijatelji === 0, "v bazi ni nobene prosnje ali prijateljstva", prijateljstvo);
+    await pool.query("UPDATE users SET role='user' WHERE id=$1", [kopijaId]);
+    r = await api("GET", "/users/search?q=kopija", T.navaden);
+    assert(r.status === 200 && r.body.users.length === 1, "kontrola: z vlogo user ga iskanje spet najde (skrije ga res vloga)", r.body);
+    await pool.query("UPDATE users SET role='backup' WHERE id=$1", [kopijaId]);
+
+    console.log("\n# 9. HEAD /admin/api/export");
+    r = await api("HEAD", "/admin/api/export", T.kopija);
+    assert(r.status === 200, "backup: HEAD /admin/api/export -> 200 (Express usmeri HEAD na GET rocnik; izvoz se izvede, telo se zavrze)", r.status);
+    r = await api("HEAD", "/admin/api/export", T.admin);
+    assert(r.status === 200, "admin: HEAD /admin/api/export -> 200 (enako)", r.status);
+    r = await api("HEAD", "/admin/api/export", T.navaden);
+    assert(r.status === 403, "navaden/business: HEAD /admin/api/export -> 403", r.status);
+    r = await api("HEAD", "/admin/api/users", T.kopija);
+    assert(r.status === 403, "backup: HEAD /admin/api/users -> 403", r.status);
+
+    console.log("\n# 10. Najvec 1 hkratni izvoz na proces (429 + Retry-After)");
+    const spi = (ms) => new Promise(res => setTimeout(res, ms));
+    // Pocakaj na pogoj (do ~10 s), brez fiksnega spanja.
+    async function cakajNa(pogoj, opis) {
+      for (let i = 0; i < 200; i++) { if (await pogoj()) return true; await spi(50); }
+      console.log("  (pogoj ni izpolnjen v roku:", opis, ")"); return false;
+    }
+    const izvozCaka = async () => (await pool.query(
+      "SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%\"tickets\"%'")).rows[0].n > 0;
+    const izvozPoznejsi = async (zeton) => {          // poskusi izvoz, dokler ni 429 (izvoz se sprosti ob koncu `finally`)
+      let k = null;
+      const koncal = await cakajNa(async () => { k = await api("GET", "/admin/api/export", zeton); return k.status !== 429; }, "izvoz se je sprostil");
+      return { koncal, k };
+    };
+    let zaklep = await pool.connect();
+    await zaklep.query("BEGIN"); await zaklep.query("LOCK TABLE tickets IN ACCESS EXCLUSIVE MODE");
+    const prvi = fetch(BASE + "/admin/api/export", { headers: { authorization: "Bearer " + T.admin } });   // admin drzi izvoz
+    assert(await cakajNa(izvozCaka, "prvi izvoz caka na zaklep tickets"), "prvi izvoz (admin) tece in caka na zaklep tabele");
+    const druga = await fetch(BASE + "/admin/api/export", { headers: { authorization: "Bearer " + T.kopija } });
+    const drugaTelo = await druga.json();
+    assert(druga.status === 429 && druga.headers.get("retry-after") === "30" && drugaTelo.error === "export_busy", "drugi hkratni izvoz (backup) -> 429 + Retry-After 30 + export_busy", { s: druga.status, ra: druga.headers.get("retry-after"), t: drugaTelo });
+    r = await api("GET", "/admin/api/export", T.admin);
+    assert(r.status === 429, "tretji hkratni izvoz (admin) -> 429", r.status);
+    r = await api("GET", "/admin/api/summary", T.admin);
+    assert(r.status === 200, "ostale admin poti med izvozom delujejo (429 velja samo za izvoz)", r.status);
+    r = await api("GET", "/admin/api/export", T.navaden);
+    assert(r.status === 403, "navaden uporabnik med izvozom dobi 403 (vloga se preveri pred omejitvijo)", r.status);
+    await zaklep.query("ROLLBACK"); zaklep.release();
+    const prviOdg = await prvi;
+    let prviIzvoz = null; try { prviIzvoz = JSON.parse(await prviOdg.text()); } catch (_) { /* spodaj */ }
+    assert(prviOdg.status === 200 && prviIzvoz && prviIzvoz.tables && prviIzvoz.tables.users, "prvi izvoz se po sprostitvi zaklepa konca z 200 in veljavnim JSON", prviOdg.status);
+    let pozno = await izvozPoznejsi(T.kopija);
+    assert(pozno.koncal && pozno.k.status === 200, "po koncu prvega izvoza backup spet dobi 200", pozno.k && pozno.k.status);
+
+    // Prekinitev odjemalca sprosti omejitev (finally): izvoz caka na zaklep, odjemalec odide, po sprostitvi zaklepa je izvoz spet mogoc.
+    zaklep = await pool.connect();
+    await zaklep.query("BEGIN"); await zaklep.query("LOCK TABLE tickets IN ACCESS EXCLUSIVE MODE");
+    const ac = new AbortController();
+    const prekinjen = fetch(BASE + "/admin/api/export", { headers: { authorization: "Bearer " + T.admin }, signal: ac.signal }).catch(() => null);
+    assert(await cakajNa(izvozCaka, "izvoz caka na zaklep (prekinitev)"), "izvoz za prekinitev caka na zaklep");
+    ac.abort(); await prekinjen;
+    r = await api("GET", "/admin/api/export", T.kopija);
+    assert(r.status === 429, "dokler strezniski izvoz se tece (caka na zaklep), je omejitev se zasedena", r.status);
+    await zaklep.query("ROLLBACK"); zaklep.release();
+    pozno = await izvozPoznejsi(T.kopija);
+    assert(pozno.koncal && pozno.k.status === 200, "po prekinitvi odjemalca se omejitev sprosti (izvoz spet 200)", pozno.k && pozno.k.status);
+    const tx = (await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND state LIKE 'idle in transaction%' AND pid <> pg_backend_pid()")).rows[0].n;
+    assert(tx === 0, "ni povezav 'idle in transaction' po izvozih", tx);
+
+    console.log("\n# 11. izvoz.sh ponovi 429 (lazni streznik: prijava, prvi izvoz 429, drugi 200)");
+    {
+      let klicov = 0;
+      const gorivo = JSON.stringify({ exported_at: new Date().toISOString(), postgres: "x", tables: { schema_migrations: { count: 1, columns: ["datoteka"], rows: [{ datoteka: "000" }] }, users: { count: 1, columns: ["id"], rows: [{ id: 1 }] } }, sequences: [] });
+      const lazni = http.createServer((q, a) => {
+        if (q.method === "POST" && q.url.startsWith("/auth/v1/token")) { q.resume(); a.setHeader("content-type", "application/json"); return a.end(JSON.stringify({ access_token: "lazni-zeton" })); }
+        if (q.method === "GET" && q.url === "/admin/api/export") {
+          klicov++;
+          if (klicov === 1) { a.statusCode = 429; a.setHeader("Retry-After", "1"); return a.end('{"error":"export_busy"}'); }
+          a.setHeader("content-type", "application/json"); return a.end(gorivo);
+        }
+        a.statusCode = 404; a.end();
+      });
+      await new Promise(res => lazni.listen(PORT_IZVOZ_LAZNI, res));
+      const izhod = path.join(require("os").tmpdir(), `izvoz_test_${process.pid}.json`);
+      // spawnSync bi blokiral zanko dogodkov in lazni streznik ne bi odgovarjal -> asinhrono
+      const rc = await new Promise((resolve) => {
+        const pr = spawn("bash", [path.join(__dirname, "..", "_orodja", "kopija", "izvoz.sh"), izhod], {
+          env: { ...process.env, BACKUP_ADMIN_EMAIL: "kopija@outly.si", BACKUP_ADMIN_PASSWORD: "ni-pravo-geslo", BACKEND_URL: `http://127.0.0.1:${PORT_IZVOZ_LAZNI}`,
+                 SUPABASE_URL: `http://127.0.0.1:${PORT_IZVOZ_LAZNI}`, SUPABASE_APIKEY: "x", IZVOZ_PAVZA_S: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+        let izpis = ""; pr.stdout.on("data", d => izpis += d); pr.stderr.on("data", d => izpis += d);
+        pr.on("exit", (koda) => resolve({ koda, izpis }));
+      });
+      lazni.close();
+      assert(rc.koda === 0 && klicov === 2, "izvoz.sh: 429 -> ponovi -> uspe (2 klica, izhod 0)", { koda: rc.koda, klicov, izpis: rc.izpis.slice(-300) });
+      assert(/poskus 1\/3: curl koda 22, HTTP 429/.test(rc.izpis), "izvoz.sh izpise HTTP 429 (brez vsebine odgovora)", rc.izpis.slice(-300));
+      try { require("fs").unlinkSync(izhod); } catch (_) { /* ni ostanka */ }
+    }
+
+    console.log("\n# 12. Izpad baze pri iskanju uporabnika -> 503 (ne 403/401), tudi za backup");
+    srvB = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT_B), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", PGOPTIONS: "-c statement_timeout=400" }, stdio: ["ignore", "pipe", "pipe"] });
+    srvB.stdout.on("data", d => logB += d); srvB.stderr.on("data", d => logB += d);
+    for (let i = 0; i < 50; i++) { try { await fetch(`http://127.0.0.1:${PORT_B}/`); break; } catch { await spi(100); } }
+    const apiB = async (m, pot, zeton) => { const x = await fetch(`http://127.0.0.1:${PORT_B}${pot}`, { method: m, headers: { authorization: "Bearer " + zeton } }); await x.text(); return { status: x.status, retryAfter: x.headers.get("retry-after") }; };
+    r = await apiB("GET", "/admin/api/export", T.kopija);
+    assert(r.status === 200, "kontrola: drugi streznik, backup izvoz 200", r.status);
+    const zaklepUsers = await pool.connect();
+    await zaklepUsers.query("BEGIN"); await zaklepUsers.query("LOCK TABLE users IN ACCESS EXCLUSIVE MODE");
+    r = await apiB("GET", "/admin/api/export", T.kopija);
+    assert(r.status === 503 && r.retryAfter === "5", "backup: iskanje uporabnika prekinjeno (57014) -> 503 + Retry-After 5 (ne 403/401)", r);
+    r = await apiB("GET", "/admin/api/export", T.admin);
+    assert(r.status === 503 && r.retryAfter === "5", "admin: enako 503", r);
+    r = await apiB("GET", "/admin/api/summary", T.kopija);
+    assert(r.status === 503, "backup na drugi admin poti med izpadom: 503 (vloge ni mogoce ugotoviti), ne 200", r.status);
+    await zaklepUsers.query("ROLLBACK"); zaklepUsers.release();
+    r = await apiB("GET", "/admin/api/export", T.kopija);
+    assert(r.status === 200, "po sprostitvi zaklepa backup izvoz spet 200", r.status);
+    srvB.kill(); srvB = null;
+
     console.log("\n# 7. Brez nepricakovanih napak v dnevniku streznika");
     assert(!/TypeError|ReferenceError|unhandled/i.test(log), "dnevnik brez TypeError/ReferenceError/unhandled", log.slice(-400));
   } finally {
     srv.kill();
+    if (srvB) srvB.kill();
     jwksServer.close();
     await pool.end();
   }
