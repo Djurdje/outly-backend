@@ -46,7 +46,7 @@ async function api(method, path, token, body, glave = {}) {
 const pocakaj = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ---------- lazni Stripe ----------
-const S = { racuni: {}, seje: {}, stRacunov: 0, stSej: 0, zahtevkiSej: [], pokvarjeneSeje: false, potekle: [] };
+const S = { racuni: {}, seje: {}, naboji: {}, stRacunov: 0, stSej: 0, zahtevkiSej: [], pokvarjeneSeje: false, potekle: [] };
 function telo(req) { return new Promise(r => { let d = ""; req.on("data", x => d += x); req.on("end", () => r(d)); }); }
 function obrazec(besedilo) { const o = {}; for (const [k, v] of new URLSearchParams(besedilo)) o[k] = v; return o; }
 const stripeServer = http.createServer(async (req, res) => {
@@ -86,6 +86,7 @@ const stripeServer = http.createServer(async (req, res) => {
     return odg(200, S.seje[id]);
   }
   if (req.method === "GET" && (m = u.match(/^\/v1\/checkout\/sessions\/(cs_\w+)$/))) return odg(200, S.seje[m[1]]);
+  if (req.method === "GET" && (m = u.match(/^\/v1\/charges\/(ch_\w+)$/))) return S.naboji[m[1]] ? odg(200, S.naboji[m[1]]) : odg(404, { error: { type: "invalid_request_error", message: "No such charge" } });
   if (req.method === "POST" && (m = u.match(/^\/v1\/checkout\/sessions\/(cs_\w+)\/expire$/))) {
     S.potekle.push(m[1]); S.seje[m[1]].status = "expired"; return odg(200, S.seje[m[1]]);
   }
@@ -227,11 +228,12 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
 
     console.log("\n# Webhook: placilo uspelo");
     const s1 = S.seje.cs_test_1;
-    r = await webhook("checkout.session.completed", { ...placana(s1, "pi_test_1"), amount_total: 2999 });
+    Object.assign(s1, placana(s1, "pi_test_1"), { amount_total: 2999 });   // webhook objekt prebere svez iz Stripa
+    r = await webhook("checkout.session.completed", { id: s1.id, object: "checkout.session" });
     assert(r.status === 200, "napacen znesek -> 200 (zabelezeno)", r);
     let o = (await pool.query("SELECT status FROM orders WHERE id=$1", [n1.id])).rows[0];
     assert(o.status === "pending", "napacen znesek: narocilo ostane pending", o);
-    Object.assign(s1, placana(s1, "pi_test_1"));
+    s1.amount_total = 3000;
     r = await webhook("checkout.session.completed", s1, { id: "evt_placilo_1" });
     assert(r.status === 200 && r.body.received, "checkout.session.completed -> 200", r);
     o = (await pool.query("SELECT status, paid_at, stripe_payment_intent_id FROM orders WHERE id=$1", [n1.id])).rows[0];
@@ -257,14 +259,16 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
     assert(r.status === 201 && r.body.mode === "stripe", "nakup 2 (stripe)", r.body);
     const n2 = r.body.order;
     assert(await sold() === soldPred + 1, "zaloga +1");
-    r = await webhook("checkout.session.expired", { ...S.seje.cs_test_2, status: "expired" });
+    S.seje.cs_test_2.status = "expired";
+    r = await webhook("checkout.session.expired", S.seje.cs_test_2);
     assert(r.status === 200, "checkout.session.expired -> 200", r);
     o = (await pool.query("SELECT status, cancelled_at FROM orders WHERE id=$1", [n2.id])).rows[0];
     assert(o.status === "cancelled" && o.cancelled_at, "narocilo cancelled", o);
     assert(await sold() === soldPred, "zaloga sproscena");
     r = await api("GET", "/me/orders", T.ana);
     assert(!r.body.some(x => x.id === n2.id), "opusceno narocilo ni v /me/orders", r.body.map(x => x.id));
-    r = await webhook("checkout.session.completed", placana(S.seje.cs_test_2, "pi_pozno"));
+    Object.assign(S.seje.cs_test_2, placana(S.seje.cs_test_2, "pi_pozno"));
+    r = await webhook("checkout.session.completed", S.seje.cs_test_2);
     o = (await pool.query("SELECT status FROM orders WHERE id=$1", [n2.id])).rows[0];
     assert(r.status === 200 && o.status === "cancelled", "placilo za preklicano narocilo ga ne obudi (zabelezeno za rocno vracilo)", o);
     assert(/POZOR: placilo za neaktivno narocilo/.test(log), "dnevnik opozori na rocno vracilo");
@@ -280,11 +284,13 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
     assert(await sold() === soldPred3, "zaloga sproscena");
 
     console.log("\n# Vracila (charge.refunded)");
-    r = await webhook("charge.refunded", { id: "ch_test_1", object: "charge", payment_intent: "pi_test_1", amount: 3000, amount_refunded: 1500, refunded: false });
+    S.naboji.ch_test_1 = { id: "ch_test_1", object: "charge", payment_intent: "pi_test_1", amount: 3000, amount_refunded: 1500, refunded: false };
+    r = await webhook("charge.refunded", { id: "ch_test_1", object: "charge", amount_refunded: 999999 });   // vsebina webhooka se ne uposteva
     o = (await pool.query("SELECT status, refunded_cents FROM orders WHERE id=$1", [n1.id])).rows[0];
     assert(r.status === 200 && o.status === "partially_refunded" && o.refunded_cents === 1500, "delno vracilo", o);
     const soldPred4 = await sold();
-    r = await webhook("charge.refunded", { id: "ch_test_1", object: "charge", payment_intent: "pi_test_1", amount: 3000, amount_refunded: 3000, refunded: true });
+    Object.assign(S.naboji.ch_test_1, { amount_refunded: 3000, refunded: true });
+    r = await webhook("charge.refunded", S.naboji.ch_test_1);
     o = (await pool.query("SELECT status, refunded_cents FROM orders WHERE id=$1", [n1.id])).rows[0];
     assert(o.status === "refunded" && o.refunded_cents === 3000, "polno vracilo", o);
     const vs = (await pool.query("SELECT status FROM tickets WHERE order_id=$1", [n1.id])).rows.map(x => x.status);
@@ -324,9 +330,15 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
     r = await api("POST", `/events/${ev}/tables/1/orders`, T.bor, {});
     assert(r.status === 409, "cakajoce narocilo drzi mizo -> 409 za drugega", r);
     const sm = S.seje[(await pool.query("SELECT stripe_checkout_session_id FROM orders WHERE id=$1", [nm.id])).rows[0].stripe_checkout_session_id];
-    r = await webhook("checkout.session.completed", placana(sm, "pi_miza"));
+    Object.assign(sm, placana(sm, "pi_miza"));
+    r = await webhook("checkout.session.completed", { id: sm.id, object: "checkout.session" });
     vst = (await pool.query("SELECT COUNT(*)::int AS n FROM tickets WHERE order_id=$1", [nm.id])).rows[0].n;
     assert(r.status === 200 && vst === 4, "miza placana: 4 vstopnice (sedezi)", vst);
+
+    console.log("\n# Webhook, ko Stripe ne vrne objekta");
+    r = await webhook("checkout.session.completed", { id: "cs_ne_obstaja", object: "checkout.session" }, { id: "evt_brez_objekta" });
+    const zab = (await pool.query("SELECT 1 FROM stripe_events WHERE id='evt_brez_objekta'")).rows.length;
+    assert(r.status >= 500 && zab === 0, "branje ne uspe -> 5xx, dogodek ni zabelezen (Stripe ga ponovi)", [r.status, zab]);
 
     console.log("\n# Neznan dogodek");
     r = await webhook("payment_intent.created", { id: "pi_x", object: "payment_intent" });

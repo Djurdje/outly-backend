@@ -155,8 +155,18 @@ async function vracilo(c, charge) {
   console.log(`[stripe] vracilo: narocilo ${o.public_ref}, ${vrnjeno} c${polno ? " (polno)" : ""}`);
 }
 
-async function obdelajDogodek(c, d) {
+// Objekt dogodka preberemo SVEZ iz Stripa (pripeta API razlicica): oblika webhooka je odvisna od razlicice endpointa v
+// nadzorni plosci, ne od nas, in svez objekt je tudi dodatna potrditev, da dogodek ni ponarejen.
+async function svezObjekt(s, d) {
   const o = d.data && d.data.object;
+  if (!o || !o.id) return o;
+  if (d.type.startsWith("checkout.session.")) return s.checkout.sessions.retrieve(o.id);
+  if (d.type === "charge.refunded") return s.charges.retrieve(o.id);
+  if (d.type === "account.updated") return s.accounts.retrieve(o.id);
+  return o;
+}
+
+async function obdelajDogodek(c, d, o) {
   switch (d.type) {
     case "checkout.session.completed":
       if (o.payment_status === "paid") await zakljuci(c, o);   // "unpaid" = odlozeno placilo, pride async_payment_succeeded
@@ -183,13 +193,16 @@ function ustvari({ pool }) {
       try { d = s.webhooks.constructEvent(req.body, podpis, sk); break; } catch (_) { /* naslednja skrivnost */ }
     }
     if (!d) return res.status(400).send("Invalid signature.");
+    let objekt;
+    try { objekt = await svezObjekt(s, d); }
+    catch (e) { console.error(`[stripe] webhook ${d.type} ${d.id}: branje objekta ni uspelo:`, e.message); return res.status(502).send("Try again."); }
     let c;
     try { c = await pool.connect(); } catch (e) { console.error("[stripe] webhook brez baze:", e.message); return res.status(503).send("Try again."); }
     try {
       await c.query("BEGIN");
       const nov = await c.query("INSERT INTO stripe_events (id, type) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING id", [d.id, d.type]);
       if (!nov.rows.length) { await c.query("ROLLBACK"); return res.json({ received: true, duplicate: true }); }
-      await obdelajDogodek(c, d);
+      await obdelajDogodek(c, d, objekt);
       await c.query("COMMIT");
       return res.json({ received: true });
     } catch (e) {
