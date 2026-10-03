@@ -348,6 +348,32 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
     const zab = (await pool.query("SELECT 1 FROM stripe_events WHERE id='evt_brez_objekta'")).rows.length;
     assert(r.status >= 500 && zab === 0, "branje ne uspe -> 5xx, dogodek ni zabelezen (Stripe ga ponovi)", [r.status, zab]);
 
+    console.log("\n# Provizija po klubu (migracija 031, admin panel)");
+    const Tadmin = zeton("admin@outly.si", uuid(9));
+    await api("GET", "/me", Tadmin);
+    await pool.query("UPDATE users SET role='admin' WHERE email='admin@outly.si'");
+    r = await api("PATCH", "/admin/api/clubs/1", Tadmin, { commissionPercent: 60 });
+    assert(r.status === 400, "provizija 60 % -> 400", r);
+    r = await api("PATCH", "/admin/api/clubs/1", Tadmin, { commissionPercent: "2,555" });
+    assert(r.status === 400, "vec kot 2 decimalki -> 400", r);
+    r = await api("PATCH", "/admin/api/clubs/1", T.lastnik, { commissionPercent: 0 });
+    assert(r.status === 401 || r.status === 403, "lastnik ne sme na admin pot", r.status);
+    r = await api("PATCH", "/business/clubs/me", T.lastnik, { commissionPercent: 0, commission_bps: 0 }, { "x-outly-club": "1" });
+    let kom = (await pool.query("SELECT commission_bps FROM clubs WHERE id=1")).rows[0].commission_bps;
+    assert(kom === null, "lastnik provizije ne more nastaviti prek svoje poti (ostane privzeta)", kom);
+    r = await api("PATCH", "/admin/api/clubs/1", Tadmin, { commissionPercent: "2,5" });
+    assert(r.status === 200 && r.body.commission_bps === 250, "admin nastavi 2,5 % -> commission_bps 250", r.body);
+    r = await api("GET", "/business/sales", T.lastnik, undefined, { "x-outly-club": "1" });
+    assert(r.status === 200 && r.body.fee_percent === 2.5, "lastnik v prodaji vidi svojo provizijo 2,5 %", r.body.fee_percent);
+    const sejPred = S.zahtevkiSej.length;
+    r = await api("POST", `/events/${ev}/orders`, T.bor, { quantity: 1 });
+    assert(r.status === 201 && r.body.order.application_fee_cents === 38, "nakup 15 EUR pri 2,5 %: provizija 38 c (37,5 zaokrozeno)", r.body.order);
+    assert(S.zahtevkiSej[sejPred] && S.zahtevkiSej[sejPred].params["payment_intent_data[application_fee_amount]"] === "38", "Stripe dobi application_fee_amount 38");
+    r = await api("PATCH", "/admin/api/clubs/1", Tadmin, { commissionPercent: null });
+    assert(r.status === 200 && r.body.commission_bps === null, "prazno -> spet privzeta", r.body);
+    const fee38 = (await pool.query("SELECT application_fee_cents FROM orders ORDER BY id DESC LIMIT 1")).rows[0].application_fee_cents;
+    assert(fee38 === 38, "sprememba provizije ne spremeni ze ustvarjenega narocila", fee38);
+
     console.log("\n# Neznan dogodek");
     r = await webhook("payment_intent.created", { id: "pi_x", object: "payment_intent" });
     assert(r.status === 200, "neznan dogodek -> 200", r);

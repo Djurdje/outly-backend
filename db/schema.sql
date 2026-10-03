@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–030, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–031, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict JcGvKoV8GNqSpOz0mJtL8JOAqiH45tEdKSNomDtIUgbKbnP9dZjbujr7g55GHYf
+\restrict apfQf8ZsJ0bgWBcUEyDiui2NgLUbcE7mzM6nRYD1HIL3AK0YfyxDcOGIbh0mKdK
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -345,7 +345,9 @@ CREATE TABLE public.clubs (
     gallery_urls text[] DEFAULT '{}'::text[] NOT NULL,
     video_url text DEFAULT ''::text NOT NULL,
     floor_plan jsonb,
+    commission_bps integer,
     CONSTRAINT clubs_bar_prices_chk CHECK ((jsonb_typeof(bar_prices) = 'array'::text)),
+    CONSTRAINT clubs_commission_bps_chk CHECK (((commission_bps IS NULL) OR ((commission_bps >= 0) AND (commission_bps <= 5000)))),
     CONSTRAINT clubs_coords_chk CHECK (((lat IS NULL) = (lng IS NULL))),
     CONSTRAINT clubs_gallery_chk CHECK ((cardinality(gallery_urls) <= 3)),
     CONSTRAINT clubs_lat_chk CHECK (((lat IS NULL) OR ((lat >= ('-90'::integer)::double precision) AND (lat <= (90)::double precision)))),
@@ -353,6 +355,13 @@ CREATE TABLE public.clubs (
     CONSTRAINT clubs_min_age_chk CHECK (((min_age >= 0) AND (min_age <= 99))),
     CONSTRAINT clubs_name_chk CHECK ((length(TRIM(BOTH FROM name)) > 0))
 );
+
+
+--
+-- Name: COLUMN clubs.commission_bps; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.clubs.commission_bps IS 'Provizija Outlyja za ta klub v baznih tockah (100 = 1 %). NULL = privzeta (PROVIZIJA_ODSTOTEK). Nastavi admin.';
 
 
 --
@@ -1796,5 +1805,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict JcGvKoV8GNqSpOz0mJtL8JOAqiH45tEdKSNomDtIUgbKbnP9dZjbujr7g55GHYf
+\unrestrict apfQf8ZsJ0bgWBcUEyDiui2NgLUbcE7mzM6nRYD1HIL3AK0YfyxDcOGIbh0mKdK
 

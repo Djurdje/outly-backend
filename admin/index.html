@@ -182,6 +182,7 @@
             <div><label>Lat</label><input id="k_lat" placeholder="46.0511"></div>
             <div><label>Lng</label><input id="k_lng" placeholder="14.5051"></div>
             <div><label>Min. starost</label><input id="k_minAge" value="18"></div>
+            <div><label>Provizija % (prazno = privzeta)</label><input id="k_commissionPercent" placeholder="npr. 5 ali 2,5" inputmode="decimal"></div>
             <div><label>Žanri (vejica)</label><input id="k_genres" placeholder="techno, house"></div>
             <div><label>Kontaktni e-naslov</label><input id="k_contactEmail"></div>
             <div><label>Telefon</label><input id="k_contactPhone"></div>
@@ -449,7 +450,7 @@ async function odloci(id, kaj) {
 }
 
 // ---------- klubi ----------
-const kPolja = ["ownerEmail", "name", "city", "country", "address", "lat", "lng", "minAge", "genres", "contactEmail", "contactPhone", "instagram", "website", "logoUrl", "bannerUrl", "description"];
+const kPolja = ["ownerEmail", "name", "city", "country", "address", "lat", "lng", "minAge", "commissionPercent", "genres", "contactEmail", "contactPhone", "instagram", "website", "logoUrl", "bannerUrl", "description"];
 function kPocisti() {
   $("k_id").value = ""; kPolja.forEach(p => $("k_" + p).value = "");
   $("k_city").value = "Ljubljana"; $("k_country").value = "Slovenija"; $("k_minAge").value = "18";
@@ -461,6 +462,7 @@ function kTelo() {
     const v = $("k_" + p).value.trim();
     if (p === "lat" || p === "lng") continue;
     if (p === "minAge") { t.minAge = v === "" ? 18 : Number(v); continue; }
+    if (p === "commissionPercent") { t.commissionPercent = v === "" ? null : v.replace(",", "."); continue; }
     if (p === "genres") { t.genres = v ? v.split(",").map(s => s.trim()).filter(Boolean) : []; continue; }
     t[p] = v;
   }
@@ -487,7 +489,7 @@ function kUredi(id) {
   const k = klubi.find(x => x.id === id); if (!k) return;
   $("k_id").value = k.id;
   const m = { ownerEmail: k.owner_email, name: k.name, city: k.city, country: k.country, address: k.address, lat: k.lat ?? "", lng: k.lng ?? "",
-    minAge: k.min_age, genres: (k.genres || []).join(", "), contactEmail: k.contact_email, contactPhone: k.contact_phone, instagram: k.instagram,
+    minAge: k.min_age, commissionPercent: k.commission_bps === null || k.commission_bps === undefined ? "" : String(k.commission_bps / 100), genres: (k.genres || []).join(", "), contactEmail: k.contact_email, contactPhone: k.contact_phone, instagram: k.instagram,
     website: k.website, logoUrl: k.logo_url, bannerUrl: k.banner_url, description: k.description };
   for (const p of kPolja) $("k_" + p).value = m[p] ?? "";
   $("kNaslov").firstChild.textContent = `Uredi klub #${k.id} `; $("kShrani").textContent = "Shrani spremembe";
@@ -504,7 +506,7 @@ async function naloziKlube() {
       <tr>
         <td class="mono">${k.id}</td>
         <td>${k.logo_url ? `<img class="mini" src="${ubezi(k.logo_url)}" alt="">` : `<span class="mini" style="display:inline-block"></span>`}</td>
-        <td><b>${ubezi(k.name)}</b><span class="drobno">${[(k.genres || []).join(", "), k.min_age ? k.min_age + "+" : ""].filter(Boolean).join(" · ")}</span></td>
+        <td><b>${ubezi(k.name)}</b><span class="drobno">${[(k.genres || []).join(", "), k.min_age ? k.min_age + "+" : "", k.commission_bps !== null && k.commission_bps !== undefined ? "provizija " + (k.commission_bps / 100).toLocaleString("sl-SI") + " %" : "provizija privzeta"].filter(Boolean).join(" · ")}</span></td>
         <td>${ubezi(k.owner_email || "—")}<span class="drobno">${ubezi(k.owner_username || "")}</span></td>
         <td>${ubezi(k.city)}<span class="drobno">${ubezi(k.address)}</span></td>
         <td class="mono">${k.lat !== null ? k.lat.toFixed(4) + ", " + k.lng.toFixed(4) : '<span class="znacka opoz">brez</span>'}</td>

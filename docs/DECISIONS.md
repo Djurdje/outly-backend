@@ -29,6 +29,12 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   *velja dokler*: Outly sam ne postane prodajalec (takrat DDV, blagajna in vračila preidejo na NEXT DIMENSIONS).
 - 2026-09-08: **Provizija Outlyja je 10 %** (`PROVIZIJA_ODSTOTEK`, privzeto 10).
   *velja dokler*: ne podpišemo drugačne pogodbe s klubi; odstotek je spremenljivka okolja, ne koda.
+- 2026-10-03: **Provizija po klubu** (Martin: »z vsakim klubom drugačna provizija, nekje 5 %, nekje 2 %«). `clubs.commission_bps`
+  (bazne točke, migracija 031) nastavi samo admin v admin panelu; prazno = privzeta 10 %. Zamrzne se na naročilu ob nakupu.
+  Lastnik jo vidi v `GET /business/sales` (`fee_percent`), spremeniti je ne more. **Odprto (Martin):** Stripovo provizijo
+  (~1,5 % + 0,25 €) pri destination charge plača Outly iz svoje provizije – pri 2 % in vstopnici 15 € je to izguba; možnosti:
+  strošek prenesti na klub, servisni strošek kupcu ali spodnja meja provizije. *vir/dokaz*: pogovor 3. 10. 2026,
+  `_testi/test_stripe.js` (»nakup 15 EUR pri 2,5 %: provizija 38 c«) · *velja dokler*: drugače ne odloči Martin · *nadomeščena z*: —
 - 2026-09: **Kartica se nikoli ne vnaša v naš vmesnik** (PCI DSS SAQ D). Uporabi se Stripov gostovani obrazec.
 - 2026-09-14: **Stripe Checkout (gostovana stran) namesto Stripe SDK** — razlog: brez Xcoda ne moremo dodati
   paketa v iOS projekt; Apple Pay pride s Checkoutom sam.

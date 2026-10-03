@@ -2308,7 +2308,7 @@ const ADMIN_POLJA_UPORABNIKA = `id, email, username, role, email_verified, avata
 // ki ga panel ne potrebuje in ki ne sme uhajati nikamor).
 const ADMIN_STOLPCI_KLUBA = `c.id, c.owner_user_id, c.name, c.logo_url, c.banner_url, c.description,
   c.contact_email, c.contact_phone, c.instagram, c.website, c.address, c.city, c.country,
-  c.lat, c.lng, c.min_age, c.genres, c.hidden, c.stripe_charges_enabled, c.created_at,
+  c.lat, c.lng, c.min_age, c.genres, c.hidden, c.stripe_charges_enabled, c.commission_bps, c.created_at,
   u.email AS owner_email, u.username AS owner_username`;
 
 const VELJAVEN_EMAIL = /^[^@\s]+@[^@\s.]+\.[^@\s]+$/;
@@ -2597,6 +2597,19 @@ admin.get("/clubs", async (req, res) => {
 });
 
 // Skupno preverjanje polj kluba za POST in PATCH. Vrne { sets, vrednosti } ali napako.
+// Provizija kluba iz telesa ADMIN zahtevka (samo admin poti; klub je ne more nastaviti): commissionPercent = stevilo 0-50
+// (npr. 2.5) ali null/"" = privzeta. Vrne { napaka } | { bps } (bps null = privzeta) | null (polja ni v telesu).
+function provizijaIzTelesa(b) {
+  const v = b.commissionPercent !== undefined ? b.commissionPercent : b.commission_percent;
+  if (v === undefined) return null;
+  if (v === null || v === "") return { bps: null };
+  const n = Number(String(v).replace(",", "."));
+  if (!Number.isFinite(n) || n < 0 || n > 50) return { napaka: "commissionPercent must be a number 0-50 (or empty for the default)." };
+  const bps = Math.round(n * 100);
+  if (Math.abs(bps - n * 100) > 1e-6) return { napaka: "commissionPercent may have at most 2 decimals." };
+  return { bps };
+}
+
 function poljaKluba(b, zaVstavljanje) {
   const out = {};
   const bes = (kljuc, ...imena) => {
@@ -2668,6 +2681,9 @@ admin.post("/clubs", async (req, res) => {
     if (b.ownerEmail === undefined && b.owner_email === undefined) return res.status(400).send("ownerEmail is required.");
     const pk = poljaKluba(b, true);
     if (pk.napaka) return res.status(400).send(pk.napaka);
+    const prov = provizijaIzTelesa(b);
+    if (prov && prov.napaka) return res.status(400).send(prov.napaka);
+    if (prov) pk.polja.commission_bps = prov.bps;
 
     await c.query("BEGIN");
     const l = await lastnikPoEmailu(c, b.ownerEmail ?? b.owner_email);
@@ -2710,6 +2726,9 @@ admin.patch("/clubs/:id", async (req, res) => {
   try {
     const pk = poljaKluba(b, false);
     if (pk.napaka) return res.status(400).send(pk.napaka);
+    const prov = provizijaIzTelesa(b);
+    if (prov && prov.napaka) return res.status(400).send(prov.napaka);
+    if (prov) pk.polja.commission_bps = prov.bps;
     const polja = pk.polja;
 
     await c.query("BEGIN");
@@ -3107,6 +3126,11 @@ app.use("/admin/api", admin);
 // TEST_PLACILA=true). Ko pride Stripe, ta pot dobi PaymentIntent in webhook;
 // vse ostalo (zaloga, vstopnice, QR, skener, prodaja) ostane.
 const PROVIZIJA_ODSTOTEK = Number(process.env.PROVIZIJA_ODSTOTEK || 10); // ODLOČITEV MARTINA — začasno 10 %
+// Provizija za klub (migracija 031): clubs.commission_bps (bazne tocke, 100 = 1 %), sicer privzeta. Vrne cele cente (I9).
+function provizijaCentov(znesekCentov, commissionBps) {
+  const bps = commissionBps === null || commissionBps === undefined ? Math.round(PROVIZIJA_ODSTOTEK * 100) : commissionBps;
+  return Math.round(znesekCentov * bps / 10000);
+}
 const NAJVEC_NA_NAROCILO = 10;
 
 function testniNacinPlacil() {
@@ -3594,7 +3618,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
-              c.stripe_account_id, c.stripe_charges_enabled
+              c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]
     );
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
@@ -3618,7 +3642,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     const test = nacin === "test";
 
     const skupaj = e.ticket_price_cents * q;
-    const provizija = Math.round(skupaj * PROVIZIJA_ODSTOTEK / 100);
+    const provizija = provizijaCentov(skupaj, e.commission_bps);
     const ref = javnaRef();
     const pi = test ? "test_" + crypto.randomUUID() : null;
 
@@ -3833,9 +3857,11 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
       // Novo, samo ce je ?range= navedеn — DODANO polje, star odjemalec (brez range) ga ne dobi.
       range ? serijaProdaje(klub, range) : Promise.resolve(null),
     ]);
+    // Provizija TEGA kluba (031), ce jo je admin nastavil; sicer privzeta. Lastnik vidi svojo pogodbeno provizijo.
+    const kp = (await pool.query("SELECT commission_bps FROM clubs WHERE id=$1", [klub])).rows[0];
     const odgovor = {
       mode: testniNacinPlacil() ? "test" : "live",
-      fee_percent: PROVIZIJA_ODSTOTEK,
+      fee_percent: kp && kp.commission_bps !== null ? kp.commission_bps / 100 : PROVIZIJA_ODSTOTEK,
       summary: povzetek.rows[0],
       events: poDogodkih.rows,
       recent_orders: zadnja.rows,
@@ -4674,7 +4700,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     }
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled,
-              e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled
+              e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps
          FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
     const e = er.rows[0];
@@ -4718,7 +4744,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     const test = nacin === "test";
 
     const cena = miza.price_cents;
-    const provizija = Math.round(cena * PROVIZIJA_ODSTOTEK / 100);
+    const provizija = provizijaCentov(cena, e.commission_bps);
     const ref = javnaRef();
     const pi = test ? "test_" + crypto.randomUUID() : null;
 
