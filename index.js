@@ -3134,6 +3134,33 @@ function stripeNapaka(res, e, kaj) {
   return res.status(502).send("Payment provider error. Please try again.");
 }
 
+// Express racun kluba: ustvari ga najvec enkrat. Hkratna klika serializira zaklep na klub (velja med instancami), drugi
+// po zaklepu vidi racun prvega. NAMENOMA brez Stripovega idempotentnega kljuca: Stripe si pod kljucem 24 h zapomni tudi
+// ZAVRNITEV (3. 10. 2026: politika "Accounts v1" je bila izklopljena, po vklopu je isti kljuc se naprej vracal napako).
+async function stripeRacunKluba(s, k, userId) {
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [`stripe-racun:${k.id}`]);
+    const ze = (await c.query("SELECT stripe_account_id FROM clubs WHERE id=$1", [k.id])).rows[0];
+    if (ze && ze.stripe_account_id) { await c.query("COMMIT"); return ze.stripe_account_id; }
+    const u = await c.query("SELECT email FROM users WHERE id=$1", [userId]);
+    const nov = await s.accounts.create({
+      type: "express",
+      country: "SI",
+      email: u.rows[0] ? u.rows[0].email : undefined,
+      capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
+      business_profile: { name: k.name },
+      metadata: { club_id: String(k.id) },
+    });
+    await c.query("UPDATE clubs SET stripe_account_id=$2 WHERE id=$1", [k.id, nov.id]);
+    await c.query("COMMIT");
+    console.log(`[stripe] klub ${k.id}: nov Connect racun`);
+    return nov.id;
+  } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
+  finally { c.release(); }
+}
+
 // POST /business/stripe/onboard — lastnik: ustvari (ce se ni) Express racun kluba in vrne povezavo do Stripovega obrazca.
 // Odgovor: { url }. Povratni naslovi vodijo v spletne nastavitve kluba (?stripe=vrnitev | ?stripe=osvezi).
 app.post("/business/stripe/onboard", requireAuth, requireClub("owner"), async (req, res) => {
@@ -3143,22 +3170,7 @@ app.post("/business/stripe/onboard", requireAuth, requireClub("owner"), async (r
     const k = await stripeKlub(req, res);
     if (!k) return;
     let racun = k.stripe_account_id;
-    if (!racun) {
-      const u = await pool.query("SELECT email FROM users WHERE id=$1", [req.user.userId]);
-      const nov = await s.accounts.create({
-        type: "express",
-        country: "SI",
-        email: u.rows[0] ? u.rows[0].email : undefined,
-        capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
-        business_profile: { name: k.name },
-        metadata: { club_id: String(k.id) },
-      }, { idempotencyKey: `outly-klub-${k.id}-racun` });
-      // Hkratna zahtevka: idempotentni kljuc vrne isti racun; v bazo ga zapise samo prvi.
-      const z = await pool.query("UPDATE clubs SET stripe_account_id=$2 WHERE id=$1 AND stripe_account_id IS NULL RETURNING stripe_account_id", [k.id, nov.id]);
-      racun = z.rows.length ? z.rows[0].stripe_account_id
-        : (await pool.query("SELECT stripe_account_id FROM clubs WHERE id=$1", [k.id])).rows[0].stripe_account_id;
-      console.log(`[stripe] klub ${k.id}: nov Connect racun`);
-    }
+    if (!racun) racun = await stripeRacunKluba(s, k, req.user.userId);
     const nastavitve = `${placilaStripe.osnovaSpleta()}/app/business/${k.id}/settings`;
     const povezava = await s.accountLinks.create({
       account: racun, type: "account_onboarding",

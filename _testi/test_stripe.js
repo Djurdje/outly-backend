@@ -56,6 +56,7 @@ const stripeServer = http.createServer(async (req, res) => {
   const u = req.url.split("?")[0];
   let m;
   if (req.method === "POST" && u === "/v1/accounts") {
+    if (S.zavrniRacun) return odg(400, { error: { type: "invalid_request_error", message: "Stripe no longer recommends Accounts v1 for new Connect integrations." } });
     S.stRacunov++;
     const kljuc = req.headers["idempotency-key"];
     const obst = Object.values(S.racuni).find(a => a._kljuc === kljuc);
@@ -163,7 +164,14 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
     assert(r.status === 403, "manager ne sme onboardati -> 403", r.body);
     r = await api("POST", "/business/stripe/onboard", T.ana, {}, { "x-outly-club": "1" });
     assert(r.status === 404 || r.status === 403, "navaden uporabnik -> 403/404", r.status);
+    S.zavrniRacun = true;
     r = await api("POST", "/business/stripe/onboard", T.lastnik, {}, { "x-outly-club": "1" });
+    assert(r.status === 502, "Stripe zavrne ustvarjanje racuna -> 502", r);
+    S.zavrniRacun = false;
+    const [r1, r2] = await Promise.all([1, 2].map(() => api("POST", "/business/stripe/onboard", T.lastnik, {}, { "x-outly-club": "1" })));
+    assert(r1.status === 200 && r2.status === 200, "po odpravi zavrnitve: ponoven klik uspe (zavrnitev se ne zapomni)", [r1.status, r2.status]);
+    assert(S.stRacunov === 1, "dva hkratna klika -> en sam Connect racun", S.stRacunov);
+    r = r1;
     assert(r.status === 200 && /^https:\/\/connect\.stripe\.test\/setup\/acct_test1$/.test(r.body.url), "lastnik dobi povezavo onboardinga", r.body);
     const racun = S.racuni.acct_test1;
     assert(racun && racun._params.type === "express" && racun._params.country === "SI", "Express racun, SI", racun && racun._params);
