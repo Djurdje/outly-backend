@@ -18,7 +18,7 @@
  *      sproscena za pocasnejse GitHub runnerje; stara koda ~580-780 ms). 3b: ista navala + 1000 bralcev GET /events hkrati
  *      (p95 skena < 1000 ms, brez 5xx). Vsak vratar skenira prek svoje vzdrzevane (keep-alive) povezave; sken z NOVO povezavo
  *      ob navali caka v vrsti sprejemanja za ~1000 povezavami (~2,5-3 s; issue #139), zato je to samo informativna sonda
- *      (trditev: 404 unknown, brez meje). Pred/po 3b test izpise stevce jedra (/proc/net/netstat) in casovnico sprejemanja.
+ *      (trditev: 404 unknown in odgovor < 8 s); med 3b jedro ne sme zavreci nobene povezave (backlog 4096, #134). Pred/po 3b test izpise stevce jedra (/proc/net/netstat) in casovnico sprejemanja.
  *   4. 300 hkratnih nakupov z mesanimi kolicinami (1-4) za dogodek s kapaciteto 100: sold_count == vsota uspesnih,
  *      <= capacity, nobenega 5xx.
  *   5. Po koncu obremenitve backend takoj odgovarja: p95 20 zaporednih GET /events in 20 skenov < 500 ms.
@@ -157,6 +157,7 @@ function razlikaStevcev(pred, po) {
   return d;
 }
 
+let srv = null;   // proces backenda (ubit tudi ob izjemi)
 (async () => {
   const pool = new Pool({ connectionString: DB });
   await pool.query("TRUNCATE ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
@@ -166,7 +167,7 @@ function razlikaStevcev(pred, po) {
   // s predpomnilnikom 1000 bralcev istega kljuca postane ena poizvedba + 1000 x 100 kB odgovora, torej meri zasedenost
   // izvajalne zanke Node (p95 skena ~1,07 s v 2 od 3 zagonov, nestabilno), ne poolov. Predpomnilnik sam pokriva
   // test_javni_predpomnilnik.js; nakupi in sken predpomnilnika sploh ne uporabljajo (nakup ga celo izprazni).
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require ${path.join(__dirname, "sled_streznika.js")}`.trim(), SLED_STREZNIK, PORT: String(PORT), JAVNI_PREDPOMNILNIK_MS: "0", SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
+  srv = spawn("node", ["index.js"], { env: { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require ${path.join(__dirname, "sled_streznika.js")}`.trim(), SLED_STREZNIK, PORT: String(PORT), JAVNI_PREDPOMNILNIK_MS: "0", SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
   for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
 
@@ -231,6 +232,8 @@ function razlikaStevcev(pred, po) {
   // skenira prek ze odprte povezave. Skener s skupnim bazenom fetch je ob zacetku navale 1300 hkratnih zahtevkov ostal brez proste
   // povezave in odprl NOVO; ta je v vrsti sprejemanja cakala za ~1000 povezavami bralcev/nakupov, Node pa ob zasedeni zanki sprejme
   // ~1 povezavo na obdelan zahtevek (CI: ~3,1 s, trije skenerji hkrati, p95 skena ~3,15 s; jedro ni zavrglo nobene povezave).
+  // POZOR: keepAliveTimeout strezniku je 5 s (Node privzeto). Korak, ki bi med prvim skenom (izhodisce) in zacetkom navale trajal > 5 s,
+  // bi povezavo zaprl (`socket hang up` ali tiha nova povezava): skenerji tecejo 100 ms pred navalo, da je povezava sveza.
   const agentiSken = vratarji.map(() => new http.Agent({ keepAlive: true, maxSockets: 1 }));
   let skenovSkupaj = 10;   // izhodiscnih 10 + vsi med navalami
   // Ena navala: 300 hkratnih nakupov za dogodek + (neobvezno) bralci GET /events hkrati + 3 vratarji skenirajo.
@@ -270,7 +273,8 @@ function razlikaStevcev(pred, po) {
     assert(skeni.every(x => x.status === 200 && x.result === "ok"), `${oznaka}: vsak sken -> 200 ok`, skeni.filter(x => !(x.status === 200 && x.result === "ok")).slice(0, 3));
     assert(percentil(ms, 0.95) < meja, `${oznaka}: p95 skena < ${meja} ms`, percentil(ms, 0.95));
     // Najpocasnejsi sken: eno-nitni Node je ob 1000 hkratnih velikih odgovorih (JSON) zaseden, zato max ni stabilna meja; ujame le obvisel sken.
-    assert(ms.length && ms[ms.length - 1] < 8000, `${oznaka}: noben sken ne visi (max < 8 s)`, ms[ms.length - 1]);
+    // Skeni tece prek vzdrzevane povezave (agentiSken): opazen max na CI 685 ms; 2 s ujame obvisel sken, ne CPU.
+    assert(ms.length && ms[ms.length - 1] < 2000, `${oznaka}: noben sken ne visi (max < 2 s)`, ms[ms.length - 1]);
   }
 
   console.log("\n# 2+3. 300 hkratnih nakupov (kapaciteta 100) + sken med obremenitvijo");
@@ -319,6 +323,11 @@ function razlikaStevcev(pred, po) {
     if (zavrzeno > 0) console.log(`  !! jedro je med 3b zavrglo povezave (ListenOverflows+ListenDrops+TCPReqQFullDrop = ${zavrzeno}): vrsta sprejemanja/SYN je prepolna, ne zakasnitev aplikacije`);
     else if ((jedroRazlika.TCPSynRetrans || 0) > 0) console.log(`  !! ponovno poslanih SYN: ${jedroRazlika.TCPSynRetrans} (brez zavrzenih v ListenOverflows/Drops - SYN vrsta ali SYN piskoti)`);
     else console.log("  (jedro ni zavrglo nobene povezave in ni bilo ponovnih SYN: zakasnitev, ce je je, ni zavrnitev jedra)");
+    // Pokritje #134 (listen backlog 4096 v index.js): skener ima zdaj vzdrzevano povezavo in sonda nima meje, zato bi vrnjen backlog 511
+    // sicer tiho presel. Jedro med navalo ne sme zavreci nobene povezave (ListenOverflows, ListenDrops, TCPReqQFullDrop).
+    assert(zavrzeno === 0, "jedro med 3b ni zavrglo nobene povezave (ListenOverflows + ListenDrops + TCPReqQFullDrop == 0; listen backlog 4096, #134)", jedroRazlika);
+  } else {
+    console.log("  (stevci jedra niso na voljo (ni Linux?): trditev o zavrzenih povezavah preskocena)");
   }
   const stD = steviloPoStatusu(d.nakupi);
   const bralciMs = d.bralciRez.map(x => x.ms).sort((a, b) => a - b);
@@ -332,6 +341,7 @@ function razlikaStevcev(pred, po) {
   preveriSkene("navala + 1000 bralcev", d.skeni, 1000);
   const sondeMs = d.sondeRez.map(x => Math.round(x.ms));
   console.log(`  (informativno: sken z NOVO povezavo ob navali ${sondeMs.join(", ")} ms; nova povezava caka v vrsti sprejemanja za povezavami bralcev, vzdrzevana ne)`);
+  assert(d.sondeRez.every(x => typeof x.ms === "number" && x.ms < 8000), "sken z novo povezavo ob navali: odgovor v < 8000 ms (ohlapna meja; garancije za novo povezavo ni, issue #139)", sondeMs);
   assert(d.sondeRez.every(x => x.status === 404 && x.body && x.body.result === "unknown"), "sken z novo povezavo ob navali: odgovor 404 unknown (brez 5xx, brez prekinjene povezave)", d.sondeRez.map(x => x.status));
   const porabljene = await pool.query("SELECT COUNT(*)::int AS n FROM tickets WHERE event_id=$1 AND status='used'", [dogodekB]);
   assert(porabljene.rows[0].n === skenovSkupaj, "v bazi je tocno toliko porabljenih vstopnic, kolikor je bilo skenov", { baza: porabljene.rows[0].n, skenov: skenovSkupaj });
@@ -368,4 +378,9 @@ function razlikaStevcev(pred, po) {
   srv.kill(); try { require("fs").unlinkSync(SLED_STREZNIK); } catch { /* ni datoteke */ }
   jwksServer.close(); await pool.end();
   process.exit(fail ? 1 : 0);
-})().catch(e => { console.error(e); process.exit(1); });
+})().catch(e => {
+  console.error(e);
+  if (srv) srv.kill();
+  try { require("fs").unlinkSync(SLED_STREZNIK); } catch { /* ni datoteke */ }
+  process.exit(1);
+});
