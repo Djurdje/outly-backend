@@ -3243,10 +3243,12 @@ app.post("/business/stripe/dashboard", requireAuth, requireClub("owner"), async 
 
 // Po COMMIT-u nakupa v Stripe nacinu: Checkout seja za cakajoce narocilo. Ob napaki narocilo -> failed (sprosti zalogo/mizo).
 // Vrne true, ce je seja ustvarjena; sicer je odgovor 502 ze poslan.
-async function nakupStripeSeja(res, c, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId }) {
+// odjemalec: "ios" (glava X-Outly-Client: ios) ali splet - doloci povratna naslova Checkouta (placila_stripe.js povratniNaslovi).
+const odjemalecNakupa = (req) => (String(req.get("x-outly-client") || "").toLowerCase() === "ios" ? "ios" : "splet");
+async function nakupStripeSeja(res, c, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec }) {
   try {
     const nr = await c.query("SELECT id, public_ref, currency, application_fee_cents FROM orders WHERE id=$1", [oid]);
-    const seja = await placilaStripe.ustvariCheckout({ narocilo: nr.rows[0], opis, kolicina, cenaEnoteCents, racunKluba, email, eventId });
+    const seja = await placilaStripe.ustvariCheckout({ narocilo: nr.rows[0], opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec });
     await c.query(
       "UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4) WHERE id=$1",
       [oid, seja.id, seja.url, seja.expires_at]);
@@ -3664,7 +3666,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     await c.query("COMMIT");
 
     if (!test && !(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – ${q === 1 ? "1 ticket" : q + " tickets"}`,
-      kolicina: q, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: u.email, eventId: e.id }))) return;
+      kolicina: q, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: u.email, eventId: e.id, odjemalec: odjemalecNakupa(req) }))) return;
 
     // POZOR: tu še držimo odjemalca c. Branje po COMMIT-u gre prek c, NE prek
     // pool: pri 10+ hkratnih nakupih (pool ima privzeto 10 povezav) bi vsak
@@ -4765,7 +4767,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     await c.query("COMMIT");
 
     if (!test && !(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – VIP ${miza.label}${paket ? " + " + paket.name : ""}`,
-      kolicina: 1, cenaEnoteCents: cena, racunKluba: e.stripe_account_id, email: starost.email, eventId: e.id }))) return;
+      kolicina: 1, cenaEnoteCents: cena, racunKluba: e.stripe_account_id, email: starost.email, eventId: e.id, odjemalec: odjemalecNakupa(req) }))) return;
 
     // Branje po COMMIT-u prek odjemalca c, NE prek pool (glej opombo pri POST /events/:id/orders).
     const telo = await odgovorNarocila(c, oid);
