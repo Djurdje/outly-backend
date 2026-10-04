@@ -80,7 +80,7 @@ const cakajoci_zaklep = async (pool) => Number((await pool.query(
 const osebna = ["my_plan", "friends_going", "friends_interested", "is_following"];
 
 function zazeni(port, dodatnoOkolje) {
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", ...dodatnoOkolje }, stdio: ["ignore", "pipe", "pipe"] });
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, REZERVACIJE_CISCENJE_MS: "0", PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", ...dodatnoOkolje }, stdio: ["ignore", "pipe", "pipe"] });
   srv.log = ""; srv.stdout.on("data", d => srv.log += d); srv.stderr.on("data", d => srv.log += d);
   return srv;
 }

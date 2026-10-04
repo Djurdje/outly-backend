@@ -4273,6 +4273,20 @@ function vipBesedilo(v, najmanj, najvec) {
   return t;
 }
 
+// Besedilo rezervacije po telefonu (ime gosta, opomba): kot vipBesedilo, a (1) dolzina je v ZNAKIH (kodnih tockah, kot char_length v bazi),
+// ne v enotah UTF-16, in (2) nevidni znaki ničelne širine (U+200B-U+200D, U+2060, U+FEFF) se odstranijo PRED obrezovanjem, da ime ne more
+// biti »nevidno« (osebje kluba bi videlo prazno vrstico). Vrne obrezan niz ali null (neveljavno).
+function rezervacijaBesedilo(v, najmanj, najvec) {
+  if (v === undefined || v === null) v = "";
+  if (typeof v !== "string") return null;
+  if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(v)) return null;
+  const t = v.replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").replace(/[\t\r\n]+/g, " ").trim();
+  if (/[\u0000-\u001f\u007f]/.test(t)) return null;
+  const n = [...t].length;
+  if (n < najmanj || n > najvec) return null;
+  return t;
+}
+
 // Id iz poti ali telesa v nove VIP poti: pozitivno celo stevilo, ki gre v PostgreSQL INTEGER (sicer bi
 // "out of range" bil 500). Vrne stevilo ali null.
 const PG_INT_MAX = 2147483647;
@@ -4636,9 +4650,9 @@ app.post("/business/events/:id/tables/:tableId/hold", requireAuth, requireClub("
   const mizaId = vipId(req.params.tableId);
   if (!mizaId) return res.status(400).send("Invalid table id.");
   const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
-  const ime = vipBesedilo(b.guest_name, 1, 60);
+  const ime = rezervacijaBesedilo(b.guest_name, 1, 60);
   if (ime === null) return res.status(400).send("guest_name must be 1 to 60 characters.");
-  const opomba = vipBesedilo(b.note, 0, 200);
+  const opomba = rezervacijaBesedilo(b.note, 0, 200);
   if (opomba === null) return res.status(400).send("note must be at most 200 characters.");
   const klub = await mojKlubId(req);
   if (!klub) return res.status(404).send("Club not found.");
@@ -4646,8 +4660,10 @@ app.post("/business/events/:id/tables/:tableId/hold", requireAuth, requireClub("
   try { c = await pool.connect(); } catch (err) { console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
   try {
     await nakupZacni(c);
-    const er = await c.query("SELECT id FROM events WHERE id = $1 AND club_id = $2", [id, klub]);
+    const er = await c.query(`SELECT id, (${KONEC_DOGODKA} <= NOW()) AS koncan FROM events WHERE id = $1 AND club_id = $2`, [id, klub]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+    // Koncan dogodek (isti izraz kot »ended« drugje): ime gosta se ne shrani brez smisla. Dogodek, ki tece, rezervacijo se sprejme.
+    if (er.rows[0].koncan) { await c.query("ROLLBACK"); return res.status(409).send("This event has already ended."); }
     // Miza TEGA kluba, ne arhivirana. Rezervacija je dovoljena tudi, ce je miza na dogodku izklopljena ali VIP na dogodku ni vklopljen
     // (klub tloris uporablja tudi samo za telefonske rezervacije).
     const mr = await c.query(
@@ -4712,10 +4728,12 @@ async function pocistiRezervacije() {
   }
 }
 if (REZERVACIJE_CISCENJE_MS > 0) {
+  // Prvi tek NE takoj po zagonu (glavni pool je takrat najbolj zaseden: prvi nakupi, health check, sken): vsaj 5 min + nakljucnih do 60 s
+  // (pri kratkem intervalu za teste sorazmerno krajse). Pospravljanje ni nujno, zato ne tekmuje z nakupi ob zagonu.
   setTimeout(() => {
     pocistiRezervacije();
     setInterval(pocistiRezervacije, REZERVACIJE_CISCENJE_MS).unref();
-  }, Math.round(Math.random() * Math.min(REZERVACIJE_CISCENJE_MS, 60 * 1000))).unref();
+  }, Math.min(REZERVACIJE_CISCENJE_MS, 5 * 60 * 1000) + Math.round(Math.random() * Math.min(REZERVACIJE_CISCENJE_MS, 60 * 1000))).unref();
 }
 
 // GET /events/:id/vip — javno (zeton ni potreben): tloris, proste/prodane mize, paketi. O kupcu NIC.

@@ -70,12 +70,12 @@ VIP vstopnice ne štejejo v `capacity` / `sold_count`; `GET /business/sales` št
 
 **Rezervacija po telefonu (migracija 032, 4. 10. 2026):** gost pokliče klub, klub (owner, manager) mizo sam označi kot zasedeno z
 `POST /business/events/:id/tables/:tableId/hold` `{ guest_name (1–60), note? (0–200) }` (201 + celoten odgovor `GET /business/events/:id/vip`;
-409 »This table is already booked.« pri naročilu ali obstoječi rezervaciji; 404 tuj dogodek/miza ali arhivirana miza) in jo sprosti z
+409 »This table is already booked.« pri naročilu ali obstoječi rezervaciji, 409 »This event has already ended.« za končan dogodek (`end_at`, sicer `start_at` + 8 h; dogodek, ki teče, sprejme; dolžina v znakih, nevidni znaki ničelne širine se odstranijo, da ime ne more biti »nevidno«); 404 tuj dogodek/miza ali arhivirana miza) in jo sprosti z
 `DELETE` iste poti (200 + isti odgovor; 404, če rezervacije ni). Tabela `table_holds` (`UNIQUE (event_id, table_id)`), v poslovnem odgovoru ima
 vsaka miza polje `hold: { guest_name, note, created_at } | null`. Javno (`GET /events/:id/vip`) je rezervirana miza `available: false`, **ime gosta
 in opomba se ne pokažeta nikjer javno ali kupcu**. Rezervacija NI naročilo: ne šteje v `GET /business/sales` ali adminove finance, nima vstopnic
 (sken se ne spremeni), dovoljena je tudi za mizo, ki je na dogodku izklopljena, in na dogodku brez vklopljenega VIP. Ime gosta je osebni podatek
-brez računa Outly: pospravljalec (`pocistiRezervacije`, vsako uro, `REZERVACIJE_CISCENJE_MS`) briše rezervacije dogodkov, ki so se končali pred več
+brez računa Outly: pospravljalec (`pocistiRezervacije`, vsako uro, `REZERVACIJE_CISCENJE_MS`; prvi tek šele 5–6 min po zagonu, da ne tekmuje z nakupi in ne šteje v poizvedbe testov) briše rezervacije dogodkov, ki so se končali pred več
 kot 24 h (`end_at`, sicer `start_at` + 12 h); brisanje dogodka jih pobriše (CASCADE).
 
 ## Sken brez povezave (issue #86, 1. 10. 2026)

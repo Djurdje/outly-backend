@@ -169,6 +169,10 @@ const spi = (ms) => new Promise(r => setTimeout(r, ms));
     ["guest_name seznam", { guest_name: ["a"] }], ["guest_name z nadzornim znakom (NUL)", { guest_name: "A\u0000B" }],
     ["opomba 201 znakov", { guest_name: "A", note: "x".repeat(201) }], ["opomba stevilo", { guest_name: "A", note: 5 }], ["opomba z NUL", { guest_name: "A", note: "a\u0000" }],
     ["opomba objekt", { guest_name: "A", note: {} }],
+    ["guest_name samo nevidni znaki (U+200B, U+200D, U+2060, U+FEFF)", { guest_name: "\u200b\u200d\u2060\ufeff" }],
+    ["guest_name presledki in nevidni znaki", { guest_name: " \u200b \u200c " }],
+    ["guest_name 61 kodnih tock (emoji)", { guest_name: "😀".repeat(61) }],
+    ["opomba 201 kodnih tock (emoji)", { guest_name: "A", note: "😀".repeat(201) }],
   ];
   for (const [opis, telo] of slabi) {
     r = await drzi(T.lastnik, E1, M1, telo);
@@ -199,6 +203,28 @@ const spi = (ms) => new Promise(r => setTimeout(r, ms));
   assert(r.status === 201 && r.body.tables.find(t => t.id === M2).hold.guest_name.length === 60, "ime z 60 znaki (sumniki) -> 201", r.status);
   await api("DELETE", pot(E1, M2), T.lastnik);
   await api("DELETE", pot(E1, M4), T.lastnik);
+  r = await drzi(T.lastnik, E1, M4, { guest_name: "😀".repeat(60), note: "😀".repeat(200) });
+  assert(r.status === 201 && [...r.body.tables.find(t => t.id === M4).hold.guest_name].length === 60 && [...r.body.tables.find(t => t.id === M4).hold.note].length === 200, "60 emoji v imenu in 200 emoji v opombi (dolzina v znakih, ne v enotah UTF-16) -> 201", r.status);
+  await api("DELETE", pot(E1, M4), T.lastnik);
+  r = await drzi(T.lastnik, E1, M4, { guest_name: "A\u200bB\u200d C\ufeff", note: "\u200b\u200b" });
+  const hZw = r.body.tables && r.body.tables.find(t => t.id === M4).hold;
+  assert(r.status === 201 && hZw && hZw.guest_name === "AB C" && hZw.note === null, "nevidni znaki se odstranijo (ime »AB C«, opomba samo iz nevidnih = null)", hZw);
+  await api("DELETE", pot(E1, M4), T.lastnik);
+
+  console.log("\n# Koncan dogodek: rezervacija ni mogoca (isti izraz kot »ended« drugje: end_at, sicer start_at + 8 h)");
+  const EKON1 = (await pool.query("INSERT INTO events (club_id,title,poster_url,start_at,status) VALUES (1,'Koncan A','https://example.com/p.jpg', NOW() - INTERVAL '10 hours','published') RETURNING id")).rows[0].id;
+  const EKON2 = (await pool.query("INSERT INTO events (club_id,title,poster_url,start_at,end_at,status) VALUES (1,'Koncan B','https://example.com/p.jpg', NOW() - INTERVAL '10 hours', NOW() - INTERVAL '1 hour','published') RETURNING id")).rows[0].id;
+  const ETECE1 = (await pool.query("INSERT INTO events (club_id,title,poster_url,start_at,status) VALUES (1,'Tece A','https://example.com/p.jpg', NOW() - INTERVAL '3 hours','published') RETURNING id")).rows[0].id;
+  const ETECE2 = (await pool.query("INSERT INTO events (club_id,title,poster_url,start_at,end_at,status) VALUES (1,'Tece B','https://example.com/p.jpg', NOW() - INTERVAL '10 hours', NOW() + INTERVAL '1 hour','published') RETURNING id")).rows[0].id;
+  for (const [e, ime] of [[EKON1, "brez end_at, zacetek pred 10 h"], [EKON2, "end_at pred 1 h"]]) {
+    r = await drzi(T.lastnik, e, M1, { guest_name: "Prepozni gost" });
+    assert(r.status === 409 && r.body === "This event has already ended.", `koncan dogodek (${ime}) -> 409 »This event has already ended.«`, [r.status, r.body]);
+    assert(await rezervacij(e, M1) === 0, "  ime se ni shranilo");
+  }
+  for (const [e, ime] of [[ETECE1, "zacel pred 3 h, brez end_at"], [ETECE2, "end_at cez 1 h"]]) {
+    r = await drzi(T.lastnik, e, M1, { guest_name: "Nocni gost" });
+    assert(r.status === 201, `dogodek, ki tece (${ime}) -> 201`, [r.status, r.body]);
+  }
 
   console.log("\n# 409: ze rezervirana, prodana, placilo v teku; dovoljeno po preklicu");
   r = await drzi(T.lastnik, E1, M1, { guest_name: "Drug gost" });
@@ -245,6 +271,13 @@ const spi = (ms) => new Promise(r => setTimeout(r, ms));
   for (const p of ["/me/orders", "/me/tickets"]) {
     const j = await api("GET", p, T.ana);
     assert(j.status === 200 && !j.besedilo.includes("Janez") && !/guest_name/.test(j.besedilo), `kupec: ${p} brez imena gosta`, j.status);
+  }
+
+  for (const p of [`/business/events/${E1}/scan-list`, `/business/events/${E1}/tickets`, "/business/scan-key"]) {
+    for (const [kdo, tok] of [["vratar", T.doorman], ["lastnik", T.lastnik]]) {
+      const j = await api("GET", p, tok);
+      assert(j.status === 200 && !/Janez|Testenko|pride ob 23h|guest_name/.test(j.besedilo), `${kdo}: ${p.replace(String(E1), ":id")} ne vsebuje imena gosta ali opombe`, j.status);
+    }
   }
 
   console.log("\n# Izklopljena miza / VIP na dogodku ni vklopljen: rezervacija dovoljena");
@@ -367,7 +400,7 @@ const spi = (ms) => new Promise(r => setTimeout(r, ms));
     for (let i = 0; i < KUPCEV; i++) {
       delo.push(() => apiNa(dvaProcesa && i % 2 ? BASE_B : BASE, "POST", `/events/${E}/tables/${m}/orders`, kupci[i], { package_id: P1 }));
     }
-    delo.splice(holdPos, 0, async () => { if (zamik) await spi(zamik); return apiNa(dvaProcesa ? BASE_B : BASE, "POST", pot(E, m), T.lastnik, { guest_name: "Gost krog " + k, note: "hkrati" }); });
+    delo.splice(holdPos, 0, async () => { if (zamik) await spi(zamik); return apiNa(dvaProcesa ? BASE_B : BASE, "POST", pot(E, m), T.lastnik, { guest_name: "Gost krog " + k, note: "zasebna-opomba-krog" }); });
     const rez = await Promise.all(delo.map(f => f()));
     const hRez = rez[holdPos];
     const nRez = rez.filter((_, i) => i !== holdPos);
@@ -423,6 +456,11 @@ const spi = (ms) => new Promise(r => setTimeout(r, ms));
   assert(po === primeri.filter(p => !p[3]).length, "ponovni tek pospravljalca ne pobrise nicesar vec (idempotentno)", po);
   assert(!/\[rezervacije\].*(napaka|error)/i.test(log), "pospravljalec ne javlja napak", log.split("\n").filter(l => /rezervacije/.test(l)).slice(0, 3));
   await ustavi(srvC);
+
+  console.log("\n# Zasebnost: ime gosta in opomba nista v dnevniku backenda (stdout/stderr vseh procesov)");
+  const zasebno = /Janez|Testenko|pride ob 23h|zasebna-opomba|Gost krog|Spet gost|Gost po preklicu|Prepozn|Nocni gost|Stari gost|Gost cascade|Gost na izklopljeni|Gost, VIP|Drug gost|Gost M2/;
+  assert(!zasebno.test(log), "dnevnik (POST, DELETE, 409, pospravljalec) ne vsebuje nobenega imena gosta ali opombe", log.split("\n").filter(l => zasebno.test(l)).slice(0, 3));
+  assert(/Rezervacija po telefonu: dogodek \d+, miza \d+, uporabnik \d+/.test(log), "dnevnik rezervacije obstaja (samo id-ji, brez imena)", null);
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
   const napake = log.split("\n").filter(l => /error|TypeError|Unhandled|deadlock/i.test(l) && !/Server error\./.test(l) && !/Resend/i.test(l));

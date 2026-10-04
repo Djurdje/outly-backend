@@ -78,7 +78,7 @@ async function api(method, path, token, body, signal) {
   let srv = null, log = "";
   async function zagon(port, okolje) {
     BASE = `http://127.0.0.1:${port}`;
-    srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
+    srv = spawn("node", ["index.js"], { env: { ...process.env, REZERVACIJE_CISCENJE_MS: "0", PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
     srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
     for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); return; } catch { await spi(100); } }
   }

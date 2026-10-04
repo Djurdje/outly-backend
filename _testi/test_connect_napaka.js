@@ -69,7 +69,7 @@ const steje = (rez) => rez.reduce((m, r) => (m[r.status] = (m[r.status] || 0) + 
   let srv = null, log = "", umrl = null;
   async function zagon(port, okolje) {
     BASE = `http://127.0.0.1:${port}`; log = ""; umrl = null;
-    srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", JAVNI_PREDPOMNILNIK_MS: "0", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
+    srv = spawn("node", ["index.js"], { env: { ...process.env, REZERVACIJE_CISCENJE_MS: "0", PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", JAVNI_PREDPOMNILNIK_MS: "0", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
     srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
     srv.on("exit", (code, sig) => { umrl = { code, sig }; });
     for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); return; } catch { await spi(100); } }
