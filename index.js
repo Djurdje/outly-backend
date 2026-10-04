@@ -4496,9 +4496,11 @@ async function vipDogodkaOdgovor(db, klub, eventId) {
             ct.price_cents AS default_price_cents,
             COALESCE(et.disabled, FALSE) AS disabled, (ct.archived_at IS NOT NULL) AS archived,
             b.order_id, b.public_ref, b.buyer_username, b.package_name, b.package_description,
-            b.guests, b.checked_in, b.created_at AS booked_at
+            b.guests, b.checked_in, b.created_at AS booked_at,
+            h.guest_name AS hold_guest_name, h.note AS hold_note, h.created_at AS hold_created_at, (h.id IS NOT NULL) AS hold_je
        FROM club_tables ct
        LEFT JOIN event_tables et ON et.event_id = $1 AND et.table_id = ct.id
+       LEFT JOIN table_holds h ON h.event_id = $1 AND h.table_id = ct.id
        LEFT JOIN LATERAL (
          SELECT o.id AS order_id, o.public_ref, u.username AS buyer_username, o.package_name, o.package_description,
                 o.created_at,
@@ -4508,7 +4510,7 @@ async function vipDogodkaOdgovor(db, klub, eventId) {
           WHERE o.event_id = $1 AND o.table_id = ct.id AND o.status IN ${VIP_ZASEDENA_STANJA}
           ORDER BY o.id LIMIT 1
        ) b ON TRUE
-      WHERE ct.club_id = $2 AND (ct.archived_at IS NULL OR b.order_id IS NOT NULL)
+      WHERE ct.club_id = $2 AND (ct.archived_at IS NULL OR b.order_id IS NOT NULL OR h.id IS NOT NULL)
       ORDER BY ct.id`, [eventId, klub]);
   const p = await db.query(
     `SELECT id, name, description FROM bottle_packages
@@ -4526,6 +4528,8 @@ async function vipDogodkaOdgovor(db, klub, eventId) {
         package_name: r.package_name, package_description: r.package_description,
         guests: r.guests, checked_in: r.checked_in, created_at: r.booked_at,
       } : null,
+      // Rezervacija po telefonu (032): klub je mizo sam oznacil kot zasedeno. Ime in opomba sta SAMO v poslovnem pogledu.
+      hold: r.hold_je ? { guest_name: r.hold_guest_name, note: r.hold_note, created_at: r.hold_created_at } : null,
     })),
     packages: p.rows,
   };
@@ -4613,6 +4617,107 @@ app.put("/business/events/:id/vip", requireAuth, requireClub("owner", "manager")
   } finally { c.release(); }
 });
 
+// ---------------------------
+// REZERVACIJA MIZE PO TELEFONU (migracija 032, Martin 4. 10. 2026)
+// ---------------------------
+// Gost pokliče klub in rezervira VIP mizo: klub jo na dogodku sam označi kot zasedeno (owner, manager), da je prek Outly
+// nihče ne more kupiti. Plačilo gre mimo Outly, zato rezervacija NI naročilo (ne šteje v prodajo, nima vstopnic).
+// Ime gosta in opomba sta SAMO v poslovnem pogledu (GET /business/events/:id/vip, vse vloge v klubu), nikoli javno ali kupcu.
+//
+// I13 (miza se ne proda dvakrat) čez dve tabeli: unikatnega indeksa čez orders in table_holds ni, zato oba zaklepata
+// ISTO vrstico club_tables. Nakup (POST /events/:id/tables/:tableId/orders) drži FOR SHARE in nato bere table_holds;
+// rezervacija vzame FOR NO KEY UPDATE (konflikt s FOR SHARE, ne pa z FOR KEY SHARE tujih ključev: urejanje cen po dogodku
+// in nakupi drugih miz je ne čakajo) in nato bere orders. Vsak zaklep je pred branjem, branje je NOV stavek (READ COMMITTED
+// vzame svež posnetek), zato ena od strani vedno vidi drugo: ali rezervacija počaka nakup in vidi njegovo naročilo,
+// ali nakup počaka rezervacijo in vidi njeno vrstico. Obe čakata največ NAKUP_DB_TIMEOUT_MS (lock_timeout -> 503).
+app.post("/business/events/:id/tables/:tableId/hold", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  const id = vipId(req.params.id);
+  if (!id) return res.status(400).send("Invalid event id.");
+  const mizaId = vipId(req.params.tableId);
+  if (!mizaId) return res.status(400).send("Invalid table id.");
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  const ime = vipBesedilo(b.guest_name, 1, 60);
+  if (ime === null) return res.status(400).send("guest_name must be 1 to 60 characters.");
+  const opomba = vipBesedilo(b.note, 0, 200);
+  if (opomba === null) return res.status(400).send("note must be at most 200 characters.");
+  const klub = await mojKlubId(req);
+  if (!klub) return res.status(404).send("Club not found.");
+  let c;
+  try { c = await pool.connect(); } catch (err) { console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+  try {
+    await nakupZacni(c);
+    const er = await c.query("SELECT id FROM events WHERE id = $1 AND club_id = $2", [id, klub]);
+    if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+    // Miza TEGA kluba, ne arhivirana. Rezervacija je dovoljena tudi, ce je miza na dogodku izklopljena ali VIP na dogodku ni vklopljen
+    // (klub tloris uporablja tudi samo za telefonske rezervacije).
+    const mr = await c.query(
+      "SELECT id FROM club_tables WHERE id = $1 AND club_id = $2 AND archived_at IS NULL FOR NO KEY UPDATE", [mizaId, klub]);
+    if (mr.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Table not found."); }
+    // Zaklep imamo: aktivna naročila (isti pogoj kot unikatni indeks orders_miza_dogodek_key) so zdaj dokončna.
+    const nr = await c.query(
+      `SELECT 1 FROM orders WHERE event_id = $1 AND table_id = $2 AND status IN ${VIP_ZASEDENA_STANJA} LIMIT 1`, [id, mizaId]);
+    if (nr.rows.length > 0) { await c.query("ROLLBACK"); return res.status(409).send("This table is already booked."); }
+    const ins = await c.query(
+      `INSERT INTO table_holds (event_id, table_id, guest_name, note, created_by_user_id) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (event_id, table_id) DO NOTHING RETURNING id`,
+      [id, mizaId, ime, opomba === "" ? null : opomba, req.user.userId]);
+    if (ins.rows.length === 0) { await c.query("ROLLBACK"); return res.status(409).send("This table is already booked."); }
+    await c.query("COMMIT");
+    console.log(`Rezervacija po telefonu: dogodek ${id}, miza ${mizaId}, uporabnik ${req.user.userId}`);   // brez imena gosta
+    return res.status(201).json(await vipDogodkaOdgovor(c, klub, id));
+  } catch (err) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (err && err.code === "23505") return res.status(409).send("This table is already booked.");
+    if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+    console.error(err);
+    return res.status(500).send("Server error.");
+  } finally { c.release(); }
+});
+
+// DELETE /business/events/:id/tables/:tableId/hold — klub prekliče rezervacijo po telefonu (miza je spet na voljo za nakup).
+// Zaklepa ne rabi: nakup, ki je rezervacijo še videl, je dobil 409; kdor jo ni, je mizo že kupil pred rezervacijo (ta bi bila 409).
+app.delete("/business/events/:id/tables/:tableId/hold", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  try {
+    const id = vipId(req.params.id);
+    if (!id) return res.status(400).send("Invalid event id.");
+    const mizaId = vipId(req.params.tableId);
+    if (!mizaId) return res.status(400).send("Invalid table id.");
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    const r = await pool.query(
+      `DELETE FROM table_holds h USING events e
+        WHERE h.event_id = e.id AND e.id = $1 AND e.club_id = $2 AND h.table_id = $3 RETURNING h.id`, [id, klub, mizaId]);
+    if (r.rows.length === 0) return res.status(404).send("Reservation not found.");
+    razprodanoPozabi("m:" + id + ":" + mizaId);   // nakup, zavrnjen zaradi rezervacije, je mizo označil »zasedena« v pomnilniku
+    return res.json(await vipDogodkaOdgovor(pool, klub, id));
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// Hramba osebnega podatka (DECISIONS 4. 10. 2026): gost ni uporabnik Outly, ime je prosto besedilo. Rezervacije dogodka, ki se je
+// končal pred več kot 24 h (end_at, sicer start_at + 12 h), se brišejo. Interval REZERVACIJE_CISCENJE_MS (privzeto 1 h; 0 = izklop).
+const REZERVACIJE_CISCENJE_MS = okoljeCelo("REZERVACIJE_CISCENJE_MS", 60 * 60 * 1000, 0, 24 * 60 * 60 * 1000);
+let rezervacijeCiscenjeTece = false;
+async function pocistiRezervacije() {
+  if (rezervacijeCiscenjeTece) return;
+  rezervacijeCiscenjeTece = true;
+  try {
+    const r = await pool.query(
+      `DELETE FROM table_holds h USING events e
+        WHERE e.id = h.event_id AND COALESCE(e.end_at, e.start_at + INTERVAL '12 hours') < NOW() - INTERVAL '24 hours'`);
+    if (r.rowCount > 0) console.log(`[rezervacije] pospravljeno ${r.rowCount} starih rezervacij po telefonu`);
+  } catch (e) {
+    console.error("[rezervacije] pospravljanje ni uspelo:", e && e.message);
+  } finally {
+    rezervacijeCiscenjeTece = false;
+  }
+}
+if (REZERVACIJE_CISCENJE_MS > 0) {
+  setTimeout(() => {
+    pocistiRezervacije();
+    setInterval(pocistiRezervacije, REZERVACIJE_CISCENJE_MS).unref();
+  }, Math.round(Math.random() * Math.min(REZERVACIJE_CISCENJE_MS, 60 * 1000))).unref();
+}
+
 // GET /events/:id/vip — javno (zeton ni potreben): tloris, proste/prodane mize, paketi. O kupcu NIC.
 // 404, ce dogodka ni, ni objavljen ali je klub skrit. Izklopljene in arhivirane mize niso na seznamu.
 app.get("/events/:id/vip", async (req, res) => {
@@ -4633,8 +4738,10 @@ app.get("/events/:id/vip", async (req, res) => {
              SELECT ct.id, ct.label, ct.x, ct.y, ct.w, ct.h, ct.shape, ct.seats,
                     COALESCE(et.price_cents, ct.price_cents) AS price_cents,
                     (ct.archived_at IS NOT NULL OR COALESCE(et.disabled, FALSE)) AS skrita,
-                    EXISTS (SELECT 1 FROM orders o WHERE o.event_id = $1 AND o.table_id = ct.id
-                              AND o.status IN ${VIP_ZASEDENA_STANJA}) AS zasedena
+                    (EXISTS (SELECT 1 FROM orders o WHERE o.event_id = $1 AND o.table_id = ct.id
+                               AND o.status IN ${VIP_ZASEDENA_STANJA})
+                     -- Rezervacija po telefonu (032): za kupca je miza zasedena; ime gosta ni v tem odgovoru.
+                     OR EXISTS (SELECT 1 FROM table_holds h WHERE h.event_id = $1 AND h.table_id = ct.id)) AS zasedena
                FROM club_tables ct LEFT JOIN event_tables et ON et.event_id = $1 AND et.table_id = ct.id
               WHERE ct.club_id = $2
            ) t
@@ -4718,6 +4825,15 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
         FOR SHARE OF ct`, [e.id, mizaId, e.club_id]);
     if (mr.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Table not found."); }
     const miza = mr.rows[0];
+
+    // Rezervacija po telefonu (032, I13): vrstico mize zdaj drzimo (FOR SHARE), rezervacija pa jo zaklepa z FOR NO KEY UPDATE in
+    // v istem zaklepu preveri narocila - ena od obeh vidi drugo. Branje je NOV stavek (READ COMMITTED: svez posnetek po zaklepu).
+    const hr = await c.query("SELECT 1 FROM table_holds WHERE event_id = $1 AND table_id = $2", [e.id, miza.id]);
+    if (hr.rows.length > 0) {
+      await c.query("ROLLBACK");
+      razprodanoOznaci("m:" + id + ":" + mizaId);
+      return res.status(409).send("This table is already booked.");
+    }
 
     const np = napakaProdaje(e, { zahtevajCeno: false });
     if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }

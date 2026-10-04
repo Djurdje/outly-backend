@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–031, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–032, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,10 +15,10 @@
 -- PostgreSQL database dump
 --
 
-\restrict apfQf8ZsJ0bgWBcUEyDiui2NgLUbcE7mzM6nRYD1HIL3AK0YfyxDcOGIbh0mKdK
+\restrict uafmqjTGgFXrA59fZ6zASDcTS94veEMc2Br1DhKw3Dwg8g1TepNnmfVl6XA1YQ7
 
--- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
--- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
+-- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
+-- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -719,6 +719,57 @@ COMMENT ON TABLE public.stripe_events IS 'Ze obdelani Stripe webhook dogodki (id
 
 
 --
+-- Name: table_holds; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.table_holds (
+    id integer NOT NULL,
+    event_id integer NOT NULL,
+    table_id integer NOT NULL,
+    guest_name text NOT NULL,
+    note text,
+    created_by_user_id integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT table_holds_guest_chk CHECK (((char_length(btrim(guest_name)) >= 1) AND (char_length(btrim(guest_name)) <= 60))),
+    CONSTRAINT table_holds_note_chk CHECK (((note IS NULL) OR (char_length(note) <= 200)))
+);
+
+
+--
+-- Name: TABLE table_holds; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.table_holds IS 'Rezervacija mize po telefonu (klub jo oznaci sam; ni narocilo, ni prodaja). Osebni podatek: guest_name/note, brise se po koncu dogodka.';
+
+
+--
+-- Name: COLUMN table_holds.guest_name; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.table_holds.guest_name IS 'Ime gosta, ki je poklical klub (prosto besedilo, ne uporabnik Outly). Samo za osebje kluba.';
+
+
+--
+-- Name: table_holds_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.table_holds_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: table_holds_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.table_holds_id_seq OWNED BY public.table_holds.id;
+
+
+--
 -- Name: ticket_transfers; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -934,6 +985,13 @@ ALTER TABLE ONLY public.orders ALTER COLUMN id SET DEFAULT nextval('public.order
 
 
 --
+-- Name: table_holds id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_holds ALTER COLUMN id SET DEFAULT nextval('public.table_holds_id_seq'::regclass);
+
+
+--
 -- Name: ticket_transfers id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -1104,6 +1162,22 @@ ALTER TABLE ONLY public.schema_migrations
 
 ALTER TABLE ONLY public.stripe_events
     ADD CONSTRAINT stripe_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: table_holds table_holds_event_table_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_holds
+    ADD CONSTRAINT table_holds_event_table_key UNIQUE (event_id, table_id);
+
+
+--
+-- Name: table_holds table_holds_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_holds
+    ADD CONSTRAINT table_holds_pkey PRIMARY KEY (id);
 
 
 --
@@ -1373,6 +1447,13 @@ CREATE INDEX orders_table_idx ON public.orders USING btree (table_id) WHERE (tab
 --
 
 CREATE INDEX orders_user_idx ON public.orders USING btree (user_id, created_at DESC);
+
+
+--
+-- Name: table_holds_table_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX table_holds_table_idx ON public.table_holds USING btree (table_id);
 
 
 --
@@ -1730,6 +1811,30 @@ ALTER TABLE ONLY public.orders
 
 
 --
+-- Name: table_holds table_holds_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_holds
+    ADD CONSTRAINT table_holds_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: table_holds table_holds_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_holds
+    ADD CONSTRAINT table_holds_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE CASCADE;
+
+
+--
+-- Name: table_holds table_holds_table_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_holds
+    ADD CONSTRAINT table_holds_table_id_fkey FOREIGN KEY (table_id) REFERENCES public.club_tables(id) ON DELETE CASCADE;
+
+
+--
 -- Name: ticket_transfers ticket_transfers_from_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1805,5 +1910,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict apfQf8ZsJ0bgWBcUEyDiui2NgLUbcE7mzM6nRYD1HIL3AK0YfyxDcOGIbh0mKdK
+\unrestrict uafmqjTGgFXrA59fZ6zASDcTS94veEMc2Br1DhKw3Dwg8g1TepNnmfVl6XA1YQ7
 
