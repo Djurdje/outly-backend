@@ -15,7 +15,7 @@ let ok = 0, fail = 0;
 function assert(cond, msg, extra) { if (cond) { ok++; console.log("  ✓", msg); } else { fail++; console.log("  ✗", msg, extra !== undefined ? JSON.stringify(extra) : ""); } }
 
 async function zazeni(port, dbUrl, dodatniEnv = {}) {
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), DATABASE_URL: dbUrl, SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test", ...dodatniEnv }, stdio: ["ignore", "pipe", "pipe"] });
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, REZERVACIJE_CISCENJE_MS: "0", PORT: String(port), DATABASE_URL: dbUrl, SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test", ...dodatniEnv }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
   for (let i = 0; i < 50; i++) { try { await fetch(`http://127.0.0.1:${port}/`); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
   return { srv, log: () => log };

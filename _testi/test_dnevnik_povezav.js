@@ -32,7 +32,7 @@ const blokada = path.join(os.tmpdir(), `blokada_zanke_${process.pid}.js`);
 fs.writeFileSync(blokada, "process.on('SIGUSR2', () => { const t = Date.now(); while (Date.now() - t < 400); });\n");
 
 function zazeni(port, okolje) {
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), DATABASE_URL: DB, SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test", NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require ${blokada}`.trim(), ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, REZERVACIJE_CISCENJE_MS: "0", PORT: String(port), DATABASE_URL: DB, SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test", NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require ${blokada}`.trim(), ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
   const st = { srv, log: "" };
   srv.stdout.on("data", d => st.log += d); srv.stderr.on("data", d => st.log += d);
   st.vrstice = () => st.log.split("\n").filter(v => v.startsWith("[povezave]"));

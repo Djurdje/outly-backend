@@ -74,6 +74,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 - **Past:** vsak paket velja za alkohol; brezalkoholnih paketov ni mogoce oznaciti, dokler ne pride stolpec (DECISIONS 2. 10.).
 - **VIP 18+ na odjemalcih še ni:** iOS in splet polja `package_min_age` (lahko `undefined` na starem backendu — privzeto 18) še ne
   kažeta. 403 sta navadno besedilo (kot pri `min_age`); odjemalec starosti ne preverja sam.
+- **Rezervacija mize po telefonu (4. 10., migracija 032; ARCHITECTURE »VIP mize«, I13, DECISIONS 4. 10.):** novo polje `hold` pri mizi v `GET /business/events/:id/vip` (ios-dev/web-dev: gumba Rezerviraj/Sprosti). **Past:** po `DELETE` na drugi instanci nakup do 3 s dobi 409.
 
 ## Javni predpomnilnik (#114, ARCHITECTURE »Javni predpomnilnik«, I17; odločitev agenta, Martin je ni potrdil)
 

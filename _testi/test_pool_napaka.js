@@ -27,7 +27,7 @@ const spi = (ms) => new Promise((r) => setTimeout(r, ms));
   const seje = async () => (await admin.query(
     "SELECT pid FROM pg_stat_activity WHERE application_name=$1 AND pid <> pg_backend_pid()", [IME])).rows.map((r) => r.pid);
 
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), DATABASE_URL: dbZImenom, JAVNI_PREDPOMNILNIK_MS: "0", /* test poola, ne predpomnilnika (#114) */ SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, REZERVACIJE_CISCENJE_MS: "0", PORT: String(PORT), DATABASE_URL: dbZImenom, JAVNI_PREDPOMNILNIK_MS: "0", /* test poola, ne predpomnilnika (#114) */ SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", (d) => log += d); srv.stderr.on("data", (d) => log += d);
   let umrl = null; srv.on("exit", (code, sig) => { umrl = { code, sig }; });
 

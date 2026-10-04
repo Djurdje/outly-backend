@@ -204,6 +204,23 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   tocno 18, brez datuma, strozja meja dogodka) · *velja dokler*: Martin ali pravnik ne rece drugace ·
   *nadomeščena z*: —
 
+- 2026-10-04: **Rezervacija VIP mize po telefonu** (Martin v pogovoru 4. 10. 2026: »rezervacija po telefonu kot plus, brez potrditve kluba«).
+  Ce gost klub poklice in rezervira mizo, jo klub (owner, manager) sam oznaci kot zasedeno na dogodku (`POST|DELETE /business/events/:id/tables/:tableId/hold`,
+  tabela `table_holds`, migracija 032); prek Outly je potem nihce ne more kupiti. Placilo gre mimo Outly, zato rezervacija NI narocilo: ne steje v
+  `GET /business/sales` in adminove finance, nima vstopnic, sken se ne spremeni. Obstojeci nakup ostane brez potrditve kluba (Martin).
+  **Odlocitve agenta (Martin jih ni potrdil; spremenljive brez posledic za nakup):** (1) rezervacija je dovoljena tudi za mizo, ki je na dogodku
+  izklopljena, in na dogodku, kjer VIP ni vklopljen (klub tloris uporablja tudi samo za telefonske rezervacije); javno se izklopljena miza z
+  rezervacijo pokaze kot zasedena, kot prodana. (2) Ime gosta (1-60 znakov) in opomba (0-200) sta v poslovnem pogledu
+  (`GET /business/events/:id/vip`, vse vloge v klubu, tudi vratar), NIKOLI v javnih odgovorih ali v odgovorih kupcu. (3) **Hramba osebnega podatka:**
+  gost ni uporabnik Outly, ime je prosto besedilo; rezervacije dogodka, ki se je koncal pred vec kot 24 h (`end_at`, sicer `start_at` + 12 h), brise
+  pospravljalec v procesu (vsako uro, `REZERVACIJE_CISCENJE_MS`); brisanje dogodka jih pobrise (CASCADE). **Odprto za `pravnik`:** ali politika
+  zasebnosti za splet in iOS omenja ime gosta, ki ga vnese klub (klub je upravljavec, Outly obdelovalec?), rok hrambe (24 h po koncu je predpostavka)
+  in dejstvo, da izvoz baze (dnevna kopija v R2, do 30 dni) hrani imena do izteka kopij. Ime gosta se ne zapisuje v dnevnik. (4) Hkratnost: glej
+  ARCHITECTURE, I13 (zaklep vrstice `club_tables`, nakup `FOR SHARE`, rezervacija `FOR NO KEY UPDATE`).
+  *vir/dokaz*: Martinovo sporocilo v seji menedzerja 4. 10. 2026 (samo: »rezervacija po telefonu kot plus, brez potrditve kluba«),
+  `_testi/test_rezervacija_telefon.js`, I13 · *velja dokler*: Martin ali pravnik ne rece drugace (pravni pregled hrambe se ni opravljen) ·
+  *nadomescena z*: —
+
 ## Oblikovanje
 
 - Figma datoteka `XeVmPgY0LDGkNcQGBkNDbg` (stran »App«, ~147 zaslonov 393×852) je merodajna za postavitev,
