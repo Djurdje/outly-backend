@@ -348,6 +348,20 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
     const zab = (await pool.query("SELECT 1 FROM stripe_events WHERE id='evt_brez_objekta'")).rows.length;
     assert(r.status >= 500 && zab === 0, "branje ne uspe -> 5xx, dogodek ni zabelezen (Stripe ga ponovi)", [r.status, zab]);
 
+    console.log("\n# iOS: povratna naslova Checkouta (X-Outly-Client: ios)");
+    {
+      r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "iOS Noc", startAt: cezDan, ticketPriceCents: 1000, capacity: 10, minAge: 0 });
+      const evIos = r.body.id;
+      const sejPrej = S.zahtevkiSej.length;
+      r = await api("POST", `/events/${evIos}/orders`, T.ana, { quantity: 1 }, { "x-outly-client": "ios" });
+      const Pi = S.zahtevkiSej[sejPrej] && S.zahtevkiSej[sejPrej].params;
+      assert(r.status === 201 && Pi && /^https:\/\/outly\.test\/placilo\?stanje=uspeh&app=ios&narocilo=OUT-/.test(Pi.success_url), "iOS: success_url = /placilo?stanje=uspeh&app=ios", Pi && Pi.success_url);
+      assert(Pi && /^https:\/\/outly\.test\/placilo\?stanje=preklic&app=ios&narocilo=OUT-/.test(Pi.cancel_url), "iOS: cancel_url = /placilo?stanje=preklic&app=ios", Pi && Pi.cancel_url);
+      r = await api("POST", `/events/${evIos}/orders`, T.bor, { quantity: 1 });
+      const Pw = S.zahtevkiSej[sejPrej + 1] && S.zahtevkiSej[sejPrej + 1].params;
+      assert(Pw && Pw.success_url.startsWith("https://outly.test/app/tickets?placilo=uspeh"), "splet brez glave: success_url ostane /app/tickets", Pw && Pw.success_url);
+    }
+
     console.log("\n# Provizija po klubu (migracija 031, admin panel)");
     const Tadmin = zeton("admin@outly.si", uuid(9));
     await api("GET", "/me", Tadmin);

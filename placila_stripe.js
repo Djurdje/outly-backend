@@ -53,7 +53,23 @@ function nacinPlacila(klub) {
 }
 
 // Checkout seja za narocilo. Klicatelj narocilo ze ima (pending, v bazi). Vrne sejo ali vrze napako.
-async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId }) {
+// Povratni naslovi: splet (/app) ali iOS. iOS (glava X-Outly-Client: ios) odpre Checkout v ASWebAuthenticationSession,
+// ki se zapre, ko stran outly.si/placilo preusmeri na outly://placilo (callback shema). Seja v iOS nima spletne prijave,
+// zato /app/... tam ne pride v postev.
+function povratniNaslovi(odjemalec, ref, eventId) {
+  if (odjemalec === "ios") {
+    return {
+      success_url: `${osnovaSpleta()}/placilo?stanje=uspeh&app=ios&narocilo=${ref}`,
+      cancel_url: `${osnovaSpleta()}/placilo?stanje=preklic&app=ios&narocilo=${ref}`,
+    };
+  }
+  return {
+    success_url: `${osnovaSpleta()}/app/tickets?placilo=uspeh&narocilo=${ref}`,
+    cancel_url: `${osnovaSpleta()}/app/event/${eventId}?placilo=preklic&narocilo=${ref}`,
+  };
+}
+
+async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec }) {
   const s = stripe();
   const ref = encodeURIComponent(narocilo.public_ref);
   const meta = { order_id: String(narocilo.id), public_ref: narocilo.public_ref };
@@ -74,8 +90,7 @@ async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racun
     },
     metadata: meta,
     expires_at: Math.floor(Date.now() / 1000) + CHECKOUT_MINUT * 60,
-    success_url: `${osnovaSpleta()}/app/tickets?placilo=uspeh&narocilo=${ref}`,
-    cancel_url: `${osnovaSpleta()}/app/event/${eventId}?placilo=preklic&narocilo=${ref}`,
+    ...povratniNaslovi(odjemalec, ref, eventId),
   }, { idempotencyKey: `outly-narocilo-${narocilo.id}` });
 }
 
@@ -260,4 +275,4 @@ function ustvari({ pool }) {
   return { webhook, pospravi, zazeni };
 }
 
-module.exports = { ustvari, stripe, jeSandbox, nacinPlacila, ustvariCheckout, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };
+module.exports = { povratniNaslovi, ustvari, stripe, jeSandbox, nacinPlacila, ustvariCheckout, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };
