@@ -163,6 +163,16 @@ async function api(method, p, token, body) {
   r = await api("POST", `/tickets/${navadna.tickets[0].id}/transfer`, T.sedemnajst, { email: "brezdatuma@outly.si" });
   assert(r.status === 200, "prenos navadne vstopnice na dogodku 0+ osebi brez datuma rojstva -> 200 (ni regresije)", r.body);
 
+  console.log("\n# Potrditev posiljatelja (age_confirmed, Martin 5. 10. 2026): prenos na racun brez datuma rojstva");
+  r = await api("POST", `/tickets/${vst[2].id}/transfer`, T.odrasla, { email: "sedemnajst@outly.si", age_confirmed: true });
+  assert(r.status === 403 && /at least 18/.test(r.body), "paket + prejemnik z VPISANIM datumom pod mejo (17) + potrditev -> 403 (znan mladoletnik)", r.body);
+  r = await api("POST", `/tickets/${vst[2].id}/transfer`, T.odrasla, { email: "brezdatuma@outly.si" });
+  assert(r.status === 403 && /date of birth/i.test(r.body), "paket + prejemnik brez datuma, BREZ potrditve (stari odjemalec) -> 403 kot doslej", r.body);
+  r = await api("POST", `/tickets/${vst[2].id}/transfer`, T.odrasla, { email: "brezdatuma@outly.si", age_confirmed: true });
+  assert(r.status === 200, "paket + prejemnik brez datuma + age_confirmed -> 200", r.body);
+  r = await api("POST", `/tickets/${e21}/transfer`, T.odrasla, { email: "brezdatuma@outly.si", age_confirmed: true });
+  assert(r.status === 200, "dogodek 21+ s paketom, prejemnik brez datuma + age_confirmed -> 200 (meja 21 velja za potrditev, ne za preverbo)", r.body);
+
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
   const napake = log.split("\n").filter(l => /error|TypeError|Unhandled/i.test(l) && !/Server error\./.test(l) && !/Resend/i.test(l));
   if (napake.length) console.log("\nLog backenda (sumljivo):\n" + napake.join("\n"));

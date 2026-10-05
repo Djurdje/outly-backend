@@ -178,6 +178,28 @@ async function api(method, path, token, body) {
   r = await api("POST", `/tickets/${vstopnica18}/transfer`, T.bor, { email: "cene@outly.si" });
   assert(r.status === 200, "prenos polnoletnemu na dogodek 18+ -> 200", r.body);
 
+  console.log("\n# Potrditev starosti posiljatelja (age_confirmed, Martin 5. 10. 2026): prenos na racun in po user_id");
+  r = await api("POST", `/events/${dogodek18}/orders`, T.bor, { quantity: 3 });
+  assert(r.status === 201 && r.body.tickets.length === 3, "bor kupi 3 vstopnice za dogodek 18+", r.body);
+  const [pot1, pot2, pot3] = r.body.tickets.map(t => t.id);
+  const idBor = (await pool.query("SELECT id FROM users WHERE email='bor@outly.si'")).rows[0].id;
+  const idLastnikPr = (await pool.query("SELECT id FROM users WHERE email='lastnik@outly.si'")).rows[0].id;   // lastnik NIMA datuma rojstva
+  r = await api("POST", `/tickets/${pot1}/transfer`, T.bor, { email: "lastnik@outly.si" });
+  assert(r.status === 403 && /date of birth/.test(r.body), "stari odjemalec (brez age_confirmed): prejemnik brez datuma rojstva -> 403 kot doslej", r.body);
+  r = await api("POST", `/tickets/${pot1}/transfer`, T.bor, { email: "mladoletni@outly.si", age_confirmed: true });
+  assert(r.status === 403, "age_confirmed + prejemnik z vpisanim datumom 16 let -> 403 (znan mladoletnik)", r.body);
+  r = await api("POST", `/tickets/${pot1}/transfer`, T.bor, { email: "lastnik@outly.si", age_confirmed: false });
+  assert(r.status === 403, "age_confirmed: false = brez potrditve -> 403", r.body);
+  r = await api("POST", `/tickets/${pot1}/transfer`, T.bor, { email: "lastnik@outly.si", age_confirmed: true });
+  assert(r.status === 200 && r.body.message === "Ticket sent to lastnik.", "age_confirmed + prejemnik brez datuma rojstva -> 200 (sporocilo kot doslej)", r.body);
+  await pool.query("INSERT INTO friendships (user_a, user_b) VALUES (LEAST($1::int,$2::int), GREATEST($1::int,$2::int))", [idBor, idLastnikPr]);
+  r = await api("POST", `/tickets/${pot2}/transfer`, T.bor, { user_id: idLastnikPr });
+  assert(r.status === 403 && /date of birth/.test(r.body), "po user_id brez age_confirmed: prejemnik brez datuma rojstva -> 403", r.body);
+  r = await api("POST", `/tickets/${pot2}/transfer`, T.bor, { user_id: idLastnikPr, age_confirmed: true });
+  assert(r.status === 200 && r.body.ticket.holder_email === null, "po user_id z age_confirmed -> 200 (holder_email null kot doslej)", r.body);
+  r = await api("POST", `/tickets/${pot3}/transfer`, T.bor, { email: "cene@outly.si", age_confirmed: true });
+  assert(r.status === 200, "age_confirmed ne moti prenosa osebi z veljavnim datumom rojstva (25 let)", r.body);
+
   console.log("\n# Napacni vhodi in vloge");
   r = await api("POST", `/tickets/${vstopnicaAna}/transfer`, T.cene, { email: "ni-email" });
   assert(r.status === 400, "neveljaven e-naslov -> 400", r.status);

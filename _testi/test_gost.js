@@ -202,7 +202,16 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     const m0 = mail[0] || {};
     assert(/Gost Noc/.test(m0.subject || "") && /Gost Noc/.test(m0.html || "") && /Pure Club/.test(m0.html || "") && /2 x 15\.00 EUR/.test(m0.html || ""), "mail: dogodek, klub, stevilo vstopnic", m0.subject);
     assert(/^Outly <test@outly\.test>$/.test(m0.from || ""), "mail: posiljatelj iz EMAIL_FROM", m0.from);
-    assert(!/<img|<script|pixel|track/i.test(m0.html || ""), "mail: brez slik/sledilnikov");
+    assert(!/<script|pixel|track/i.test(m0.html || "") && !/<img[^>]+src="(?!cid:)/i.test(m0.html || ""), "mail: brez sledilnikov in zunanjih slik (samo vgrajene cid:)");
+    // QR inline + PDF (migracija 034): 2 vstopnici -> 2 vgrajeni sliki PNG (content_id) + 1 PDF s 2 stranema
+    const pr = m0.attachments || [];
+    const slike = pr.filter(x => x.content_type === "image/png");
+    assert(slike.length === 2 && slike.every((x, i) => x.content_id === `ticket-qr-${i + 1}` && Buffer.from(x.content, "base64").subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))), "mail: 2 vgrajeni sliki QR (PNG, content_id)", pr.map(x => [x.filename, x.content_type, x.content_id]));
+    assert(/src="cid:ticket-qr-1"/.test(m0.html || "") && /src="cid:ticket-qr-2"/.test(m0.html || ""), "mail: HTML kaze obe sliki (cid:)");
+    const pdfP = pr.find(x => x.content_type === "application/pdf");
+    const pdfB = pdfP ? Buffer.from(pdfP.content, "base64") : Buffer.alloc(0);
+    assert(pdfP && pdfP.filename === "outly-tickets.pdf" && pdfB.subarray(0, 5).toString() === "%PDF-" && pdfB.toString("latin1").includes("%%EOF") && (pdfB.toString("latin1").match(/\/Type \/Page /g) || []).length === 2, "mail: priloga PDF (2 strani)", pdfP && pdfP.filename);
+    assert(!JSON.stringify(pdfP || {}).includes("gost@example.com") && !pdfB.toString("latin1").includes("gost@example.com"), "PDF brez e-naslova prejemnika");
     assert(m0.reply_to === "luka@outly.si", "mail: reply-to luka@outly.si", m0.reply_to);
     const t0 = m0.text || "";
     const ob = (re, opis) => assert(re.test(t0), `potrdilo (besedilo maila): ${opis}`, t0.slice(0, 200));
@@ -816,6 +825,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(poslanoNa("dnevno3@example.com").length === 0 && R.poslano.length === prejD + 2 && /dnevna meja gostujocih mailov/.test(d.log) && !/dnevno3@example\.com/.test(d.log), "mail se ne poslje, zapis v dnevniku brez e-naslova", R.poslano.length - prejD);
     const nOdl = await vstavi(null, "placan-nad-mejo@example.com", null);   // placano (ne testno), meja (2) je ze presezena: potrdilo vseeno gre
     assert(await cakaj(() => poslanoNa("placan-nad-mejo@example.com").length === 1), "resnicno placano narocilo NAD dnevno mejo: potrdilo je poslano");
+    await cakaj(async () => (await pool.query("SELECT guest_mail_sent_at FROM orders WHERE id=$1", [nOdl])).rows[0].guest_mail_sent_at !== null);   // zapis »poslano« sledi odgovoru Resenda
     const odl = (await pool.query("SELECT guest_mail_attempts, guest_mail_sent_at FROM orders WHERE id=$1", [nOdl])).rows[0];
     assert(odl.guest_mail_sent_at !== null && odl.guest_mail_attempts === 1, "poslano v 1. poskusu, ni odloženo", odl);
     assert(/opozorilo: ze \d+ gostujocih mailov v 24 h/.test(d.log) && !/placan-nad-mejo@example\.com/.test(d.log), "ob preseznem stevilu samo opozorilo v dnevniku, brez e-naslova");
