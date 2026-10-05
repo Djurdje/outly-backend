@@ -19,7 +19,7 @@ in stvari, ki jih nobeno orodje ne ve.
 
 **Zgodovina** (zaključeni sklopi, dnevniki sej, stari načrti in daljše prvotno besedilo pasti do 2. 10. 2026) je v
 [`docs/arhiv/STATE-do-2026-10-02.md`](arhiv/STATE-do-2026-10-02.md) — ni merodajna. Ta datoteka ima **največ 200 vrstic**;
-kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`STATE-do-2026-10-02d.md`](arhiv/STATE-do-2026-10-02d.md)).
+kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`STATE-do-2026-10-05.md`](arhiv/STATE-do-2026-10-05.md)).
 
 ## Odprte naloge
 
@@ -42,12 +42,6 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   workspacea in okolja ostaneta (veljata tudi za web servis) — ne zapiraj.
 - **Health Check Path = `/healthz`** (200 / 503 ob nedosegljivi bazi, `_testi/test_zdravje.js`; lasten pool `zdraviPool`; 503 tudi ob >60 s zastoju glavnega poola ali skenPool (nobena povezava se ne vrne), I10); Render novo kodo spusti v promet
   šele, ko odgovori. Interni klici health checka niso v request logih (prazni logi so pričakovani).
-
-## Cloudflare Browser Cache TTL = 4 h (29. 9. 2026)
-
-- Vse statične datoteke outly.si dobijo `max-age=14400`; `Cache-Control: no-cache` iz `_headers` NE velja (HTML ima `max-age=0`).
-  Spletna aplikacija se brani sama (`outly_webpage/CLAUDE.md`), **landing ne**: `script.js`, `auth.js` ... so lahko do 4 h stari.
-  Priporočilo Martinu (nastavitev računa): Caching → Browser Cache TTL = »Respect Existing Headers«.
 
 ## Sken brez povezave (QR v2; ARCHITECTURE »Sken brez povezave«, invarianta I14)
 
@@ -82,23 +76,9 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   Dnevnik `[predpomnilnik] 60 s: …` kaže zadetke/razveljavitve; izklop: `JAVNI_PREDPOMNILNIK_MS=0`. Nov javni GET, odvisen od uporabnika, NE sme vanj.
 - Za iOS/splet (neobvezno): `GET /events?lite=true` brez `description` (ključ manjka; model naj ga ima neobveznega), `ETag`/304.
 
-## Spletna aplikacija (outly.si/app; podrobnosti v `outly_webpage/CLAUDE.md`)
+## Spletna aplikacija, Cloudflare TTL, izhod oblačnih sej
 
-- **Ni javna** (Martin 29. 9.: »da lahko jaz prvo vse preverim«): dosegljiva samo z neposrednim URL-jem, `noindex`.
-  **Gumba na outly.si ne dodajaj, dokler Martin ne reče** — to je hkrati javna objava.
-- **Osnutek politike zasebnosti** za spletno aplikacijo (`docs/osnutki/zasebnost-spletna-aplikacija.md`, tudi kamera za skener)
-  NI objavljen, čaka Martinov DA; popravi netočno alinejo §11 (žeton v brskalniku ni v »varni shrambi sistema«).
-- Kontrast: bel napis na modrem gumbu (#4C76FF) 3,35–3,93 (WCAG AA 4,5); barva znamke — samo Martin. Modro besedilo na spletu #6A8CFF.
-- `GET /business/events/:id/tickets` vrne podpisan `qr` vseh vstopnic vsem vlogam v klubu (iOS enako); splet ga hrani samo v pomnilniku.
-- **Past (backend, obstojeca):** `klubUporabnika(uid, zeljeni)` za lastnika z VEC klubi vrne samo prvega (`ORDER BY id LIMIT 1`);
-  lastnik z drugim klubom v glavi `X-Outly-Club` dobi 404. Danes ima vsak lastnik en klub - ob drugem klubu to popraviti.
-- **Past (splet):** `PATCH /me` vrne samo `POLJA_UPORABNIKA` (brez `clubs`, `pending_*`) - odjemalec mora zdruziti s
-  trenutnim profilom ali znova poklicati `GET /me` (iOS po avatarju klice `GET /me`).
-- MapLibre 5 nima več `maplibregl.supported()`; MapLibrov CSS (naložen pozneje) prepiše `position` platna — pravila zemljevida
-  imajo zato višjo specifičnost (`.karta.maplibregl-map`).
-- **Odprte najdbe pregleda faze 1** (29. 9., še brez Issueja): CSP velja samo za `/app` (seja v localStorage je skupna z vsem
-  outly.si); `img-src https:` (poljuben https plakat/logo); `ticket_url`, `website`/`logo_url` brez preverbe `^https://` na strežniku
-  (splet filtrira z `varenUrl`, iOS ne).
+- Preseljeno v arhiv (HR 5. 10.): [`STATE-do-2026-10-05.md`](arhiv/STATE-do-2026-10-05.md). **Odprte najdbe pregleda faze 1** (CSP, `img-src https:`, `ticket_url`/`website` brez preverbe `^https://`) so tam; Issue še ni.
 
 ## Stripe plačila (od 3. 10. 2026; issue #19, `placila_stripe.js`, DECISIONS 3. 10., I19)
 
@@ -187,12 +167,6 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   GitHub) ne more biti obvezna.
 - **`jq` in `^`**: v `jq` je `^` zasidran na cel niz, ne na vrstico — vzorec čez vrstice diffa rabi `(?m)`.
   Brez tega filter tiho ne ujame ničesar in preverba je videti zelena. (Ujeto pri pisanju `zascita.yml`.)
-- **Oblačne seje nimajo izhoda** do `onrender.com`, `outly.si`, `*.pages.dev`, `supabase.co`, `ntfy.sh`, `download.swift.org` in
-  GitHub *releases* (403 prek agent proxyja). iOS prevod preveri `Gradnja iOS` na PR-ju (+ `type-checker`); backend ročni zagon
-  **`Nadzor produkcije`** (`workflow_dispatch` na `main`, `test=false`, korak »Preveri produkcijo« izpiše `OK <ime> (<status>)`).
-  Zelen Nadzor ne dokaže, da teče nova koda (Render ob neuspelem deployu pusti staro) — ob dvomu preveri novo polje v odgovoru.
-- **Headless preverjanje outly.si:** stubati je treba samo Supabase (`*.supabase.co`; supabase-js in Inter sta v `vendor/`,
-  `assets/fonts/`). Playwright: `npm i playwright` v scratchpadu + `executablePath` `/opt/pw-browsers/chromium-*/chrome-linux/chrome`.
 - `owner_user_id` ni več v javnih odgovorih klubov (#113, I4; arhiv `STATE-do-2026-10-02c.md`). **ios-dev** (neurgentno): odstrani `APIClub.ownerUserId`.
 - **Idempotentni ključ nakupa (#112, I18).** Glava `Idempotency-Key: <UUID>` na obeh `POST …/orders` (brez nje vse kot prej): en UUID na pritisk »Kupi«, isti ob
   ponovitvi ISTEGA nakupa, nov ob spremembi nakupa. Ponovitev = 201 + `Idempotent-Replayed: true` s TRENUTNIM stanjem; neaktivno 409, drug nakup 422. iOS (#53) in splet (#29) ga pošiljata.
