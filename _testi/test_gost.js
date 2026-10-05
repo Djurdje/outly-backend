@@ -11,11 +11,14 @@
  *   4  validacija (400) pred omejevalnikom; starost (I8, 403); razprodano (I2, 409); hkratni nakupi
  *   5  idempotenca (I18): ponovitev, svez zeton, 422, vezano na e-naslov, hkratnost
  *   6  Stripe nacin: checkout_url, success_url z zetonom, customer_email, webhook -> paid -> mail enkrat, pospravljalec, potekla seja
- *   7  zloraba: 1 neplacano na (e-naslov, dogodek), brez enumeracije racunov, gost ne steje v omejitev uporabnika; 5/h/IP (429)
+ *   7  zloraba: 1 neplacano na (e-naslov, dogodek), brez enumeracije racunov, gost ne steje v omejitev uporabnika; nakup 10/h/IP (429; GOST_NAKUP_NA_URO)
  *   8  poslovni pogledi: vratar brez e-naslova, »Guest«, sken, prodaja
  *   9  prevzem v racun: GET /me, /me/orders, /me/tickets; neprevzet pri nepotrjenem e-naslovu; tuji uporabniki ne vidijo
  *  10  napaka Resenda ne podre nakupa, pospravljalec poslje mail (enkrat); potek zetona + pospravljanje
  *  10b hramba: anonimizacija e-naslova (neplacano 24 h, placano 180 dni po dogodku)
+ *  10c preklic: ob ponavljanju in vzporednih klicih Stripa ne obremenjujemo (409 request_in_progress)
+ *  14  dnevna meja mailov samo za testna narocila; placano potrdilo gre vedno
+ *  15  pospravljalec: naroila v premoru ne stradajo novejsih
  *  11  obstojeci nakupi prijavljenih nespremenjeni
  */
 const crypto = require("crypto");
@@ -81,7 +84,7 @@ const poslanoNa = (email) => R.poslano.filter(m => m.to === email || (Array.isAr
 const zetonIzMaila = (m) => { const x = /\/app\/guest\/order#t=([A-Za-z0-9_-]{43})/.exec(m.html || ""); return x ? x[1] : null; };
 
 // ---------- lazni Stripe ----------
-const S = { seje: {}, stSej: 0, zahtevki: [] };
+const S = { seje: {}, stSej: 0, zahtevki: [], branj: 0, zamikBranja: 0 };
 const stripeServer = http.createServer((req, res) => {
   let d = ""; req.on("data", x => d += x);
   req.on("end", () => {
@@ -99,7 +102,7 @@ const stripeServer = http.createServer((req, res) => {
         metadata: { order_id: p["metadata[order_id]"], public_ref: p["metadata[public_ref]"] }, expires_at: Number(p.expires_at), payment_intent: null };
       return odg(200, S.seje[id]);
     }
-    if (req.method === "GET" && (m = u.match(/^\/v1\/checkout\/sessions\/(cs_\w+)$/))) return odg(200, S.seje[m[1]]);
+    if (req.method === "GET" && (m = u.match(/^\/v1\/checkout\/sessions\/(cs_\w+)$/))) { S.branj++; return S.zamikBranja ? setTimeout(() => odg(200, S.seje[m[1]]), S.zamikBranja) : odg(200, S.seje[m[1]]); }
     if (req.method === "POST" && (m = u.match(/^\/v1\/checkout\/sessions\/(cs_\w+)\/expire$/))) { S.seje[m[1]].status = "expired"; return odg(200, S.seje[m[1]]); }
     return odg(404, { error: { type: "invalid_request_error", message: "Lazni Stripe: neznana pot " + req.method + " " + u } });
   });
@@ -137,7 +140,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
   await new Promise(r => resendServer.listen(RESEND_PORT, r));
   const a = zagon(PORT_A, { RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>",
     STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_POSPRAVI_MS: "600",
-    GOST_NAKUP_NA_URO: "1000", GOST_POSTA_PONOVI_MS: "500", GOST_POSTA_PREMOR_MS: "400", GOST_POSTA_TIMEOUT_MS: "1000", GOST_NEUSPESNI_NA_URO: "1000", REZERVACIJE_CISCENJE_MS: "1000", GOST_HRAMBA_DNI: "180" });
+    GOST_NAKUP_NA_URO: "1000", GOST_PREKLIC_OKNO_MS: "1500", GOST_POSTA_PONOVI_MS: "500", GOST_POSTA_PREMOR_MS: "400", GOST_POSTA_TIMEOUT_MS: "1000", GOST_NEUSPESNI_NA_URO: "1000", REZERVACIJE_CISCENJE_MS: "1000", GOST_HRAMBA_DNI: "180" });
   let b = null;
   await cakajStreznik(A);
 
@@ -591,6 +594,31 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     r = await preklic(zBs);
     assert(r.status === 200 && r.body.order.status === "cancelled", "brez seje in starejse od 60 s: preklic gre", r);
 
+    // Stripova omejitev branja: preklic seje, ki ni ne odprta ne placana (complete + unpaid), ne sme ob vsakem klicu v Stripe
+    r = await nakup(evCap, "complete-unpaid@example.com", { quantity: 1 });
+    const nCu = r.body.order.id, zCu = r.body.guest_token, sCu = await seja(nCu);
+    sCu.status = "complete"; sCu.payment_status = "unpaid";
+    let br0 = S.branj;
+    r = await preklic(zCu);
+    assert(r.status === 409 && r.body.error === "order_not_pending" && S.branj === br0 + 1, "complete+unpaid: 1. preklic 409 order_not_pending, en Stripov klic", [r.status, S.branj - br0]);
+    r = await preklic(zCu);
+    assert(r.status === 409 && r.body.error === "request_in_progress" && Number(r.headers.get("retry-after")) >= 1 && S.branj === br0 + 1, "ponovitev znotraj okna: 409 request_in_progress + Retry-After, BREZ Stripa", [r.status, r.body, S.branj - br0]);
+    const ponovitve = await Promise.all([1, 2, 3, 4, 5].map(() => preklic(zCu)));
+    assert(ponovitve.every(x => x.status === 409 && x.body.error === "request_in_progress") && S.branj === br0 + 1, "5 hitrih ponovitev: vse 409 request_in_progress, noben ne 429, brez Stripa", [ponovitve.map(x => x.status), S.branj - br0]);
+    await pocakaj(1700);
+    r = await preklic(zCu);
+    assert(r.status === 409 && r.body.error === "order_not_pending" && S.branj === br0 + 2, "po izteku okna spet en Stripov klic", [r.status, S.branj - br0]);
+    // vzporedni preklic istega narocila: pocasen Stripe (zamik daljsi od okna) -> drugi klic ne gre do Stripa
+    r = await nakup(evCap, "vzporeden-preklic@example.com", { quantity: 1 });
+    const nVp = r.body.order.id, zVp = r.body.guest_token, sVp = await seja(nVp);
+    br0 = S.branj; S.zamikBranja = 2200;
+    const prvi = preklic(zVp);
+    await pocakaj(1700);   // okno (1500 ms) je ze poteklo, prvi klic pa se vedno caka na Stripe
+    const drugi = await preklic(zVp);
+    assert(drugi.status === 409 && drugi.body.error === "request_in_progress" && Number(drugi.headers.get("retry-after")) >= 1, "vzporeden preklic istega narocila: 409 request_in_progress (brez Stripa)", [drugi.status, drugi.body]);
+    r = await prvi; S.zamikBranja = 0;
+    assert(r.status === 200 && r.body.order.status === "cancelled" && sVp.status === "expired" && S.branj === br0 + 1, "prvi preklic uspe, Stripe ni bil poklican dvakrat", [r.status, S.branj - br0]);
+
     console.log("\n# 10d. Skupna meja cakajocih gostujocih vstopnic na dogodek");
     // evCap2: kapaciteta 30 -> meja max(10, 20 % = 6) = 10 cakajocih vstopnic
     r = await nakup(evCap2, "cap-a@example.com", { quantity: 6 });
@@ -786,11 +814,30 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(r.status === 201 && r.body.tickets.length === 1, "3. nakup: 201 z vstopnico");
     assert(await cakaj(async () => (await pool.query("SELECT guest_mail_attempts FROM orders WHERE id=$1", [n3])).rows[0].guest_mail_attempts >= 8), "preko dnevne meje: testni mail izpuscen (poskusi izcrpani)");
     assert(poslanoNa("dnevno3@example.com").length === 0 && R.poslano.length === prejD + 2 && /dnevna meja gostujocih mailov/.test(d.log) && !/dnevno3@example\.com/.test(d.log), "mail se ne poslje, zapis v dnevniku brez e-naslova", R.poslano.length - prejD);
-    const nOdl = await vstavi(null, "odlozen@example.com", null);   // placano (ne testno): mail se ODLOZI, ne izgubi
-    assert(await cakaj(() => /se odlozi/.test(d.log), 6000), "resnicno placano narocilo: potrdilo se odlozi (dnevnik)");
+    const nOdl = await vstavi(null, "placan-nad-mejo@example.com", null);   // placano (ne testno), meja (2) je ze presezena: potrdilo vseeno gre
+    assert(await cakaj(() => poslanoNa("placan-nad-mejo@example.com").length === 1), "resnicno placano narocilo NAD dnevno mejo: potrdilo je poslano");
     const odl = (await pool.query("SELECT guest_mail_attempts, guest_mail_sent_at FROM orders WHERE id=$1", [nOdl])).rows[0];
-    assert(odl.guest_mail_attempts === 0 && odl.guest_mail_sent_at === null && poslanoNa("odlozen@example.com").length === 0, "odlozeno potrdilo ni porabilo poskusa", odl);
+    assert(odl.guest_mail_sent_at !== null && odl.guest_mail_attempts === 1, "poslano v 1. poskusu, ni odloženo", odl);
+    assert(/opozorilo: ze \d+ gostujocih mailov v 24 h/.test(d.log) && !/placan-nad-mejo@example\.com/.test(d.log), "ob preseznem stevilu samo opozorilo v dnevniku, brez e-naslova");
+    const nOdl2 = await vstavi(null, "dnevno1@example.com", null);   // placano, isti naslov kot testni nakup v 24 h: tudi 1/naslov/24 h velja samo za testna
+    assert(await cakaj(() => poslanoNa("dnevno1@example.com").length === 2), "placano narocilo na naslov, ki je v 24 h ze dobil mail: potrdilo poslano");
     d.srv.kill();
+
+    console.log("\n# 15. Pospravljalec: naroila v premoru ne stradajo novejsih");
+    await pool.query("UPDATE orders SET guest_mail_attempts = 8 WHERE guest_email IS NOT NULL AND guest_mail_sent_at IS NULL");
+    await pool.query("UPDATE events SET capacity = 500 WHERE id = $1", [evA]);   // vstavi() zasede zalogo; evA je do zdaj skoraj polen
+    const premor = [];
+    for (let i = 1; i <= 25; i++) premor.push(await vstavi(null, `premor${i}@example.com`, null));
+    // 25 starejsih placanih narocil: 1. poskus je ze bil pred trenutkom, naslednji je zaradi premora (10 min) mogoc sele pozneje
+    await pool.query("UPDATE orders SET guest_mail_attempts = 1, guest_mail_claimed_at = NOW() WHERE id = ANY($1::bigint[])", [premor]);
+    const novo = await vstavi(null, "premor-novo@example.com", null);   // vecji id, prvi poskus
+    const PORT_F = 3196;
+    const f = zagon(PORT_F, { RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, GOST_POSTA_PONOVI_MS: "300", GOST_POSTA_PREMOR_MS: "600000" });
+    await cakajStreznik(`http://127.0.0.1:${PORT_F}`);
+    assert(await cakaj(() => poslanoNa("premor-novo@example.com").length === 1, 6000), "novejse narocilo dobi mail, ceprav je pred njim 25 starejsih v premoru (LIMIT 20)");
+    await pocakaj(900);
+    assert(R.poslano.filter(m => /^premor\d+@/.test(String(m.to))).length === 0, "narocila v premoru niso bila poslana pred iztekom premora");
+    f.srv.kill();
   } catch (e) {
     fail++; console.error("NAPAKA TESTA:", e);
   } finally {

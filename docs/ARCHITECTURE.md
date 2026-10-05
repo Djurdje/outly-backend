@@ -135,6 +135,7 @@ Napake: besedilo (400 validacija PRED omejevalnikom, 403 starost, 409, 429, 503)
 `pending` → `tickets: []`; brez e-naslova; `Cache-Control: no-store`.
 **`POST /guest/order/cancel`** (glava `X-Guest-Token`, brez telesa): prekliče NEPLAČANO (`pending`) naročilo: Stripe seja se poteče (kot pospravljalec), zaloga se sprosti takoj; 200 `{ order }` (status `cancelled`);
 placano/že preklicano v istem trenutku 409 `order_not_pending` (seja je bila medtem plačana: tudi 409, naročilo ostane `pending` do webhooka); seja se še ustvarja (< 60 s) 409 `request_in_progress` + `Retry-After`; Stripe nedosegljiv 502.
+Zaščita Stripove omejitve branja (si jo delita webhook in pospravljalec): v procesu množica naročil v obdelavi + čas zadnjega Stripovega klica po naročilu (`GOST_PREKLIC_OKNO_MS`, 5 s, največ 5000 vnosov); vzporeden ali prehiter preklic istega naročila → 409 `request_in_progress` + `Retry-After` brez Stripa (nikoli 429).
 Po preklicu žeton daje 404.
 
 **Žeton:** `randomBytes(32)` base64url, v bazi samo sha256. Več žetonov na naročilo (največ 10): odgovor nakupa, `success_url`, mail, vsaka ponovitev ključa (čistopisa ni, mail iz webhooka potrebuje svežega).
@@ -145,7 +146,8 @@ naročila — NULL: »VAT is charged according to the seller's VAT status.«, pr
 **Največ enkrat OB USPEHU; ob padcu procesa ali preteku roka MED pošiljanjem lahko dvakrat.** `UPDATE … RETURNING` si rezervira poskus (`guest_mail_attempts`, `guest_mail_claimed_at`), `guest_mail_sent_at` po uspehu Resenda.
 Pospravljalec (`GOST_POSTA_PONOVI_MS`) ponavlja z naraščajočim premorom 2 min, 5 min, 15 min, 1 h, 3 h, 12 h, 24 h (`GOST_POSTA_PREMOR_MS` × [1, 2.5, 7.5, 30, 90, 360, 720]), skupaj 8 poskusov; ob izčrpanju `console.error` (brez e-naslova).
 Največ 3 sočasna pošiljanja v procesu (`GOST_POSTA_SOCASNIH`), klic Resenda ima rok `GOST_POSTA_TIMEOUT_MS` (10 s). Resend ob napaki NE vrže (`{ error }`): napaka v dnevnik, ne podre plačila ali webhooka.
-Meje (zloraba: mail na tuj naslov): v TESTNEM načinu največ 1 mail na naslov na 24 h (drugi se izpusti, zapis v dnevnik); globalno `GOST_POSTA_DNEVNO` (300) na 24 h — testni se izpusti, resnično plačan se ODLOŽI (potrdilo ne sme izginiti).
+Meje (zloraba: mail na tuj naslov): v TESTNEM načinu največ 1 mail na naslov na 24 h (drugi se izpusti, zapis v dnevnik); globalno `GOST_POSTA_DNEVNO` (300) na 24 h — obe meji veljata SAMO za testna naročila (`is_test`); potrdilo resnično plačanega naročila (zakonska obveznost) se nikoli ne odloži in ne izpusti, ob preseženi številki samo `console.warn` (brez e-naslova, največ 1/uro).
+Pospravljalec izbira naročila s pogojem premora že v SQL (isti pogoj kot pri zaklepu), da starejša naročila v dolgem premoru ne stradajo novejših (`LIMIT 20`).
 
 **Zloraba:** nakup 10/h/IP (`GOST_NAKUP_NA_URO`, `omeji("nakup-gost")`, `priNapaki: "lokalno"`); največ 1 neplačano naročilo na (e-naslov, dogodek) — unikaten delni indeks `orders_gost_cakajoce_key`; skupna meja čakajočih vstopnic na dogodek (zgoraj);
 Idempotency-Key vezan na e-naslov (`orders_gost_idempotency_key`) s plastjo v procesu kot pri računih (hkratni zahtevki istega ključa ne porabijo meje) — iskanje po ključu pred omejevalnikom omeji števec v pomnilniku

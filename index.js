@@ -3820,7 +3820,7 @@ app.get("/me/tickets", requireAuth, async (req, res) => {
 // ---------------------------
 // Martin, 5. 10. 2026: kupec vpise samo e-naslov (brez kode iz maila, brez gesla, brez registracije). Samo navadne vstopnice, VIP mize NE.
 // Naročilo: orders.user_id = NULL + guest_email (NI vrstice v `users`; DECISIONS 5. 10. 2026). Pogled gosta = ZETON v glavi X-Guest-Token
-// (32 B nakljucnih, v bazi samo sha256, tabela gost_zetoni). Zloraba: 5 nakupov/uro/IP, najvec 1 neplacano narocilo na (e-naslov, dogodek)
+// (32 B nakljucnih, v bazi samo sha256, tabela gost_zetoni). Zloraba: 10 nakupov/uro/IP (GOST_NAKUP_NA_URO), najvec 1 neplacano narocilo na (e-naslov, dogodek)
 // (unikaten delni indeks), Idempotency-Key vezan na e-naslov. Mail z vstopnico ob placilu (najvec enkrat; Resend ob napaki ne vrze).
 const GOST_ZETON_DNI = 30;                 // zeton velja do konca dogodka + 30 dni
 const GOST_ZETONOV_NA_NAROCILO = 10;       // odgovor nakupa, success_url Stripa, mail, ponovitve; starejsi se pozabijo
@@ -3839,6 +3839,7 @@ const GOST_POSTA_PREMOR_MS = okoljeCelo("GOST_POSTA_PREMOR_MS", 120000, 0, 36000
 const GOST_POSTA_PREMORI = [0, 1, 2.5, 7.5, 30, 90, 360, 720].map((x) => Math.round(x * GOST_POSTA_PREMOR_MS));
 const GOST_POSTA_POSKUSOV = GOST_POSTA_PREMORI.length;
 const GOST_PREVZEM_MS = okoljeCelo("GOST_PREVZEM_MS", 30000, 0, 3600000);   // kako pogosto /me/orders in /me/tickets znova iscejo gostujoca narocila
+const GOST_PREKLIC_OKNO_MS = okoljeCelo("GOST_PREKLIC_OKNO_MS", 5000, 0, 600000);   // najmanjsi razmik med Stripovimi klici za isto narocilo (preklic)
 const GOST_ZETON_VZOREC = /^[A-Za-z0-9_-]{43}$/;
 const GOST_EMAIL_ATOM = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
 const GOST_POSTA_NIZ = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -4148,6 +4149,30 @@ async function gostNarociloOdgovor(db, oid) {
   };
 }
 
+// Zascita Stripove omejitve branja (si jo delita webhook in pospravljalec): preklic z veljavnim zetonom, ko seja ni ne odprta ne placana
+// (npr. complete + unpaid), bi sicer ob vsakem klicu naredil checkout.sessions.retrieve. Stanje je v procesu (ena instanca):
+// (a) narocila v obdelavi (vzporedni preklic istega narocila ne gre do Stripa), (b) cas zadnjega Stripovega klica po narocilu (najvec en na okno).
+// Oboje se konca z 409 request_in_progress + Retry-After, nikoli 429 (veljaven zeton ne sme biti zavrnjen z omejitvijo).
+const gostPreklicVObdelavi = new Set();
+const gostPreklicStripe = new Map();   // order_id -> ms zadnjega Stripovega klica; najvec 5000 vnosov (najstarejsi se izrine)
+function gostPreklicVstopi(oid) {
+  if (gostPreklicVObdelavi.has(oid)) return 1;
+  const zdaj = Date.now(), zadnji = gostPreklicStripe.get(oid);
+  if (zadnji !== undefined && zdaj - zadnji < GOST_PREKLIC_OKNO_MS) return Math.max(1, Math.ceil((GOST_PREKLIC_OKNO_MS - (zdaj - zadnji)) / 1000));
+  gostPreklicVObdelavi.add(oid);
+  return 0;
+}
+function gostPreklicIzstopi(oid) {
+  gostPreklicVObdelavi.delete(oid);
+  gostPreklicStripe.delete(oid);   // ponovni vnos na konec vrstnega reda (Map hrani vrstni red vstavljanja)
+  if (gostPreklicStripe.size >= 5000) {
+    const meja = Date.now() - GOST_PREKLIC_OKNO_MS;
+    for (const [k, t] of gostPreklicStripe) if (t <= meja) gostPreklicStripe.delete(k);
+    while (gostPreklicStripe.size >= 5000) gostPreklicStripe.delete(gostPreklicStripe.keys().next().value);
+  }
+  gostPreklicStripe.set(oid, Date.now());
+}
+
 // GET /guest/order — pogled gosta: narocilo + vstopnice. Zeton v glavi X-Guest-Token (NE v URL-ju zahtevka: ne pride v dnevnike).
 // Napacen/potekel zeton, preklicano neplacano narocilo, prevzeto v racun, VIP miza: 404 vedno enako (razlike ne razkrijemo).
 // pending: tickets [] (odjemalec po vrnitvi s Stripa poizveduje, dokler ne pride paid).
@@ -4172,10 +4197,12 @@ app.get("/guest/order", async (req, res) => {
 // Zeton v glavi X-Guest-Token, brez telesa. 200 { order } (status cancelled); naročilo, ki ni pending (placano ali ze preklicano
 // v istem trenutku): 409 { error: "order_not_pending" }. Stripe seja se poteče (kot pospravljalec); če je bila med tem placana: 409.
 // Brez omeji(): nepoznan zeton steje gostNeuspesni, veljaven nikoli ne dobi 429 (ponovitev na preklicanem narocilu se konca pri 409, brez Stripa).
+// Stripov klic: najvec eden hkrati in najvec eden na GOST_PREKLIC_OKNO_MS (5 s) po narocilu, sicer 409 request_in_progress + Retry-After (glej gostPreklicVstopi).
 app.post("/guest/order/cancel", async (req, res) => {
   res.set("Cache-Control", "no-store");
+  let oid = null, vObdelavi = false;
   try {
-    const oid = await gostNarociloPoZetonu(pool, req.get("x-guest-token"));
+    oid = await gostNarociloPoZetonu(pool, req.get("x-guest-token"));
     if (!oid) return gostNeuspesen(req, res);
     const k = (await pool.query("SELECT status, event_id, stripe_checkout_session_id, created_at FROM orders WHERE id = $1", [oid])).rows[0];
     if (!k) return res.status(404).send("Order not found.");
@@ -4184,6 +4211,12 @@ app.post("/guest/order/cancel", async (req, res) => {
     if (k.stripe_checkout_session_id) {
       const s = placilaStripe.stripe();
       if (!s) return res.status(503).send("Payments are not configured yet.");
+      const cakaj = gostPreklicVstopi(oid);
+      if (cakaj) {
+        res.set("Retry-After", String(cakaj));
+        return res.status(409).json({ error: "request_in_progress", message: "Your cancellation is already being processed. Please try again in a moment." });
+      }
+      vObdelavi = true;
       let seja;
       try {
         seja = await s.checkout.sessions.retrieve(k.stripe_checkout_session_id);
@@ -4207,6 +4240,7 @@ app.post("/guest/order/cancel", async (req, res) => {
     console.log(`[gost] preklic neplacanega narocila ${oid}`);
     return res.json({ order: await gostNarociloOdgovor(pool, oid) });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+  finally { if (vObdelavi) gostPreklicIzstopi(oid); }
 });
 
 // --- prevzem v racun ---
@@ -4292,8 +4326,8 @@ async function gostPostaVstopi() {
 }
 function gostPostaIzstopi() { const n = gostPosta.cakajoci.shift(); if (n) n(); else gostPosta.aktivnih--; }
 const gostPostaZadnjiDnevnik = new Map();   // vrsta zapisa -> ms; isti zapis najvec enkrat na uro (sweeper bi ga sicer ponavljal ob vsakem teku)
-function gostPostaDnevnik(vrsta, sporocilo) {
-  if (Date.now() - (gostPostaZadnjiDnevnik.get(vrsta) || 0) > 3600 * 1000) { gostPostaZadnjiDnevnik.set(vrsta, Date.now()); console.error(sporocilo); }
+function gostPostaDnevnik(vrsta, sporocilo, raven = "error") {
+  if (Date.now() - (gostPostaZadnjiDnevnik.get(vrsta) || 0) > 3600 * 1000) { gostPostaZadnjiDnevnik.set(vrsta, Date.now()); console[raven](sporocilo); }
 }
 const gostPostaIzcrpaj = (oid) => pool.query("UPDATE orders SET guest_mail_attempts = $2 WHERE id = $1 AND guest_mail_sent_at IS NULL", [oid, GOST_POSTA_POSKUSOV]);
 
@@ -4309,16 +4343,15 @@ async function gostPosljiEnoPosto(oid) {
     `SELECT guest_email, status, guest_mail_sent_at, guest_mail_attempts, public_ref, COALESCE(stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test
        FROM orders WHERE id = $1`, [oid])).rows[0];
   if (!pre || !pre.guest_email || pre.status !== "paid" || pre.guest_mail_sent_at || pre.guest_mail_attempts >= GOST_POSTA_POSKUSOV) return false;
-  // Meje (zloraba: mail na tuj naslov brez placila): globalno na dan; v testnem nacinu se 1 mail na naslov na 24 h.
+  // Meje (zloraba: mail na tuj naslov brez placila) veljajo SAMO za testna narocila: globalno na dan in 1 mail na naslov na 24 h.
+  // Potrdilo placanega narocila je zakonska obveznost (ZVPot-1): nikoli se ne odlozi ne izpusti, ob preseznem stevilu samo opozorilo (brez e-naslova).
   const dnevno = (await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE guest_mail_sent_at > NOW() - INTERVAL '24 hours'")).rows[0].n;
-  if (dnevno >= GOST_POSTA_DNEVNO) {
-    if (pre.is_test) { await gostPostaIzcrpaj(oid); gostPostaDnevnik("testni", `[gost] dnevna meja gostujocih mailov (${GOST_POSTA_DNEVNO}): testni mail izpuscen (narocilo ${pre.public_ref})`); }
-    else gostPostaDnevnik("placan", `[gost] dnevna meja gostujocih mailov (${GOST_POSTA_DNEVNO}) dosezena: potrdilo placanega narocila ${pre.public_ref} se odlozi`);
-    return false;
-  }
   if (pre.is_test) {
+    if (dnevno >= GOST_POSTA_DNEVNO) { await gostPostaIzcrpaj(oid); gostPostaDnevnik("testni", `[gost] dnevna meja gostujocih mailov (${GOST_POSTA_DNEVNO}): testni mail izpuscen (narocilo ${pre.public_ref})`); return false; }
     const ze = await pool.query("SELECT 1 FROM orders WHERE guest_email = $1 AND id <> $2 AND guest_mail_sent_at > NOW() - INTERVAL '24 hours' LIMIT 1", [pre.guest_email, oid]);
     if (ze.rows.length) { await gostPostaIzcrpaj(oid); console.error(`[gost] testni nacin: mail na isti naslov je bil ze poslan v 24 h, izpuscen (narocilo ${pre.public_ref})`); return false; }
+  } else if (dnevno >= GOST_POSTA_DNEVNO) {
+    gostPostaDnevnik("placan", `[gost] opozorilo: ze ${dnevno} gostujocih mailov v 24 h (meja ${GOST_POSTA_DNEVNO} velja samo za testna narocila); potrdilo placanega narocila ${pre.public_ref} se poslje vseeno`, "warn");
   }
   const k = await pool.query(
     `UPDATE orders SET guest_mail_attempts = guest_mail_attempts + 1, guest_mail_claimed_at = NOW()
@@ -4367,7 +4400,9 @@ async function gostPosljiNeposlane() {
   try {
     const r = await pool.query(
       `SELECT id FROM orders WHERE guest_email IS NOT NULL AND guest_mail_sent_at IS NULL AND status = 'paid'
-          AND guest_mail_attempts < $1 AND paid_at > NOW() - INTERVAL '3 days' ORDER BY id LIMIT 20`, [GOST_POSTA_POSKUSOV]);
+          AND guest_mail_attempts < $1 AND paid_at > NOW() - INTERVAL '3 days'
+          AND (guest_mail_claimed_at IS NULL OR guest_mail_claimed_at < NOW() - ($2::bigint[])[guest_mail_attempts + 1] * INTERVAL '1 millisecond')
+        ORDER BY id LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);   // premor v SQL (isti pogoj kot pri zaklepu): najstarejsi v premoru ne stradajo novejsih
     for (const o of r.rows) await posljiGostuVstopnice(o.id);
   } catch (e) { console.error("[gost] pospravljanje mailov:", e && e.message); }
   finally { gostPostaTece = false; }
