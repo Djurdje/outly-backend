@@ -137,6 +137,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 - **Past:** ob uspešnem prenosu gostu je pošiljateljeva vstopnica POSLANA; če mail ne gre (napačen naslov, 8 poskusov ~42 h izčrpanih), vstopnice ne dobi nihče (v dnevniku `[gost] POZOR: mail s prenesene vstopnice …`, brez e-naslova). Razveljavitve ni.
 - **Past:** Resend (SDK 3.5) sledenja odpiranju/klikom ne izklaplja na mailu, ampak na domeni (Resend → Domains); pravna presoja zahteva brez sledenja, zato to nastavitev preveri Luka/Martin. Inline slika (`content_id`) in priloga PDF sta preverjeni samo proti lažnemu strežniku.
 - **Past:** PDF vstopnice uporablja osnovno pisavo (Helvetica, WinAnsi): č, ć, đ se v PDF izpišejo kot c, c, d (š, ž ostanejo); koda QR je enaka.
+- **Postopek: ugovor/izbris prejemnika** (odgovor na mail ali zahteva): admin (račun z vlogo admin) pokliče `POST /admin/api/guest-tickets/erase` z `{ "email": "<naslov>" }`; odgovor `{ tickets, transfers }`. Povezava preneha delovati, vstopnica in koda v mailu veljata naprej (vrnitev pošiljatelju ročno). Ni v admin panelu.
 - **Meja:** po prevzemu v račun se serial NE zamenja (PDF/koda v mailu veljata naprej); ugovor prejemnika (21(4)) gre z odgovorom na mail (ročno), gumba »Zavrni vstopnico« ni.
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)

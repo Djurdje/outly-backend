@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict dkVQKbll7arxHoabeWcPXI1ydV6fAjIsE7ZdLideVL0WTw05fI1af4uWF1rDYT5
+\restrict OEOLAos0s3OI8eyy2giY5L2ssoQJCo2Qa9YslaKfqnbXw1PsjeAY4Xr1OSR9hqr
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
@@ -837,7 +837,9 @@ CREATE TABLE public.ticket_transfers (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     seen_at timestamp with time zone,
     to_guest boolean DEFAULT false NOT NULL,
-    age_confirmed_min smallint
+    age_confirmed_min smallint,
+    allow_guest boolean DEFAULT false NOT NULL,
+    to_email_norm text
 );
 
 
@@ -1597,17 +1599,24 @@ CREATE INDEX table_holds_table_idx ON public.table_holds USING btree (table_id);
 
 
 --
+-- Name: ticket_transfers_gost_cas_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ticket_transfers_gost_cas_idx ON public.ticket_transfers USING btree (created_at) WHERE to_guest;
+
+
+--
 -- Name: ticket_transfers_gost_naslov_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX ticket_transfers_gost_naslov_idx ON public.ticket_transfers USING btree (to_email, created_at) WHERE to_guest;
+CREATE INDEX ticket_transfers_gost_naslov_idx ON public.ticket_transfers USING btree (to_email_norm, created_at) WHERE allow_guest;
 
 
 --
 -- Name: ticket_transfers_gost_posiljatelj_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX ticket_transfers_gost_posiljatelj_idx ON public.ticket_transfers USING btree (from_user_id, created_at) WHERE to_guest;
+CREATE INDEX ticket_transfers_gost_posiljatelj_idx ON public.ticket_transfers USING btree (from_user_id, created_at) WHERE allow_guest;
 
 
 --
@@ -2094,5 +2103,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict dkVQKbll7arxHoabeWcPXI1ydV6fAjIsE7ZdLideVL0WTw05fI1af4uWF1rDYT5
+\unrestrict OEOLAos0s3OI8eyy2giY5L2ssoQJCo2Qa9YslaKfqnbXw1PsjeAY4Xr1OSR9hqr
 

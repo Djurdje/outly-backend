@@ -203,14 +203,14 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(/Gost Noc/.test(m0.subject || "") && /Gost Noc/.test(m0.html || "") && /Pure Club/.test(m0.html || "") && /2 x 15\.00 EUR/.test(m0.html || ""), "mail: dogodek, klub, stevilo vstopnic", m0.subject);
     assert(/^Outly <test@outly\.test>$/.test(m0.from || ""), "mail: posiljatelj iz EMAIL_FROM", m0.from);
     assert(!/<script|pixel|track/i.test(m0.html || "") && !/<img[^>]+src="(?!cid:)/i.test(m0.html || ""), "mail: brez sledilnikov in zunanjih slik (samo vgrajene cid:)");
-    // QR inline + PDF (migracija 034): 2 vstopnici -> 2 vgrajeni sliki PNG (content_id) + 1 PDF s 2 stranema
+    // QR inline + PDF (migracija 034): 2 vstopnici -> vgrajena slika PNG SAMO za prvo kodo (content_id) + 1 PDF z 2 stranema (vse kode)
     const pr = m0.attachments || [];
     const slike = pr.filter(x => x.content_type === "image/png");
-    assert(slike.length === 2 && slike.every((x, i) => x.content_id === `ticket-qr-${i + 1}` && Buffer.from(x.content, "base64").subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))), "mail: 2 vgrajeni sliki QR (PNG, content_id)", pr.map(x => [x.filename, x.content_type, x.content_id]));
-    assert(/src="cid:ticket-qr-1"/.test(m0.html || "") && /src="cid:ticket-qr-2"/.test(m0.html || ""), "mail: HTML kaze obe sliki (cid:)");
+    assert(slike.length === 1 && slike[0].content_id === "ticket-qr-1" && Buffer.from(slike[0].content, "base64").subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])), "mail: ena vgrajena slika QR (prva koda; PNG, content_id)", pr.map(x => [x.filename, x.content_type, x.content_id]));
+    assert(/src="cid:ticket-qr-1"/.test(m0.html || "") && !/cid:ticket-qr-2/.test(m0.html || "") && /first QR code is below; all your QR codes \(one per page\) are in the attached PDF/.test(m0.text || ""), "mail: HTML kaze prvo sliko (cid:), besedilo pove, da so vse kode v PDF");
     const pdfP = pr.find(x => x.content_type === "application/pdf");
     const pdfB = pdfP ? Buffer.from(pdfP.content, "base64") : Buffer.alloc(0);
-    assert(pdfP && pdfP.filename === "outly-tickets.pdf" && pdfB.subarray(0, 5).toString() === "%PDF-" && pdfB.toString("latin1").includes("%%EOF") && (pdfB.toString("latin1").match(/\/Type \/Page /g) || []).length === 2, "mail: priloga PDF (2 strani)", pdfP && pdfP.filename);
+    assert(pdfP && pdfP.filename === "outly-tickets.pdf" && pdfB.subarray(0, 5).toString() === "%PDF-" && pdfB.toString("latin1").includes("%%EOF") && (pdfB.toString("latin1").match(/\/Type \/Page /g) || []).length === 2, "mail: priloga PDF (2 strani, vse kode)", pdfP && pdfP.filename);
     assert(!JSON.stringify(pdfP || {}).includes("gost@example.com") && !pdfB.toString("latin1").includes("gost@example.com"), "PDF brez e-naslova prejemnika");
     assert(m0.reply_to === "luka@outly.si", "mail: reply-to luka@outly.si", m0.reply_to);
     const t0 = m0.text || "";

@@ -6,10 +6,14 @@
  *
  * Najmanjsa varna pot (Martin, 5. 10. 2026): ena majhna odvisnost brez lastnih odvisnosti (qrcode-generator, MIT) za matriko QR;
  * PNG zapisemo sami z vgrajenim `zlib`, PDF sestavimo rocno (osnovna pisava Helvetica, WinAnsi, brez vdelanih pisav). Brez pdfkit
- * (~10 odvisnosti) in brez knjiznic za slike. Znaki izven WinAnsi (c, c, d, ...) se v PDF poenostavijo (c -> c): PDF je pripomocek,
+ * (~10 odvisnosti) in brez knjiznic za slike.
+ * Zanesljivost (sken na vratih ne sme trpeti): izracun matrike QR je ~7 ms CPU na kodo, zato sta qrPng in pdfVstopnice ASINHRONI in
+ * pred vsakim dragim korakom prepustita zanko dogodkov (setImmediate); deflate tece v nitih libuv. Noben kos ne blokira zanke dlje kot ~7-10 ms. Znaki izven WinAnsi (c, c, d, ...) se v PDF poenostavijo (c -> c): PDF je pripomocek,
  * merodajna je koda QR; besedilo maila ima polne znake.
  */
 const zlib = require("zlib");
+const { promisify } = require("util");
+const deflate = promisify(zlib.deflate);   // v nitih libuv, ne na glavni niti
 const qrcode = require("qrcode-generator");
 
 // --- QR matrika ---
@@ -30,6 +34,20 @@ function qrMatrika(koda) {
   return m;
 }
 
+// GLOBALNA vrsta kosov dela: en kos na obrat zanke dogodkov (setImmediate). Samo `await setImmediate` na zahtevek ne zadosca: 40 hkratnih mailov bi
+// postavilo 40 callbackov v ISTO fazo »check« in ti bi stekli zaporedoma v enem obratu (merjeno: zamik zanke ~300 ms). Z verigo je med dvema kosoma
+// vedno vsaj en obrat zanke (casovniki, V/I, sken na vratih pridejo na vrsto).
+let vrstaDela = Promise.resolve();
+function delo(fn) {
+  const r = vrstaDela.then(() => new Promise((res) => setImmediate(res))).then(fn);
+  vrstaDela = r.then(() => {}, () => {});
+  return r;
+}
+async function qrMatrikaAsinhrono(koda) {
+  const k = String(koda);
+  return matrikaPredpomnilnik.has(k) ? matrikaPredpomnilnik.get(k) : delo(() => qrMatrika(k));
+}
+
 // --- PNG ---
 const CRC_TABELA = (() => {
   const t = new Uint32Array(256);
@@ -48,8 +66,8 @@ function pngKos(tip, podatki) {
   return Buffer.concat([dolzina, jedro, crc]);
 }
 // Sivinska slika 8 bit (0 = crno, 255 = belo); `modul` pikslov na modul, `rob` modulov praznega roba (vsaj 4 po standardu).
-function qrPng(koda, modul = 8, rob = 4) {
-  const { n, temen } = qrMatrika(koda);
+async function qrPng(koda, modul = 6, rob = 4) {
+  const { n, temen } = await qrMatrikaAsinhrono(koda);
   const stran = (n + 2 * rob) * modul;
   const vrstica = 1 + stran;
   const surovo = Buffer.alloc(vrstica * stran, 0xFF);
@@ -66,7 +84,7 @@ function qrPng(koda, modul = 8, rob = 4) {
   const glava = Buffer.alloc(13);
   glava.writeUInt32BE(stran, 0); glava.writeUInt32BE(stran, 4); glava[8] = 8; glava[9] = 0; glava[10] = 0; glava[11] = 0; glava[12] = 0;
   return Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), pngKos("IHDR", glava),
-    pngKos("IDAT", zlib.deflateSync(surovo, { level: 9 })), pngKos("IEND", Buffer.alloc(0))]);
+    pngKos("IDAT", await deflate(surovo, { level: 1 })), pngKos("IEND", Buffer.alloc(0))]);
 }
 
 // --- PDF ---
@@ -131,24 +149,25 @@ const f2 = (x) => (Math.round(x * 100) / 100).toString();
  * `vstopnice`: [{ koda (vsebina QR), vrsta (niz, npr. "Standard ticket"), oznaka (npr. "Ticket 1 of 2") }]; `varnost`: besedilo pod kodo.
  * PDF nima e-naslova prejemnika in nobene povezave z zetonom (lahko ga kdo posreduje; vstopnica je tako ali tako koda QR).
  */
-function pdfVstopnice({ dogodek, vstopnice, varnost, naslovDokumenta = "Outly ticket" }) {
+async function pdfVstopnice({ dogodek, vstopnice, varnost, naslovDokumenta = "Outly ticket" }) {
   const strani = [];
+  const skrajsaj = (x, najvec) => { const t = String(x || ""); return t.length > najvec ? t.slice(0, najvec - 1) + "…" : t; };   // N1: predolgo besedilo ne sme potisniti kode QR s strani
   for (const v of vstopnice) {
+    const { n, temen } = await qrMatrikaAsinhrono(v.koda);   // eno drago izracunavanje na kos, med kosi zanka prosta
     const op = [];
     const bes = (x, y, velikost, krepko, besedilo, siva = 0) => op.push(`BT /${krepko ? "F2" : "F1"} ${velikost} Tf ${siva} g ${f2(x)} ${f2(y)} Td ${pdfNiz(besedilo)} Tj ET`);
     const levo = 56, desno = A4[0] - 56, sir = desno - levo;
     let y = A4[1] - 72;
     bes(levo, y, 11, true, "OUTLY TICKET", 0.35); y -= 30;
-    for (const vr of prelomi(dogodek.naslov, 22, true, sir)) { bes(levo, y, 22, true, vr); y -= 27; }
+    for (const vr of prelomi(skrajsaj(dogodek.naslov, 120), 22, true, sir).slice(0, 4)) { bes(levo, y, 22, true, vr); y -= 27; }
     y -= 4;
-    for (const [vel, krepko, besedilo, siva] of [[13, false, dogodek.zacetek, 0], [12, false, dogodek.prizoriscePodatki, 0.2], [12, true, dogodek.starost, 0], [12, false, v.vrsta, 0.2], [10, false, dogodek.organizator, 0.35]]) {
+    for (const [vel, krepko, besedilo, siva] of [[13, false, dogodek.zacetek, 0], [12, false, skrajsaj(dogodek.prizoriscePodatki, 160), 0.2], [12, true, dogodek.starost, 0], [12, false, v.vrsta, 0.2], [10, false, skrajsaj(dogodek.organizator, 120), 0.35]]) {
       if (!besedilo) continue;
-      for (const vr of prelomi(besedilo, vel, krepko, sir)) { bes(levo, y, vel, krepko, vr, siva); y -= vel * 1.45; }
+      for (const vr of prelomi(skrajsaj(besedilo, 200), vel, krepko, sir).slice(0, 3)) { bes(levo, y, vel, krepko, vr, siva); y -= vel * 1.45; }
       y -= 4;
     }
     if (v.oznaka) { bes(levo, y, 11, false, v.oznaka, 0.35); y -= 18; }
     // koda QR (vektorsko, 250 x 250 pt, rob 4 moduli)
-    const { n, temen } = qrMatrika(v.koda);
     const rob = 4, velikost = 250, modul = velikost / (n + 2 * rob);
     const x0 = (A4[0] - velikost) / 2, y0 = y - 12 - velikost;
     op.push("q 0 g");
@@ -163,7 +182,7 @@ function pdfVstopnice({ dogodek, vstopnice, varnost, naslovDokumenta = "Outly ti
     }
     op.push("Q");
     y = y0 - 28;
-    for (const vr of prelomi(varnost, 10.5, false, sir)) { bes(levo, y, 10.5, false, vr, 0.15); y -= 15; }
+    for (const vr of prelomi(varnost, 10.5, false, sir).slice(0, 6)) { bes(levo, y, 10.5, false, vr, 0.15); y -= 15; }
     bes(levo, 48, 9, false, "outly.si", 0.45);
     strani.push(op.join("\n"));
   }
