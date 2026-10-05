@@ -776,6 +776,7 @@ app.get("/me", requireAuth, async (req, res) => {
     );
 
     if (result.rows.length === 0) return res.status(404).send("User not found.");
+    await prevzemiGostujocaNarocila(req.user.userId);
     // Klub in vloga v njem (lastnik ali član ekipe, migracija 009). Aplikacija
     // po club_role pokaže poslovni obraz — tudi vratarju, ki ima users.role 'user'.
     const k = await klubUporabnika(req.user.userId);
@@ -1084,10 +1085,15 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 
       // 2. Osebni podatki na naracilih se odvezejo. Znesek, datum in dogodek
       //    ostanejo, ker so racunovodski podatek; e-naslov ni.
+      //    Prevzeta gostujoca narocila (migracija 033): tudi guest_email in zetoni pogleda (kdor ima povezavo, ne vidi vec nicesar).
       await odjemalec.query(
         `UPDATE orders
-         SET buyer_email = 'izbrisan-' || id || '@outly.invalid'
+         SET buyer_email = 'izbrisan-' || id || '@outly.invalid', guest_email = NULL
          WHERE user_id = $1`,
+        [req.user.userId]
+      );
+      await odjemalec.query(
+        "DELETE FROM gost_zetoni WHERE order_id IN (SELECT id FROM orders WHERE user_id = $1)",
         [req.user.userId]
       );
 
@@ -2899,7 +2905,7 @@ admin.get("/finance", async (req, res) => {
                 COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents),0)::int AS clubs_net_cents,
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold,
                 COUNT(*)::int AS orders,
-                COUNT(DISTINCT o.user_id)::int AS buyers,
+                COUNT(DISTINCT COALESCE(o.user_id::text, lower(o.guest_email)))::int AS buyers,
                 COUNT(DISTINCT o.club_id)::int AS clubs_with_sales,
                 COUNT(*) FILTER (WHERE o.stripe_payment_intent_id LIKE 'test_%')::int AS test_orders
          FROM orders o WHERE ${KJE}`, p),
@@ -2935,7 +2941,7 @@ admin.get("/finance", async (req, res) => {
               AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
          GROUP BY d.dan ORDER BY d.dan`, p),
       pool.query(
-        `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, c.name AS club_name, u.username AS buyer_username
+        `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, c.name AS club_name, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
          FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs c ON c.id = o.club_id
          LEFT JOIN users u ON u.id = o.user_id
          WHERE o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day')
@@ -3142,7 +3148,8 @@ function testniNacinPlacil() {
 // STRIPE (issue #19): Checkout + Connect Express. Logika je v placila_stripe.js; tu so poti.
 // ---------------------------
 const placilaStripe = require("./placila_stripe");
-const stripePlacila = placilaStripe.ustvari({ pool });
+// naPlacano: po COMMIT-u webhooka/pospravljalca poslje gostu mail z vstopnicami (nakup brez racuna, migracija 033); za navadna narocila ne stori nicesar.
+const stripePlacila = placilaStripe.ustvari({ pool, naPlacano: (id) => posljiGostuVstopnice(id) });
 stripePlacila.zazeni();
 app.post("/stripe/webhook", express.raw({ type: "*/*", limit: "1mb" }), stripePlacila.webhook);
 
@@ -3264,10 +3271,10 @@ async function omejitevCakajocih(c, userId, eventId) {
   return null;
 }
 
-async function nakupStripeSeja(res, c, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec }) {
+async function nakupStripeSeja(res, c, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna }) {
   try {
     const nr = await c.query("SELECT id, public_ref, currency, application_fee_cents FROM orders WHERE id=$1", [oid]);
-    const seja = await placilaStripe.ustvariCheckout({ narocilo: nr.rows[0], opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec });
+    const seja = await placilaStripe.ustvariCheckout({ narocilo: nr.rows[0], opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna });
     await c.query(
       "UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4) WHERE id=$1",
       [oid, seja.id, seja.url, seja.expires_at]);
@@ -3361,14 +3368,19 @@ function javnaRef() {
 const STOLPCI_NAROCILA = `o.id, o.public_ref, o.event_id, o.club_id, o.quantity, o.unit_price_cents, o.total_cents,
   o.currency, o.application_fee_cents, o.status, o.buyer_email, o.created_at, o.paid_at, o.cancelled_at,
   o.refunded_cents, COALESCE(o.stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test,
-  (o.table_id IS NOT NULL) AS is_vip, o.table_id, o.table_label, o.table_seats, o.package_name, o.package_description`;
+  (o.table_id IS NOT NULL) AS is_vip, o.table_id, o.table_label, o.table_seats, o.package_name, o.package_description,
+  (o.user_id IS NULL AND o.guest_email IS NOT NULL) AS is_guest`;
+// Gostujoce narocilo (nakup brez racuna, migracija 033): user_id NULL + guest_email. Po prevzemu v racun (GET /me) je user_id nastavljen
+// in narocilo ni vec »gostujoce«. V poslovnih pogledih se gost pokaze kot »Guest« (brez e-naslova kot imetnik; vratar ne vidi e-naslovov).
+const GOST_OZNAKA = `(o.user_id IS NULL AND o.guest_email IS NOT NULL)`;
+const IME_GOSTA = `CASE WHEN ${GOST_OZNAKA} THEN 'Guest' END`;
 const STOLPCI_VSTOPNICE = `t.id, t.order_id, t.event_id, t.serial, t.status, t.used_at, t.created_at, t.holder_user_id`;
 // VIP polja vstopnice (migracija 025): VIP vstopnica je vstopnica narocila z mizo. Zahteva alias `o` = orders.
 const STOLPCI_VIP_VSTOPNICE = `(o.table_id IS NOT NULL) AS is_vip, o.table_label, o.table_seats, o.package_name, o.package_description`;
 // Imetnik vstopnice: kdor jo je prejel s prenosom, sicer kupec (008).
 const IMETNIK = `COALESCE(t.holder_user_id, o.user_id)`;
-const STOLPCI_IMETNIKA = `${IMETNIK} AS holder_id, hu.username AS holder_username, hu.email AS holder_email,
-  (t.holder_user_id IS NOT NULL AND t.holder_user_id IS DISTINCT FROM o.user_id) AS transferred`;
+const STOLPCI_IMETNIKA = `${IMETNIK} AS holder_id, COALESCE(hu.username, ${IME_GOSTA}) AS holder_username, hu.email AS holder_email,
+  (t.holder_user_id IS NOT NULL AND t.holder_user_id IS DISTINCT FROM o.user_id) AS transferred, ${GOST_OZNAKA} AS is_guest`;
 const JOIN_IMETNIK = `LEFT JOIN users hu ON hu.id = ${IMETNIK}`;
 
 // db: neobvezen odjemalec iz pool.connect(); klicatelj, ki ga že drži, MORA
@@ -3713,6 +3725,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
 // GET /me/orders — moja naročila z vstopnicami.
 app.get("/me/orders", requireAuth, async (req, res) => {
   try {
+    await prevzemiGostujocaNarocila(req.user.userId, true);
     const r = await pool.query(
       `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name,
               CASE WHEN o.status = 'pending' THEN o.checkout_url END AS checkout_url
@@ -3774,17 +3787,20 @@ app.delete("/me/favorites/:eventId", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
-app.get("/me/tickets", requireAuth, async (req, res) => {
-  try {
-    const r = await pool.query(
-      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.status AS order_status,
+// Oblika vstopnice za zaslon »moje vstopnice«; isti stolpci tudi pri gostu (GET /guest/order), da imata odjemalca eno obliko.
+const SQL_VSTOPNICE_POGLED = `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.status AS order_status,
               e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
               cl.id AS club_id, cl.name AS club_name, cl.address, cl.city, cl.logo_url,
               ${STOLPCI_IMETNIKA}, bu.username AS buyer_username,
               (t.status = 'valid' AND e.start_at > NOW()) AS transferable
        FROM tickets t JOIN orders o ON o.id = t.order_id
        JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id
-       ${JOIN_IMETNIK} LEFT JOIN users bu ON bu.id = o.user_id
+       ${JOIN_IMETNIK} LEFT JOIN users bu ON bu.id = o.user_id`;
+app.get("/me/tickets", requireAuth, async (req, res) => {
+  try {
+    await prevzemiGostujocaNarocila(req.user.userId, true);
+    const r = await pool.query(
+      `${SQL_VSTOPNICE_POGLED}
        WHERE t.id IN (
          -- Dva indeksirana vira namesto COALESCE(...) = $1, ki je bral VSE
          -- vstopnice in naročila (pri 120.000 vstopnicah 30 ms, raste linearno).
@@ -3798,6 +3814,631 @@ app.get("/me/tickets", requireAuth, async (req, res) => {
     return res.json(r.rows.map(t => ({ ...t, qr: qrVstopnice(t) })));
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
+
+// ---------------------------
+// NAKUP BREZ RACUNA (gost) — migracija 033, invarianta I22
+// ---------------------------
+// Martin, 5. 10. 2026: kupec vpise samo e-naslov (brez kode iz maila, brez gesla, brez registracije). Samo navadne vstopnice, VIP mize NE.
+// Naročilo: orders.user_id = NULL + guest_email (NI vrstice v `users`; DECISIONS 5. 10. 2026). Pogled gosta = ZETON v glavi X-Guest-Token
+// (32 B nakljucnih, v bazi samo sha256, tabela gost_zetoni). Zloraba: 10 nakupov/uro/IP (GOST_NAKUP_NA_URO), najvec 1 neplacano narocilo na (e-naslov, dogodek)
+// (unikaten delni indeks), Idempotency-Key vezan na e-naslov. Mail z vstopnico ob placilu (najvec enkrat; Resend ob napaki ne vrze).
+const GOST_ZETON_DNI = 30;                 // zeton velja do konca dogodka + 30 dni
+const GOST_ZETONOV_NA_NAROCILO = 10;       // odgovor nakupa, success_url Stripa, mail, ponovitve; starejsi se pozabijo
+const GOST_NAKUP_NA_URO = okoljeCelo("GOST_NAKUP_NA_URO", 10, 1, 100000);   // nakupov gostov na IP na uro
+const GOST_QUANTITY_NAJVEC = okoljeCelo("GOST_QUANTITY_NAJVEC", 6, 1, NAJVEC_NA_NAROCILO);   // vstopnic na gostujoce narocilo
+const GOST_NEUSPESNI_NA_URO = okoljeCelo("GOST_NEUSPESNI_NA_URO", 60, 1, 100000);            // neuspesnih (404) ogledov/preklicev na IP na uro
+const GOST_IDEM_ISKANJ_NA_URO = okoljeCelo("GOST_IDEM_ISKANJ_NA_URO", 300, 1, 100000);       // iskanj po Idempotency-Key (pred omejevalnikom nakupov) na IP na uro
+const GOST_CAKAJOCIH_ODSTOTEK = okoljeCelo("GOST_CAKAJOCIH_ODSTOTEK", 20, 1, 100);           // skupno cakajocih gostujocih vstopnic na dogodek: odstotek kapacitete
+const GOST_CAKAJOCIH_NAJMANJ = okoljeCelo("GOST_CAKAJOCIH_NAJMANJ", 10, 1, 10000);           // ... vendar vsaj toliko
+const GOST_POSTA_DNEVNO = okoljeCelo("GOST_POSTA_DNEVNO", 300, 1, 1000000);                  // globalna dnevna meja gostujocih mailov
+const GOST_POSTA_SOCASNIH = 3;                                                              // socasnih posiljanj v procesu
+const GOST_POSTA_TIMEOUT_MS = okoljeCelo("GOST_POSTA_TIMEOUT_MS", 10000, 100, 60000);        // rok za klic Resenda
+const GOST_POSTA_PONOVI_MS = okoljeCelo("GOST_POSTA_PONOVI_MS", 120000, 0, 3600000);   // pospravljalec neposlanih mailov; 0 = izklop
+const GOST_POSTA_PREMOR_MS = okoljeCelo("GOST_POSTA_PREMOR_MS", 120000, 0, 3600000);   // premor po 1. neuspelem poskusu; naslednji so mnogokratniki
+// Premor po n-tem neuspelem poskusu (indeks n; 0 = prvi poskus takoj): 2 min, 5 min, 15 min, 1 h, 3 h, 12 h, 24 h (pri privzetih 120000 ms), skupaj 8 poskusov.
+const GOST_POSTA_PREMORI = [0, 1, 2.5, 7.5, 30, 90, 360, 720].map((x) => Math.round(x * GOST_POSTA_PREMOR_MS));
+const GOST_POSTA_POSKUSOV = GOST_POSTA_PREMORI.length;
+const GOST_PREVZEM_MS = okoljeCelo("GOST_PREVZEM_MS", 30000, 0, 3600000);   // kako pogosto /me/orders in /me/tickets znova iscejo gostujoca narocila
+const GOST_PREKLIC_OKNO_MS = okoljeCelo("GOST_PREKLIC_OKNO_MS", 5000, 0, 600000);   // najmanjsi razmik med Stripovimi klici za isto narocilo (preklic)
+const GOST_ZETON_VZOREC = /^[A-Za-z0-9_-]{43}$/;
+const GOST_EMAIL_ATOM = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+const GOST_POSTA_NIZ = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Cenen stevec po IP v pomnilniku procesa (brez baze): za poti, kjer bi omejevalnik v bazi sam postal breme (neuspesni ogledi, iskanje po kljucu).
+// Velja za en proces (danes teče ena instanca); po restartu se ponastavi. IP kot omeji(): IPv4 polno, IPv6 /64. Najvec 50000 vnosov.
+function ipStevec(najvec, oknoMs) {
+  const m = new Map();
+  const vnos = (ip) => { const v = m.get(predponaIp(ip)); return v && v.doKdaj > Date.now() ? v : null; };
+  return {
+    presezeno: (ip) => { const v = vnos(ip); return !!v && v.n >= najvec; },
+    preostaloSek: (ip) => { const v = vnos(ip); return v ? Math.max(1, Math.ceil((v.doKdaj - Date.now()) / 1000)) : 1; },
+    dodaj: (ip) => {
+      const k = predponaIp(ip), v = vnos(ip);
+      if (v) { v.n++; return; }
+      if (m.size >= 50000) { const zdaj = Date.now(); for (const [kk, vv] of m) if (vv.doKdaj <= zdaj) m.delete(kk); if (m.size >= 50000) return; }
+      m.set(k, { n: 1, doKdaj: Date.now() + oknoMs });
+    },
+  };
+}
+const gostNeuspesni = ipStevec(GOST_NEUSPESNI_NA_URO, 3600 * 1000);
+const gostIdemIskanja = ipStevec(GOST_IDEM_ISKANJ_NA_URO, 3600 * 1000);
+const odgovoriPreVeliko = (res, st, ip) => { res.set("Retry-After", String(st.preostaloSek(ip))); return res.status(429).send("Too many requests. Please try again later."); };
+
+// E-naslov: trim + lower, najvec 254, razumna oblika (ne popolna RFC 5322: potrditev je mail z vstopnico). null = neveljaven.
+function gostEmail(v) {
+  if (typeof v !== "string") return null;
+  const e = v.trim().toLowerCase();
+  if (!e || e.length > 254 || !GOST_EMAIL_ATOM.test(e)) return null;
+  const [lokalni, domena] = e.split("@");
+  if (lokalni.startsWith(".") || lokalni.endsWith(".") || lokalni.includes("..")) return null;
+  if (domena.split(".").pop().length < 2) return null;
+  return e;
+}
+// Datum rojstva YYYY-MM-DD, resnicen koledarski datum. null = neveljaven.
+function gostDatumRojstva(v) {
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const [l, m, d] = v.split("-").map(Number);
+  const dt = new Date(Date.UTC(l, m - 1, d));
+  return dt.getUTCFullYear() === l && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d ? v : null;
+}
+
+// Stikalo za pravi denar (GOST_NAKUP_LIVE=1): pogoji in politika zasebnosti morata biti objavljeni, preden gostje placujejo pravi denar.
+// Sandbox (sk_test_) in testni nacin delata brez stikala.
+function gostStikalo(req, res, next) {
+  res.set("Cache-Control", "no-store");
+  const live = !!process.env.STRIPE_SECRET_KEY && !placilaStripe.jeSandbox() && process.env.TEST_PLACILA !== "true";
+  if (live && process.env.GOST_NAKUP_LIVE !== "1") return res.status(503).send("Guest checkout is not available yet.");
+  next();
+}
+// Preverba telesa PRED omejevalnikom in bazo (brez poizvedbe): neveljaven zahtevek ne porabi nakupnega poskusa.
+function gostTelo(req, res, next) {
+  res.set("Cache-Control", "no-store");
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  const eventId = celoId4(req.params.id);
+  if (!eventId) return res.status(400).send("Invalid event id.");
+  const email = gostEmail(b.email);
+  if (!email) return res.status(400).send("Enter a valid email address.");
+  const q = Number(b.quantity ?? 1);
+  if (!Number.isInteger(q) || q < 1 || q > GOST_QUANTITY_NAJVEC) return res.status(400).send(`quantity must be an integer between 1 and ${GOST_QUANTITY_NAJVEC}.`);
+  if (b.accept_terms !== true) return res.status(400).send("You must accept the terms to buy tickets.");
+  if (typeof b.terms_version !== "string" || !/^[A-Za-z0-9._:-]{1,40}$/.test(b.terms_version)) return res.status(400).send("terms_version is required.");
+  let dob = null;
+  if (b.date_of_birth !== undefined && b.date_of_birth !== null) {
+    dob = gostDatumRojstva(b.date_of_birth);
+    if (!dob) return res.status(400).send("Enter your date of birth as YYYY-MM-DD.");
+  }
+  req.gost = { eventId, email, quantity: q, dob, terms: b.terms_version };
+  next();
+}
+
+// --- zetoni ---
+const gostZetonHash = (zeton) => crypto.createHash("sha256").update(zeton).digest("hex");   // TEXT (hex), ne bytea: izvoz in obnova baze (JSON)
+// Nov zeton za narocilo (cistopisa ne hranimo, zato ga mail iz webhooka ne bi mogel ponoviti: vsak namen dobi svezega).
+// null, ce narocilo ni (vec) gostujoce (prevzeto v racun): zetonov od prevzema naprej ni vec (N4).
+async function gostKujZeton(db, oid) {
+  const zeton = crypto.randomBytes(32).toString("base64url");
+  const r = await db.query(
+    "INSERT INTO gost_zetoni (token_hash, order_id) SELECT $1, o.id FROM orders o WHERE o.id = $2 AND o.user_id IS NULL AND o.guest_email IS NOT NULL", [gostZetonHash(zeton), oid]);
+  if (!r.rowCount) return null;
+  await db.query(
+    `DELETE FROM gost_zetoni WHERE order_id = $1
+       AND token_hash NOT IN (SELECT token_hash FROM gost_zetoni WHERE order_id = $1 ORDER BY created_at DESC LIMIT ${GOST_ZETONOV_NA_NAROCILO})`, [oid]);
+  return zeton;
+}
+// id narocila za zeton ali null (napacen, potekel, preklicano neplacano narocilo, prevzeto v racun: vse enako, brez razlike).
+async function gostNarociloPoZetonu(db, zeton) {
+  if (typeof zeton !== "string" || !GOST_ZETON_VZOREC.test(zeton)) return null;
+  const r = await db.query(
+    `SELECT o.id FROM gost_zetoni z JOIN orders o ON o.id = z.order_id JOIN events e ON e.id = o.event_id
+      WHERE z.token_hash = $1 AND o.user_id IS NULL AND o.guest_email IS NOT NULL AND o.table_id IS NULL
+        AND NOT (o.status IN ('cancelled','failed') AND o.paid_at IS NULL)
+        AND COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') + INTERVAL '${GOST_ZETON_DNI} days' > NOW()`, [gostZetonHash(zeton)]);
+  return r.rows.length ? r.rows[0].id : null;
+}
+// Zeton je v FRAGMENTU (#t=): brskalnik ga ne poslje strezniku (Cloudflare) in ga ne vkljuci v Referer.
+const gostPovezava = (zeton) => `${placilaStripe.osnovaSpleta()}/app/guest/order#t=${zeton}`;
+
+// --- idempotenca (kot I18, vezana na gostov e-naslov namesto uporabnika) ---
+async function gostIdemPoisci(db, email, kljuc) {
+  const r = await db.query("SELECT id, event_id, quantity, status, checkout_url, user_id FROM orders WHERE guest_email = $1 AND idempotency_key = $2", [email, kljuc]);
+  return r.rows[0] || null;
+}
+// Isto kot idemOdgovori: isti nakup + aktivno narocilo -> 201 s trenutnim stanjem (in SVEZIM zetonom: cistopisa prvega ni); drug nakup -> 422;
+// neaktivno -> 409. Odgovor je poslan vedno.
+async function gostIdemOdgovori(req, res, db, obst) {
+  const g = req.gost;
+  if (obst.event_id !== g.eventId || obst.quantity !== g.quantity) return idemNapacnaVsebina(res);
+  if (obst.status === "pending" && !obst.checkout_url) {
+    res.set("Retry-After", "2");
+    return res.status(409).json({ error: "request_in_progress", message: "Your previous attempt is still being processed. Please try again in a moment." });
+  }
+  if (!IDEM_AKTIVNA_NAROCILA.includes(obst.status) && obst.status !== "pending") {
+    return res.status(409).json({ error: "order_not_active",
+      message: "The order for this Idempotency-Key is no longer active (refunded, cancelled or unpaid). Use a new Idempotency-Key to buy again." });
+  }
+  const telo = await odgovorNarocila(db, obst.id);
+  telo.guest_token = obst.user_id === null ? await gostKujZeton(db, obst.id) : null;   // prevzeto v racun: zetonov ni vec
+  console.log(`Nakup gosta (ponovitev kljuca): naročilo ${obst.id}`);
+  res.set("Idempotent-Replayed", "true");
+  res.locals.brezRazveljavitve = true;   // ponovitev ne spremeni nobenega podatka: javni predpomnilnik (I17) ostane
+  return res.status(201).json(telo);
+}
+// Plast 1 (pred omejevalnikom in semaforjem): ponovitev ne porabi nakupnega poskusa in ne caka v vrsti. Kot pri racunih (idemPreveri):
+// zahtevek istega kljuca, ki je ze v teku v TEM procesu, ne porabi poskusa omejevalnika, ampak caka na prvega in dobi isti rezultat.
+// Hkratna zahtevka iz dveh instanc se vrstita sele v transakciji (plast 3: advisory lock + unikaten indeks).
+async function gostIdemPreveri(req, res) {
+  const g = req.gost, kljuc = req.idemKljuc;
+  const mapKljuc = `g:${g.email}:${kljuc}`;
+  const v = { event_id: g.eventId, quantity: g.quantity };
+  const rok = Date.now() + IDEMPOTENCA_CAKANJE_MS;
+  for (;;) {
+    if (res.destroyed) return false;
+    const obst = await sCasovnoMejo(gostIdemPoisci(pool, g.email, kljuc), IDEMPOTENCA_PREVERBA_MS);
+    if (res.destroyed) return false;   // odjemalec je odsel: ne postani lastnik in ne kupi (duh)
+    if (obst) { await gostIdemOdgovori(req, res, pool, obst); return false; }
+    const tuji = idemVObdelavi.get(mapKljuc);
+    if (!tuji) { idemZahtevaj(req, res, mapKljuc, v); return true; }
+    if (Date.now() - tuji.od > IDEMPOTENCA_STARO_MS) { tuji.sprosti(); continue; }   // viseci lastnik: prevzemi
+    if (tuji.vsebina.event_id !== v.event_id || tuji.vsebina.quantity !== v.quantity) { idemNapacnaVsebina(res); return false; }
+    const ostanek = rok - Date.now();
+    const izid = ostanek > 0 ? await idemCakaj(tuji, ostanek, res) : "cas";
+    if (izid === "preklic") return false;
+    if (izid === "cas") {
+      res.set("Retry-After", "2");
+      res.status(409).json({ error: "request_in_progress", message: "Your previous attempt is still being processed. Please try again in a moment." });
+      return false;
+    }
+  }
+}
+async function idempotencaGost(req, res, next) {
+  const surov = req.headers["idempotency-key"];
+  if (surov === undefined) return next();
+  if (typeof surov !== "string" || !IDEM_UUID.test(surov)) {
+    return res.status(400).json({ error: "invalid_idempotency_key", message: "Idempotency-Key must be a UUID." });
+  }
+  req.idemKljuc = surov.toLowerCase();
+  // N3: iskanje po kljucu je poizvedba v bazi PRED omejevalnikom nakupov; cenen stevec v pomnilniku ga omeji na IP.
+  if (gostIdemIskanja.presezeno(req.ip)) return odgovoriPreVeliko(res, gostIdemIskanja, req.ip);
+  gostIdemIskanja.dodaj(req.ip);
+  let dalje;
+  try { dalje = await gostIdemPreveri(req, res); }
+  catch (e) {
+    console.error("[gost] preverba idempotence ni uspela:", e && e.message);   // plast 3 je neodvisna
+    dalje = !res.headersSent && !res.destroyed;
+  }
+  if (dalje) next();
+}
+
+// POST /guest/events/:id/orders — nakup vstopnic brez racuna. Brez zetona.
+// Telo: { email, quantity?, date_of_birth? (obvezen pri min_age > 0), accept_terms: true, terms_version }.
+// 201 { mode, order, tickets, checkout_url?, guest_token }; napake kot besedilo (400, 403, 409, 429, 503) ali { error, message } (idempotenca).
+app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zavrniRazprodano,
+  omeji({ kljuc: "nakup-gost", najvec: GOST_NAKUP_NA_URO, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+  const g = req.gost;
+  if (!(await nakupDovoljenje(req, res))) return;
+  let c;
+  try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+  if (req.idem) req.idem.vTransakciji = true;   // zaprtje zveze od tu naprej kljuca ne sprosti (commit se zgodi brez odjemalca)
+  try {
+    await nakupZacni(c);
+    if (req.idemKljuc) {
+      await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [`idem:g:${g.email}:${req.idemKljuc}`]);
+      const obst = await gostIdemPoisci(c, g.email, req.idemKljuc);
+      if (obst) { await c.query("ROLLBACK"); return await gostIdemOdgovori(req, res, c, obst); }
+    }
+    const er = await c.query(
+      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
+              e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
+              c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps
+       FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [g.eventId]
+    );
+    if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+    const e = er.rows[0];
+    const np = napakaProdaje(e, { zahtevajCeno: true });
+    if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
+    if (e.capacity !== null && e.sold_count + g.quantity > e.capacity) {
+      if (e.capacity - e.sold_count <= 0) razprodanoOznaci("v:" + e.id);
+      await c.query("ROLLBACK"); return res.status(409).send(`Only ${Math.max(0, e.capacity - e.sold_count)} tickets left.`);
+    }
+
+    // Starost (I8): izjava gosta, preverjena na strezniku; datuma rojstva NE shranimo (nacelo najmanj podatkov, GDPR 5(1)(c)):
+    // v narocilo gre samo guest_age_min = starostna meja, za katero je izjava prestala preverbo (NULL = datum ni bil podan).
+    if (e.min_age > 0 && !g.dob) { await c.query("ROLLBACK"); return res.status(403).send("Enter your date of birth to buy tickets for this event."); }
+    if (g.dob) {
+      const a = (await c.query("SELECT starost($1::date) AS leta, ($1::date < CURRENT_DATE AND $1::date > CURRENT_DATE - INTERVAL '120 years') AS veljaven", [g.dob])).rows[0];
+      if (!a.veljaven) { await c.query("ROLLBACK"); return res.status(400).send("Enter a valid date of birth."); }
+      if (e.min_age > 0 && a.leta < e.min_age) { await c.query("ROLLBACK"); return res.status(403).send(`You must be at least ${e.min_age} to buy tickets for this event.`); }
+    }
+
+    // Nacin placila: isto kot pri racunih (test = takoj placano; stripe = cakajoce narocilo + Checkout seja po COMMIT-u).
+    const nacin = placilaStripe.nacinPlacila(e);
+    if (nacin === "nastavitve") { await c.query("ROLLBACK"); return res.status(503).send("Payments are not available yet."); }
+    if (nacin === "klub") { await c.query("ROLLBACK"); return res.status(409).send("This club does not accept online payments yet."); }
+    const test = nacin === "test";
+    if (!test && e.capacity !== null) {
+      // Skupna meja CAKAJOCIH gostujocih vstopnic na dogodek (zaloga je zaklenjena do ~35 min): zaklep vrstice dogodka (kot sprozilec
+      // rezerviraj_zalogo) serializira hkratne nakupe, stetje v isti transakciji je zato tocno. Brez nje bi mnogo e-naslovov zaklenilo dogodek.
+      await c.query("SELECT 1 FROM events WHERE id = $1 FOR UPDATE", [e.id]);
+      const cak = (await c.query(
+        "SELECT COALESCE(SUM(quantity), 0)::int AS n FROM orders WHERE event_id = $1 AND user_id IS NULL AND guest_email IS NOT NULL AND status = 'pending'", [e.id])).rows[0].n;
+      const meja = Math.max(GOST_CAKAJOCIH_NAJMANJ, Math.ceil(e.capacity * GOST_CAKAJOCIH_ODSTOTEK / 100));
+      if (cak + g.quantity > meja) {
+        await c.query("ROLLBACK");
+        return res.status(409).send("Too many unfinished payments for this event right now, try again in a few minutes.");
+      }
+    }
+
+    const skupaj = e.ticket_price_cents * g.quantity;
+    const provizija = provizijaCentov(skupaj, e.commission_bps);
+    const ref = javnaRef();
+    const pi = test ? "test_" + crypto.randomUUID() : null;
+    const or = await c.query(
+      `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency,
+                           application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at, idempotency_key,
+                           stripe_account_id, guest_email, guest_terms_version, guest_terms_accepted_at, guest_age_min)
+       VALUES ($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,CASE WHEN $10 = 'paid' THEN NOW() END,$13,$14,$12,$15,NOW(),$16) RETURNING id`,
+      [ref, e.id, e.club_id, g.quantity, e.ticket_price_cents, skupaj, e.currency, provizija, e.vat_rate,
+       test ? "paid" : "pending", pi, g.email, req.idemKljuc || null, test ? null : e.stripe_account_id, g.terms, g.dob ? e.min_age : null]
+    );
+    const oid = or.rows[0].id;
+    if (test) {
+      await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, g.quantity]);
+    }
+    const zeton = await gostKujZeton(c, oid);   // v isti transakciji: zeton velja takoj, ko je narocilo vidno
+    await c.query("COMMIT");
+
+    if (!test) {
+        const povratna = { success_url: gostPovezava(zeton), cancel_url: gostPovezava(zeton) };   // stran naroclia: »Complete payment« / »Cancel order«
+      if (!(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – ${g.quantity === 1 ? "1 ticket" : g.quantity + " tickets"}`,
+        kolicina: g.quantity, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: g.email, eventId: e.id,
+        odjemalec: "splet", povratna }))) return;
+    }
+
+    const telo = await odgovorNarocila(c, oid);   // prek c (ne pool): glej opombo pri POST /events/:id/orders
+    telo.guest_token = zeton;
+    console.log(`Nakup gosta (${nacin}): naročilo ${ref}, dogodek ${e.id}, ${g.quantity}x ${e.ticket_price_cents} c`);
+    if (test) posljiGostuVstopnice(oid);   // brez await: odgovor ne caka na Resend; napaka maila ne podre nakupa (pospravljalec ponovi)
+    return res.status(201).json(telo);
+  } catch (err) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+    if (err && err.code === "23505") {
+      if (err.constraint === "orders_gost_idempotency_key" && req.idemKljuc) {
+        try {
+          const obst = await gostIdemPoisci(c, g.email, req.idemKljuc);
+          if (obst) return await gostIdemOdgovori(req, res, c, obst);
+        } catch (e2) { console.error(e2); }
+      }
+      if (err.constraint === "orders_gost_cakajoce_key") {
+        return res.status(409).send("You already have an unfinished payment for this event. Please wait up to 30 minutes for it to expire, then try again.");
+      }
+    }
+    if (err && err.code === "23514") return res.status(409).send(/Ni dovolj/.test(err.message) ? "Not enough tickets left." : "Order rejected: " + (err.constraint || err.message));
+    console.error(err);
+    return res.status(500).send("Server error.");
+  } finally { try { c.release(); } finally { if (req.idem) req.idem.sprosti(); nakupIzstopi(); } }
+});
+
+// Neuspesen zahtevek (zeton ne velja): 404; nad mejo neuspesnih na IP 429. VELJAVEN zeton se obdela vedno (iskanje je indeksirano in poceni):
+// na skupnem wifiju kluba ali CGNAT napadalec (ali pokvarjen odjemalec) gostom na vratih ne sme onemogociti prikaza vstopnice.
+// Zeton ima 256 bitov, ugibanje ni realno; meja je samo varovalo pred obremenitvijo.
+function gostNeuspesen(req, res) {
+  if (gostNeuspesni.presezeno(req.ip)) return odgovoriPreVeliko(res, gostNeuspesni, req.ip);
+  gostNeuspesni.dodaj(req.ip);
+  return res.status(404).send("Order not found.");
+}
+
+// Narocilo gosta v obliki odgovora (GET /guest/order, POST /guest/order/cancel); brez e-naslova.
+async function gostNarociloOdgovor(db, oid) {
+  const nr = await db.query(
+    `SELECT o.id, o.public_ref, o.status, o.quantity, o.unit_price_cents, o.total_cents, o.currency, o.refunded_cents,
+            COALESCE(o.stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test, o.created_at, o.paid_at,
+            CASE WHEN o.status = 'pending' THEN o.checkout_url END AS checkout_url,
+            e.id AS event_id, e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
+            cl.id AS club_id, cl.name AS club_name, cl.address, cl.city, cl.logo_url
+       FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id WHERE o.id = $1`, [oid]);
+  if (!nr.rows.length) return null;
+  const x = nr.rows[0];
+  return {
+    id: x.id, public_ref: x.public_ref, status: x.status, quantity: x.quantity, unit_price_cents: x.unit_price_cents,
+    total_cents: x.total_cents, currency: x.currency, refunded_cents: x.refunded_cents, is_test: x.is_test,
+    created_at: x.created_at, paid_at: x.paid_at, checkout_url: x.checkout_url,
+    event_id: x.event_id, club_id: x.club_id, event_title: x.event_title, start_at: x.start_at, poster_url: x.poster_url, club_name: x.club_name,
+    event: { id: x.event_id, title: x.event_title, start_at: x.start_at, end_at: x.end_at, poster_url: x.poster_url, min_age: x.min_age,
+             club_id: x.club_id, club_name: x.club_name, address: x.address, city: x.city, logo_url: x.logo_url },
+  };
+}
+
+// Zascita Stripove omejitve branja (si jo delita webhook in pospravljalec): preklic z veljavnim zetonom, ko seja ni ne odprta ne placana
+// (npr. complete + unpaid), bi sicer ob vsakem klicu naredil checkout.sessions.retrieve. Stanje je v procesu (ena instanca):
+// (a) narocila v obdelavi (vzporedni preklic istega narocila ne gre do Stripa), (b) cas zadnjega Stripovega klica po narocilu (najvec en na okno).
+// Oboje se konca z 409 request_in_progress + Retry-After, nikoli 429 (veljaven zeton ne sme biti zavrnjen z omejitvijo).
+const gostPreklicVObdelavi = new Set();
+const gostPreklicStripe = new Map();   // order_id -> ms zadnjega Stripovega klica; najvec 5000 vnosov (najstarejsi se izrine)
+function gostPreklicVstopi(oid) {
+  if (gostPreklicVObdelavi.has(oid)) return 1;
+  const zdaj = Date.now(), zadnji = gostPreklicStripe.get(oid);
+  if (zadnji !== undefined && zdaj - zadnji < GOST_PREKLIC_OKNO_MS) return Math.max(1, Math.ceil((GOST_PREKLIC_OKNO_MS - (zdaj - zadnji)) / 1000));
+  gostPreklicVObdelavi.add(oid);
+  return 0;
+}
+function gostPreklicIzstopi(oid) {
+  gostPreklicVObdelavi.delete(oid);
+  gostPreklicStripe.delete(oid);   // ponovni vnos na konec vrstnega reda (Map hrani vrstni red vstavljanja)
+  if (gostPreklicStripe.size >= 5000) {
+    const meja = Date.now() - GOST_PREKLIC_OKNO_MS;
+    for (const [k, t] of gostPreklicStripe) if (t <= meja) gostPreklicStripe.delete(k);
+    while (gostPreklicStripe.size >= 5000) gostPreklicStripe.delete(gostPreklicStripe.keys().next().value);
+  }
+  gostPreklicStripe.set(oid, Date.now());
+}
+
+// GET /guest/order — pogled gosta: narocilo + vstopnice. Zeton v glavi X-Guest-Token (NE v URL-ju zahtevka: ne pride v dnevnike).
+// Napacen/potekel zeton, preklicano neplacano narocilo, prevzeto v racun, VIP miza: 404 vedno enako (razlike ne razkrijemo).
+// pending: tickets [] (odjemalec po vrnitvi s Stripa poizveduje, dokler ne pride paid).
+// Omejitev: samo NEUSPESNI (404) zahtevki na IP (GOST_NEUSPESNI_NA_URO); veljaven zeton je vedno obdelan, tudi ce je IP nad mejo.
+app.get("/guest/order", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  try {
+    const oid = await gostNarociloPoZetonu(pool, req.get("x-guest-token"));
+    if (!oid) return gostNeuspesen(req, res);
+    const order = await gostNarociloOdgovor(pool, oid);
+    if (!order) return res.status(404).send("Order not found.");
+    let vstopnice = [];
+    if (["paid", "partially_refunded"].includes(order.status)) {
+      const r = await pool.query(`${SQL_VSTOPNICE_POGLED} WHERE t.order_id = $1 ORDER BY t.id`, [oid]);
+      vstopnice = r.rows.map((t) => ({ ...t, qr: qrVstopnice(t), transferable: false }));   // prenos zahteva racun
+    }
+    return res.json({ order, tickets: vstopnice });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// POST /guest/order/cancel — gost prekliče svoje NEPLACANO naročilo (zaloga se sprosti takoj, ne šele čez ~35 min).
+// Zeton v glavi X-Guest-Token, brez telesa. 200 { order } (status cancelled); naročilo, ki ni pending (placano ali ze preklicano
+// v istem trenutku): 409 { error: "order_not_pending" }. Stripe seja se poteče (kot pospravljalec); če je bila med tem placana: 409.
+// Brez omeji(): nepoznan zeton steje gostNeuspesni, veljaven nikoli ne dobi 429 (ponovitev na preklicanem narocilu se konca pri 409, brez Stripa).
+// Stripov klic: najvec eden hkrati in najvec eden na GOST_PREKLIC_OKNO_MS (5 s) po narocilu, sicer 409 request_in_progress + Retry-After (glej gostPreklicVstopi).
+app.post("/guest/order/cancel", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  let oid = null, vObdelavi = false;
+  try {
+    oid = await gostNarociloPoZetonu(pool, req.get("x-guest-token"));
+    if (!oid) return gostNeuspesen(req, res);
+    const k = (await pool.query("SELECT status, event_id, stripe_checkout_session_id, created_at FROM orders WHERE id = $1", [oid])).rows[0];
+    if (!k) return res.status(404).send("Order not found.");
+    const nePending = () => res.status(409).json({ error: "order_not_pending", message: "Only an unpaid order can be cancelled." });
+    if (k.status !== "pending") return nePending();
+    if (k.stripe_checkout_session_id) {
+      const s = placilaStripe.stripe();
+      if (!s) return res.status(503).send("Payments are not configured yet.");
+      const cakaj = gostPreklicVstopi(oid);
+      if (cakaj) {
+        res.set("Retry-After", String(cakaj));
+        return res.status(409).json({ error: "request_in_progress", message: "Your cancellation is already being processed. Please try again in a moment." });
+      }
+      vObdelavi = true;
+      let seja;
+      try {
+        seja = await s.checkout.sessions.retrieve(k.stripe_checkout_session_id);
+        if (seja.status === "open") seja = await s.checkout.sessions.expire(seja.id);
+      } catch (e) {
+        console.error(`[gost] preklic: Stripe seja ni dosegljiva (narocilo ${oid}):`, e && e.message);
+        return res.status(502).send("Payment provider is unavailable. Please try again.");
+      }
+      if (seja.status === "complete") {
+        return res.status(409).json({ error: "order_not_pending", message: "This order has just been paid. Your tickets will be ready in a moment." });
+      }
+    } else if (Date.now() - new Date(k.created_at).getTime() < 60 * 1000) {
+      // Checkout seja se ustvarja: preklic bi lahko ostal brez seje, ki jo kupec nato placa (placilo za preklicano narocilo).
+      res.set("Retry-After", "2");
+      return res.status(409).json({ error: "request_in_progress", message: "Your order is still being set up. Please try again in a moment." });
+    }
+    // Pogoj status = 'pending': placilo, ki je med tem prispelo po webhooku, ni povozeno. Sprozilec sprosti zalogo.
+    const u = await pool.query("UPDATE orders SET status = 'cancelled', cancelled_at = NOW() WHERE id = $1 AND status = 'pending' AND user_id IS NULL RETURNING id", [oid]);
+    if (!u.rows.length) return nePending();
+    razprodanoPozabi("v:" + k.event_id);
+    console.log(`[gost] preklic neplacanega narocila ${oid}`);
+    return res.json({ order: await gostNarociloOdgovor(pool, oid) });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+  finally { if (vObdelavi) gostPreklicIzstopi(oid); }
+});
+
+// --- prevzem v racun ---
+// Ko uporabnik s POTRJENIM e-naslovom (users.email_verified) pride na /me, /me/orders ali /me/tickets, postanejo PLACANA gostujoca narocila
+// (user_id NULL) z istim e-naslovom njegova: od tu naprej so v /me/orders, /me/tickets (tudi iOS). Zeton gosta se preklice.
+// Napaka ne sme podreti prijave: poti za branje gredo naprej brez prevzema.
+const gostPrevzemSpomin = new Map();   // userId -> ms zadnjega iskanja (omejitev bremena na /me/orders in /me/tickets)
+async function prevzemiGostujocaNarocila(userId, zVmesnimSpominom = false) {
+  try {
+    const zdaj = Date.now();
+    if (zVmesnimSpominom && GOST_PREVZEM_MS > 0) {
+      const prej = gostPrevzemSpomin.get(userId);
+      if (prej !== undefined && zdaj - prej < GOST_PREVZEM_MS) return;
+      if (gostPrevzemSpomin.size >= 20000) gostPrevzemSpomin.clear();
+      gostPrevzemSpomin.set(userId, zdaj);
+    }
+    // Samo placana narocila (cakajoce Stripe narocilo se prevzame, ko je placano: zeton iz success_url mora do takrat veljati).
+    // Ob prevzemu se zetoni gosta PRESEKAJO (pravna analiza 2.6): vstopnice so od tu naprej v racunu, ne na dveh mestih.
+    // NOT EXISTS: narocilo, katerega Idempotency-Key ze obstaja pri uporabniku (unikaten (user_id, kljuc)), se preskoci; ostala se prevzamejo.
+    const r = await pool.query(
+      `WITH p AS (UPDATE orders o SET user_id = u.id FROM users u
+                   WHERE u.id = $1 AND u.email_verified AND o.user_id IS NULL AND o.guest_email = lower(u.email)
+                     AND o.status IN ('paid','partially_refunded','refunded')
+                     AND NOT EXISTS (SELECT 1 FROM orders x WHERE x.user_id = u.id AND x.idempotency_key IS NOT NULL AND x.idempotency_key = o.idempotency_key)
+                   RETURNING o.id),
+            d AS (DELETE FROM gost_zetoni WHERE order_id IN (SELECT id FROM p) RETURNING 1)
+       SELECT (SELECT COUNT(*)::int FROM p) AS n`, [userId]);
+    if (r.rows[0].n) console.log(`[gost] ${r.rows[0].n} gostujocih narocil prevzetih v racun ${userId}`);
+  } catch (e) { console.error("[gost] prevzem narocil ni uspel:", e && e.message); }
+}
+
+// --- mail z vstopnico ---
+// Ko narocilo postane placano (test: takoj; Stripe: webhook ali pospravljalec), gost dobi mail. Mail je ZAKONSKO POTRDILO o sklenitvi pogodbe
+// na trajnem nosilcu (ZVPot-1 132/6; pravna analiza 5. 10. 2026, 1.3): vse informacije so v BESEDILU maila, povezava je samo dodatek.
+// Najvec enkrat OB USPEHU: narocilo si »rezervira« poskus z UPDATE ... RETURNING (stevec poskusov + cas), poslano se zapise sele po uspehu Resenda.
+// Ob padcu procesa ali preteku roka MED posiljanjem se mail lahko poslje dvakrat (rezervacija poskusa ne ve, ali je Resend sprejel).
+// Resend ob napaki NE vrze (vrne { error }): napaka se zapise v dnevnik (brez e-naslova), poskus ponovi pospravljalec z narascajocim premorom
+// (GOST_POSTA_PREMORI, 8 poskusov ~ 42 h); ob izcrpanju console.error. Socasno najvec GOST_POSTA_SOCASNIH posiljanj; klic ima rok GOST_POSTA_TIMEOUT_MS.
+// Meje: v TESTNEM nacinu (brez placila) najvec 1 mail na naslov na 24 h; globalno GOST_POSTA_DNEVNO na 24 h (testni se izpusti, resnicno placan se odlozi).
+// Napaka maila NE sme podreti placila ali webhooka (klicatelji ne cakajo in ne vidijo izjem). Vrne true, ce je mail poslan.
+const POSREDNIK_VRSTICA = "NEXT DIMENSIONS, družba za marketing, d.o.o., Trebče 81, 3256 Bistrica ob Sotli, luka@outly.si";
+const POSTA_ODGOVOR = "luka@outly.si";
+const znesek = (centi, valuta) => `${(centi / 100).toFixed(2)} ${String(valuta).trim()}`;
+const ljDatum = (d) => new Intl.DateTimeFormat("en-GB", { dateStyle: "full", timeStyle: "short", timeZone: "Europe/Ljubljana" }).format(new Date(d)) + " (Ljubljana time)";
+// Stavek o DDV glede na stopnjo, zamrznjeno na narocilu (events.vat_rate; NULL = klub ni dolocil): ne trdimo, da je DDV vkljucen, ce ne vemo.
+function davekStavek(vat) {
+  if (vat === null || vat === undefined) return "VAT is charged according to the seller's VAT status.";
+  const p = Math.round(Number(vat) * 1000) / 10;
+  return p > 0 ? `The price includes VAT (${p}%).` : "The seller does not charge VAT on this price.";
+}
+// Vsebina potrdila kot razdelki { naslov, vrstice[] }; iz njih nastaneta besedilo in HTML (isto besedilo, brez oglasov).
+function gostPotrdilo(o, povezava, prevzeto) {
+  const klubKontakt = [o.club_address && o.club_city ? `${o.club_address}, ${o.club_city}` : (o.club_address || o.club_city), o.club_phone, o.club_email].filter(Boolean);
+  const starost = o.min_age > 0 ? `Age limit: ${o.min_age}+. Every visitor must meet the age limit. ID is checked at the door; the club may refuse entry if you don't meet it.` : "No age limit.";
+  const razdelki = [
+    { naslov: "Order", vrstice: [`Order ${o.public_ref}, placed on ${ljDatum(o.paid_at || o.created_at)}.`] },
+    { naslov: "Event", vrstice: [o.event_title, ljDatum(o.start_at), [o.club_name, o.club_address, o.club_city].filter(Boolean).join(", "), starost] },
+    { naslov: "Tickets", vrstice: [`${o.quantity} x ${znesek(o.unit_price_cents, o.currency)} = ${znesek(o.total_cents, o.currency)}. ${davekStavek(o.vat_rate)}`] },
+    { naslov: "Seller", vrstice: [`The ticket is sold by the club: ${[o.club_name, ...klubKontakt].join(", ")}.`, `Outly is only the intermediary: ${POSREDNIK_VRSTICA}.`] },
+    { naslov: "No right of withdrawal", vrstice: ["There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply."] },
+    { naslov: "Terms", vrstice: [`You accepted the Outly terms, version ${o.guest_terms_version}: https://outly.si/terms`] },
+    { naslov: "Your tickets", vrstice: prevzeto
+      ? [`Open your tickets in your Outly account: ${povezava}`]
+      : [`Open your tickets (show the QR code at the door): ${povezava}`, "This link is your ticket. Don't share it except with people coming with you.", "If you create an Outly account with this email, your tickets will appear there."] },
+    { naslov: "Complaints", vrstice: [`About the event: contact the club (details above). About the purchase or the payment: contact Outly at ${POSTA_ODGOVOR}.`] },
+    { naslov: "Questions", vrstice: [`Reply to this email or write to ${POSTA_ODGOVOR}.`] },
+  ];
+  const besedilo = `Your Outly tickets - order ${o.public_ref}\n\n` + razdelki.map(r => `${r.naslov.toUpperCase()}\n${r.vrstice.join("\n")}`).join("\n\n") + "\n";
+  const html = `<div style="font-family: Arial, sans-serif; line-height:1.5"><h2>Your Outly tickets</h2>` + razdelki.map(r =>
+    `<h3>${GOST_POSTA_NIZ(r.naslov)}</h3>` + r.vrstice.map(v => {
+      const e = GOST_POSTA_NIZ(v);
+      return `<p>${povezava && v.includes(povezava) ? e.replace(GOST_POSTA_NIZ(povezava), `<a href="${GOST_POSTA_NIZ(povezava)}">${GOST_POSTA_NIZ(povezava)}</a>`) : e}</p>`;
+    }).join("")).join("") + `</div>`;
+  return { besedilo, html };
+}
+// Socasna posiljanja v procesu (Resend ne sme zasesti procesa ob mnozici placil naenkrat); cakajoci v pomnilniku, najvec 200.
+const gostPosta = { aktivnih: 0, cakajoci: [] };
+async function gostPostaVstopi() {
+  if (gostPosta.aktivnih < GOST_POSTA_SOCASNIH) { gostPosta.aktivnih++; return true; }
+  if (gostPosta.cakajoci.length >= 200) return false;   // pospravljalec poskusi pozneje (poskus se se ni porabil)
+  await new Promise((r) => gostPosta.cakajoci.push(r));
+  return true;
+}
+function gostPostaIzstopi() { const n = gostPosta.cakajoci.shift(); if (n) n(); else gostPosta.aktivnih--; }
+const gostPostaZadnjiDnevnik = new Map();   // vrsta zapisa -> ms; isti zapis najvec enkrat na uro (sweeper bi ga sicer ponavljal ob vsakem teku)
+function gostPostaDnevnik(vrsta, sporocilo, raven = "error") {
+  if (Date.now() - (gostPostaZadnjiDnevnik.get(vrsta) || 0) > 3600 * 1000) { gostPostaZadnjiDnevnik.set(vrsta, Date.now()); console[raven](sporocilo); }
+}
+const gostPostaIzcrpaj = (oid) => pool.query("UPDATE orders SET guest_mail_attempts = $2 WHERE id = $1 AND guest_mail_sent_at IS NULL", [oid, GOST_POSTA_POSKUSOV]);
+
+async function posljiGostuVstopnice(oid) {
+  if (!resend) return false;
+  if (!(await gostPostaVstopi())) return false;
+  try { return await gostPosljiEnoPosto(oid); }
+  catch (err) { console.error(`Resend napaka (gost, vstopnice, narocilo ${oid}):`, err && err.message); return false; }
+  finally { gostPostaIzstopi(); }
+}
+async function gostPosljiEnoPosto(oid) {
+  const pre = (await pool.query(
+    `SELECT guest_email, status, guest_mail_sent_at, guest_mail_attempts, public_ref, COALESCE(stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test
+       FROM orders WHERE id = $1`, [oid])).rows[0];
+  if (!pre || !pre.guest_email || pre.status !== "paid" || pre.guest_mail_sent_at || pre.guest_mail_attempts >= GOST_POSTA_POSKUSOV) return false;
+  // Meje (zloraba: mail na tuj naslov brez placila) veljajo SAMO za testna narocila: globalno na dan in 1 mail na naslov na 24 h.
+  // Potrdilo placanega narocila je zakonska obveznost (ZVPot-1): nikoli se ne odlozi ne izpusti, ob preseznem stevilu samo opozorilo (brez e-naslova).
+  const dnevno = (await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE guest_mail_sent_at > NOW() - INTERVAL '24 hours'")).rows[0].n;
+  if (pre.is_test) {
+    if (dnevno >= GOST_POSTA_DNEVNO) { await gostPostaIzcrpaj(oid); gostPostaDnevnik("testni", `[gost] dnevna meja gostujocih mailov (${GOST_POSTA_DNEVNO}): testni mail izpuscen (narocilo ${pre.public_ref})`); return false; }
+    const ze = await pool.query("SELECT 1 FROM orders WHERE guest_email = $1 AND id <> $2 AND guest_mail_sent_at > NOW() - INTERVAL '24 hours' LIMIT 1", [pre.guest_email, oid]);
+    if (ze.rows.length) { await gostPostaIzcrpaj(oid); console.error(`[gost] testni nacin: mail na isti naslov je bil ze poslan v 24 h, izpuscen (narocilo ${pre.public_ref})`); return false; }
+  } else if (dnevno >= GOST_POSTA_DNEVNO) {
+    gostPostaDnevnik("placan", `[gost] opozorilo: ze ${dnevno} gostujocih mailov v 24 h (meja ${GOST_POSTA_DNEVNO} velja samo za testna narocila); potrdilo placanega narocila ${pre.public_ref} se poslje vseeno`, "warn");
+  }
+  const k = await pool.query(
+    `UPDATE orders SET guest_mail_attempts = guest_mail_attempts + 1, guest_mail_claimed_at = NOW()
+      WHERE id = $1 AND guest_email IS NOT NULL AND status = 'paid' AND guest_mail_sent_at IS NULL AND guest_mail_attempts < $2
+        AND (guest_mail_claimed_at IS NULL OR guest_mail_claimed_at < NOW() - ($3::bigint[])[guest_mail_attempts + 1] * INTERVAL '1 millisecond')
+      RETURNING public_ref, guest_email, quantity, event_id, club_id, user_id, unit_price_cents, total_cents, currency, vat_rate, created_at, paid_at, guest_terms_version, guest_mail_attempts`,
+    [oid, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+  if (!k.rows.length) return false;
+  const o = k.rows[0];
+  const ev = await pool.query(
+    `SELECT e.title AS event_title, e.start_at, e.min_age, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
+            cl.contact_phone AS club_phone, cl.contact_email AS club_email
+       FROM events e JOIN clubs cl ON cl.id = e.club_id WHERE e.id = $1`, [o.event_id]);
+  if (!ev.rows.length) return false;
+  const x = { ...o, ...ev.rows[0] };
+  const zeton = o.user_id === null ? await gostKujZeton(pool, oid) : null;
+  const prevzeto = zeton === null;   // narocilo je ze v racunu (zeton gosta je preklican): povezava vodi v /app/tickets
+  const povezava = prevzeto ? `${placilaStripe.osnovaSpleta()}/app/tickets` : gostPovezava(zeton);
+  const { besedilo, html } = gostPotrdilo(x, povezava, prevzeto);
+  // Rok za Resend: Promise.race (SDK nima AbortSignal); po izteku poskus velja za neuspel, klic lahko vseeno uspe (mozen dvojnik).
+  let timer;
+  const poslano = resend.emails.send({
+    from: process.env.EMAIL_FROM || "onboarding@resend.dev", to: o.guest_email, reply_to: POSTA_ODGOVOR,
+    subject: `Your tickets: ${x.event_title} (order ${o.public_ref})`.slice(0, 200), html, text: besedilo,
+  });
+  poslano.catch(() => {});
+  let r;
+  try {
+    r = await Promise.race([poslano, new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("rok za Resend potekel")), GOST_POSTA_TIMEOUT_MS); })]);
+  } catch (err) { r = { error: { message: err && err.message } }; }
+  finally { clearTimeout(timer); }
+  if (r && r.error) {
+    console.error(`Resend napaka (gost, vstopnice, ${o.public_ref}, poskus ${o.guest_mail_attempts}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
+    if (o.guest_mail_attempts >= GOST_POSTA_POSKUSOV) console.error(`[gost] POZOR: potrdilo za narocilo ${o.public_ref} NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov); gost ima vstopnice samo prek povezave iz odgovora nakupa`);
+    return false;
+  }
+  await pool.query("UPDATE orders SET guest_mail_sent_at = NOW() WHERE id = $1", [oid]);
+  console.log(`[gost] mail z vstopnicami poslan: narocilo ${o.public_ref}`);
+  return true;
+}
+// Pospravljalec: placana gostujoca narocila brez poslanega maila (Resend je padel, proces se je ugasnil med placilom in mailom).
+let gostPostaTece = false;
+async function gostPosljiNeposlane() {
+  if (!resend || gostPostaTece) return;
+  gostPostaTece = true;
+  try {
+    const r = await pool.query(
+      `SELECT id FROM orders WHERE guest_email IS NOT NULL AND guest_mail_sent_at IS NULL AND status = 'paid'
+          AND guest_mail_attempts < $1 AND paid_at > NOW() - INTERVAL '3 days'
+          AND (guest_mail_claimed_at IS NULL OR guest_mail_claimed_at < NOW() - ($2::bigint[])[guest_mail_attempts + 1] * INTERVAL '1 millisecond')
+        ORDER BY id LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);   // premor v SQL (isti pogoj kot pri zaklepu): najstarejsi v premoru ne stradajo novejsih
+    for (const o of r.rows) await posljiGostuVstopnice(o.id);
+  } catch (e) { console.error("[gost] pospravljanje mailov:", e && e.message); }
+  finally { gostPostaTece = false; }
+}
+// Prvi tek NE takoj po zagonu (glavni pool je takrat najbolj zaseden).
+if (GOST_POSTA_PONOVI_MS > 0) setInterval(gostPosljiNeposlane, GOST_POSTA_PONOVI_MS).unref();
+// Hramba osebnih podatkov gosta (pravna analiza 5. 10. 2026, 2.3; roki so PREDPOSTAVKA, Martin jih lahko spremeni):
+//   * potekli zetoni (konec dogodka + 30 dni) se brisejo (poizvedba po zetonu jih ze zavrne, to je higiena);
+//   * neplacana (cancelled/failed) gostujoca narocila: e-naslov se anonimizira 24 h po preklicu (pogodbe ni; e-naslov je rabil samo pravilu »1 neplacano«);
+//   * placana (tudi vrnjena): e-naslov se anonimizira GOST_HRAMBA_DNI (privzeto 180) po koncu dogodka (vracila ob odpovedi/prestavitvi, pritozbe, spori).
+// Anonimizacija = kot ob izbrisu racuna: buyer_email 'izbrisan-<id>@outly.invalid', guest_email NULL; znesek, datum in dogodek ostanejo.
+// Prevzeta narocila (user_id nastavljen): buyer_email je e-naslov racuna, zato se pocisti samo guest_email.
+// Ob obnovi iz varnostne kopije se anonimizacija ponovi (isti tek).
+const GOST_HRAMBA_DNI = okoljeCelo("GOST_HRAMBA_DNI", 180, 1, 3650);
+async function pocistiGostZetone() {
+  try {
+    const r = await pool.query(
+      `DELETE FROM gost_zetoni z USING orders o, events e
+        WHERE o.id = z.order_id AND e.id = o.event_id
+          AND COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') + INTERVAL '${GOST_ZETON_DNI} days' < NOW()`);
+    if (r.rowCount > 0) console.log(`[gost] pospravljenih ${r.rowCount} potecenih zetonov`);
+    const an = await pool.query(
+      `WITH k AS (
+         SELECT o.id FROM orders o JOIN events e ON e.id = o.event_id
+          WHERE o.guest_email IS NOT NULL AND (
+                (o.status IN ('cancelled','failed') AND COALESCE(o.cancelled_at, o.created_at) < NOW() - INTERVAL '24 hours')
+             OR (o.status IN ('paid','partially_refunded','refunded')
+                 AND COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') + $1::int * INTERVAL '1 day' < NOW()))
+          LIMIT 1000),
+       u AS (UPDATE orders o SET guest_email = NULL,
+                    buyer_email = CASE WHEN o.user_id IS NULL THEN 'izbrisan-' || o.id || '@outly.invalid' ELSE o.buyer_email END
+              FROM k WHERE o.id = k.id RETURNING o.id)
+       DELETE FROM gost_zetoni WHERE order_id IN (SELECT id FROM u)`, [GOST_HRAMBA_DNI]);
+    if (an.rowCount > 0) console.log(`[gost] anonimiziranih gostujocih narocil: zetonov ${an.rowCount}`);
+  } catch (e) { console.error("[gost] pospravljanje ni uspelo:", e && e.message); }
+}
 
 // --- poslovni del: prodaja ---
 // Klub iz requireClub (lastnik ali član ekipe). Admin brez kluba -> null -> 404.
@@ -3849,7 +4490,7 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
                 -- tickets_sold = samo navadne vstopnice (narocila brez mize); gross_cents vkljucuje mize (migracija 025).
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold,
                 COUNT(*)::int AS orders,
-                COUNT(DISTINCT o.user_id)::int AS buyers,
+                COUNT(DISTINCT COALESCE(o.user_id::text, lower(o.guest_email)))::int AS buyers,
                 COALESCE(SUM(o.total_cents) FILTER (WHERE o.created_at > NOW() - INTERVAL '7 days'),0)::int AS gross_7d_cents,
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.created_at > NOW() - INTERVAL '7 days' AND o.table_id IS NULL),0)::int AS tickets_7d,
                 COUNT(*) FILTER (WHERE o.table_id IS NOT NULL)::int AS tables_sold,
@@ -3867,7 +4508,7 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
          FROM events e LEFT JOIN orders o ON o.event_id = e.id
          WHERE e.club_id = $1 GROUP BY e.id ORDER BY e.start_at DESC LIMIT 100`, [klub]),
       pool.query(
-        `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, u.username AS buyer_username
+        `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
          FROM orders o JOIN events e ON e.id = o.event_id LEFT JOIN users u ON u.id = o.user_id
          WHERE o.club_id = $1 ORDER BY o.created_at DESC LIMIT 30`, [klub]),
       // Zadnjih 14 dni po dnevih (tudi dnevi brez prodaje), za graf v nadzorni plosci.
@@ -3905,7 +4546,7 @@ app.get("/business/events/:id/tickets", requireAuth, requireClub(), async (req, 
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
     const r = await pool.query(
-      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.buyer_email, u.username AS buyer_username, ${STOLPCI_IMETNIKA}
+      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.buyer_email, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username, ${STOLPCI_IMETNIKA}
        FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id
        LEFT JOIN users u ON u.id = o.user_id ${JOIN_IMETNIK}
        WHERE t.event_id = $1 AND e.club_id = $2 ORDER BY t.id LIMIT 1000`, [id, klub]
@@ -4061,6 +4702,7 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (re
     );
     if (r.rows.length === 0) return res.status(404).json({ result: "unknown", message: "Ticket not found." });
     const t = r.rows[0];
+    if (t.is_guest) delete t.buyer_email;   // gost brez racuna: vratar ne vidi e-naslova (migracija 033); na zaslonu je imetnik »Guest«
     if (t.club_id !== klub) return res.status(403).json({ result: "wrong_club", message: "This ticket is for another club's event." });
     if (ev !== undefined && ev !== null && Number(ev) !== t.event_id) return res.status(400).json({ result: "invalid", message: "QR code does not match the ticket." });
     // Odpovedan dogodek: narocila ostanejo placana (vracilo je rocno), vstopnice pa na vratih ne smejo vec veljati.
@@ -4126,7 +4768,7 @@ app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken(), as
         `SELECT t.serial,
                 CASE WHEN o.status IN ('paid','partially_refunded') OR t.status IN ('refunded','void') THEN t.status ELSE 'unpaid' END AS status,
                 t.used_at, (o.table_id IS NOT NULL) AS is_vip, o.table_label, o.package_name,
-                hu.username AS holder_username
+                COALESCE(hu.username, ${IME_GOSTA}) AS holder_username
          FROM tickets t JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK}
          WHERE t.event_id = $1
          ORDER BY t.id`, [id]),
@@ -4763,9 +5405,10 @@ async function pocistiRezervacije() {
 if (REZERVACIJE_CISCENJE_MS > 0) {
   // Prvi tek NE takoj po zagonu (glavni pool je takrat najbolj zaseden: prvi nakupi, health check, sken): vsaj 5 min + nakljucnih do 60 s
   // (pri kratkem intervalu za teste sorazmerno krajse). Pospravljanje ni nujno, zato ne tekmuje z nakupi ob zagonu.
+  const pocistiVse = () => { pocistiRezervacije(); pocistiGostZetone(); };   // gostujoci zetoni (migracija 033): isti urnik
   setTimeout(() => {
-    pocistiRezervacije();
-    setInterval(pocistiRezervacije, REZERVACIJE_CISCENJE_MS).unref();
+    pocistiVse();
+    setInterval(pocistiVse, REZERVACIJE_CISCENJE_MS).unref();
   }, Math.min(REZERVACIJE_CISCENJE_MS, 5 * 60 * 1000) + Math.round(Math.random() * Math.min(REZERVACIJE_CISCENJE_MS, 60 * 1000))).unref();
 }
 

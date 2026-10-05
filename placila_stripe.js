@@ -69,7 +69,8 @@ function povratniNaslovi(odjemalec, ref, eventId) {
   };
 }
 
-async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec }) {
+// povratna: neobvezen { success_url, cancel_url } namesto privzetih (nakup brez racuna: success_url nosi zeton gosta, index.js).
+async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna }) {
   const s = stripe();
   const ref = encodeURIComponent(narocilo.public_ref);
   const meta = { order_id: String(narocilo.id), public_ref: narocilo.public_ref };
@@ -90,7 +91,7 @@ async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racun
     },
     metadata: meta,
     expires_at: Math.floor(Date.now() / 1000) + CHECKOUT_MINUT * 60,
-    ...povratniNaslovi(odjemalec, ref, eventId),
+    ...(povratna || povratniNaslovi(odjemalec, ref, eventId)),
   }, { idempotencyKey: `outly-narocilo-${narocilo.id}` });
 }
 
@@ -102,27 +103,28 @@ function idNarocilaIzSeje(seja) {
 }
 
 // Placilo uspelo: pending -> paid, nastanejo vstopnice. Idempotentno (drugic ne naredi nicesar).
+// Vrne id narocila, ki je PRAVKAR postalo placano (sicer null): klicatelj po COMMIT-u sprozi stranske ucinke (mail gostu).
 async function zakljuci(c, seja) {
   const id = idNarocilaIzSeje(seja);
-  if (!id) { console.error(`[stripe] seja ${seja.id} brez narocila`); return; }
+  if (!id) { console.error(`[stripe] seja ${seja.id} brez narocila`); return null; }
   const r = await c.query(
     `SELECT id, public_ref, status, total_cents, currency, quantity, table_id, table_seats, event_id, stripe_checkout_session_id
        FROM orders WHERE id = $1 FOR UPDATE`, [id]);
-  if (!r.rows.length) { console.error(`[stripe] seja ${seja.id}: narocila ${id} ni`); return; }
+  if (!r.rows.length) { console.error(`[stripe] seja ${seja.id}: narocila ${id} ni`); return null; }
   const o = r.rows[0];
   if (o.stripe_checkout_session_id && o.stripe_checkout_session_id !== seja.id) {
-    console.error(`[stripe] seja ${seja.id} se ne ujema z narocilom ${o.public_ref} (${o.stripe_checkout_session_id})`); return;
+    console.error(`[stripe] seja ${seja.id} se ne ujema z narocilom ${o.public_ref} (${o.stripe_checkout_session_id})`); return null;
   }
   if (o.status !== "pending") {
     if (!["paid", "partially_refunded", "refunded"].includes(o.status)) {
       // Placilo za ze preklicano narocilo (zaloga je bila sproscena). Ne vknjizimo ga samodejno: lahko bi presegli zalogo.
       console.error(`[stripe] POZOR: placilo za neaktivno narocilo ${o.public_ref} (stanje ${o.status}, seja ${seja.id}) - vrni rocno v Stripu.`);
     }
-    return;
+    return null;
   }
   if (seja.amount_total !== o.total_cents || String(seja.currency || "").toUpperCase() !== String(o.currency).toUpperCase()) {
     console.error(`[stripe] POZOR: znesek seje ${seja.id} (${seja.amount_total} ${seja.currency}) != narocilo ${o.public_ref} (${o.total_cents} ${o.currency})`);
-    return;
+    return null;
   }
   const pi = typeof seja.payment_intent === "string" ? seja.payment_intent : (seja.payment_intent && seja.payment_intent.id) || null;
   await c.query(
@@ -132,6 +134,7 @@ async function zakljuci(c, seja) {
   const stevilo = o.table_id ? o.table_seats : o.quantity;
   await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [o.id, o.event_id, stevilo]);
   console.log(`[stripe] placano: narocilo ${o.public_ref}, ${stevilo} vstopnic`);
+  return o.id;
 }
 
 // Seja potekla ali placilo padlo: pending -> cancelled/failed (sprozilec sprosti zalogo, unikatni indeks mize jo spusti).
@@ -181,21 +184,30 @@ async function svezObjekt(s, d) {
   return o;
 }
 
+// Vrne id narocila, ki je s tem dogodkom postalo placano (ali null).
 async function obdelajDogodek(c, d, o) {
   switch (d.type) {
     case "checkout.session.completed":
-      if (o.payment_status === "paid") await zakljuci(c, o);   // "unpaid" = odlozeno placilo, pride async_payment_succeeded
+      if (o.payment_status === "paid") return zakljuci(c, o);   // "unpaid" = odlozeno placilo, pride async_payment_succeeded
       break;
-    case "checkout.session.async_payment_succeeded": await zakljuci(c, o); break;
+    case "checkout.session.async_payment_succeeded": return zakljuci(c, o);
     case "checkout.session.expired": await prekini(c, o, "cancelled"); break;
     case "checkout.session.async_payment_failed": await prekini(c, o, "failed"); break;
     case "account.updated": await posodobiKlub(c, o); break;
     case "charge.refunded": await vracilo(c, o); break;
     default: break;   // drugi dogodki: samo zabelezeni
   }
+  return null;
 }
 
-function ustvari({ pool }) {
+// naPlacano(idNarocila): neobvezen povratni klic PO COMMIT-u, ko narocilo postane placano (webhook ali pospravljalec). Njegova napaka
+// ne sme podreti webhooka (Stripe bi ponavljal) ne pospravljalca; klicatelj jo ujame sam, tu je se varovalka.
+function ustvari({ pool, naPlacano }) {
+  const poPlacilu = (id) => {
+    if (!id || !naPlacano) return;
+    try { Promise.resolve(naPlacano(id)).catch((e) => console.error("[stripe] naPlacano:", e && e.message)); }
+    catch (e) { console.error("[stripe] naPlacano:", e && e.message); }
+  };
   // POST /stripe/webhook (surovo telo!). 400 = napacen podpis, 500 = obdelava ni uspela (Stripe ponovi), 200 = obdelano ali ze videno.
   async function webhook(req, res) {
     const s = stripe();
@@ -217,8 +229,9 @@ function ustvari({ pool }) {
       await c.query("BEGIN");
       const nov = await c.query("INSERT INTO stripe_events (id, type) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING id", [d.id, d.type]);
       if (!nov.rows.length) { await c.query("ROLLBACK"); return res.json({ received: true, duplicate: true }); }
-      await obdelajDogodek(c, d, objekt);
+      const placano = await obdelajDogodek(c, d, objekt);
       await c.query("COMMIT");
+      poPlacilu(placano);
       return res.json({ received: true });
     } catch (e) {
       await c.query("ROLLBACK").catch(() => {});
@@ -256,7 +269,11 @@ function ustvari({ pool }) {
           }
           let seja = await s.checkout.sessions.retrieve(o.stripe_checkout_session_id);
           if (seja.status === "open") seja = await s.checkout.sessions.expire(seja.id);
-          if (seja.status === "complete" && seja.payment_status === "paid") await vTransakciji((c) => zakljuci(c, seja));
+          if (seja.status === "complete" && seja.payment_status === "paid") {
+            let placano = null;
+            await vTransakciji(async (c) => { placano = await zakljuci(c, seja); });
+            poPlacilu(placano);
+          }
           else if (seja.status === "expired") await vTransakciji((c) => prekini(c, seja, "cancelled"));
           // complete + unpaid: odlozeno placilo, pocakaj na async webhook
         } catch (e) { console.error(`[stripe] pospravljanje narocila ${o.public_ref}:`, e.message); }

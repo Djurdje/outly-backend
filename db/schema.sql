@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–032, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–033, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -12,10 +12,11 @@
 -- (ni imela orders/tickets/refresh_tokens/...) — zato zdaj izvoz.
 -- =============================================================================
 --
+--
 -- PostgreSQL database dump
 --
 
-\restrict uafmqjTGgFXrA59fZ6zASDcTS94veEMc2Br1DhKw3Dwg8g1TepNnmfVl6XA1YQ7
+\restrict 1GLROyQZscThW7TWr6yZlRIbP0hLPhV4nZqarVpht4wOzaCpa2IurAQN26syCij
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
@@ -577,6 +578,25 @@ CREATE TABLE public.friendships (
 
 
 --
+-- Name: gost_zetoni; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.gost_zetoni (
+    token_hash text NOT NULL,
+    order_id bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT gost_zetoni_hash_chk CHECK ((token_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: TABLE gost_zetoni; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.gost_zetoni IS 'Zetoni za pogled gostujocega narocila (GET /guest/order). Samo sha256 zetona (hex, 64 znakov); velja do konca dogodka + 30 dni (preverja poizvedba, ne stolpec).';
+
+
+--
 -- Name: omejitve; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -631,7 +651,15 @@ CREATE TABLE public.orders (
     stripe_checkout_session_id text,
     checkout_url text,
     checkout_expires_at timestamp with time zone,
+    guest_email text,
+    guest_terms_version text,
+    guest_terms_accepted_at timestamp with time zone,
+    guest_age_min smallint,
+    guest_mail_sent_at timestamp with time zone,
+    guest_mail_claimed_at timestamp with time zone,
+    guest_mail_attempts smallint DEFAULT 0 NOT NULL,
     CONSTRAINT orders_fee_chk CHECK (((application_fee_cents >= 0) AND (application_fee_cents <= total_cents))),
+    CONSTRAINT orders_guest_chk CHECK (((guest_email IS NULL) OR ((guest_email = lower(guest_email)) AND (char_length(guest_email) <= 254) AND (POSITION(('@'::text) IN (guest_email)) > 1) AND (table_id IS NULL) AND (guest_terms_version IS NOT NULL) AND (guest_terms_accepted_at IS NOT NULL)))),
     CONSTRAINT orders_paid_chk CHECK (((status <> 'paid'::text) OR (paid_at IS NOT NULL))),
     CONSTRAINT orders_price_chk CHECK (((unit_price_cents >= 0) AND (total_cents >= 0))),
     CONSTRAINT orders_qty_chk CHECK (((quantity > 0) AND (quantity <= 20))),
@@ -668,6 +696,13 @@ COMMENT ON COLUMN public.orders.checkout_url IS 'URL Stripove placilne strani za
 --
 
 COMMENT ON COLUMN public.orders.checkout_expires_at IS 'Potek Checkout seje; pospravljalec po njem narocilo preveri pri Stripu in preklice.';
+
+
+--
+-- Name: COLUMN orders.guest_email; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.guest_email IS 'E-naslov gosta, ki je kupil brez racuna (user_id NULL do prevzema). Osebni podatek kot buyer_email; ob izbrisu racuna se postavi na NULL.';
 
 
 --
@@ -1133,6 +1168,14 @@ ALTER TABLE ONLY public.friendships
 
 
 --
+-- Name: gost_zetoni gost_zetoni_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gost_zetoni
+    ADD CONSTRAINT gost_zetoni_pkey PRIMARY KEY (token_hash);
+
+
+--
 -- Name: omejitve omejitve_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1373,6 +1416,13 @@ CREATE INDEX friendships_user_b_idx ON public.friendships USING btree (user_b);
 
 
 --
+-- Name: gost_zetoni_order_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX gost_zetoni_order_idx ON public.gost_zetoni USING btree (order_id, created_at DESC);
+
+
+--
 -- Name: omejitve_okno_do_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1398,6 +1448,41 @@ CREATE INDEX orders_club_idx ON public.orders USING btree (club_id, created_at D
 --
 
 CREATE INDEX orders_event_idx ON public.orders USING btree (event_id, status);
+
+
+--
+-- Name: orders_gost_cakajoce_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX orders_gost_cakajoce_key ON public.orders USING btree (guest_email, event_id) WHERE ((guest_email IS NOT NULL) AND (status = 'pending'::text));
+
+
+--
+-- Name: orders_gost_email_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_gost_email_idx ON public.orders USING btree (guest_email) WHERE (guest_email IS NOT NULL);
+
+
+--
+-- Name: orders_gost_idempotency_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX orders_gost_idempotency_key ON public.orders USING btree (guest_email, idempotency_key) WHERE ((guest_email IS NOT NULL) AND (idempotency_key IS NOT NULL));
+
+
+--
+-- Name: orders_gost_poslano_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_gost_poslano_idx ON public.orders USING btree (guest_mail_sent_at) WHERE (guest_mail_sent_at IS NOT NULL);
+
+
+--
+-- Name: orders_gost_posta_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_gost_posta_idx ON public.orders USING btree (id) WHERE ((guest_email IS NOT NULL) AND (guest_mail_sent_at IS NULL) AND (status = 'paid'::text));
 
 
 --
@@ -1771,6 +1856,14 @@ ALTER TABLE ONLY public.friendships
 
 
 --
+-- Name: gost_zetoni gost_zetoni_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gost_zetoni
+    ADD CONSTRAINT gost_zetoni_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE CASCADE;
+
+
+--
 -- Name: orders orders_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1910,5 +2003,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict uafmqjTGgFXrA59fZ6zASDcTS94veEMc2Br1DhKw3Dwg8g1TepNnmfVl6XA1YQ7
+\unrestrict 1GLROyQZscThW7TWr6yZlRIbP0hLPhV4nZqarVpht4wOzaCpa2IurAQN26syCij
 
