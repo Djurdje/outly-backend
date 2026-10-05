@@ -406,3 +406,19 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   Strošek 0 EUR do 10 GB/1 M zapisov na mesec (Cloudflare lahko ob vklopu R2 zahteva plačilno sredstvo). Rok hrambe 30 dni (in dejstvo, da šifrirani osebni podatki ležijo pri Cloudflare) v politiki zasebnosti
   ni zapisan — nepreverjeno, pregled `pravnik` pred javnim zagonom.
   *vir/dokaz*: Martinova izbira in poenostavitev v pogovoru 2. 10. 2026; STATE.md (zaprt dostop 30. 9.) · *velja dokler*: je baza zaprta za zunanje povezave in izvoz ostaja tok · *nadomeščena z*: —
+
+## Nakup brez računa (5. 10. 2026)
+
+- 2026-10-05: **Nakup vstopnice brez računa: kupec vpiše samo e-naslov** (Martin, 5. 10. 2026; varianto z OTP kodo iz maila je izrecno zavrnil: »spet more kodo… kot da bi account naredil«). Samo splet (`/app`), samo navadne vstopnice (VIP mize ne: alkohol 18+, prenos prijateljem).
+  *vir/dokaz*: pogovor 5. 10. 2026; pravna analiza outly-hq `pravno/2026-10-05-gostujoci-nakup.md` · *velja dokler*: Martin ne odloči drugače · *nadomeščena z*: —
+- 2026-10-05: **Odločitev agenta (Martin je ni potrdil): gost NI vrstica v `users`, ampak `orders.user_id = NULL` + `orders.guest_email` + žeton.** Razlogi: (1) `orders.user_id` je že nullable (po izbrisu računa) in vse poti za branje
+  ga prenesejo (LEFT JOIN users), zato obstoječe poti in odgovori za prijavljene ostanejo nespremenjeni; (2) vrstica v `users` bi trčila z Supabase prijavo in povezavo po e-naslovu (isti e-naslov = tuji uid, `users_email` unique),
+  gost bi se pojavil v iskanju uporabnikov, prijateljskih prošnjah in adminovem seznamu, zahteval bi izmišljeno uporabniško ime; (3) omejitev neplačanih naročil uporabnika in gostujoče omejitve se ločita same od sebe (štetje po `user_id`);
+  (4) ni enumeracije računov: gostujoči nakup ne bere `users`. Cena: lastna idempotenca (vezana na e-naslov), lasten prevzem v račun, »Guest« v poslovnih pogledih. Zavrnjena alternativa: gost kot `users` z oznako brez `supabase_uid`.
+- 2026-10-05: **Odločitev agenta (Martin je ni potrdil): žeton gosta** = 32 B naključja (base64url), v bazi samo sha256, več žetonov na naročilo (največ 10; mail iz webhooka potrebuje svežega), v glavi `X-Guest-Token` (ne v URL-ju API zahtevka),
+  velja do konca dogodka + 30 dni (poizvedba) in se ob prevzemu v račun prekliče (pravna analiza 2.6). Rok 30 dni je predlog Martinovega načrta. *velja dokler*: ni drugače določeno · *nadomeščena z*: —
+- 2026-10-05: **Odločitev agenta (Martin je ni potrdil): zloraba** (gost nima računa, neplačana naročila zaklepajo zalogo ~35 min): 5 nakupov/uro/IP (`GOST_NAKUP_NA_URO`), največ 1 neplačano naročilo na (e-naslov, dogodek) z unikatnim delnim indeksom,
+  `quantity` do 10. **Znana meja:** botnet z mnogimi IP-ji in e-naslovi lahko zaklene zalogo (5 × 10 vstopnic/uro/IP, 35 min); ni obrambe po skupni količini čakajočih. Če se pojavi, dodaj skupno omejitev čakajočih na dogodek.
+- 2026-10-05: **Odločitev agenta (Martin je ni potrdil): hramba osebnih podatkov gosta** po pravni analizi 2.3: datum rojstva se NE shrani (samo `guest_age_min`); e-naslov neplačanega/preklicanega naročila se anonimizira 24 h po preklicu; plačanega
+  `GOST_HRAMBA_DNI` = 180 dni po koncu dogodka (rok je PREDPOSTAVKA, Martin ga lahko spremeni; rok sporov pri kartičnih shemah ni preverjen). Mail z vstopnico je zakonsko potrdilo (ZVPot-1 132/6): celotna vsebina v besedilu.
+  **Ni v tej nalogi:** firma in matična številka kluba v bazi nista (`clubs` ima ime, naslov, telefon, e-naslov), zato mail kaže samo to; pogoji in politika zasebnosti (§ 3 analize) se ne spreminjajo brez Martinovega DA.
