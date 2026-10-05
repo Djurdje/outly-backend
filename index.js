@@ -4118,6 +4118,15 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
   } finally { try { c.release(); } finally { if (req.idem) req.idem.sprosti(); nakupIzstopi(); } }
 });
 
+// Neuspesen zahtevek (zeton ne velja): 404; nad mejo neuspesnih na IP 429. VELJAVEN zeton se obdela vedno (iskanje je indeksirano in poceni):
+// na skupnem wifiju kluba ali CGNAT napadalec (ali pokvarjen odjemalec) gostom na vratih ne sme onemogociti prikaza vstopnice.
+// Zeton ima 256 bitov, ugibanje ni realno; meja je samo varovalo pred obremenitvijo.
+function gostNeuspesen(req, res) {
+  if (gostNeuspesni.presezeno(req.ip)) return odgovoriPreVeliko(res, gostNeuspesni, req.ip);
+  gostNeuspesni.dodaj(req.ip);
+  return res.status(404).send("Order not found.");
+}
+
 // Narocilo gosta v obliki odgovora (GET /guest/order, POST /guest/order/cancel); brez e-naslova.
 async function gostNarociloOdgovor(db, oid) {
   const nr = await db.query(
@@ -4142,13 +4151,12 @@ async function gostNarociloOdgovor(db, oid) {
 // GET /guest/order — pogled gosta: narocilo + vstopnice. Zeton v glavi X-Guest-Token (NE v URL-ju zahtevka: ne pride v dnevnike).
 // Napacen/potekel zeton, preklicano neplacano narocilo, prevzeto v racun, VIP miza: 404 vedno enako (razlike ne razkrijemo).
 // pending: tickets [] (odjemalec po vrnitvi s Stripa poizveduje, dokler ne pride paid).
-// Omejitev: samo NEUSPESNI (404) zahtevki na IP (GOST_NEUSPESNI_NA_URO); uspesni (poizvedovanje po Stripu) so brez meje.
+// Omejitev: samo NEUSPESNI (404) zahtevki na IP (GOST_NEUSPESNI_NA_URO); veljaven zeton je vedno obdelan, tudi ce je IP nad mejo.
 app.get("/guest/order", async (req, res) => {
   res.set("Cache-Control", "no-store");
   try {
-    if (gostNeuspesni.presezeno(req.ip)) return odgovoriPreVeliko(res, gostNeuspesni, req.ip);
     const oid = await gostNarociloPoZetonu(pool, req.get("x-guest-token"));
-    if (!oid) { gostNeuspesni.dodaj(req.ip); return res.status(404).send("Order not found."); }
+    if (!oid) return gostNeuspesen(req, res);
     const order = await gostNarociloOdgovor(pool, oid);
     if (!order) return res.status(404).send("Order not found.");
     let vstopnice = [];
@@ -4163,12 +4171,12 @@ app.get("/guest/order", async (req, res) => {
 // POST /guest/order/cancel — gost prekliče svoje NEPLACANO naročilo (zaloga se sprosti takoj, ne šele čez ~35 min).
 // Zeton v glavi X-Guest-Token, brez telesa. 200 { order } (status cancelled); naročilo, ki ni pending (placano ali ze preklicano
 // v istem trenutku): 409 { error: "order_not_pending" }. Stripe seja se poteče (kot pospravljalec); če je bila med tem placana: 409.
-app.post("/guest/order/cancel", omeji({ kljuc: "gost-preklic", najvec: 30, oknoSekund: 3600, priNapaki: "odpri" }), async (req, res) => {
+// Brez omeji(): nepoznan zeton steje gostNeuspesni, veljaven nikoli ne dobi 429 (ponovitev na preklicanem narocilu se konca pri 409, brez Stripa).
+app.post("/guest/order/cancel", async (req, res) => {
   res.set("Cache-Control", "no-store");
   try {
-    if (gostNeuspesni.presezeno(req.ip)) return odgovoriPreVeliko(res, gostNeuspesni, req.ip);
     const oid = await gostNarociloPoZetonu(pool, req.get("x-guest-token"));
-    if (!oid) { gostNeuspesni.dodaj(req.ip); return res.status(404).send("Order not found."); }
+    if (!oid) return gostNeuspesen(req, res);
     const k = (await pool.query("SELECT status, event_id, stripe_checkout_session_id, created_at FROM orders WHERE id = $1", [oid])).rows[0];
     if (!k) return res.status(404).send("Order not found.");
     const nePending = () => res.status(409).json({ error: "order_not_pending", message: "Only an unpaid order can be cancelled." });

@@ -740,6 +740,17 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(r.status === 429 && r.headers.get("retry-after"), "5. neuspesen ogled z IP: 429 + Retry-After (ugibanje zetonov)", [r.status, r.headers.get("retry-after")]);
     r = await zahtevek(B, "POST", "/guest/order/cancel", null, undefined, { "x-guest-token": "napacen6" });
     assert(r.status === 429, "isti stevec velja za preklic");
+    r = await brezAvtorizacije(B, "/guest/order", zetonB);
+    assert(r.status === 200 && r.body.order.id, "IP nad mejo neuspesnih + VELJAVEN zeton -> 200 (vstopnica na vratih se vedno prikaze)", r.status);
+    r = await zahtevek(B, "POST", "/guest/order/cancel", null, undefined, { "x-guest-token": zetonB });
+    assert(r.status === 409 && r.body.error === "order_not_pending", "preklic z veljavnim zetonom nad mejo: obdelan (409: narocilo je placano), ne 429", r);
+    const zetonPk = crypto.randomBytes(32).toString("base64url");
+    const nPk2 = (await pool.query(
+      `INSERT INTO orders (public_ref, event_id, club_id, quantity, unit_price_cents, total_cents, status, buyer_email, created_at, guest_email, guest_terms_version, guest_terms_accepted_at)
+       VALUES ('OUT-PK'||floor(random()*1e9)::text, $1, 1, 1, 1500, 1500, 'pending', 'pk@example.com', NOW() - INTERVAL '5 minutes', 'pk@example.com', 'x', NOW()) RETURNING id`, [evA])).rows[0].id;
+    await pool.query("INSERT INTO gost_zetoni (token_hash, order_id) VALUES ($1, $2)", [crypto.createHash("sha256").update(zetonPk).digest("hex"), nPk2]);
+    r = await zahtevek(B, "POST", "/guest/order/cancel", null, undefined, { "x-guest-token": zetonPk });
+    assert(r.status === 200 && r.body.order.status === "cancelled", "preklic neplacanega narocila z veljavnim zetonom nad mejo neuspesnih: 200", r);
     b.srv.kill(); b = null;
 
     console.log("\n# 13. Stikalo za pravi denar (GOST_NAKUP_LIVE)");
