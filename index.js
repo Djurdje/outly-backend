@@ -3245,6 +3245,25 @@ app.post("/business/stripe/dashboard", requireAuth, requireClub("owner"), async 
 // Vrne true, ce je seja ustvarjena; sicer je odgovor 502 ze poslan.
 // odjemalec: "ios" (glava X-Outly-Client: ios) ali splet - doloci povratna naslova Checkouta (placila_stripe.js povratniNaslovi).
 const odjemalecNakupa = (req) => (String(req.get("x-outly-client") || "").toLowerCase() === "ios" ? "ios" : "splet");
+// Omejitev cakajocih (neplacanih) narocil (pregled 5. 10. 2026): cakajoce Stripe narocilo drzi zalogo ali mizo do ~35 min.
+// Brez omejitve bi en racun z nekaj kliki zasedel razprodan dogodek ali vse VIP mize, ne da bi kaj placal.
+// Pravilo: najvec 1 cakajoce narocilo na dogodek in najvec CAKAJOCA_NAJVEC skupaj na uporabnika. Kupec nedokoncano
+// placilo nadaljuje prek checkout_url v GET /me/orders ali pocaka, da seja poteče (pospravljalec jo sprosti).
+// Zaklep (uporabnik) v isti transakciji kot INSERT: dva hkratna nakupa istega uporabnika ne prideta mimo stetja oba.
+// Ponovitev z istim Idempotency-Key se vrne prej (plast 3), zato je to pravilo ne zavrne.
+const CAKAJOCA_NAJVEC = 3;
+const CAKAJOCA_ZAKLEP_RAZRED = 73110;   // prvi del dvodelnega advisory kljuca (drugi = id uporabnika); ne trci z migrate.js (enodelni kljuc)
+async function omejitevCakajocih(c, userId, eventId) {
+  await c.query("SELECT pg_advisory_xact_lock($1::int, $2::int)", [CAKAJOCA_ZAKLEP_RAZRED, userId]);
+  const r = await c.query(
+    `SELECT COUNT(*)::int AS vse, COUNT(*) FILTER (WHERE event_id = $2)::int AS ta
+       FROM orders WHERE user_id = $1 AND status = 'pending'`, [userId, eventId]);
+  const { vse, ta } = r.rows[0];
+  if (ta > 0) return "You already have an unfinished payment for this event. Finish it in My tickets, or wait up to 30 minutes for it to expire.";
+  if (vse >= CAKAJOCA_NAJVEC) return "You have too many unfinished payments. Finish one in My tickets, or wait up to 30 minutes for them to expire.";
+  return null;
+}
+
 async function nakupStripeSeja(res, c, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec }) {
   try {
     const nr = await c.query("SELECT id, public_ref, currency, application_fee_cents FROM orders WHERE id=$1", [oid]);
@@ -3642,6 +3661,10 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     if (nacin === "nastavitve") { await c.query("ROLLBACK"); return res.status(503).send("Payments are not available yet."); }
     if (nacin === "klub") { await c.query("ROLLBACK"); return res.status(409).send("This club does not accept online payments yet."); }
     const test = nacin === "test";
+    if (!test) {
+      const omejitev = await omejitevCakajocih(c, req.user.userId, e.id);
+      if (omejitev) { await c.query("ROLLBACK"); return res.status(409).send(omejitev); }
+    }
 
     const skupaj = e.ticket_price_cents * q;
     const provizija = provizijaCentov(skupaj, e.commission_bps);
@@ -3887,7 +3910,14 @@ app.get("/business/events/:id/tickets", requireAuth, requireClub(), async (req, 
        LEFT JOIN users u ON u.id = o.user_id ${JOIN_IMETNIK}
        WHERE t.event_id = $1 AND e.club_id = $2 ORDER BY t.id LIMIT 1000`, [id, klub]
     );
-    return res.json(r.rows.map(t => ({ ...t, qr: qrVstopnice(t) })));
+    // Vratar (zacasno osebje) ne potrebuje e-naslovov kupcev (najmanj podatkov, GDPR); za rocni vstop zadostujeta
+    // podpisan QR in uporabnisko ime. Lastnik in manager vidita vse kot doslej (pregled 5. 10. 2026).
+    const vratar = req.klub && req.klub.role === "doorman";
+    return res.json(r.rows.map(t => {
+      const v = { ...t, qr: qrVstopnice(t) };
+      if (vratar) { delete v.buyer_email; delete v.holder_email; }
+      return v;
+    }));
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
@@ -4025,7 +4055,7 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (re
     if (!klub) return res.status(404).send("Club not found.");
 
     const r = await skenPool.query(
-      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, e.club_id, e.title AS event_title, e.start_at, o.status AS order_status, o.public_ref, o.buyer_email,
+      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, e.club_id, e.title AS event_title, e.start_at, e.status AS event_status, o.status AS order_status, o.public_ref, o.buyer_email,
               ${STOLPCI_IMETNIKA}
        FROM tickets t JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK} WHERE t.serial = $1`, [serial]
     );
@@ -4033,6 +4063,8 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (re
     const t = r.rows[0];
     if (t.club_id !== klub) return res.status(403).json({ result: "wrong_club", message: "This ticket is for another club's event." });
     if (ev !== undefined && ev !== null && Number(ev) !== t.event_id) return res.status(400).json({ result: "invalid", message: "QR code does not match the ticket." });
+    // Odpovedan dogodek: narocila ostanejo placana (vracilo je rocno), vstopnice pa na vratih ne smejo vec veljati.
+    if (t.event_status === "cancelled") return res.status(409).json({ result: "event_cancelled", message: "This event was cancelled.", ticket: t });
     if (!["paid", "partially_refunded"].includes(t.order_status)) return res.status(409).json({ result: "unpaid", message: "Order is not paid." });
     if (t.status === "used") return res.status(409).json({ result: "already_used", message: "Ticket was already scanned.", used_at: t.used_at, ticket: t });
     if (t.status !== "valid") return res.status(409).json({ result: t.status, message: `Ticket is ${t.status}.`, ticket: t });
@@ -4172,7 +4204,7 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken(), jso
     const prenesene = new Map();
     if (serijski.length) {
       const r = await skenPool.query(
-        `SELECT t.id, t.serial, t.status, t.used_at, t.used_by_user_id, t.scan_device, t.event_id, t.created_at, e.club_id, e.start_at, o.status AS order_status
+        `SELECT t.id, t.serial, t.status, t.used_at, t.used_by_user_id, t.scan_device, t.event_id, t.created_at, e.club_id, e.start_at, e.status AS event_status, o.status AS order_status
          FROM tickets t JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = t.order_id
          WHERE t.serial = ANY($1::uuid[])`, [serijski]);
       for (const t of r.rows) vrstice.set(t.serial, t);
@@ -4198,6 +4230,7 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken(), jso
           rez = { result: k !== undefined && Number(k) === Number(klub) ? "transferred" : "unknown", used_at: null };
         } else if (Number(t.club_id) !== Number(klub)) rez = { result: "wrong_club", used_at: null };
         else if (d.evId !== undefined && d.evId !== null && Number(d.evId) !== Number(t.event_id)) rez = { result: "invalid", used_at: null };
+        else if (t.event_status === "cancelled" && t.status !== "used") rez = { result: "event_cancelled", used_at: null };
         else if (!["paid", "partially_refunded"].includes(t.order_status)) rez = { result: "unpaid", used_at: null };
         else if (t.status === "used") rez = { result: jePonovitev(t, d) ? "ok" : "already_used", used_at: iso(t.used_at) };
         else if (t.status !== "valid") rez = { result: t.status, used_at: null };
@@ -4878,6 +4911,10 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     if (nacin === "nastavitve") { await c.query("ROLLBACK"); return res.status(503).send("Payments are not available yet."); }
     if (nacin === "klub") { await c.query("ROLLBACK"); return res.status(409).send("This club does not accept online payments yet."); }
     const test = nacin === "test";
+    if (!test) {
+      const omejitev = await omejitevCakajocih(c, req.user.userId, e.id);
+      if (omejitev) { await c.query("ROLLBACK"); return res.status(409).send(omejitev); }
+    }
 
     const cena = miza.price_cents;
     const provizija = provizijaCentov(cena, e.commission_bps);
