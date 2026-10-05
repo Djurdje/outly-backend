@@ -4372,7 +4372,7 @@ async function gostResendPosli({ to, subject, html, text, attachments }) {
   poslano.catch(() => {});
   try {
     return await Promise.race([poslano, new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("rok za Resend potekel")), GOST_POSTA_TIMEOUT_MS); })]);
-  } catch (err) { return { error: { message: err && err.message } }; }
+  } catch (err) { return { error: { message: err && (err.message || String(err)) } }; }
   finally { clearTimeout(timer); }
 }
 // Socasna posiljanja v procesu (Resend ne sme zasesti procesa ob mnozici placil naenkrat); cakajoci v pomnilniku, najvec 200.
@@ -4394,7 +4394,7 @@ async function posljiGostuVstopnice(oid) {
   if (!resend) return false;
   if (!(await gostPostaVstopi())) return false;
   try { return await gostPosljiEnoPosto(oid); }
-  catch (err) { console.error(`Resend napaka (gost, vstopnice, narocilo ${oid}):`, err && err.message); return false; }
+  catch (err) { console.error(`Resend napaka (gost, vstopnice, narocilo ${oid}):`, err && (err.message || String(err))); return false; }
   finally { gostPostaIzstopi(); }
 }
 async function gostPosljiEnoPosto(oid) {
@@ -4623,7 +4623,7 @@ async function posljiPrenosGostu(tid) {
   if (!resend) return false;
   if (!(await gostPostaVstopi())) return false;
   try { return await prenosPosljiEnoPosto(tid); }
-  catch (err) { console.error(`Resend napaka (prenos gostu, vstopnica ${tid}):`, err && err.message); return false; }
+  catch (err) { console.error(`Resend napaka (prenos gostu, vstopnica ${tid}):`, err && (err.message || String(err))); return false; }
   finally { gostPostaIzstopi(); }
 }
 async function prenosPosljiEnoPosto(tid) {
@@ -4882,7 +4882,7 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
 
   const c = await pool.connect();
   try {
-    await c.query("BEGIN");
+    await nakupZacni(c);   // lock_timeout/statement_timeout kot pri nakupu: zaklepi vrstice vstopnice, posiljatelja in naslova ne cakajo v neskoncnost
     const tr = await c.query(
       `SELECT t.id, t.serial, t.status, t.event_id, ${IMETNIK} AS holder_id, o.status AS order_status,
               e.title AS event_title, e.start_at, e.min_age, o.package_id
@@ -5004,6 +5004,7 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     });
   } catch (e) {
     await c.query("ROLLBACK").catch(() => {});
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
     console.error(e); return res.status(500).send("Server error.");
   } finally { c.release(); }
 });

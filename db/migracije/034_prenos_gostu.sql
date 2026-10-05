@@ -14,10 +14,10 @@
 --                                    meja na prejemnika se ne da obiti z »ime+1@«, »i.me@«.
 --   * gost_zetoni_vstopnic           hash zetona -> vstopnica (GET /guest/ticket). token_hash je TEXT (hex sha256), NE bytea: izvoz baze je JSON.
 --
--- Samo DODAJANJE (obstojecih podatkov ne spreminja). Zaklepi: ADD COLUMN s konstantno privzeto vrednostjo ali brez nje je v PG16 samo sprememba kataloga
--- (kratek ACCESS EXCLUSIVE, brez prepisa tabele); ADD CONSTRAINT ... NOT VALID vzame kratek ACCESS EXCLUSIVE, VALIDATE CONSTRAINT bere tabelo z blazjim zaklepom
--- SHARE UPDATE EXCLUSIVE (pisanje, torej tudi sken, tece naprej); CREATE INDEX (brez CONCURRENTLY) pa drzi SHARE zaklep, ki BLOKIRA pisanje v tabelo za cas gradnje
--- (delni indeksi nad skoraj praznimi vrsticami: milisekunde). migrate.js ima lock_timeout, zato migracija raje pade, kot da bi dolgo drzala zaklep.
+-- Samo DODAJANJE (obstojecih podatkov ne spreminja). Zaklepi: cela datoteka tece v ENI transakciji, zato ACCESS EXCLUSIVE iz prvega ALTER TABLE tickets velja do COMMIT
+-- (tudi VALIDATE CONSTRAINT in CREATE INDEX tece pod njim: pisanje v tickets, tudi sken, v tem casu caka). ADD COLUMN s konstantno privzeto vrednostjo ali brez nje je v PG16
+-- samo sprememba kataloga (brez prepisa), preverba omejitve in indeksi pa preberejo tabelo: na majhni tabeli milisekunde, na veliki bi bilo treba korake locirati.
+-- migrate.js ima lock_timeout, zato migracija raje pade, kot da bi dolgo drzala zaklep.
 BEGIN;
 
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS holder_is_guest BOOLEAN NOT NULL DEFAULT FALSE;

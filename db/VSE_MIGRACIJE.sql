@@ -1915,10 +1915,10 @@ COMMENT ON TABLE gost_zetoni IS 'Zetoni za pogled gostujocega narocila (GET /gue
 --                                    meja na prejemnika se ne da obiti z »ime+1@«, »i.me@«.
 --   * gost_zetoni_vstopnic           hash zetona -> vstopnica (GET /guest/ticket). token_hash je TEXT (hex sha256), NE bytea: izvoz baze je JSON.
 --
--- Samo DODAJANJE (obstojecih podatkov ne spreminja). Zaklepi: ADD COLUMN s konstantno privzeto vrednostjo ali brez nje je v PG16 samo sprememba kataloga
--- (kratek ACCESS EXCLUSIVE, brez prepisa tabele); ADD CONSTRAINT ... NOT VALID vzame kratek ACCESS EXCLUSIVE, VALIDATE CONSTRAINT bere tabelo z blazjim zaklepom
--- SHARE UPDATE EXCLUSIVE (pisanje, torej tudi sken, tece naprej); CREATE INDEX (brez CONCURRENTLY) pa drzi SHARE zaklep, ki BLOKIRA pisanje v tabelo za cas gradnje
--- (delni indeksi nad skoraj praznimi vrsticami: milisekunde). migrate.js ima lock_timeout, zato migracija raje pade, kot da bi dolgo drzala zaklep.
+-- Samo DODAJANJE (obstojecih podatkov ne spreminja). Zaklepi: cela datoteka tece v ENI transakciji, zato ACCESS EXCLUSIVE iz prvega ALTER TABLE tickets velja do COMMIT
+-- (tudi VALIDATE CONSTRAINT in CREATE INDEX tece pod njim: pisanje v tickets, tudi sken, v tem casu caka). ADD COLUMN s konstantno privzeto vrednostjo ali brez nje je v PG16
+-- samo sprememba kataloga (brez prepisa), preverba omejitve in indeksi pa preberejo tabelo: na majhni tabeli milisekunde, na veliki bi bilo treba korake locirati.
+-- migrate.js ima lock_timeout, zato migracija raje pade, kot da bi dolgo drzala zaklep.
 
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS holder_is_guest BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS holder_guest_email TEXT;
@@ -2001,7 +2001,7 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('031_provizija_po_klubu.sql', '68135f70b950c27d'),
     ('032_rezervacija_po_telefonu.sql', '8eaeef6a07794ab7'),
     ('033_gostujoci_nakup.sql', '4519bc730554831f'),
-    ('034_prenos_gostu.sql', 'e877c718c94360d5')
+    ('034_prenos_gostu.sql', 'ddd3432c2f4ceb54')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
