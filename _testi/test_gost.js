@@ -61,20 +61,24 @@ const pocakaj = (ms) => new Promise(r => setTimeout(r, ms));
 async function cakaj(pogoj, ms = 6000) { const do_ = Date.now() + ms; while (Date.now() < do_) { if (await pogoj()) return true; await pocakaj(100); } return false; }
 
 // ---------- lazni Resend ----------
-const R = { poslano: [], napaka: false };
+const R = { poslano: [], napaka: false, zamik: 0, vLetu: 0, najvecSocasnih: 0, zamudnjena: [] };
 const resendServer = http.createServer((req, res) => {
   let d = ""; req.on("data", x => d += x);
   req.on("end", () => {
     if (req.method === "POST" && req.url === "/emails") {
       if (R.napaka) { res.writeHead(422, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "validation_error", message: "stub: zavrnjeno", statusCode: 422 })); }
-      R.poslano.push(JSON.parse(d));
-      res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ id: "mail_" + R.poslano.length }));
+      const m = JSON.parse(d);
+      R.vLetu++; R.najvecSocasnih = Math.max(R.najvecSocasnih, R.vLetu);
+      const koncaj = (arr) => { R.vLetu--; arr.push(m); res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "mail_" + (R.poslano.length + R.zamudnjena.length) })); };
+      // zamik > GOST_POSTA_TIMEOUT_MS: odgovor pride prepozno; mail se steje med »zamudnjene« (backend ga je ze zavrgel)
+      if (R.zamik) return setTimeout(() => koncaj(R.zamik > 1500 ? R.zamudnjena : R.poslano), R.zamik);
+      return koncaj(R.poslano);
     }
     res.writeHead(404, { "content-type": "application/json" }); res.end("{}");
   });
 });
 const poslanoNa = (email) => R.poslano.filter(m => m.to === email || (Array.isArray(m.to) && m.to.includes(email)));
-const zetonIzMaila = (m) => { const x = /\/app\/guest\/order\?t=([A-Za-z0-9_-]{43})/.exec(m.html || ""); return x ? x[1] : null; };
+const zetonIzMaila = (m) => { const x = /\/app\/guest\/order#t=([A-Za-z0-9_-]{43})/.exec(m.html || ""); return x ? x[1] : null; };
 
 // ---------- lazni Stripe ----------
 const S = { seje: {}, stSej: 0, zahtevki: [] };
@@ -133,7 +137,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
   await new Promise(r => resendServer.listen(RESEND_PORT, r));
   const a = zagon(PORT_A, { RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>",
     STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_POSPRAVI_MS: "600",
-    GOST_NAKUP_NA_URO: "1000", GOST_POSTA_PONOVI_MS: "500", GOST_POSTA_PREMOR_MS: "400", REZERVACIJE_CISCENJE_MS: "1000", GOST_HRAMBA_DNI: "180" });
+    GOST_NAKUP_NA_URO: "1000", GOST_POSTA_PONOVI_MS: "500", GOST_POSTA_PREMOR_MS: "400", GOST_POSTA_TIMEOUT_MS: "1000", GOST_NEUSPESNI_NA_URO: "1000", REZERVACIJE_CISCENJE_MS: "1000", GOST_HRAMBA_DNI: "180" });
   let b = null;
   await cakajStreznik(A);
 
@@ -161,6 +165,8 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     const evMail = await dogodek("lastnik", 1, "Gost Mail", 50);
     const evPotek = await dogodek("lastnik", 1, "Gost Potek", 50);
     const evStripe = await dogodek("lastnik2", 2, "Stripe Noc", 20);
+    const evCap = await dogodek("lastnik2", 2, "Stripe Cap", 30);
+    const evCap2 = await dogodek("lastnik2", 2, "Stripe Cap 2", 30);
     const evStripe2 = await dogodek("lastnik2", 2, "Stripe Noc 2", 20);
     const sold = async (ev) => (await pool.query("SELECT sold_count FROM events WHERE id=$1", [ev])).rows[0].sold_count;
 
@@ -180,7 +186,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(o.guest_terms_version === "2026-10-01" && o.guest_terms_accepted_at, "sprejeti pogoji shranjeni (verzija + cas)", o);
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM users WHERE lower(email)='gost@example.com'")).rows[0].n === 0, "gost NI vrstica v users");
     assert(await sold(evA) === 2, "sold_count 2", await sold(evA));
-    const hash = crypto.createHash("sha256").update(zeton1).digest();
+    const hash = crypto.createHash("sha256").update(zeton1).digest("hex");
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni WHERE token_hash=$1 AND order_id=$2", [hash, n1])).rows[0].n === 1, "v bazi je sha256 zetona");
     const povsod = (await pool.query("SELECT (SELECT string_agg(o::text, ' ') FROM orders o) || (SELECT string_agg(z::text, ' ') FROM gost_zetoni z) AS t")).rows[0].t;
     assert(!povsod.includes(zeton1), "cistopisa zetona nikjer v orders / gost_zetoni");
@@ -200,7 +206,8 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     const nr = (await pool.query("SELECT public_ref FROM orders WHERE guest_email='gost@example.com'")).rows[0].public_ref;
     ob(new RegExp(`Order ${nr}, placed on .*\\(Ljubljana time\\)`), "stevilka narocila + datum in ura nakupa");
     ob(/Gost Noc\n.*\(Ljubljana time\)\nPure Club, .*Ljubljana\nNo age limit\./s, "dogodek: naziv, datum/ura, kraj, starostna meja");
-    ob(/2 x 15\.00 EUR = 30\.00 EUR\. Prices include VAT\./, "stevilo, cena/vstopnico, skupaj, DDV");
+    ob(/2 x 15\.00 EUR = 30\.00 EUR\. VAT is charged according to the seller's VAT status\./, "stevilo, cena/vstopnico, skupaj; DDV stavek ob neznani stopnji (vat_rate NULL)");
+    ob(/Complaints\s+About the event: contact the club.*About the purchase or the payment: contact Outly at luka@outly\.si/is, "stavek o pritozbah (klub za dogodek, Outly za nakup/placilo)");
     ob(/sold by the club: Pure Club/, "prodajalec = klub");
     ob(/NEXT DIMENSIONS, družba za marketing, d\.o\.o\., Trebče 81, 3256 Bistrica ob Sotli, luka@outly\.si/, "posrednik NEXT DIMENSIONS");
     ob(/no right of withdrawal.*ZVPot-1, Article 135, point 12/i, "izjema od odstopa (ZVPot-1 135/12)");
@@ -209,8 +216,8 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     ob(/If you create an Outly account with this email, your tickets will appear there\./, "stavek o prevzemu v racun");
     assert(!/you might also like|recommend|other events/i.test(t0), "potrdilo: brez oglasov in priporocil");
     const zetonMail = zetonIzMaila(m0);
-    assert(zetonMail && zetonMail !== zeton1, "mail: povezava https://outly.test/app/guest/order?t=<svez zeton>", zetonMail);
-    assert((m0.text || "").includes(`https://outly.test/app/guest/order?t=${zetonMail}`), "mail: povezava tudi v tekstovni razlicici");
+    assert(zetonMail && zetonMail !== zeton1, "mail: povezava https://outly.test/app/guest/order#t=<svez zeton> (fragment, ne poizvedba)", zetonMail);
+    assert((m0.text || "").includes(`https://outly.test/app/guest/order#t=${zetonMail}`), "mail: povezava tudi v tekstovni razlicici");
     assert((await pool.query("SELECT guest_mail_sent_at FROM orders WHERE id=$1", [n1])).rows[0].guest_mail_sent_at !== null, "guest_mail_sent_at zapisan");
 
     // ============================================================
@@ -253,7 +260,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
       [{ email: "ni-naslov" }, "e-naslov brez @"], [{ email: "a@b" }, "e-naslov brez domene s piko"], [{ email: "a@b.c" }, "TLD 1 znak"], [{ email: "a b@c.si" }, "presledek v e-naslovu"],
       [{ email: ".a@c.si" }, "pika na zacetku"], [{ email: "a..b@c.si" }, "dvojna pika"], [{ email: "a@-c.si" }, "domena z vezajem na zacetku"],
       [{ email: `${"a".repeat(250)}@c.si` }, "e-naslov > 254"], [{ email: 5 }, "e-naslov ni niz"], [{ email: undefined }, "brez e-naslova"],
-      [{ quantity: 0 }, "quantity 0"], [{ quantity: 11 }, "quantity 11"], [{ quantity: 1.5 }, "quantity 1.5"], [{ quantity: "dva" }, "quantity niz"],
+      [{ quantity: 0 }, "quantity 0"], [{ quantity: 7 }, "quantity 7 (meja za goste 6)"], [{ quantity: 1.5 }, "quantity 1.5"], [{ quantity: "dva" }, "quantity niz"],
       [{ date_of_birth: "1990-13-01" }, "datum rojstva: mesec 13"], [{ date_of_birth: "1990-02-30" }, "datum rojstva: 30. 2."], [{ date_of_birth: "01.01.1990" }, "datum rojstva: napacna oblika"],
     ];
     for (const [dod, opis] of slabi) {
@@ -348,8 +355,8 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(r.body.tickets.length === 0 && r.body.checkout_url === "https://checkout.stripe.test/c/pay/cs_test_1", "tickets [] in checkout_url", r.body);
     const zetonStripe = r.body.guest_token, nS = r.body.order.id;
     const P = S.zahtevki[stZah].params;
-    assert(P.success_url === `https://outly.test/app/guest/order?t=${zetonStripe}`, "success_url = https://outly.test/app/guest/order?t=<guest_token>", P.success_url);
-    assert(P.cancel_url === `https://outly.test/app/event/${evStripe}?placilo=preklic`, "cancel_url = stran dogodka v /app", P.cancel_url);
+    assert(P.success_url === `https://outly.test/app/guest/order#t=${zetonStripe}`, "success_url = https://outly.test/app/guest/order#t=<guest_token> (fragment)", P.success_url);
+    assert(P.cancel_url === `https://outly.test/app/guest/order#t=${zetonStripe}`, "cancel_url = stran narocila (Complete payment / Cancel order)", P.cancel_url);
     assert(P.customer_email === "plac@example.com", "Stripe Checkout: customer_email predizpolnjen", P.customer_email);
     assert(P["payment_intent_data[on_behalf_of]"] === "acct_test2" && P["payment_intent_data[transfer_data][destination]"] === "acct_test2" && P["payment_intent_data[application_fee_amount]"] === "300", "Connect: racun kluba + provizija 10 % (isto kot pri racunih)", P);
     r = await brezAvtorizacije(A, "/guest/order", zetonStripe);
@@ -509,10 +516,10 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     r = await nakup(evMail, "resend-napaka@example.com");
     assert(r.status === 201 && r.body.tickets.length === 1, "Resend zavrne mail: nakup se vedno 201 z vstopnico", r);
     const nMail = r.body.order.id, zetonMail2 = r.body.guest_token;
-    await pocakaj(1500);
+    assert(await cakaj(async () => (await pool.query("SELECT guest_mail_attempts FROM orders WHERE id=$1", [nMail])).rows[0].guest_mail_attempts >= 2, 8000), "pospravljalec je ze ponovil poskus (stevec poskusov >= 2)");
     let st = (await pool.query("SELECT guest_mail_sent_at, guest_mail_attempts, status FROM orders WHERE id=$1", [nMail])).rows[0];
     assert(st.status === "paid" && st.guest_mail_sent_at === null && st.guest_mail_attempts >= 1, "mail ni poslan, poskusi so zabelezeni, narocilo placano", st);
-    assert(R.poslano.length === mailov, "stub Resend ni sprejel nicesar");
+    assert(R.poslano.length === mailov, "stub Resend ni sprejel nicesar (pospravljalec je poskusil vsaj 2x: poskusi so narascali)");
     assert(/Resend napaka \(gost, vstopnice/.test(a.log) && !/resend-napaka@example\.com/.test(a.log), "napaka je v dnevniku, BREZ e-naslova", a.log.split("\n").filter(l => /Resend/.test(l)).slice(-2));
     r = await brezAvtorizacije(A, "/guest/order", zetonMail2);
     assert(r.status === 200 && r.body.tickets.length === 1, "gost vstopnico vidi kljub neuspelemu mailu");
@@ -544,6 +551,118 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     for (let i = 0; i < 14; i++) await nakup(evMail, "zetoni@example.com", {}, { "idempotency-key": Kz });
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni WHERE order_id=$1", [r.body.order.id])).rows[0].n <= 10 + 1, "najvec ~10 zetonov na narocilo (ponovitve ne rastejo v nedogled)", (await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni WHERE order_id=$1", [r.body.order.id])).rows[0].n);
 
+    // ============================================================
+    console.log("\n# 10c. Preklic neplacanega narocila (POST /guest/order/cancel)");
+    const seja = async (id) => S.seje[(await pool.query("SELECT stripe_checkout_session_id FROM orders WHERE id=$1", [id])).rows[0].stripe_checkout_session_id];
+    const preklic = (t) => zahtevek(A, "POST", "/guest/order/cancel", null, undefined, t === undefined ? {} : { "x-guest-token": t });
+    r = await nakup(evCap, "preklic@example.com", { quantity: 3 });
+    assert(r.status === 201 && r.body.order.status === "pending", "pending naroilo za preklic", r);
+    const zPk = r.body.guest_token, nPk = r.body.order.id, sPk = await seja(nPk);
+    assert(await sold(evCap) === 3, "zaloga zasedena (3)");
+    r = await preklic(zPk);
+    assert(r.status === 200 && r.body.order.status === "cancelled" && r.body.order.id === nPk && !JSON.stringify(r.body).includes("preklic@example.com"), "preklic: 200 { order } status cancelled, brez e-naslova", r);
+    assert(await sold(evCap) === 0, "zaloga se sprosti takoj", await sold(evCap));
+    assert(sPk.status === "expired", "Stripe seja potecena (expire)", sPk.status);
+    r = await preklic(zPk);
+    assert(r.status === 404, "ponoven preklic: zeton ne velja vec (404)", r.status);
+    r = await brezAvtorizacije(A, "/guest/order", zPk);
+    assert(r.status === 404, "GET po preklicu: 404", r.status);
+    r = await preklic("x".repeat(43));
+    assert(r.status === 404, "napacen zeton -> 404", r.status);
+    r = await preklic();
+    assert(r.status === 404, "brez zetona -> 404", r.status);
+    r = await nakup(evA, "placan-preklic@example.com");
+    r = await preklic(r.body.guest_token);
+    assert(r.status === 409 && r.body.error === "order_not_pending", "placano (test) naroilo: preklic 409 order_not_pending", r);
+    r = await nakup(evCap, "ze-placano@example.com", { quantity: 2 });
+    const nZp = r.body.order.id, zZp = r.body.guest_token, sZp = await seja(nZp);
+    Object.assign(sZp, placana(sZp, "pi_gost_zp"));
+    r = await preklic(zZp);
+    assert(r.status === 409 && r.body.error === "order_not_pending", "seja je ze placana (webhook se ni prispel): preklic 409", r);
+    assert((await pool.query("SELECT status FROM orders WHERE id=$1", [nZp])).rows[0].status === "pending", "narocilo ostane pending (placilo ni povozeno)");
+    w = await webhook("checkout.session.completed", { id: sZp.id, object: "checkout.session" });
+    assert((await pool.query("SELECT status FROM orders WHERE id=$1", [nZp])).rows[0].status === "paid", "webhook nato vknjizi placilo");
+    r = await nakup(evCap, "brez-seje@example.com");
+    const nBs = r.body.order.id, zBs = r.body.guest_token;
+    await pool.query("UPDATE orders SET stripe_checkout_session_id = NULL WHERE id=$1", [nBs]);
+    r = await preklic(zBs);
+    assert(r.status === 409 && r.body.error === "request_in_progress" && r.headers.get("retry-after"), "seja se ustvarja (< 60 s, brez seje): 409 request_in_progress", r);
+    await pool.query("UPDATE orders SET created_at = NOW() - INTERVAL '5 minutes' WHERE id=$1", [nBs]);
+    r = await preklic(zBs);
+    assert(r.status === 200 && r.body.order.status === "cancelled", "brez seje in starejse od 60 s: preklic gre", r);
+
+    console.log("\n# 10d. Skupna meja cakajocih gostujocih vstopnic na dogodek");
+    // evCap2: kapaciteta 30 -> meja max(10, 20 % = 6) = 10 cakajocih vstopnic
+    r = await nakup(evCap2, "cap-a@example.com", { quantity: 6 });
+    assert(r.status === 201, "6 cakajocih (cap-a)", r.status);
+    r = await nakup(evCap2, "cap-b@example.com", { quantity: 4 });
+    assert(r.status === 201, "+4 = 10 cakajocih (cap-b): na meji, 201", r.status);
+    const zCapB = r.body.guest_token;
+    r = await nakup(evCap2, "cap-c@example.com", { quantity: 1 });
+    assert(r.status === 409 && r.body === "Too many unfinished payments for this event right now, try again in a few minutes.", "11. cakajoca vstopnica -> 409 z navodilom", r);
+    assert(await sold(evCap2) === 10, "zaloga: samo 10 (meja drzi)", await sold(evCap2));
+    r = await api("POST", `/events/${evCap2}/orders`, T.ana, { quantity: 1 });
+    assert(r.status === 201, "meja velja samo za goste: prijavljen uporabnik se vedno 201", r.status);
+    r = await preklic(zCapB);
+    assert(r.status === 200, "cap-b prekliče");
+    r = await nakup(evCap2, "cap-c@example.com", { quantity: 1 });
+    assert(r.status === 201, "po preklicu se sprosti: cap-c 201", r.status);
+    const hk2 = await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map(i => nakup(evCap2, `cap-h${i}@example.com`, { quantity: 2 })));
+    assert(await sold(evCap2) <= 10 + 1 + 1 + 6 + 4 && (await pool.query("SELECT COALESCE(SUM(quantity),0)::int AS n FROM orders WHERE event_id=$1 AND guest_email IS NOT NULL AND status='pending'", [evCap2])).rows[0].n <= 10,
+      "hkratni nakupi: cakajocih gostujocih vstopnic nikoli > 10", hk2.map(x => x.status));
+
+    console.log("\n# 10e. Mail: meje in obnasanje ob pocasnem Resendu");
+    r = await nakup(evA, "dvakrat@example.com");
+    assert(await cakaj(() => poslanoNa("dvakrat@example.com").length >= 1), "prvi mail na naslov poslan");
+    r = await nakup(evA, "dvakrat@example.com");
+    const nDv = r.body.order.id;
+    assert(r.status === 201 && r.body.tickets.length === 1, "drugi nakup z istim naslovom v testnem nacinu: 201");
+    assert(await cakaj(async () => (await pool.query("SELECT guest_mail_attempts FROM orders WHERE id=$1", [nDv])).rows[0].guest_mail_attempts >= 8), "testni nacin: drugi mail v 24 h izpuscen (poskusi izcrpani)");
+    assert(poslanoNa("dvakrat@example.com").length === 1 && /mail na isti naslov je bil ze poslan v 24 h/.test(a.log) && !/dvakrat@example\.com/.test(a.log), "samo 1 mail; zapis v dnevniku brez e-naslova");
+    const mailovPrej = R.poslano.length;
+    R.zamik = 600; R.najvecSocasnih = 0;
+    const osem = await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map(i => nakup(evA, `socasen${i}@example.com`)));
+    assert(osem.every(x => x.status === 201), "8 hkratnih nakupov: vsi 201", osem.map(x => x.status));
+    assert(await cakaj(() => R.poslano.length >= mailovPrej + 8, 15000), "vseh 8 mailov poslanih");
+    R.zamik = 0;
+    assert(R.najvecSocasnih <= 3 && R.najvecSocasnih >= 2, "najvec 3 socasna posiljanja Resendu", R.najvecSocasnih);
+    R.zamik = 2500;
+    r = await nakup(evA, "pocasen@example.com");
+    const nPo2 = r.body.order.id;
+    assert(r.status === 201, "pocasen Resend: nakup 201");
+    assert(await cakaj(() => /rok za Resend potekel/.test(a.log), 6000), "klic Resenda ima rok: po izteku napaka v dnevniku");
+    assert((await pool.query("SELECT guest_mail_sent_at, guest_mail_attempts FROM orders WHERE id=$1", [nPo2])).rows[0].guest_mail_sent_at === null, "po preteku roka poslano NI zapisano");
+    R.zamik = 0;
+    assert(await cakaj(() => poslanoNa("pocasen@example.com").length >= 1, 8000), "ko je Resend spet hiter, pospravljalec poslje");
+
+    console.log("\n# 10f. Prevzem: trk idempotentnega kljuca (N1), zeton po prevzemu (N4), izbris racuna");
+    const ZK = zeton("kolizija@example.com", uuid(23));
+    await api("GET", "/me", ZK);
+    const uidK = (await pool.query("SELECT id FROM users WHERE email='kolizija@example.com'")).rows[0].id;
+    const kKolizija = crypto.randomUUID();
+    const vstavi = async (user, email, kljuc) => (await pool.query(
+      `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, status, buyer_email, paid_at, idempotency_key, guest_email, guest_terms_version, guest_terms_accepted_at)
+       VALUES ('OUT-K'||floor(random()*1e9)::text, $1, $2, 1, 1, 1500, 1500, 'paid', $3, NOW(), $4, $5, $6, CASE WHEN $5::text IS NULL THEN NULL ELSE NOW() END) RETURNING id`,
+      [user, evA, email, kljuc, user ? null : email, user ? null : "x"])).rows[0].id;
+    await vstavi(uidK, "kolizija@example.com", kKolizija);
+    const gTrk = await vstavi(null, "kolizija@example.com", kKolizija);
+    const gOk = await vstavi(null, "kolizija@example.com", null);
+    r = await api("GET", "/me", ZK);
+    assert(r.status === 200, "GET /me ob trku kljuca: 200 (prevzem ne podre prijave)", r.status);
+    const po = (await pool.query("SELECT id, user_id FROM orders WHERE id = ANY($1::bigint[])", [[gTrk, gOk]])).rows;
+    assert(po.find(x => x.id === gOk).user_id === uidK && po.find(x => x.id === gTrk).user_id === null, "naroilo brez trka prevzeto, tisto s trkom kljuca preskoceno", po);
+    const ZI = zeton("idem@example.com", uuid(22));
+    await api("GET", "/me", ZI);
+    assert((await pool.query("SELECT user_id FROM orders WHERE id=$1", [idemOrder])).rows[0].user_id !== null, "idem@example.com: narocilo prevzeto");
+    r = await nakup(evIdem, "idem@example.com", { quantity: 4 }, { "idempotency-key": K });
+    assert(r.status === 201 && r.body.guest_token === null && r.body.tickets.length === 4, "ponovitev kljuca PO prevzemu: 201 s vstopnicami, guest_token null (zetonov ni vec)", [r.status, r.body.guest_token]);
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni WHERE order_id=$1", [idemOrder])).rows[0].n === 0, "po prevzemu se noben zeton ne kuje");
+    r = await api("DELETE", "/me", ZG, { password: "x" });
+    assert(r.status === 200, "DELETE /me po prevzemu gostujocega narocila: 200", r);
+    const izb = (await pool.query("SELECT user_id, guest_email, buyer_email FROM orders WHERE id=$1", [n1])).rows[0];
+    assert(izb.user_id === null && izb.guest_email === null && izb.buyer_email === `izbrisan-${n1}@outly.invalid`, "izbris racuna: guest_email NULL, buyer_email anonimiziran, narocilo ostane", izb);
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni WHERE order_id=$1", [n1])).rows[0].n === 0, "ni zetonov");
+
     // hramba osebnih podatkov
     console.log("\n# 10b. Hramba: anonimizacija e-naslova");
     const mk = async (email, status, dniPo, user = null) => (await pool.query(
@@ -553,7 +672,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     const hSveza = await mk("sveza-preklic@example.com", "cancelled", 2);
     const hStara = await mk("stara-preklic@example.com", "failed", 30);
     const hPlacana = await mk("placana-vsa@example.com", "paid", 1);
-    await pool.query("INSERT INTO gost_zetoni (token_hash, order_id) VALUES ($1, $2)", [crypto.randomBytes(32), hStara]);
+    await pool.query("INSERT INTO gost_zetoni (token_hash, order_id) VALUES ($1, $2)", [crypto.randomBytes(32).toString("hex"), hStara]);
     assert(await cakaj(async () => (await pool.query("SELECT guest_email FROM orders WHERE id=$1", [hStara])).rows[0].guest_email === null, 8000), "preklicano neplacano narocilo (> 24 h): e-naslov anonimiziran");
     let h = (await pool.query("SELECT buyer_email, guest_email, status, total_cents FROM orders WHERE id=$1", [hStara])).rows[0];
     assert(h.buyer_email === `izbrisan-${hStara}@outly.invalid` && h.total_cents === 1500, "buyer_email -> izbrisan-<id>@outly.invalid, znesek ostane", h);
@@ -586,7 +705,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
 
     // ============================================================
     console.log("\n# 12. Omejitev po IP (instanca B: 3 na uro)");
-    b = zagon(PORT_B, { RESEND_API_KEY: "", GOST_NAKUP_NA_URO: "3", STRIPE_SECRET_KEY: "", GOST_POSTA_PONOVI_MS: "0" });
+    b = zagon(PORT_B, { RESEND_API_KEY: "", GOST_NAKUP_NA_URO: "3", STRIPE_SECRET_KEY: "", GOST_POSTA_PONOVI_MS: "0", GOST_NEUSPESNI_NA_URO: "4", GOST_IDEM_ISKANJ_NA_URO: "4" });
     await cakajStreznik(B);
     const nB = (email, dod, g) => nakup(evA, email, dod, g, B);
     const KB = crypto.randomUUID();
@@ -605,11 +724,66 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE guest_email='ip4@example.com'")).rows[0].n === 0, "zavrnjeni nakup (429) nima narocila");
     r = await brezAvtorizacije(B, "/guest/order", zetonB);
     assert(r.status === 200, "branje gostujocega narocila ni vezano na mejo nakupov");
-    await zahtevek(B, "GET", "/", null);
+    // N3: iskanje po Idempotency-Key (pred omejevalnikom nakupov) je omejeno na IP (4/h): doslej 2 iskanja (KB + ponovitev)
+    r = await nB("ip1@example.com", {}, { "idempotency-key": KB });
+    r = await nB("ip1@example.com", {}, { "idempotency-key": KB });
+    assert(r.status === 201, "iskanje po kljucu #4: se 201", r.status);
+    r = await nB("ip1@example.com", {}, { "idempotency-key": KB });
+    assert(r.status === 429 && r.headers.get("retry-after"), "iskanje po kljucu #5: 429 + Retry-After (omejitev iskanj pred omejevalnikom nakupov)", [r.status, r.headers.get("retry-after")]);
+    r = await nB("ip5@example.com");
+    assert(r.status === 429, "nakup brez kljuca ob presezeni meji nakupov: se vedno 429");
+    // S5: GET /guest/order steje samo NEUSPESNE (404) zahtevke: 4 uspesni niso porabili nicesar
+    for (let i = 0; i < 6; i++) { r = await brezAvtorizacije(B, "/guest/order", zetonB); if (r.status !== 200) break; }
+    assert(r.status === 200, "uspesni ogledi niso omejeni (6x 200)", r.status);
+    for (let i = 0; i < 4; i++) { r = await brezAvtorizacije(B, "/guest/order", "napacen" + i); assert(r.status === 404, `neuspesen ogled ${i + 1}/4: 404`, r.status); }
+    r = await brezAvtorizacije(B, "/guest/order", "napacen5");
+    assert(r.status === 429 && r.headers.get("retry-after"), "5. neuspesen ogled z IP: 429 + Retry-After (ugibanje zetonov)", [r.status, r.headers.get("retry-after")]);
+    r = await zahtevek(B, "POST", "/guest/order/cancel", null, undefined, { "x-guest-token": "napacen6" });
+    assert(r.status === 429, "isti stevec velja za preklic");
+    b.srv.kill(); b = null;
+
+    console.log("\n# 13. Stikalo za pravi denar (GOST_NAKUP_LIVE)");
+    const PORT_C = 3193, PORT_E = 3194;
+    const okoljeLive = { RESEND_API_KEY: "", STRIPE_SECRET_KEY: "sk_live_x", STRIPE_WEBHOOK_SECRET: WHSEC, GOST_POSTA_PONOVI_MS: "0" };
+    let c2 = zagon(PORT_C, okoljeLive);
+    await cakajStreznik(`http://127.0.0.1:${PORT_C}`);
+    r = await nakup(evA, "live@example.com", {}, {}, `http://127.0.0.1:${PORT_C}`);
+    assert(r.status === 503 && r.body === "Guest checkout is not available yet.", "sk_live_ brez GOST_NAKUP_LIVE=1: 503 »Guest checkout is not available yet.«", r);
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE guest_email='live@example.com'")).rows[0].n === 0, "naroilo ni nastalo");
+    c2.srv.kill();
+    c2 = zagon(PORT_E, { ...okoljeLive, GOST_NAKUP_LIVE: "1" });
+    await cakajStreznik(`http://127.0.0.1:${PORT_E}`);
+    r = await nakup(evA, "live@example.com", {}, {}, `http://127.0.0.1:${PORT_E}`);
+    assert(r.status === 409 && /does not accept online payments/.test(r.body), "z GOST_NAKUP_LIVE=1 gre naprej (klub brez Stripa: obstojece pravilo 409)", r);
+    c2.srv.kill();
+    assert(true, "sandbox/testni nacin deluje brez stikala (instanca A, sekcije 1-12)");
+
+    console.log("\n# 14. Globalna dnevna meja mailov (GOST_POSTA_DNEVNO)");
+    a.srv.kill(); await pocakaj(500);
+    await pool.query("UPDATE orders SET guest_mail_sent_at = NOW() - INTERVAL '2 days' WHERE guest_mail_sent_at IS NOT NULL");
+    await pool.query("UPDATE orders SET guest_mail_attempts = 8 WHERE guest_email IS NOT NULL AND guest_mail_sent_at IS NULL");
+    const PORT_D = 3195, D = `http://127.0.0.1:${PORT_D}`;
+    const d = zagon(PORT_D, { RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, GOST_POSTA_DNEVNO: "2", GOST_POSTA_PONOVI_MS: "300", GOST_POSTA_PREMOR_MS: "200" });
+    await cakajStreznik(D);
+    const prejD = R.poslano.length;
+    for (const i of [1, 2]) {
+      r = await nakup(evA, `dnevno${i}@example.com`, {}, {}, D);
+      assert(r.status === 201 && await cakaj(() => poslanoNa(`dnevno${i}@example.com`).length === 1), `dnevno${i}: mail poslan (meja 2)`);
+    }
+    r = await nakup(evA, "dnevno3@example.com", {}, {}, D);
+    const n3 = r.body.order.id;
+    assert(r.status === 201 && r.body.tickets.length === 1, "3. nakup: 201 z vstopnico");
+    assert(await cakaj(async () => (await pool.query("SELECT guest_mail_attempts FROM orders WHERE id=$1", [n3])).rows[0].guest_mail_attempts >= 8), "preko dnevne meje: testni mail izpuscen (poskusi izcrpani)");
+    assert(poslanoNa("dnevno3@example.com").length === 0 && R.poslano.length === prejD + 2 && /dnevna meja gostujocih mailov/.test(d.log) && !/dnevno3@example\.com/.test(d.log), "mail se ne poslje, zapis v dnevniku brez e-naslova", R.poslano.length - prejD);
+    const nOdl = await vstavi(null, "odlozen@example.com", null);   // placano (ne testno): mail se ODLOZI, ne izgubi
+    assert(await cakaj(() => /se odlozi/.test(d.log), 6000), "resnicno placano narocilo: potrdilo se odlozi (dnevnik)");
+    const odl = (await pool.query("SELECT guest_mail_attempts, guest_mail_sent_at FROM orders WHERE id=$1", [nOdl])).rows[0];
+    assert(odl.guest_mail_attempts === 0 && odl.guest_mail_sent_at === null && poslanoNa("odlozen@example.com").length === 0, "odlozeno potrdilo ni porabilo poskusa", odl);
+    d.srv.kill();
   } catch (e) {
     fail++; console.error("NAPAKA TESTA:", e);
   } finally {
-    a.srv.kill(); if (b) b.srv.kill(); jwksServer.close(); stripeServer.close(); resendServer.close(); await pool.end();
+    try { a.srv.kill(); } catch (e) {} if (b) b.srv.kill(); jwksServer.close(); stripeServer.close(); resendServer.close(); await pool.end();
     if (fail) console.log("\n--- dnevnik streznika ---\n" + a.log.split("\n").slice(-40).join("\n"));
     console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
     process.exit(fail ? 1 : 0);

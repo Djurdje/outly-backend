@@ -16,7 +16,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict BnTIxcd79VIgW5YmscdtlJajJk0t0cK0vXl58DcGcwcfhhofj7899FnHn7NyFnk
+\restrict 1GLROyQZscThW7TWr6yZlRIbP0hLPhV4nZqarVpht4wOzaCpa2IurAQN26syCij
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
@@ -582,10 +582,10 @@ CREATE TABLE public.friendships (
 --
 
 CREATE TABLE public.gost_zetoni (
-    token_hash bytea NOT NULL,
+    token_hash text NOT NULL,
     order_id bigint NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT gost_zetoni_hash_chk CHECK ((octet_length(token_hash) = 32))
+    CONSTRAINT gost_zetoni_hash_chk CHECK ((token_hash ~ '^[0-9a-f]{64}$'::text))
 );
 
 
@@ -593,7 +593,7 @@ CREATE TABLE public.gost_zetoni (
 -- Name: TABLE gost_zetoni; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.gost_zetoni IS 'Zetoni za pogled gostujocega narocila (GET /guest/order). Samo sha256 zetona (32 B); velja do konca dogodka + 30 dni (preverja poizvedba, ne stolpec).';
+COMMENT ON TABLE public.gost_zetoni IS 'Zetoni za pogled gostujocega narocila (GET /guest/order). Samo sha256 zetona (hex, 64 znakov); velja do konca dogodka + 30 dni (preverja poizvedba, ne stolpec).';
 
 
 --
@@ -1458,6 +1458,13 @@ CREATE UNIQUE INDEX orders_gost_cakajoce_key ON public.orders USING btree (guest
 
 
 --
+-- Name: orders_gost_email_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_gost_email_idx ON public.orders USING btree (guest_email) WHERE (guest_email IS NOT NULL);
+
+
+--
 -- Name: orders_gost_idempotency_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1465,17 +1472,17 @@ CREATE UNIQUE INDEX orders_gost_idempotency_key ON public.orders USING btree (gu
 
 
 --
+-- Name: orders_gost_poslano_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_gost_poslano_idx ON public.orders USING btree (guest_mail_sent_at) WHERE (guest_mail_sent_at IS NOT NULL);
+
+
+--
 -- Name: orders_gost_posta_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX orders_gost_posta_idx ON public.orders USING btree (id) WHERE ((guest_email IS NOT NULL) AND (guest_mail_sent_at IS NULL) AND (status = 'paid'::text));
-
-
---
--- Name: orders_gost_prevzem_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX orders_gost_prevzem_idx ON public.orders USING btree (guest_email) WHERE ((guest_email IS NOT NULL) AND (user_id IS NULL));
 
 
 --
@@ -1996,5 +2003,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict BnTIxcd79VIgW5YmscdtlJajJk0t0cK0vXl58DcGcwcfhhofj7899FnHn7NyFnk
+\unrestrict 1GLROyQZscThW7TWr6yZlRIbP0hLPhV4nZqarVpht4wOzaCpa2IurAQN26syCij
 

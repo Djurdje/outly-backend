@@ -121,6 +121,16 @@ async function telo() {
   r = await api("POST", `/events/${dogodekId}/orders`, T.kupec, { quantity: 3 });
   assert(r.status === 201, "kupec zapolni celotno zmogljivost (3 vstopnice)", r.body);
 
+  // Gostujoce narocilo (nakup brez racuna, migracija 033) z zetonom: gost_zetoni mora preziveti izvoz (JSON) in obnovo.
+  r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Dogodek za goste", startAt: cezTeden, ticketPriceCents: 1000, capacity: 5, minAge: 0 });
+  const dogodekGost = r.body.id;
+  r = await fetch(`${BASE}/guest/events/${dogodekGost}/orders`, { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "gost-obnova@example.com", quantity: 2, accept_terms: true, terms_version: "2026-10-01" }) });
+  const gostOdg = await r.json();
+  assert(r.status === 201 && gostOdg.guest_token, "gostujoci nakup (brez racuna) z zetonom", gostOdg);
+  const gostHash = crypto.createHash("sha256").update(gostOdg.guest_token).digest("hex");
+  assert((await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni WHERE token_hash=$1", [gostHash])).rows[0].n === 1, "v izvorni bazi je hash gostovega zetona");
+
   const izvornoStanjeDogodka = await pool.query("SELECT capacity, sold_count FROM events WHERE id=$1", [dogodekId]);
   assert(izvornoStanjeDogodka.rows[0].sold_count === 3, "sold_count v izvorni bazi = 3 (zapolnjeno)", izvornoStanjeDogodka.rows[0]);
   const izvornaVsotaNarocil = await pool.query("SELECT COALESCE(SUM(total_cents),0)::int AS vsota FROM orders");
@@ -149,6 +159,11 @@ async function telo() {
     const stev = await obnovljeniPool.query(`SELECT count(*)::int AS n FROM "${tabela}"`);
     assert(stev.rows[0].n === izvoz.tables[tabela].count, `tabela ${tabela}: ${stev.rows[0].n} == ${izvoz.tables[tabela].count}`, stev.rows[0]);
   }
+
+  console.log("\n# (a2) gostujoce narocilo in zeton po obnovi");
+  const gostObnovljen = await obnovljeniPool.query(
+    "SELECT o.guest_email, o.user_id, o.status, (SELECT COUNT(*)::int FROM gost_zetoni z WHERE z.order_id = o.id AND z.token_hash = $1) AS zetonov FROM orders o WHERE o.guest_email = 'gost-obnova@example.com'", [gostHash]);
+  assert(gostObnovljen.rows.length === 1 && gostObnovljen.rows[0].user_id === null && gostObnovljen.rows[0].zetonov === 1, "obnovljeno gostujoce narocilo in hash zetona", gostObnovljen.rows);
 
   console.log("\n# (b) sold_count dogodka enak izvornemu (sprozilec ni tekel dvakrat)");
   const obnovljenDogodek = await obnovljeniPool.query("SELECT capacity, sold_count FROM events WHERE id=$1", [dogodekId]);

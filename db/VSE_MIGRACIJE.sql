@@ -1846,7 +1846,7 @@ COMMENT ON COLUMN table_holds.guest_name IS 'Ime gosta, ki je poklical klub (pro
 --   * orders_gost_idempotency_key  Idempotency-Key je vezan na gostov e-naslov (kot (user_id, kljuc) pri racunih, I18).
 --
 -- Samo DODAJANJE: stolpci brez privzete vrednosti (razen stevca poskusov), omejitve NOT VALID + VALIDATE (brez dolgega zaklepa),
--- ena nova tabela in trije indeksi. Obstojecih podatkov ne bere in ne spreminja.
+-- ena nova tabela in pet indeksov. Obstojecih podatkov ne bere in ne spreminja.
 
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS guest_email TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS guest_terms_version TEXT;
@@ -1877,24 +1877,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS orders_gost_idempotency_key ON orders (guest_e
 CREATE UNIQUE INDEX IF NOT EXISTS orders_gost_cakajoce_key ON orders (guest_email, event_id)
     WHERE guest_email IS NOT NULL AND status = 'pending';
 
--- Prevzem v racun (GET /me): iskanje gostujocih narocil po e-naslovu, samo se neprevzeta.
-CREATE INDEX IF NOT EXISTS orders_gost_prevzem_idx ON orders (guest_email)
-    WHERE guest_email IS NOT NULL AND user_id IS NULL;
+-- Iskanje gostujocih narocil po e-naslovu: prevzem v racun (GET /me), omejitev maila (1 na 24 h v testnem nacinu).
+CREATE INDEX IF NOT EXISTS orders_gost_email_idx ON orders (guest_email) WHERE guest_email IS NOT NULL;
+-- Globalna dnevna meja gostujocih mailov (stevilo poslanih v zadnjih 24 h).
+CREATE INDEX IF NOT EXISTS orders_gost_poslano_idx ON orders (guest_mail_sent_at) WHERE guest_mail_sent_at IS NOT NULL;
 
 -- Pospravljalec maila: placana gostujoca narocila, ki jim mail se ni bil poslan.
 CREATE INDEX IF NOT EXISTS orders_gost_posta_idx ON orders (id)
     WHERE guest_email IS NOT NULL AND guest_mail_sent_at IS NULL AND status = 'paid';
 
+-- token_hash je TEXT (hex sha256, 64 znakov), NE bytea: izvoz baze (JSON) in db/obnovi_izvoz.js bytea ne prenesesta (Buffer v JSON-u).
 CREATE TABLE IF NOT EXISTS gost_zetoni (
-    token_hash BYTEA       PRIMARY KEY,
+    token_hash TEXT        PRIMARY KEY,
     order_id   BIGINT      NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT gost_zetoni_hash_chk CHECK (octet_length(token_hash) = 32)
+    CONSTRAINT gost_zetoni_hash_chk CHECK (token_hash ~ '^[0-9a-f]{64}$')
 );
 CREATE INDEX IF NOT EXISTS gost_zetoni_order_idx ON gost_zetoni (order_id, created_at DESC);
 
 COMMENT ON COLUMN orders.guest_email IS 'E-naslov gosta, ki je kupil brez racuna (user_id NULL do prevzema). Osebni podatek kot buyer_email; ob izbrisu racuna se postavi na NULL.';
-COMMENT ON TABLE gost_zetoni IS 'Zetoni za pogled gostujocega narocila (GET /guest/order). Samo sha256 zetona (32 B); velja do konca dogodka + 30 dni (preverja poizvedba, ne stolpec).';
+COMMENT ON TABLE gost_zetoni IS 'Zetoni za pogled gostujocega narocila (GET /guest/order). Samo sha256 zetona (hex, 64 znakov); velja do konca dogodka + 30 dni (preverja poizvedba, ne stolpec).';
 
 
 -- =============================================================================
@@ -1934,7 +1936,7 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('030_stripe_checkout.sql', 'cf18e6af0cd63066'),
     ('031_provizija_po_klubu.sql', '68135f70b950c27d'),
     ('032_rezervacija_po_telefonu.sql', '8eaeef6a07794ab7'),
-    ('033_gostujoci_nakup.sql', '2da2975796f01481')
+    ('033_gostujoci_nakup.sql', '4519bc730554831f')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

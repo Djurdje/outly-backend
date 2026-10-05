@@ -94,6 +94,9 @@ async function vstaviVrstice(tabela, stolpci, vrstice, stolpecInfo) {
     if (vrednost === null || vrednost === undefined) return null;
     const info = stolpecInfo.get(stolpec);
     if (info.data_type === "json" || info.data_type === "jsonb") return JSON.stringify(vrednost);
+    // bytea: izvoz (JSON.stringify) pretvori Buffer v {"type":"Buffer","data":[...]}, pg ga ob vstavljanju ne bi razumel.
+    // Danes bytea stolpcev ni (gost_zetoni.token_hash je TEXT, migracija 033), to je varovalo za prihodnje.
+    if (info.data_type === "bytea" && vrednost && vrednost.type === "Buffer" && Array.isArray(vrednost.data)) return Buffer.from(vrednost.data);
     // text[] in podobna polja: pg zna JS seznam sam pretvoriti v niz —
     // stringify bi ga namesto tega poslal kot Postgres ARRAY literal narobe.
     return vrednost;

@@ -123,11 +123,11 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 
 ## Nakup brez računa (od 5. 10. 2026; ARCHITECTURE »Nakup brez računa«, I22, DECISIONS 5. 10.)
 
-- **Odjemalec (web-dev):** `POST /guest/events/:id/orders`, `GET /guest/order` (glava `X-Guest-Token`). **iOS ni** (Martin). Po vrnitvi s Stripa je naročilo lahko še `pending`: stran naj poizveduje, dokler ni `paid`.
+- **Odjemalec (web-dev):** `POST /guest/events/:id/orders`, `GET /guest/order`, `POST /guest/order/cancel` (glava `X-Guest-Token`; povezave imajo žeton v `#t=`). **iOS ni** (Martin). **Stikalo `GOST_NAKUP_LIVE=1`** za pravi denar (Martin). Po vrnitvi s Stripa je naročilo lahko še `pending`: stran naj poizveduje, dokler ni `paid`.
   **Past:** če je kupec prijavljen z istim e-naslovom, `GET /me` (zagon aplikacije) naročilo prevzame in PRESEKA žeton: `GET /guest/order` da 404 — stran naj ob 404 s sejo odpre My tickets.
 - **Past:** gost, ki izgubi stran med plačilom, ne dobi `checkout_url` nazaj (409 »unfinished payment« do ~35 min) razen s ponovitvijo z istim `Idempotency-Key`; mail pride šele po plačilu.
 - **Past:** v vseh poslovnih pogledih je gost »Guest« (`is_guest`), lastnik/manager vidita `buyer_email` kot pri vseh; vratar ga ne vidi nikjer. Obstoječa neskladnost, nespremenjena: `POST /business/tickets/scan` vrne vratarju `buyer_email`/`holder_email` NAVADNIH kupcev (I21 pokriva samo seznam).
-- **Meja:** mail z vstopnico gre na katerikoli naslov, ki ga vpiše kupec (v testnem načinu brez plačila): največ 5 nakupov/h/IP; `reply_to` luka@outly.si. Mail ni popoln: firma/matična kluba ni v bazi (ZVPot-1 7/1, 130/1) — odločitev Martina/pravnika.
+- **Meja:** mail z vstopnico gre na katerikoli naslov, ki ga vpiše kupec (v testnem načinu brez plačila): največ 10 nakupov/h/IP in 1 mail na naslov/24 h; `reply_to` luka@outly.si. Mail ni popoln: firma/matična kluba ni v bazi (ZVPot-1 7/1, 130/1) — odločitev Martina/pravnika.
 - **Predpostavke:** žeton do konca dogodka + 30 dni; e-naslov plačanega naročila 180 dni po dogodku (`GOST_HRAMBA_DNI`); neplačanega 24 h. V varnostnih kopijah (30 dni) e-naslovi ostanejo; po obnovi se anonimizacija ponovi sama.
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
