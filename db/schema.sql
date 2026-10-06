@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–033, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–034, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -12,11 +12,10 @@
 -- (ni imela orders/tickets/refresh_tokens/...) — zato zdaj izvoz.
 -- =============================================================================
 --
---
 -- PostgreSQL database dump
 --
 
-\restrict 1GLROyQZscThW7TWr6yZlRIbP0hLPhV4nZqarVpht4wOzaCpa2IurAQN26syCij
+\restrict OEOLAos0s3OI8eyy2giY5L2ssoQJCo2Qa9YslaKfqnbXw1PsjeAY4Xr1OSR9hqr
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
@@ -597,6 +596,25 @@ COMMENT ON TABLE public.gost_zetoni IS 'Zetoni za pogled gostujocega narocila (G
 
 
 --
+-- Name: gost_zetoni_vstopnic; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.gost_zetoni_vstopnic (
+    token_hash text NOT NULL,
+    ticket_id bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT gost_zetoni_vstopnic_hash_chk CHECK ((token_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: TABLE gost_zetoni_vstopnic; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.gost_zetoni_vstopnic IS 'Zetoni za pogled gostujoce vstopnice (GET /guest/ticket). Samo sha256 zetona (hex); velja do konca dogodka + 30 dni (preverja poizvedba).';
+
+
+--
 -- Name: omejitve; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -817,7 +835,11 @@ CREATE TABLE public.ticket_transfers (
     old_serial uuid NOT NULL,
     new_serial uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    seen_at timestamp with time zone
+    seen_at timestamp with time zone,
+    to_guest boolean DEFAULT false NOT NULL,
+    age_confirmed_min smallint,
+    allow_guest boolean DEFAULT false NOT NULL,
+    to_email_norm text
 );
 
 
@@ -855,9 +877,29 @@ CREATE TABLE public.tickets (
     scan_device text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     holder_user_id integer,
+    holder_is_guest boolean DEFAULT false NOT NULL,
+    holder_guest_email text,
+    holder_guest_mail_sent_at timestamp with time zone,
+    holder_guest_mail_claimed_at timestamp with time zone,
+    holder_guest_mail_attempts smallint DEFAULT 0 NOT NULL,
+    CONSTRAINT tickets_gost_imetnik_chk CHECK ((((NOT holder_is_guest) AND (holder_guest_email IS NULL)) OR (holder_is_guest AND (holder_user_id IS NULL) AND ((holder_guest_email IS NULL) OR ((holder_guest_email = lower(holder_guest_email)) AND (char_length(holder_guest_email) <= 254) AND (POSITION(('@'::text) IN (holder_guest_email)) > 1)))))),
     CONSTRAINT tickets_status_chk CHECK ((status = ANY (ARRAY['valid'::text, 'used'::text, 'void'::text, 'refunded'::text]))),
     CONSTRAINT tickets_used_chk CHECK (((status <> 'used'::text) OR (used_at IS NOT NULL)))
 );
+
+
+--
+-- Name: COLUMN tickets.holder_is_guest; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.tickets.holder_is_guest IS 'Vstopnico drzi gost (prenos na e-naslov brez racuna). Ostane TRUE tudi po anonimizaciji e-naslova; po prevzemu v racun FALSE.';
+
+
+--
+-- Name: COLUMN tickets.holder_guest_email; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.tickets.holder_guest_email IS 'E-naslov gosta imetnika. Osebni podatek; NULL po prevzemu v racun ali konec dogodka + 30 dni.';
 
 
 --
@@ -1176,6 +1218,14 @@ ALTER TABLE ONLY public.gost_zetoni
 
 
 --
+-- Name: gost_zetoni_vstopnic gost_zetoni_vstopnic_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gost_zetoni_vstopnic
+    ADD CONSTRAINT gost_zetoni_vstopnic_pkey PRIMARY KEY (token_hash);
+
+
+--
 -- Name: omejitve omejitve_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1423,6 +1473,13 @@ CREATE INDEX gost_zetoni_order_idx ON public.gost_zetoni USING btree (order_id, 
 
 
 --
+-- Name: gost_zetoni_vstopnic_ticket_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX gost_zetoni_vstopnic_ticket_idx ON public.gost_zetoni_vstopnic USING btree (ticket_id, created_at DESC);
+
+
+--
 -- Name: omejitve_okno_do_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1542,6 +1599,27 @@ CREATE INDEX table_holds_table_idx ON public.table_holds USING btree (table_id);
 
 
 --
+-- Name: ticket_transfers_gost_cas_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ticket_transfers_gost_cas_idx ON public.ticket_transfers USING btree (created_at) WHERE to_guest;
+
+
+--
+-- Name: ticket_transfers_gost_naslov_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ticket_transfers_gost_naslov_idx ON public.ticket_transfers USING btree (to_email_norm, created_at) WHERE allow_guest;
+
+
+--
+-- Name: ticket_transfers_gost_posiljatelj_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ticket_transfers_gost_posiljatelj_idx ON public.ticket_transfers USING btree (from_user_id, created_at) WHERE allow_guest;
+
+
+--
 -- Name: ticket_transfers_ticket_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1560,6 +1638,20 @@ CREATE INDEX ticket_transfers_to_unseen_idx ON public.ticket_transfers USING btr
 --
 
 CREATE INDEX tickets_event_idx ON public.tickets USING btree (event_id, status);
+
+
+--
+-- Name: tickets_gost_email_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX tickets_gost_email_idx ON public.tickets USING btree (holder_guest_email) WHERE (holder_guest_email IS NOT NULL);
+
+
+--
+-- Name: tickets_gost_posta_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX tickets_gost_posta_idx ON public.tickets USING btree (id) WHERE (holder_is_guest AND (holder_guest_mail_sent_at IS NULL));
 
 
 --
@@ -1864,6 +1956,14 @@ ALTER TABLE ONLY public.gost_zetoni
 
 
 --
+-- Name: gost_zetoni_vstopnic gost_zetoni_vstopnic_ticket_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gost_zetoni_vstopnic
+    ADD CONSTRAINT gost_zetoni_vstopnic_ticket_id_fkey FOREIGN KEY (ticket_id) REFERENCES public.tickets(id) ON DELETE CASCADE;
+
+
+--
 -- Name: orders orders_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2003,5 +2103,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 1GLROyQZscThW7TWr6yZlRIbP0hLPhV4nZqarVpht4wOzaCpa2IurAQN26syCij
+\unrestrict OEOLAos0s3OI8eyy2giY5L2ssoQJCo2Qa9YslaKfqnbXw1PsjeAY4Xr1OSR9hqr
 

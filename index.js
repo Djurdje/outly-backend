@@ -4,6 +4,7 @@ const { Pool } = require("pg");
 const crypto = require("crypto");
 const net = require("net");
 const { Resend } = require("resend");
+const { qrPng, pdfVstopnice } = require("./vstopnica_priloge");   // QR (PNG, vgrajen v mail) in PDF vstopnice (priloga); migracija 034
 const path = require("path");
 // Express 4 ne ujame zavrnjenih obljub asinhronih rocnikov: neujet `await pool.connect()` je sesul CEL proces (issue #129).
 // Ovoj (asinhroni_rocniki.js) zavrnitev preusmeri v next(err); napakaRocnik na koncu datoteke jo prevede v 503/500.
@@ -768,6 +769,11 @@ app.use("/admin", express.static(path.join(__dirname, "admin"), { index: "index.
 // ---------------------------
 // ME (protected)
 // ---------------------------
+// Stikalo za prenos vstopnice prijatelju BREZ racuna (Martin, 5. 10. 2026): do objave pogojev 1.2 in politike 2.5 SAMO za vlogo admin
+// (ekipa testira v produkciji); PRENOS_BREZ_RACUNA=vsi vklopi za vse (to naredi Martin na Renderju). Vloga je iz baze ob vsakem klicu (I5).
+// Velja samo za posiljanje GOSTU; potrditev starosti posiljatelja (age_confirmed) pri prenosu na racun NI vezana na stikalo.
+function mozenPrenosGostu(vloga) { return process.env.PRENOS_BREZ_RACUNA === "vsi" || vloga === "admin"; }
+
 app.get("/me", requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
@@ -806,6 +812,7 @@ app.get("/me", requireAuth, async (req, res) => {
       pending_friend_requests: pf.rows[0] ? pf.rows[0].n : 0,
       pending_received_tickets: pv.rows[0] ? pv.rows[0].n : 0,
       pending_club_events: pk.rows[0] ? pk.rows[0].n : 0,
+      can_transfer_to_guest: mozenPrenosGostu(result.rows[0].role),
     });
   } catch (err) {
     console.error(err);
@@ -998,7 +1005,8 @@ app.patch("/me", requireAuth, async (req, res) => {
       [req.user.userId]
     );
 
-    return res.status(200).json(r2.rows[0] || r.rows[0]);
+    const me = r2.rows[0] || r.rows[0];
+    return res.status(200).json({ ...me, can_transfer_to_guest: mozenPrenosGostu(me.role) });
   } catch (e) {
     console.error(e);
     return res.status(500).send("Server error.");
@@ -3374,13 +3382,19 @@ const STOLPCI_NAROCILA = `o.id, o.public_ref, o.event_id, o.club_id, o.quantity,
 // in narocilo ni vec »gostujoce«. V poslovnih pogledih se gost pokaze kot »Guest« (brez e-naslova kot imetnik; vratar ne vidi e-naslovov).
 const GOST_OZNAKA = `(o.user_id IS NULL AND o.guest_email IS NOT NULL)`;
 const IME_GOSTA = `CASE WHEN ${GOST_OZNAKA} THEN 'Guest' END`;
+// Gostujoci IMETNIK (prenos vstopnice na e-naslov brez racuna, migracija 034): tickets.holder_is_guest. Vstopnica ostane vstopnica narocila
+// kupca (ta ima racun), imetnik pa je gost: ni vrstica v `users`, e-naslova NIKJER ne vracamo (tudi lastniku kluba ne). Zastavica je loceno od
+// e-naslova, ker se ta po koncu dogodka + 30 dni anonimizira (NULL), vstopnica pa NE sme spet postati »kupceva«.
+const IME_GOSTA_IMETNIKA = `CASE WHEN ${GOST_OZNAKA} OR t.holder_is_guest THEN 'Guest' END`;
 const STOLPCI_VSTOPNICE = `t.id, t.order_id, t.event_id, t.serial, t.status, t.used_at, t.created_at, t.holder_user_id`;
 // VIP polja vstopnice (migracija 025): VIP vstopnica je vstopnica narocila z mizo. Zahteva alias `o` = orders.
 const STOLPCI_VIP_VSTOPNICE = `(o.table_id IS NOT NULL) AS is_vip, o.table_label, o.table_seats, o.package_name, o.package_description`;
 // Imetnik vstopnice: kdor jo je prejel s prenosom, sicer kupec (008).
-const IMETNIK = `COALESCE(t.holder_user_id, o.user_id)`;
-const STOLPCI_IMETNIKA = `${IMETNIK} AS holder_id, COALESCE(hu.username, ${IME_GOSTA}) AS holder_username, hu.email AS holder_email,
-  (t.holder_user_id IS NOT NULL AND t.holder_user_id IS DISTINCT FROM o.user_id) AS transferred, ${GOST_OZNAKA} AS is_guest`;
+// Gostujoci imetnik (034) NI nobeden uporabnik: IMETNIK je NULL (ne pade nazaj na kupca), zato ga ne najdejo ne /me/tickets ne prijateljski nacrti.
+const IMETNIK = `(CASE WHEN t.holder_is_guest THEN NULL ELSE COALESCE(t.holder_user_id, o.user_id) END)`;
+const STOLPCI_IMETNIKA = `${IMETNIK} AS holder_id, COALESCE(hu.username, ${IME_GOSTA_IMETNIKA}) AS holder_username, hu.email AS holder_email,
+  (t.holder_is_guest OR (t.holder_user_id IS NOT NULL AND t.holder_user_id IS DISTINCT FROM o.user_id)) AS transferred, ${GOST_OZNAKA} AS is_guest,
+  (t.holder_is_guest OR ${GOST_OZNAKA}) AS is_guest_holder`;
 const JOIN_IMETNIK = `LEFT JOIN users hu ON hu.id = ${IMETNIK}`;
 
 // db: neobvezen odjemalec iz pool.connect(); klicatelj, ki ga že drži, MORA
@@ -3807,7 +3821,7 @@ app.get("/me/tickets", requireAuth, async (req, res) => {
          SELECT id FROM tickets WHERE holder_user_id = $1
          UNION ALL
          SELECT t2.id FROM orders o2 JOIN tickets t2 ON t2.order_id = o2.id
-          WHERE o2.user_id = $1 AND t2.holder_user_id IS NULL
+          WHERE o2.user_id = $1 AND t2.holder_user_id IS NULL AND NOT t2.holder_is_guest   -- 034: vstopnica, poslana gostu, ni vec kupceva
        ) AND o.status IN ('paid','partially_refunded')
        ORDER BY (e.start_at >= NOW()) DESC, e.start_at ASC, t.id ASC LIMIT 200`, [req.user.userId]
     );
@@ -4122,10 +4136,10 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
 // Neuspesen zahtevek (zeton ne velja): 404; nad mejo neuspesnih na IP 429. VELJAVEN zeton se obdela vedno (iskanje je indeksirano in poceni):
 // na skupnem wifiju kluba ali CGNAT napadalec (ali pokvarjen odjemalec) gostom na vratih ne sme onemogociti prikaza vstopnice.
 // Zeton ima 256 bitov, ugibanje ni realno; meja je samo varovalo pred obremenitvijo.
-function gostNeuspesen(req, res) {
+function gostNeuspesen(req, res, sporocilo = "Order not found.") {
   if (gostNeuspesni.presezeno(req.ip)) return odgovoriPreVeliko(res, gostNeuspesni, req.ip);
   gostNeuspesni.dodaj(req.ip);
-  return res.status(404).send("Order not found.");
+  return res.status(404).send(sporocilo);
 }
 
 // Narocilo gosta v obliki odgovora (GET /guest/order, POST /guest/order/cancel); brez e-naslova.
@@ -4260,15 +4274,26 @@ async function prevzemiGostujocaNarocila(userId, zVmesnimSpominom = false) {
     // Samo placana narocila (cakajoce Stripe narocilo se prevzame, ko je placano: zeton iz success_url mora do takrat veljati).
     // Ob prevzemu se zetoni gosta PRESEKAJO (pravna analiza 2.6): vstopnice so od tu naprej v racunu, ne na dveh mestih.
     // NOT EXISTS: narocilo, katerega Idempotency-Key ze obstaja pri uporabniku (unikaten (user_id, kljuc)), se preskoci; ostala se prevzamejo.
+    // Vstopnice, poslane temu e-naslovu s prenosom brez racuna (034), so v ISTEM stavku (en obisk baze na GET /me): postanejo njegove (holder_user_id),
+    // zetoni se preklicejo, e-naslov gosta se izbrise. Serial se NE zamenja (PDF in koda v mailu veljata naprej: gost, ki se registrira dan pred
+    // dogodkom, ne sme obstati pred vrati z neveljavno kodo). Zapis prenosa dobi prejemnika (obvestilo »X ti je poslal vstopnico«); seen_at ostane NULL.
     const r = await pool.query(
       `WITH p AS (UPDATE orders o SET user_id = u.id FROM users u
                    WHERE u.id = $1 AND u.email_verified AND o.user_id IS NULL AND o.guest_email = lower(u.email)
                      AND o.status IN ('paid','partially_refunded','refunded')
                      AND NOT EXISTS (SELECT 1 FROM orders x WHERE x.user_id = u.id AND x.idempotency_key IS NOT NULL AND x.idempotency_key = o.idempotency_key)
                    RETURNING o.id),
-            d AS (DELETE FROM gost_zetoni WHERE order_id IN (SELECT id FROM p) RETURNING 1)
-       SELECT (SELECT COUNT(*)::int FROM p) AS n`, [userId]);
+            d AS (DELETE FROM gost_zetoni WHERE order_id IN (SELECT id FROM p) RETURNING 1),
+            pt AS (UPDATE tickets t SET holder_user_id = u.id, holder_is_guest = FALSE, holder_guest_email = NULL
+                    FROM users u WHERE u.id = $1 AND u.email_verified AND t.holder_is_guest AND t.holder_guest_email = lower(u.email)
+                    RETURNING t.id),
+            zt AS (DELETE FROM gost_zetoni_vstopnic WHERE ticket_id IN (SELECT id FROM pt) RETURNING 1),
+            tt AS (UPDATE ticket_transfers x SET to_user_id = $1
+                    WHERE x.to_guest AND x.to_user_id IS NULL AND x.ticket_id IN (SELECT id FROM pt)
+                      AND x.id = (SELECT MAX(y.id) FROM ticket_transfers y WHERE y.ticket_id = x.ticket_id AND y.to_guest) RETURNING 1)
+       SELECT (SELECT COUNT(*)::int FROM p) AS n, (SELECT COUNT(*)::int FROM pt) AS nt`, [userId]);
     if (r.rows[0].n) console.log(`[gost] ${r.rows[0].n} gostujocih narocil prevzetih v racun ${userId}`);
+    if (r.rows[0].nt) console.log(`[gost] ${r.rows[0].nt} prenesenih gostujocih vstopnic prevzetih v racun ${userId}`);
   } catch (e) { console.error("[gost] prevzem narocil ni uspel:", e && e.message); }
 }
 
@@ -4292,7 +4317,7 @@ function davekStavek(vat) {
   return p > 0 ? `The price includes VAT (${p}%).` : "The seller does not charge VAT on this price.";
 }
 // Vsebina potrdila kot razdelki { naslov, vrstice[] }; iz njih nastaneta besedilo in HTML (isto besedilo, brez oglasov).
-function gostPotrdilo(o, povezava, prevzeto) {
+function gostPotrdilo(o, povezava, prevzeto, kode = []) {
   const klubKontakt = [o.club_address && o.club_city ? `${o.club_address}, ${o.club_city}` : (o.club_address || o.club_city), o.club_phone, o.club_email].filter(Boolean);
   const starost = o.min_age > 0 ? `Age limit: ${o.min_age}+. Every visitor must meet the age limit. ID is checked at the door; the club may refuse entry if you don't meet it.` : "No age limit.";
   const razdelki = [
@@ -4302,9 +4327,11 @@ function gostPotrdilo(o, povezava, prevzeto) {
     { naslov: "Seller", vrstice: [`The ticket is sold by the club: ${[o.club_name, ...klubKontakt].join(", ")}.`, `Outly is only the intermediary: ${POSREDNIK_VRSTICA}.`] },
     { naslov: "No right of withdrawal", vrstice: ["There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply."] },
     { naslov: "Terms", vrstice: [`You accepted the Outly terms, version ${o.guest_terms_version}: https://outly.si/terms`] },
-    { naslov: "Your tickets", vrstice: prevzeto
+    { naslov: "Your tickets", vrstice: (prevzeto
       ? [`Open your tickets in your Outly account: ${povezava}`]
-      : [`Open your tickets (show the QR code at the door): ${povezava}`, "This link is your ticket. Don't share it except with people coming with you.", "If you create an Outly account with this email, your tickets will appear there."] },
+      : [`Open your tickets (show the QR code at the door): ${povezava}`, "This link is your ticket. Don't share it except with people coming with you.", "If you create an Outly account with this email, your tickets will appear there."])
+      .concat(kode.length > 1 ? ["The first QR code is below; all your QR codes (one per page) are in the attached PDF (outly-tickets.pdf). Show one code per person at the door."]
+        : kode.length ? ["The QR code is below and in the attached PDF (outly-tickets.pdf). Show it at the door."] : []) },
     { naslov: "Complaints", vrstice: [`About the event: contact the club (details above). About the purchase or the payment: contact Outly at ${POSTA_ODGOVOR}.`] },
     { naslov: "Questions", vrstice: [`Reply to this email or write to ${POSTA_ODGOVOR}.`] },
   ];
@@ -4313,8 +4340,40 @@ function gostPotrdilo(o, povezava, prevzeto) {
     `<h3>${GOST_POSTA_NIZ(r.naslov)}</h3>` + r.vrstice.map(v => {
       const e = GOST_POSTA_NIZ(v);
       return `<p>${povezava && v.includes(povezava) ? e.replace(GOST_POSTA_NIZ(povezava), `<a href="${GOST_POSTA_NIZ(povezava)}">${GOST_POSTA_NIZ(povezava)}</a>`) : e}</p>`;
-    }).join("")).join("") + `</div>`;
+    }).join("") + (r.naslov === "Your tickets" ? kode.slice(0, 1).map(k => qrSlikaHtml(k.cid, k.oznaka)).join("") : "")).join("") + `</div>`;
   return { besedilo, html };
+}
+// --- priloge: QR kot vgrajena slika (CID) + PDF (migracija 034, vstopnica_priloge.js) ---
+const QR_STAVEK = "This email and the attached PDF are your ticket. The QR code is valid for one entry: whoever shows it first gets in. Don't forward this email, post the code or share the link.";
+const qrSlikaHtml = (cid, oznaka) => `<div style="margin:12px 0">${oznaka ? `<p style="margin:0 0 4px">${GOST_POSTA_NIZ(oznaka)}</p>` : ""}<img src="cid:${cid}" width="228" height="228" alt="Ticket QR code" style="display:block;width:228px;height:228px;border:1px solid #ccc"></div>`;
+// Resend 3.5 posreduje telo strezniku neprepisano (JSON, kljuci snake_case: content_type, content_id): vsebina priloge je BASE64 niz (Buffer bi se serializiral
+// napacno), `content_id` vgradi sliko (cid:). SDK tega NE tipizira in ne preverja (verzija 3.5.0): PREVERI ob vsaki nadgradnji SDK (npr. 4.x je prepisal polja v camelCase).
+// Inline slika SAMO za prvo kodo (zanesljivost: sestavljanje je CPU na glavni niti; ostale kode so v PDF, ena na stran); sestavljanje je asinhrono in prepusca zanko (vstopnica_priloge.js).
+async function prilogeVstopnic(ev, kode, imePdf) {
+  const starost = ev.min_age > 0 ? `Age limit: ${ev.min_age}+. Show a valid photo ID at the door.` : "";
+  const priloge = [];
+  if (kode.length) priloge.push({ filename: `${kode[0].cid}.png`, content: (await qrPng(kode[0].koda)).toString("base64"), content_type: "image/png", content_id: kode[0].cid });
+  if (kode.length) {
+    const pdf = await pdfVstopnice({
+      dogodek: { naslov: ev.event_title, zacetek: ljDatum(ev.start_at), prizoriscePodatki: [ev.club_name, ev.club_address, ev.club_city].filter(Boolean).join(", "),
+                 starost: ev.starostPdf || starost, organizator: [ev.club_phone, ev.club_email].filter(Boolean).join(" | ") },
+      vstopnice: kode.map(k => ({ koda: k.koda, vrsta: k.vrsta, oznaka: k.oznaka })), varnost: QR_STAVEK });
+    priloge.push({ filename: imePdf, content: pdf.toString("base64"), content_type: "application/pdf" });
+  }
+  return priloge;
+}
+// Klic Resenda z rokom (Promise.race: SDK nima AbortSignal); po izteku poskus velja za neuspel, klic lahko vseeno uspe (mozen dvojnik).
+// Vrne { data } ali { error } (Resend ob napaki ne vrze). Brez sledenja: Resend ga nastavlja na domeni, ne na mailu (glej STATE).
+async function gostResendPosli({ to, subject, html, text, attachments }) {
+  let timer;
+  const poslano = resend.emails.send({
+    from: process.env.EMAIL_FROM || "onboarding@resend.dev", to, reply_to: POSTA_ODGOVOR, subject, html, text, ...(attachments && attachments.length ? { attachments } : {}),
+  });
+  poslano.catch(() => {});
+  try {
+    return await Promise.race([poslano, new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("rok za Resend potekel")), GOST_POSTA_TIMEOUT_MS); })]);
+  } catch (err) { return { error: { message: err && (err.message || String(err)) } }; }
+  finally { clearTimeout(timer); }
 }
 // Socasna posiljanja v procesu (Resend ne sme zasesti procesa ob mnozici placil naenkrat); cakajoci v pomnilniku, najvec 200.
 const gostPosta = { aktivnih: 0, cakajoci: [] };
@@ -4335,7 +4394,7 @@ async function posljiGostuVstopnice(oid) {
   if (!resend) return false;
   if (!(await gostPostaVstopi())) return false;
   try { return await gostPosljiEnoPosto(oid); }
-  catch (err) { console.error(`Resend napaka (gost, vstopnice, narocilo ${oid}):`, err && err.message); return false; }
+  catch (err) { console.error(`Resend napaka (gost, vstopnice, narocilo ${oid}):`, err && (err.message || String(err))); return false; }
   finally { gostPostaIzstopi(); }
 }
 async function gostPosljiEnoPosto(oid) {
@@ -4370,19 +4429,16 @@ async function gostPosljiEnoPosto(oid) {
   const zeton = o.user_id === null ? await gostKujZeton(pool, oid) : null;
   const prevzeto = zeton === null;   // narocilo je ze v racunu (zeton gosta je preklican): povezava vodi v /app/tickets
   const povezava = prevzeto ? `${placilaStripe.osnovaSpleta()}/app/tickets` : gostPovezava(zeton);
-  const { besedilo, html } = gostPotrdilo(x, povezava, prevzeto);
-  // Rok za Resend: Promise.race (SDK nima AbortSignal); po izteku poskus velja za neuspel, klic lahko vseeno uspe (mozen dvojnik).
-  let timer;
-  const poslano = resend.emails.send({
-    from: process.env.EMAIL_FROM || "onboarding@resend.dev", to: o.guest_email, reply_to: POSTA_ODGOVOR,
-    subject: `Your tickets: ${x.event_title} (order ${o.public_ref})`.slice(0, 200), html, text: besedilo,
+  // Kode QR kot vgrajene slike (CID) + PDF v prilogi (migracija 034): samo vstopnice, ki so SE vedno kupceve in veljavne (prevzeto naročilo je lahko
+  // medtem delno preneseno: stara koda ne velja vec in je v mailu ne kazemo).
+  const kv = (await pool.query(
+    `SELECT t.serial, t.event_id, t.created_at FROM tickets t WHERE t.order_id = $1 AND t.status = 'valid' AND t.holder_user_id IS NULL AND NOT t.holder_is_guest ORDER BY t.id`, [oid])).rows;
+  const kode = kv.map((t, i) => ({ cid: `ticket-qr-${i + 1}`, oznaka: kv.length > 1 ? `Ticket ${i + 1} of ${kv.length}` : "", koda: qrVstopnice(t) }));
+  const { besedilo, html } = gostPotrdilo(x, povezava, prevzeto, kode);
+  const priloge = await prilogeVstopnic(x, kode.map(k => ({ ...k, vrsta: "Standard ticket" })), "outly-tickets.pdf");
+  const r = await gostResendPosli({
+    to: o.guest_email, subject: `Your tickets: ${x.event_title} (order ${o.public_ref})`.slice(0, 200), html, text: besedilo, attachments: priloge,
   });
-  poslano.catch(() => {});
-  let r;
-  try {
-    r = await Promise.race([poslano, new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("rok za Resend potekel")), GOST_POSTA_TIMEOUT_MS); })]);
-  } catch (err) { r = { error: { message: err && err.message } }; }
-  finally { clearTimeout(timer); }
   if (r && r.error) {
     console.error(`Resend napaka (gost, vstopnice, ${o.public_ref}, poskus ${o.guest_mail_attempts}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
     if (o.guest_mail_attempts >= GOST_POSTA_POSKUSOV) console.error(`[gost] POZOR: potrdilo za narocilo ${o.public_ref} NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov); gost ima vstopnice samo prek povezave iz odgovora nakupa`);
@@ -4404,6 +4460,7 @@ async function gostPosljiNeposlane() {
           AND (guest_mail_claimed_at IS NULL OR guest_mail_claimed_at < NOW() - ($2::bigint[])[guest_mail_attempts + 1] * INTERVAL '1 millisecond')
         ORDER BY id LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);   // premor v SQL (isti pogoj kot pri zaklepu): najstarejsi v premoru ne stradajo novejsih
     for (const o of r.rows) await posljiGostuVstopnice(o.id);
+    await prenosPosljiNeposlane();   // vstopnice, poslane prijateljem brez racuna (034)
   } catch (e) { console.error("[gost] pospravljanje mailov:", e && e.message); }
   finally { gostPostaTece = false; }
 }
@@ -4437,8 +4494,199 @@ async function pocistiGostZetone() {
               FROM k WHERE o.id = k.id RETURNING o.id)
        DELETE FROM gost_zetoni WHERE order_id IN (SELECT id FROM u)`, [GOST_HRAMBA_DNI]);
     if (an.rowCount > 0) console.log(`[gost] anonimiziranih gostujocih narocil: zetonov ${an.rowCount}`);
+    // Vstopnice, poslane gostu (034): zetoni potecejo in e-naslov imetnika se izbrise konec dogodka + 30 dni (GOST_ZETON_DNI; pravna presoja 1.4).
+    // holder_is_guest OSTANE (vstopnica ne sme spet postati kupceva); zapis prenosa dobi neosebno oznako.
+    const konec = `COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') + INTERVAL '${GOST_ZETON_DNI} days' < NOW()`;
+    await pool.query(`DELETE FROM gost_zetoni_vstopnic z USING tickets t, events e WHERE t.id = z.ticket_id AND e.id = t.event_id AND ${konec}`);
+    const at = await pool.query(
+      `WITH k AS (SELECT t.id FROM tickets t JOIN events e ON e.id = t.event_id WHERE t.holder_guest_email IS NOT NULL AND ${konec} LIMIT 1000),
+            u AS (UPDATE tickets t SET holder_guest_email = NULL FROM k WHERE t.id = k.id RETURNING t.id),
+            p AS (UPDATE ticket_transfers x SET to_email = 'izbrisan-' || x.id || '@outly.invalid', to_email_norm = NULL
+                   WHERE x.to_guest AND x.to_user_id IS NULL AND x.ticket_id IN (SELECT id FROM u) RETURNING 1)
+       SELECT (SELECT COUNT(*)::int FROM u) AS n`);
+    if (at.rows[0].n > 0) console.log(`[gost] anonimiziranih prenesenih gostujocih vstopnic: ${at.rows[0].n}`);
   } catch (e) { console.error("[gost] pospravljanje ni uspelo:", e && e.message); }
 }
+
+// ---------------------------
+// PRENOS VSTOPNICE PRIJATELJU BREZ RACUNA — migracija 034, invarianta I7/I23
+// ---------------------------
+// Martin, 5. 10. 2026: uporabnik z racunom vpise e-naslov prijatelja, ki racuna nima; prijatelj dobi mail s kodo QR (vgrajena slika), PDF in skrivno povezavo.
+// Stikalo: PRENOS_BREZ_RACUNA (mozenPrenosGostu). Vstopnica dobi gostujocega IMETNIKA (tickets.holder_is_guest + holder_guest_email), serial se zamenja
+// (posiljateljeva koda ne velja), pogled gosta je ZETON v glavi X-Guest-Token (gost_zetoni_vstopnic, v bazi samo sha256, hex TEXT). Posiljatelj zetona
+// NIKOLI ne dobi (zeton se skuje sele ob posiljanju maila). Mail: najvec enkrat ob uspehu, ponovitve kot pri gostujocem nakupu (premor 2 min .. 24 h, 8 poskusov).
+const GOST_PRENOS_NA_DAN = okoljeCelo("GOST_PRENOS_NA_DAN", 10, 1, 100000);                  // prenosov gostu na posiljatelja na 24 h (mail tujemu naslovu)
+const GOST_PRENOS_NA_NASLOV = okoljeCelo("GOST_PRENOS_NA_NASLOV", 10, 1, 100000);           // prenosov z allow_guest na isti (normaliziran) e-naslov na 24 h (ne glede na posiljatelja)
+const GOST_PRENOS_DNEVNO = okoljeCelo("GOST_PRENOS_DNEVNO", 500, 1, 10000000);                // globalno: prenosov gostu (maili tujcem) na 24 h; ob dosegu 429 + alarm v dnevniku
+// Kljuc za mejo na prejemnika: mala crka, brez »+oznake« v lokalnem delu, pri gmail.com/googlemail.com tudi brez pik (»i.me+x@gmail.com« in »ime@gmail.com« sta isti nabiralnik).
+// Ni varnostna meja kot taka (domene z lastnimi pravili ne poznamo), samo ovira najpreprostejse obhode.
+function naslovKljuc(email) {
+  const [lok0, dom0] = String(email).trim().toLowerCase().split("@");
+  let lok = (lok0 || "").split("+")[0], dom = dom0 || "";
+  if (dom === "gmail.com" || dom === "googlemail.com") { lok = lok.replace(/\./g, ""); dom = "gmail.com"; }
+  return `${lok}@${dom}`;
+}
+
+async function gostKujZetonVstopnice(db, tid) {
+  const zeton = crypto.randomBytes(32).toString("base64url");
+  const r = await db.query("INSERT INTO gost_zetoni_vstopnic (token_hash, ticket_id) SELECT $1, t.id FROM tickets t WHERE t.id = $2 AND t.holder_is_guest", [gostZetonHash(zeton), tid]);
+  if (!r.rowCount) return null;   // vstopnica ni (vec) gostujoca (prevzeta v racun): zetonov od prevzema naprej ni vec
+  await db.query(
+    `DELETE FROM gost_zetoni_vstopnic WHERE ticket_id = $1
+       AND token_hash NOT IN (SELECT token_hash FROM gost_zetoni_vstopnic WHERE ticket_id = $1 ORDER BY created_at DESC LIMIT ${GOST_ZETONOV_NA_NAROCILO})`, [tid]);
+  return zeton;
+}
+// id vstopnice za zeton ali null (napacen, potekel, prevzet v racun, ponovno prenesen: vse enako, brez razlike). Indeksirano (PK) in poceni.
+async function gostVstopnicaPoZetonu(db, zeton) {
+  if (typeof zeton !== "string" || !GOST_ZETON_VZOREC.test(zeton)) return null;
+  const r = await db.query(
+    `SELECT t.id FROM gost_zetoni_vstopnic z JOIN tickets t ON t.id = z.ticket_id JOIN events e ON e.id = t.event_id
+      WHERE z.token_hash = $1 AND t.holder_is_guest
+        AND COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') + INTERVAL '${GOST_ZETON_DNI} days' > NOW()`, [gostZetonHash(zeton)]);
+  return r.rows.length ? r.rows[0].id : null;
+}
+const gostVstopnicaPovezava = (zeton) => `${placilaStripe.osnovaSpleta()}/app/guest/ticket#t=${zeton}`;
+
+// GET /guest/ticket — pogled gostujocega imetnika vstopnice. Zeton v glavi X-Guest-Token (NE v URL-ju). Enak 404 za vse neveljavne primere.
+// Veljaven zeton NIKOLI ne dobi 429 (meja neuspesnih velja samo za neveljavne, kot GET /guest/order).
+app.get("/guest/ticket", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  try {
+    const tid = await gostVstopnicaPoZetonu(pool, req.get("x-guest-token"));
+    if (!tid) return gostNeuspesen(req, res, "Ticket not found.");
+    const r = await pool.query(`${SQL_VSTOPNICE_POGLED} WHERE t.id = $1`, [tid]);
+    if (!r.rows.length) return res.status(404).send("Ticket not found.");
+    const t = r.rows[0];
+    // Posiljatelj (uporabniško ime zadnjega prenosa gostu; ze v mailu): buyer_username ima isto vrednost (splet ga ne bere, ohrani obliko /me/tickets).
+    const od = (await pool.query(
+      `SELECT u.username FROM ticket_transfers tt JOIN users u ON u.id = tt.from_user_id WHERE tt.ticket_id = $1 AND tt.to_guest ORDER BY tt.id DESC LIMIT 1`, [tid])).rows[0];
+    const pos = od ? od.username : null;
+    // BELI SEZNAM polj (ne SELECT-ova oblika /me/tickets): brez order_id, holder_user_id, holder_id, holder_email, is_guest, order_status (notranje/kupcevo).
+    // public_ref ostane: spletna stran ga kaze kot »ORDER« (webapp/js/views/vstopnice.js QrTelo).
+    const bel = {};
+    for (const k of ["id", "serial", "status", "used_at", "created_at", "event_id", "event_title", "start_at", "end_at", "poster_url", "min_age", "club_id", "club_name",
+      "address", "city", "logo_url", "is_vip", "table_label", "table_seats", "package_name", "package_description", "public_ref", "transferred", "holder_username", "is_guest_holder"]) bel[k] = t[k];
+    return res.json({
+      ticket: { ...bel, qr: qrVstopnice(t), transferable: false, from_username: pos, buyer_username: pos },   // gost vstopnice ne more naprej (brez racuna)
+      event: { id: t.event_id, title: t.event_title, start_at: t.start_at, end_at: t.end_at, poster_url: t.poster_url, min_age: t.min_age,
+               club_id: t.club_id, club_name: t.club_name, address: t.address, city: t.city, logo_url: t.logo_url },
+    });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// --- mail prejemniku ---
+// Vsebina po pravni presoji (outly-hq pravno/2026-10-05-prenos-brez-racuna.md, razdelki 1.3, 3, 5): obvestilo po GDPR 14 v CELOTI v mailu (politika prenosa brez racuna
+// ne opisuje), pravica do ugovora (21(4)) v LOCENEM odstavku, varnostno besedilo, en nevtralen stavek o prevzemu v racun (ne trzenje, ZEKom-2 226), brez oglasov.
+// Pošiljatelj = uporabniško ime (nikoli e-naslov). Brez sledenja (to nastavlja Resend na domeni). E-naslova prejemnika ni v PDF.
+function prenosPotrdilo(x, povezava, kode) {
+  const klubKontakt = [x.club_phone, x.club_email].filter(Boolean).join(", ");
+  const meja = starostZaPaket(x.min_age, x.package_id !== null && x.package_id !== undefined);
+  const starost = meja > 0
+    ? `Age limit: ${meja}+${meja > x.min_age ? " (table with a drinks package)" : ""}. Show a valid photo ID at the door; if you are under ${meja}, the club will refuse entry.`
+    : "No age limit.";
+  const vrsta = x.table_label ? `VIP table ${x.table_label}${x.package_name ? `, package: ${x.package_name}` : ""}` : "Standard ticket";
+  const posiljatelj = x.from_username || "An Outly user";
+  const razdelki = [
+    { naslov: "This is your ticket", vrstice: [QR_STAVEK] },
+    { naslov: "Event", vrstice: [x.event_title, ljDatum(x.start_at), [x.club_name, x.club_address, x.club_city].filter(Boolean).join(", "),
+        `Organiser: ${x.club_name}${klubKontakt ? ` (${klubKontakt})` : ""}. Contact the organiser about the event itself.`, starost] },
+    { naslov: "Your ticket", vrstice: [vrsta, `Show this QR code at the door (it is also in the attached PDF, outly-ticket.pdf): ${povezava}`], slika: true },
+    { naslov: "Ticket rules", vrstice: ["One entry per code.", "The organiser may refuse entry under its house rules or the law.", "Reselling the ticket is not allowed.",
+        "If the event is cancelled, a refund goes to the person who bought the ticket, not to you.", "If you create an Outly account with this email, the ticket will appear there."] },
+    { naslov: "Not for you?", vrstice: [`If you were not expecting this ticket, reply to this email and we will delete your email address.`] },
+    { naslov: "About your email address (GDPR, Article 14)", vrstice: [
+        `Who we are: ${POSREDNIK_VRSTICA}.`,
+        `Why: we use your email address only to deliver this ticket and to allow entry. Legal basis: legitimate interest (GDPR Article 6(1)(f)): ${posiljatelj} wanted to pass this ticket on to you.`,
+        `Where we got it: ${posiljatelj}, an Outly user, entered your email address.`,
+        `Data: your email address, the ticket and event, the sender's confirmation that you meet the age limit (if there is one), and the time the ticket is scanned at entry.`,
+        `Recipients: Resend (email delivery). The organiser (${x.club_name}) only sees that the ticket was passed on to a guest, not your email address.`,
+        `Transfer outside the EEA: our email provider is based in the United States; the transfer relies on the EU standard contractual clauses or an adequacy decision, as described in our privacy policy.`,
+        `Retention: we delete your email address 30 days after the event ends, unless you create an Outly account with it.`,
+        `Your rights: access, rectification, erasure, restriction, and a complaint to the Information Commissioner of Slovenia (www.ip-rs.si). Privacy policy: https://outly.si/privacy` ] },
+    { naslov: "Right to object", vrstice: [`Don't want us to process your email address? You have the right to object at any time: reply to this email and we will delete your address.`] },
+    { naslov: "Questions", vrstice: [`Reply to this email or write to ${POSTA_ODGOVOR}.`] },
+  ];
+  const besedilo = `${posiljatelj} sent you a ticket for ${x.event_title}\n\n` + razdelki.map(r => `${r.naslov.toUpperCase()}\n${r.vrstice.join("\n")}`).join("\n\n") + "\n";
+  const html = `<div style="font-family: Arial, sans-serif; line-height:1.5"><h2>${GOST_POSTA_NIZ(posiljatelj)} sent you a ticket</h2>` + razdelki.map(r => {
+    const jeVarnost = r.naslov === "This is your ticket";
+    return `<h3>${GOST_POSTA_NIZ(r.naslov)}</h3>` + r.vrstice.map(v => {
+      const e = GOST_POSTA_NIZ(v);
+      const z = povezava && v.includes(povezava) ? e.replace(GOST_POSTA_NIZ(povezava), `<a href="${GOST_POSTA_NIZ(povezava)}">${GOST_POSTA_NIZ(povezava)}</a>`) : e;
+      return `<p>${jeVarnost ? `<strong>${z}</strong>` : z}</p>`;
+    }).join("") + (r.slika ? kode.map(k => qrSlikaHtml(k.cid, k.oznaka)).join("") : "");
+  }).join("") + `</div>`;
+  return { besedilo, html };
+}
+
+// Meje maila (zloraba: mail na tuj naslov) so v transakciji prenosa (POST /tickets/:id/transfer): GOST_PRENOS_NA_DAN na posiljatelja, GOST_PRENOS_NA_NASLOV na naslov.
+async function posljiPrenosGostu(tid) {
+  if (!resend) return false;
+  if (!(await gostPostaVstopi())) return false;
+  try { return await prenosPosljiEnoPosto(tid); }
+  catch (err) { console.error(`Resend napaka (prenos gostu, vstopnica ${tid}):`, err && (err.message || String(err))); return false; }
+  finally { gostPostaIzstopi(); }
+}
+async function prenosPosljiEnoPosto(tid) {
+  const k = await pool.query(
+    `UPDATE tickets SET holder_guest_mail_attempts = holder_guest_mail_attempts + 1, holder_guest_mail_claimed_at = NOW()
+      WHERE id = $1 AND holder_is_guest AND holder_guest_email IS NOT NULL AND status = 'valid' AND holder_guest_mail_sent_at IS NULL AND holder_guest_mail_attempts < $2
+        AND (holder_guest_mail_claimed_at IS NULL OR holder_guest_mail_claimed_at < NOW() - ($3::bigint[])[holder_guest_mail_attempts + 1] * INTERVAL '1 millisecond')
+      RETURNING id, holder_guest_email, serial, event_id, created_at, holder_guest_mail_attempts`,
+    [tid, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+  if (!k.rows.length) return false;
+  const t = k.rows[0];
+  const ev = await pool.query(
+    `SELECT e.title AS event_title, e.start_at, e.min_age, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
+            cl.contact_phone AS club_phone, cl.contact_email AS club_email, o.package_id, o.table_label, o.package_name,
+            (SELECT u.username FROM ticket_transfers tt JOIN users u ON u.id = tt.from_user_id WHERE tt.ticket_id = t.id AND tt.to_guest ORDER BY tt.id DESC LIMIT 1) AS from_username
+       FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id WHERE t.id = $1`, [tid]);
+  if (!ev.rows.length) return false;
+  const x = ev.rows[0];
+  const zeton = await gostKujZetonVstopnice(pool, tid);
+  if (!zeton) return false;   // medtem prevzeto v racun
+  const kode = [{ cid: "ticket-qr-1", oznaka: "", koda: qrVstopnice(t) }];
+  const meja = starostZaPaket(x.min_age, x.package_id !== null);
+  const vrsta = x.table_label ? `VIP table ${x.table_label}${x.package_name ? ` - ${x.package_name}` : ""}` : "Standard ticket";
+  const povezava = gostVstopnicaPovezava(zeton);
+  const { besedilo, html } = prenosPotrdilo(x, povezava, kode);
+  const priloge = await prilogeVstopnic({ ...x, starostPdf: meja > 0 ? `Age ${meja}+ - bring a valid photo ID` : "" }, kode.map(c => ({ ...c, vrsta })), "outly-ticket.pdf");
+  const r = await gostResendPosli({ to: t.holder_guest_email, subject: `${x.from_username || "An Outly user"} sent you a ticket for ${x.event_title}`.slice(0, 200), html, text: besedilo, attachments: priloge });
+  if (r && r.error) {
+    console.error(`Resend napaka (prenos gostu, vstopnica ${tid}, poskus ${t.holder_guest_mail_attempts}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
+    if (t.holder_guest_mail_attempts >= GOST_POSTA_POSKUSOV) console.error(`[gost] POZOR: mail s prenesene vstopnice ${tid} NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov); prejemnik vstopnice ni dobil`);
+    return false;
+  }
+  await pool.query("UPDATE tickets SET holder_guest_mail_sent_at = NOW() WHERE id = $1", [tid]);
+  console.log(`[gost] mail s preneseno vstopnico poslan: vstopnica ${tid}`);
+  return true;
+}
+// Pospravljalec (isti urnik in premori kot za potrdila gostujocih nakupov).
+async function prenosPosljiNeposlane() {
+  const r = await pool.query(
+    `SELECT t.id FROM tickets t WHERE t.holder_is_guest AND t.holder_guest_email IS NOT NULL AND t.holder_guest_mail_sent_at IS NULL AND t.status = 'valid'
+        AND t.holder_guest_mail_attempts < $1
+        AND (t.holder_guest_mail_claimed_at IS NULL OR t.holder_guest_mail_claimed_at < NOW() - ($2::bigint[])[t.holder_guest_mail_attempts + 1] * INTERVAL '1 millisecond')
+      ORDER BY t.id LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+  for (const t of r.rows) await posljiPrenosGostu(t.id);
+}
+
+// POST /admin/api/guest-tickets/erase — ugovor prejemnika (GDPR 21) ali zahteva za izbris: prejemnik odgovori na mail, admin (ekipa) izbrise njegov e-naslov.
+// Telo { email }. Vstopnicam, poslanim temu naslovu, se izbrise holder_guest_email in zetoni (povezava preneha delovati), zapisi prenosa dobijo neosebno
+// oznako. Vstopnica OSTANE gostujoca (koda v mailu velja do konca dogodka; vrnitev posiljatelju ni avtomatizirana). Odgovor { tickets, transfers } (stevili).
+admin.post("/guest-tickets/erase", async (req, res) => {
+  try {
+    const email = gostEmail((req.body || {}).email);
+    if (!email) return res.status(400).json({ error: "invalid_email", message: "A valid email is required." });
+    const r = await pool.query(
+      `WITH t AS (UPDATE tickets SET holder_guest_email = NULL WHERE holder_is_guest AND holder_guest_email = $1 RETURNING id),
+            z AS (DELETE FROM gost_zetoni_vstopnic WHERE ticket_id IN (SELECT id FROM t) RETURNING 1),
+            x AS (UPDATE ticket_transfers SET to_email = 'izbrisan-' || id || '@outly.invalid', to_email_norm = NULL
+                   WHERE to_guest AND to_user_id IS NULL AND to_email = $1 RETURNING 1)
+       SELECT (SELECT COUNT(*)::int FROM t) AS tickets, (SELECT COUNT(*)::int FROM x) AS transfers`, [email]);
+    console.log(`[gost] admin ${req.user.userId}: izbris e-naslova gostujocih vstopnic: ${r.rows[0].tickets} vstopnic, ${r.rows[0].transfers} zapisov prenosa`);
+    return res.json(r.rows[0]);
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
 
 // --- poslovni del: prodaja ---
 // Klub iz requireClub (lastnik ali član ekipe). Admin brez kluba -> null -> 404.
@@ -4601,10 +4849,15 @@ app.post("/me/tickets/received/:id/seen", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
-// POST /tickets/:id/transfer — prenos vstopnice prijatelju. Telo: { email }.
-// Prenese lahko samo trenutni imetnik; samo veljavno vstopnico pred zacetkom dogodka;
-// prejemnik mora imeti Outly racun in izpolnjevati min_age. Serial se zamenja ->
-// star QR (posnetek zaslona pri posiljatelju) ne velja vec. Narocilo ostane kupcu (008).
+// POST /tickets/:id/transfer — prenos vstopnice prijatelju. Telo: { email } ALI { user_id }, neobvezno { allow_guest, age_confirmed }.
+// Prenese lahko samo trenutni imetnik; samo veljavno vstopnico pred zacetkom dogodka. Serial se zamenja -> star QR (posnetek zaslona
+// pri posiljatelju) ne velja vec. Narocilo ostane kupcu (008).
+// Prejemnik: (a) Outly racun s potrjenim e-naslovom (kot doslej); (b) od 5. 10. 2026 GOST: `allow_guest: true` + e-naslov brez (potrjenega) racuna ->
+//   vstopnica dobi gostujocega imetnika in prejemnik dobi mail s kodo QR, PDF in povezavo (migracija 034, stikalo PRENOS_BREZ_RACUNA).
+// Starost (I8): meja = min_age, pri vstopnici mize s paketom pijace max(min_age, 18) (starostZaPaket). `age_confirmed: true` = POSILJATELJ potrjuje, da
+//   prejemnik izpolnjuje mejo (Martin, 5. 10. 2026: »naj oznaci, da je prijatelj 18+, in to je to«; osebni dokument preveri klub na vratih):
+//   gost: obvezno (brez -> 400 age_confirmation_required); racun brez datuma rojstva: z njo dovoljeno (brez nje 403 kot doslej);
+//   racun z VPISANIM datumom rojstva pod mejo: 403 vedno (znan mladoletnik). Potrditev ni vezana na stikalo.
 app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 30, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const id = celoId(req.params.id);
   if (!id) return res.status(400).send("Invalid ticket id.");
@@ -4617,10 +4870,19 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
   if (b0.user_id !== undefined && !prejemnikId) return res.status(400).send("Invalid user_id.");
   if (!prejemnikId && (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return res.status(400).send("A valid email is required.");
   if (prejemnikId && !(await staPrijatelja(req.user.userId, prejemnikId))) return res.status(404).send("You can only send a ticket by user to one of your friends.");
+  const dovoliGosta = !prejemnikId && b0.allow_guest === true;           // gost samo pri { email } (po id sme samo prijatelju, ki ima racun)
+  const starostPotrjena = b0.age_confirmed === true;                       // samo boolean true; niz »true« ali stevilo 1 NE zadostujeta
+  const gEmail = dovoliGosta ? gostEmail(email) : null;
+  // Pri allow_guest se vsi napacni vhodi in meje zavrnejo ENAKO ne glede na to, ali ima naslov racun (brez razkritja racuna): strog e-naslov,
+  // potrditev starosti in meje so PRED iskanjem uporabnika.
+  if (dovoliGosta && !gEmail) return res.status(400).json({ error: "invalid_email", message: "Enter a valid email address." });
+  if (dovoliGosta && !mozenPrenosGostu(req.user.role)) {
+    return res.status(403).json({ error: "guest_transfer_disabled", message: "Sending a ticket to someone without an Outly account is not available yet." });
+  }
 
   const c = await pool.connect();
   try {
-    await c.query("BEGIN");
+    await nakupZacni(c);   // lock_timeout/statement_timeout kot pri nakupu: zaklepi vrstice vstopnice, posiljatelja in naslova ne cakajo v neskoncnost
     const tr = await c.query(
       `SELECT t.id, t.serial, t.status, t.event_id, ${IMETNIK} AS holder_id, o.status AS order_status,
               e.title AS event_title, e.start_at, e.min_age, o.package_id
@@ -4636,33 +4898,102 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     if (t.status !== "valid") { await c.query("ROLLBACK"); return res.status(409).send(`Ticket is ${t.status}.`); }
     if (new Date(t.start_at).getTime() <= Date.now()) { await c.query("ROLLBACK"); return res.status(409).send("Event has already started."); }
 
+    // Starost: vstopnica mize s paketom pijace ima mejo najmanj 18 (#102), pri strozji meji dogodka velja ta.
+    const potrebnaStarost = starostZaPaket(t.min_age, t.package_id !== null);
+    const zaMizo = potrebnaStarost > t.min_age; // meja izhaja iz paketa, ne iz dogodka
+    if (dovoliGosta) {
+      // (1) potrditev starosti: ista 400 za vsak naslov (racun ali ne, z datumom ali brez), (2) meje na posiljatelja in naslov (steje VSE prenose z allow_guest).
+      if (potrebnaStarost > 0 && !starostPotrjena) {
+        await c.query("ROLLBACK");
+        return res.status(400).json({ error: "age_confirmation_required", min_age: potrebnaStarost,
+          message: `Confirm that the person you are sending this ticket to is at least ${potrebnaStarost}.` });
+      }
+      // Zaklepi VEDNO v vrstnem redu: vrstica vstopnice (zgoraj), posiljatelj, naslov — dva prenosa nikoli ne cakata drug na drugega v krogu.
+      await c.query("SELECT pg_advisory_xact_lock(hashtext('prenos-gost'), $1)", [req.user.userId]);
+      await c.query("SELECT pg_advisory_xact_lock(hashtext('prenos-gost-naslov:' || $1))", [naslovKljuc(gEmail)]);
+      const st = (await c.query(
+        `SELECT COUNT(*) FILTER (WHERE from_user_id = $1)::int AS posiljatelj, COUNT(*) FILTER (WHERE to_email_norm = $2)::int AS naslov
+           FROM ticket_transfers WHERE allow_guest AND created_at > NOW() - INTERVAL '24 hours' AND (from_user_id = $1 OR to_email_norm = $2)`, [req.user.userId, naslovKljuc(gEmail)])).rows[0];
+      if (st.posiljatelj >= GOST_PRENOS_NA_DAN || st.naslov >= GOST_PRENOS_NA_NASLOV) {
+        await c.query("ROLLBACK");
+        res.set("Retry-After", "3600");
+        return res.status(429).json({ error: "guest_transfer_limit", message: "Too many tickets sent by email. Try again later." });
+      }
+    }
+
     const pr = prejemnikId
       ? await c.query("SELECT id, email, username, email_verified, starost(date_of_birth) AS leta FROM users WHERE id = $1", [prejemnikId])
       : await c.query("SELECT id, email, username, email_verified, starost(date_of_birth) AS leta FROM users WHERE LOWER(email) = $1", [email]);
-    if (pr.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("No Outly account with this email. Ask your friend to sign up first."); }
-    const p = pr.rows[0];
-    if (Number(p.id) === Number(req.user.userId)) { await c.query("ROLLBACK"); return res.status(400).send("You already hold this ticket."); }
-    if (!p.email_verified) { await c.query("ROLLBACK"); return res.status(409).send("Your friend's account is not verified yet."); }
-    // Vstopnica mize s paketom pijace: prejemnik mora imeti najmanj 18 let (#102), pri strozji meji dogodka velja ta.
-    const potrebnaStarost = starostZaPaket(t.min_age, t.package_id !== null);
-    if (potrebnaStarost > 0) {
-      const zaMizo = potrebnaStarost > t.min_age; // meja izhaja iz paketa, ne iz dogodka
-      if (p.leta === null) { await c.query("ROLLBACK"); return res.status(403).send(zaMizo ? "Your friend must add a date of birth before receiving a ticket for a table with a bottle package." : "Your friend must add a date of birth before receiving a ticket for this event."); }
-      if (p.leta < potrebnaStarost) { await c.query("ROLLBACK"); return res.status(403).send(zaMizo ? `Your friend must be at least ${potrebnaStarost} to receive a ticket for a table with a bottle package.` : `Your friend must be at least ${t.min_age} for this event.`); }
+    const p = pr.rows[0] || null;
+    // GOST: allow_guest in e-naslov brez racuna ali z se nepotrjenim racunom (ob potrditvi se vstopnica prevzame v racun, GET /me).
+    const gost = dovoliGosta && (!p || !p.email_verified);
+    if (!p && !gost) { await c.query("ROLLBACK"); return res.status(404).send("No Outly account with this email. Ask your friend to sign up first."); }
+    if (p && Number(p.id) === Number(req.user.userId)) { await c.query("ROLLBACK"); return res.status(400).send("You already hold this ticket."); }
+    if (p && !gost && !p.email_verified) { await c.query("ROLLBACK"); return res.status(409).send("Your friend's account is not verified yet."); }
+    if (gost) {
+      // Znan mladoletnik: tudi nepotrjen racun z vpisanim datumom rojstva pod mejo je 403 (potrditev posiljatelja ga ne prevlada).
+      // Prevzem v racun datuma NE preverja (koda je ze v mailu, klub preveri osebni dokument na vratih): zavestna odlocitev (DECISIONS, I8).
+      if (p && p.leta !== null && p.leta < potrebnaStarost) {
+        await c.query("ROLLBACK");
+        return res.status(403).send(zaMizo ? `Your friend must be at least ${potrebnaStarost} to receive a ticket for a table with a bottle package.` : `Your friend must be at least ${t.min_age} for this event.`);
+      }
+    } else if (potrebnaStarost > 0) {
+      if (p.leta !== null) {
+        // Znan datum rojstva odloca (potrditev posiljatelja ga ne prevlada): znanega mladoletnika ne obdarujemo.
+        if (p.leta < potrebnaStarost) { await c.query("ROLLBACK"); return res.status(403).send(zaMizo ? `Your friend must be at least ${potrebnaStarost} to receive a ticket for a table with a bottle package.` : `Your friend must be at least ${t.min_age} for this event.`); }
+      } else if (!starostPotrjena) {
+        await c.query("ROLLBACK");
+        return res.status(403).send(zaMizo ? "Your friend must add a date of birth before receiving a ticket for a table with a bottle package." : "Your friend must add a date of birth before receiving a ticket for this event.");
+      }
     }
+    const potrditevStarosti = potrebnaStarost > 0 && starostPotrjena ? potrebnaStarost : null;
 
-    const u = await c.query(
-      `UPDATE tickets SET holder_user_id = $2, serial = gen_random_uuid() WHERE id = $1 AND status = 'valid'
-       RETURNING id, order_id, event_id, serial, status, used_at, created_at, holder_user_id`, [t.id, p.id]
-    );
+    let u, prejemnikEmail;
+    if (gost) {
+      prejemnikEmail = gEmail;
+      // Posiljatelj mora imeti potrjen e-naslov (mail tujemu naslovu gre v imenu preverjenega racuna); requireAuth to ze zahteva, to je druga plast.
+      if (!(await c.query("SELECT email_verified FROM users WHERE id = $1", [req.user.userId])).rows[0]?.email_verified) {
+        await c.query("ROLLBACK");
+        return res.status(403).json({ error: "email_not_verified", message: "Verify your email to send tickets to people without an account." });
+      }
+      // Globalna dnevna meja (zloraba: mail tujcem): ob dosegu 429 in alarm v dnevniku (brez e-naslova).
+      const dnevno = (await c.query("SELECT COUNT(*)::int AS n FROM ticket_transfers WHERE to_guest AND created_at > NOW() - INTERVAL '24 hours'")).rows[0].n;
+      if (dnevno >= GOST_PRENOS_DNEVNO) {
+        await c.query("ROLLBACK");
+        gostPostaDnevnik("prenos-dnevno", `[gost] ALARM: dosezena dnevna meja prenosov vstopnic gostom (${GOST_PRENOS_DNEVNO} na 24 h): nadaljnji prenosi gostu zavrnjeni (429); preveri zlorabo`);
+        res.set("Retry-After", "3600");
+        return res.status(429).json({ error: "guest_transfer_limit", message: "Too many tickets sent by email. Try again later." });
+      }
+      await c.query("DELETE FROM gost_zetoni_vstopnic WHERE ticket_id = $1", [t.id]);   // N2: nobenega ostanka zetonov z prejsnjega gostujocega obdobja
+      u = await c.query(
+        `UPDATE tickets SET holder_user_id = NULL, holder_is_guest = TRUE, holder_guest_email = $2, serial = gen_random_uuid(),
+                holder_guest_mail_sent_at = NULL, holder_guest_mail_claimed_at = NULL, holder_guest_mail_attempts = 0
+          WHERE id = $1 AND status = 'valid'
+         RETURNING id, order_id, event_id, serial, status, used_at, created_at, holder_user_id`, [t.id, gEmail]);
+    } else {
+      prejemnikEmail = p.email;
+      u = await c.query(
+        `UPDATE tickets SET holder_user_id = $2, serial = gen_random_uuid() WHERE id = $1 AND status = 'valid'
+         RETURNING id, order_id, event_id, serial, status, used_at, created_at, holder_user_id`, [t.id, p.id]
+      );
+    }
     if (u.rows.length === 0) { await c.query("ROLLBACK"); return res.status(409).send("Ticket is no longer valid."); }
     await c.query(
-      `INSERT INTO ticket_transfers (ticket_id, from_user_id, to_user_id, to_email, old_serial, new_serial) VALUES ($1,$2,$3,$4,$5,$6)`,
-      [t.id, req.user.userId, p.id, p.email, t.serial, u.rows[0].serial]
+      `INSERT INTO ticket_transfers (ticket_id, from_user_id, to_user_id, to_email, old_serial, new_serial, to_guest, age_confirmed_min, allow_guest, to_email_norm) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [t.id, req.user.userId, gost ? null : p.id, prejemnikEmail, t.serial, u.rows[0].serial, gost, potrditevStarosti, dovoliGosta, naslovKljuc(prejemnikEmail)]
     );
     await c.query("COMMIT");
-    console.log(`Prenos vstopnice ${t.id}: uporabnik ${req.user.userId} -> ${p.id} (dogodek ${t.event_id})`);
-    // Posiljatelj nove kode ne dobi — vstopnica ni vec njegova.
+    console.log(`Prenos vstopnice ${t.id}: uporabnik ${req.user.userId} -> ${gost ? "gost" : p.id} (dogodek ${t.event_id})`);
+    // Posiljatelj nove kode ne dobi — vstopnica ni vec njegova (gost: zetona posiljatelj NIKOLI ne dobi; kuje se ob posiljanju maila).
+    if (gost) posljiPrenosGostu(t.id);   // brez await: odgovor ne caka na Resend; napaka maila ne podre prenosa (pospravljalec ponovi)
+    if (dovoliGosta) {
+      // ENOTEN odgovor za racun in gosta (brez razkritja, ali ima naslov racun): novi odjemalci so vedno poslali allow_guest.
+      return res.status(200).json({
+        result: "ok", message: `Ticket sent to ${prejemnikEmail}.`,
+        ticket: { id: u.rows[0].id, event_id: t.event_id, event_title: t.event_title, status: u.rows[0].status,
+                  holder_username: null, holder_email: prejemnikEmail, transferred: true }
+      });
+    }
     // E-naslov prejemnika (I7, issue #140): samo ce ga je posiljatelj vpisal sam; pri prenosu po user_id (prijatelj iz seznama)
     // posiljatelj naslova ne pozna in ga ne sme izvedeti. Kljuc `holder_email` ostane (null), ker je odstranitev polja brisanje.
     const naslovZnan = !prejemnikId;
@@ -4673,6 +5004,7 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     });
   } catch (e) {
     await c.query("ROLLBACK").catch(() => {});
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
     console.error(e); return res.status(500).send("Server error.");
   } finally { c.release(); }
 });
@@ -4768,7 +5100,7 @@ app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken(), as
         `SELECT t.serial,
                 CASE WHEN o.status IN ('paid','partially_refunded') OR t.status IN ('refunded','void') THEN t.status ELSE 'unpaid' END AS status,
                 t.used_at, (o.table_id IS NOT NULL) AS is_vip, o.table_label, o.package_name,
-                COALESCE(hu.username, ${IME_GOSTA}) AS holder_username
+                COALESCE(hu.username, ${IME_GOSTA_IMETNIKA}) AS holder_username
          FROM tickets t JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK}
          WHERE t.event_id = $1
          ORDER BY t.id`, [id]),

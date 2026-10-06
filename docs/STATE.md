@@ -130,6 +130,17 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 - **Meja:** mail z vstopnico gre na katerikoli naslov, ki ga vpiše kupec (v testnem načinu brez plačila): največ 10 nakupov/h/IP in 1 mail na naslov/24 h; `reply_to` luka@outly.si. Mail ni popoln: firma/matična kluba ni v bazi (ZVPot-1 7/1, 130/1) — odločitev Martina/pravnika.
 - **Predpostavke:** žeton do konca dogodka + 30 dni; e-naslov plačanega naročila 180 dni po dogodku (`GOST_HRAMBA_DNI`); neplačanega 24 h. V varnostnih kopijah (30 dni) e-naslovi ostanejo; po obnovi se anonimizacija ponovi sama.
 
+## Prenos vstopnice prijatelju brez računa (od 5. 10. 2026; ARCHITECTURE »Prenos vstopnice prijatelju brez računa«, I23, DECISIONS 5. 10.)
+
+- **Odjemalca (ios-dev, web-dev):** `POST /tickets/:id/transfer` dobi `allow_guest`, `age_confirmed`; `GET /me` (in `PATCH /me`) `can_transfer_to_guest`; nova `GET /guest/ticket` (glava `X-Guest-Token`, splet `/app/guest/ticket#t=`). Poslovni pogledi: `is_guest_holder`, imetnik `Guest`. Podrobnosti API-ja v ARCHITECTURE.
+  **Stikalo `PRENOS_BREZ_RACUNA=vsi`** vklopi Martin po objavi pogojev 1.2 in politike 2.5; do takrat samo vloga `admin`.
+- **Past:** ob uspešnem prenosu gostu je pošiljateljeva vstopnica POSLANA; če mail ne gre (napačen naslov, 8 poskusov ~42 h izčrpanih), vstopnice ne dobi nihče (v dnevniku `[gost] POZOR: mail s prenesene vstopnice …`, brez e-naslova). Razveljavitve ni.
+- **Past:** Resend (SDK 3.5) sledenja odpiranju/klikom ne izklaplja na mailu, ampak na domeni (Resend → Domains); pravna presoja zahteva brez sledenja, zato to nastavitev preveri Luka/Martin. Inline slika (`content_id`) in priloga PDF sta preverjeni samo proti lažnemu strežniku.
+- **Past:** PDF vstopnice uporablja osnovno pisavo (Helvetica, WinAnsi): č, ć, đ se v PDF izpišejo kot c, c, d (š, ž ostanejo); koda QR je enaka.
+- **Postopek: ugovor/izbris prejemnika** (odgovor na mail ali zahteva): admin (račun z vlogo admin) pokliče `POST /admin/api/guest-tickets/erase` z `{ "email": "<naslov>" }`; odgovor `{ tickets, transfers }`. Povezava preneha delovati, vstopnica in koda v mailu veljata naprej (vrnitev pošiljatelju ročno). Ni v admin panelu.
+- **Meja (GDPR 21, za Martina/pravnika):** po izbrisu (erase ali anonimizacija) se štetje na naslov pozabi in seznama zavrnjenih naslovov ni: pošiljatelj lahko isti naslov spet vpiše.
+- **Meja:** po prevzemu v račun se serial NE zamenja (PDF/koda v mailu veljata naprej); ugovor prejemnika (21(4)) gre z odgovorom na mail (ročno), gumba »Zavrni vstopnico« ni.
+
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 
 - **Stripe v sandboxu (3. 10.):** klub brez dokončanega Connect onboardinga v sandboxu še vedno prodaja v testnem načinu (da demo klubi

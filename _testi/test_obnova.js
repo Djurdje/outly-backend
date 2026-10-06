@@ -131,6 +131,14 @@ async function telo() {
   const gostHash = crypto.createHash("sha256").update(gostOdg.guest_token).digest("hex");
   assert((await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni WHERE token_hash=$1", [gostHash])).rows[0].n === 1, "v izvorni bazi je hash gostovega zetona");
 
+  // Vstopnica, poslana gostu (prenos brez racuna, migracija 034): gostujoci imetnik + zeton (gost_zetoni_vstopnic, hash TEXT) morata preziveti izvoz in obnovo.
+  const vstGost = (await pool.query("SELECT id FROM tickets WHERE event_id=$1 ORDER BY id LIMIT 1", [dogodekId])).rows[0].id;
+  const prenosZeton = crypto.randomBytes(32).toString("base64url");
+  const prenosHash = crypto.createHash("sha256").update(prenosZeton).digest("hex");
+  await pool.query("UPDATE tickets SET holder_is_guest = TRUE, holder_guest_email = 'gost-prenos@example.com', holder_guest_mail_attempts = 2 WHERE id=$1", [vstGost]);
+  await pool.query("INSERT INTO ticket_transfers (ticket_id, from_user_id, to_user_id, to_email, old_serial, new_serial, to_guest, age_confirmed_min) SELECT id, NULL, NULL, 'gost-prenos@example.com', gen_random_uuid(), serial, TRUE, 18 FROM tickets WHERE id=$1", [vstGost]);
+  await pool.query("INSERT INTO gost_zetoni_vstopnic (token_hash, ticket_id) VALUES ($1, $2)", [prenosHash, vstGost]);
+
   const izvornoStanjeDogodka = await pool.query("SELECT capacity, sold_count FROM events WHERE id=$1", [dogodekId]);
   assert(izvornoStanjeDogodka.rows[0].sold_count === 3, "sold_count v izvorni bazi = 3 (zapolnjeno)", izvornoStanjeDogodka.rows[0]);
   const izvornaVsotaNarocil = await pool.query("SELECT COALESCE(SUM(total_cents),0)::int AS vsota FROM orders");
@@ -164,6 +172,12 @@ async function telo() {
   const gostObnovljen = await obnovljeniPool.query(
     "SELECT o.guest_email, o.user_id, o.status, (SELECT COUNT(*)::int FROM gost_zetoni z WHERE z.order_id = o.id AND z.token_hash = $1) AS zetonov FROM orders o WHERE o.guest_email = 'gost-obnova@example.com'", [gostHash]);
   assert(gostObnovljen.rows.length === 1 && gostObnovljen.rows[0].user_id === null && gostObnovljen.rows[0].zetonov === 1, "obnovljeno gostujoce narocilo in hash zetona", gostObnovljen.rows);
+
+  const prenosObnovljen = await obnovljeniPool.query(
+    `SELECT t.holder_is_guest, t.holder_guest_email, t.holder_guest_mail_attempts, (SELECT COUNT(*)::int FROM gost_zetoni_vstopnic z WHERE z.ticket_id = t.id AND z.token_hash = $2) AS zetonov,
+            (SELECT COUNT(*)::int FROM ticket_transfers x WHERE x.ticket_id = t.id AND x.to_guest AND x.age_confirmed_min = 18) AS prenosov FROM tickets t WHERE t.id = $1`, [vstGost, prenosHash]);
+  assert(prenosObnovljen.rows.length === 1 && prenosObnovljen.rows[0].holder_is_guest === true && prenosObnovljen.rows[0].holder_guest_email === "gost-prenos@example.com"
+    && prenosObnovljen.rows[0].holder_guest_mail_attempts === 2 && prenosObnovljen.rows[0].zetonov === 1 && prenosObnovljen.rows[0].prenosov === 1, "obnovljena vstopnica z gostujocim imetnikom, hash zetona in zapis prenosa (034)", prenosObnovljen.rows);
 
   console.log("\n# (b) sold_count dogodka enak izvornemu (sprozilec ni tekel dvakrat)");
   const obnovljenDogodek = await obnovljeniPool.query("SELECT capacity, sold_count FROM events WHERE id=$1", [dogodekId]);
