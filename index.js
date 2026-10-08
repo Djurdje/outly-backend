@@ -790,8 +790,11 @@ app.get("/me", requireAuth, async (req, res) => {
     const v = await pool.query("SELECT COUNT(*)::int AS n FROM club_invites WHERE user_id=$1 AND status='pending'", [req.user.userId]);
     // Čakajoče prošnje za prijateljstvo (migracija 016) — obvestila v aplikaciji.
     const pf = await pool.query("SELECT COUNT(*)::int AS n FROM friend_requests WHERE to_user_id=$1 AND status='pending'", [req.user.userId]);
-    // Neprebrane prejete vstopnice (migracija 017) — obvestilo "X ti je poslal vstopnico".
-    const pv = await pool.query("SELECT COUNT(*)::int AS n FROM ticket_transfers WHERE to_user_id=$1 AND seen_at IS NULL", [req.user.userId]);
+    // Neprebrane prejete vstopnice (migracija 017) — obvestilo "X ti je poslal vstopnico" — in neprebrana vabila na guest listo (migracija 036):
+    // en poizvedbeni krog za oba stevca (GET /me tece ob vsakem zagonu aplikacije; indeksa ticket_transfers_to_unseen_idx, guest_list_members_neprebrana_idx).
+    const pv = await pool.query(
+      `SELECT (SELECT COUNT(*)::int FROM ticket_transfers WHERE to_user_id=$1 AND seen_at IS NULL) AS n,
+              (SELECT COUNT(*)::int ${GUEST_LISTA_NEPREBRANA_IZ} ${GUEST_LISTA_NEPREBRANA_KJE}) AS vabil`, [req.user.userId]);
     // Neprebrana obvestila "klub, ki mu slediš, je objavil dogodek" (migracija 019).
     const pk = await pool.query(
       `SELECT COUNT(*)::int AS n FROM club_event_notifications n
@@ -811,6 +814,7 @@ app.get("/me", requireAuth, async (req, res) => {
       pending_invites: v.rows[0] ? v.rows[0].n : 0,
       pending_friend_requests: pf.rows[0] ? pf.rows[0].n : 0,
       pending_received_tickets: pv.rows[0] ? pv.rows[0].n : 0,
+      pending_guest_list_invites: pv.rows[0] ? pv.rows[0].vabil : 0,
       pending_club_events: pk.rows[0] ? pk.rows[0].n : 0,
       can_transfer_to_guest: mozenPrenosGostu(result.rows[0].role),
     });
@@ -5040,6 +5044,15 @@ const GUEST_LISTA_OPOMBA_NAJVEC = 200;
 const GUEST_LISTA_VRSTIC_NAJVEC = okoljeCelo("GUEST_LISTA_VRSTIC_NAJVEC", 60, 1, 1000);
 // Dogodek je »koncan«, ko mine end_at, sicer start_at + 8 h (kot pri /me/plans). Lista ostane vidna gostitelju se 12 h po koncu.
 const GUEST_LISTA_KONEC = `COALESCE(e.end_at, e.start_at + INTERVAL '8 hours')`;
+// Neprebrano vabilo na guest listo (migracija 036): moje vabilo, ki ni odstranjeno, lista ni preklicana, vstopnica ni void, dogodek se ni koncal.
+// Skupno stevcu v GET /me in seznamu GET /me/guest-list-invites/received ($1 = id uporabnika), da se ne razideta.
+const GUEST_LISTA_NEPREBRANA_IZ = `FROM guest_list_members m
+       JOIN guest_lists gl ON gl.id = m.guest_list_id
+       JOIN tickets t ON t.id = m.ticket_id
+       JOIN events e ON e.id = t.event_id`;
+const GUEST_LISTA_NEPREBRANA_KJE = `WHERE m.user_id = $1 AND m.seen_at IS NULL AND m.removed_at IS NULL
+        AND gl.revoked_at IS NULL AND gl.host_user_id IS NOT NULL AND t.status <> 'void'   -- brez gostitelja (ON DELETE SET NULL) vrstice ni mogoce prikazati: tudi ne steti
+        AND ${GUEST_LISTA_KONEC} > NOW()`;
 
 // Oblika liste (isto za uporabnika in admina; admin dobi se gostitelja, created_at, revoked_at). `kje`: SQL pogoj nad alias-i gl (guest_lists),
 // e (events), cl (clubs). db: pool ali odjemalec, ki ga klicatelj ze drzi (branje po COMMIT-u gre prek njega, ne prek poola; glej nakup).
@@ -5112,6 +5125,45 @@ app.get("/me/guest-lists", requireAuth, async (req, res) => {
       `gl.host_user_id = $1 AND gl.revoked_at IS NULL AND ${GUEST_LISTA_KONEC} > NOW() - INTERVAL '12 hours'`, [req.user.userId]);
     return res.json({ guest_lists: lists });
   } catch (e) { return odgovoriNaNapako(res, e, "GET /me/guest-lists"); }
+});
+
+// GET /me/guest-list-invites/received — neprebrana obvestila "X te je dodal na svojo guest listo" (migracija 036, zvonec). Samo povabljenec iz zetona (I3);
+// o gostitelju samo username/avatar_url (I11), nikoli e-naslov. Vstopnica sama je v GET /me/tickets (ticket_id). Izgine ob POST .../seen ali ko vabilo ni vec
+// aktivno (odstranjen z liste, lista preklicana, vstopnica void, dogodek koncan: isti pogoji kot stevec pending_guest_list_invites v GET /me).
+app.get("/me/guest-list-invites/received", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT m.id, m.guest_list_id, m.ticket_id, m.created_at, hu.username AS host_username, hu.avatar_url AS host_avatar_url,
+              e.id AS event_id, e.title AS event_title, e.start_at AS event_start_at, e.poster_url AS event_poster_url, cl.name AS club_name
+       ${GUEST_LISTA_NEPREBRANA_IZ}
+       JOIN clubs cl ON cl.id = e.club_id
+       JOIN users hu ON hu.id = gl.host_user_id
+       ${GUEST_LISTA_NEPREBRANA_KJE}
+       ORDER BY m.created_at DESC, m.id DESC LIMIT 50`, [req.user.userId]
+    );
+    return res.json({ invites: r.rows.map(x => ({
+      id: x.id, guest_list_id: x.guest_list_id, ticket_id: x.ticket_id,
+      host_username: x.host_username, host_avatar_url: x.host_avatar_url || null,
+      created_at: x.created_at,
+      event: { id: x.event_id, title: x.event_title, start_at: x.event_start_at, poster_url: x.event_poster_url, club_name: x.club_name },
+    })) });
+  } catch (e) { return odgovoriNaNapako(res, e, "GET /me/guest-list-invites/received"); }
+});
+
+// POST /me/guest-list-invites/received/:id/seen — povabljenec je obvestilo videl (dotik v meniju). Idempotentno (seen_at se ne prepise).
+// Tuje ali neobstojece vabilo: 404 (ne razkrivamo, da obstaja). Moje odstranjeno/preklicano vabilo je tudi 200 (dotik tik po odstranitvi ni napaka).
+app.post("/me/guest-list-invites/received/:id/seen", requireAuth, async (req, res) => {
+  const id = celoId(req.params.id);
+  if (id === null) return res.status(400).send("Invalid id.");
+  if (!Number.isSafeInteger(id)) return res.status(404).send("Not found.");   // vecji od BIGINT bi dal 22003 -> 500
+  try {
+    const r = await pool.query(
+      `UPDATE guest_list_members SET seen_at = COALESCE(seen_at, NOW()) WHERE id = $1 AND user_id = $2 RETURNING id`,
+      [id, req.user.userId]
+    );
+    if (r.rows.length === 0) return res.status(404).send("Not found.");
+    return res.json({ ok: true });
+  } catch (e) { return odgovoriNaNapako(res, e, "POST /me/guest-list-invites/received/:id/seen"); }
 });
 
 // POST /me/guest-lists/:id/invites — telo { user_ids: [..], age_confirmed? }. Vse ali nic (ena transakcija pod zaklepom vrstice liste).

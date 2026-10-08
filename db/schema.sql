@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–035, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–036, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -628,7 +628,8 @@ CREATE TABLE public.guest_list_members (
     user_id integer,
     ticket_id bigint NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    removed_at timestamp with time zone
+    removed_at timestamp with time zone,
+    seen_at timestamp with time zone
 );
 
 
@@ -637,6 +638,13 @@ CREATE TABLE public.guest_list_members (
 --
 
 COMMENT ON TABLE public.guest_list_members IS 'Povabljeni prijatelj na guest listi in njegova vstopnica. Odstranitev = removed_at in vstopnica void.';
+
+
+--
+-- Name: COLUMN guest_list_members.seen_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.guest_list_members.seen_at IS 'Povabljenec je obvestilo o vabilu videl (zvonec). NULL = neprebrano; vabila pred 036 so prebrana.';
 
 
 --
@@ -1611,6 +1619,13 @@ CREATE INDEX gost_zetoni_vstopnic_ticket_idx ON public.gost_zetoni_vstopnic USIN
 --
 
 CREATE UNIQUE INDEX guest_list_members_aktiven_key ON public.guest_list_members USING btree (guest_list_id, user_id) WHERE (removed_at IS NULL);
+
+
+--
+-- Name: guest_list_members_neprebrana_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX guest_list_members_neprebrana_idx ON public.guest_list_members USING btree (user_id) WHERE ((seen_at IS NULL) AND (removed_at IS NULL));
 
 
 --
