@@ -174,7 +174,7 @@ function kodaV1(serial, eventId, secret = "test") {
   assert(seznam.tickets.length === 11, "11 vstopnic dogodka (8 + 2 + 1), vsa narocila placana", seznam.tickets.length);
   const sA0 = seznam.tickets.find(t => t.serial === anine[0].serial);
   assert(sA0 && sA0.status === "used" && sA0.used_at && sA0.holder_username === "ana" && sA0.is_vip === false, "unovcena vstopnica: status used, used_at, holder_username, is_vip false", sA0);
-  assert(Object.keys(sA0).sort().join() === "holder_username,is_vip,package_name,serial,status,table_label,used_at", "tocno ta polja (brez id-jev in e-naslovov)", Object.keys(sA0));
+  assert(Object.keys(sA0).sort().join() === "guest_list_host_username,holder_username,is_guest_list,is_vip,package_name,serial,status,table_label,used_at", "tocno ta polja (brez id-jev in e-naslovov; od 035 z is_guest_list in guest_list_host_username)", Object.keys(sA0));
   assert(!/@|email/i.test(r.text), "v odgovoru ni e-naslovov");
   const bSer = seznam.tickets.find(t => t.serial === borove[0].serial);
   assert(bSer && bSer.status === "valid" && bSer.used_at === null, "neunovcena vstopnica: valid, used_at null", bSer);
@@ -200,7 +200,7 @@ function kodaV1(serial, eventId, secret = "test") {
   const cT = r.body.tickets.find(t => t.serial === ceneteva.serial);
   assert(r.body.tickets.length === 11 && cT && cT.status === "unpaid", "vstopnica vrnjenega narocila JE na seznamu s status unpaid (veljaven podpis, a ne placano)", cT);
   assert(cT && cT.used_at === null && cT.holder_username === "cene", "unpaid: used_at null, imetnik cene", cT);
-  assert(Object.keys(cT || {}).sort().join() === "holder_username,is_vip,package_name,serial,status,table_label,used_at" && !/@|email/i.test(r.text), "unpaid: ista polja kot drugi, brez e-naslovov");
+  assert(Object.keys(cT || {}).sort().join() === "guest_list_host_username,holder_username,is_guest_list,is_vip,package_name,serial,status,table_label,used_at" && !/@|email/i.test(r.text), "unpaid: ista polja kot drugi, brez e-naslovov");
   // naročilo v teku (pending) -> unpaid; vstopnica sama void ostane void; po plačilu spet valid
   const borNar = (await pool.query("SELECT order_id FROM tickets WHERE serial=$1", [borove[1].serial])).rows[0].order_id;
   await pool.query("UPDATE orders SET status='pending' WHERE id=$1", [borNar]);
