@@ -6,7 +6,7 @@
  *
  * Pred popravkom je POST /business/tickets/scan vratarju vrnil ticket.buyer_email in ticket.holder_email NAVADNIH kupcev
  * (I21 je pokrival samo seznam GET /business/events/:id/tickets). Preverjeno v VSEH vejah odgovora:
- *  1  ok, already_used, status != valid (refunded), event_cancelled: vratar brez buyer_email/holder_email (in brez znaka @ v odgovoru)
+ *  1  ok, already_used, status != valid (refunded), event_cancelled, not_today (I25): vratar brez buyer_email/holder_email (in brez znaka @ v odgovoru)
  *  2  vratar: uporabnisko ime imetnika, QR-neodvisna polja (public_ref, holder_username) ostanejo
  *  3  lastnik in manager: e-naslova viden kot doslej (ok in event_cancelled), imetnik po prenosu = e-naslov prejemnika
  *  4  scan-batch in scan-list: v odgovoru ni e-naslovov (nobena vloga)
@@ -65,18 +65,23 @@ let srv = null;
     await pool.query("INSERT INTO club_members (club_id, user_id, role) VALUES (1, (SELECT id FROM users WHERE email='manager@outly.si'), 'manager')");
 
     const cezDan = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
-    const dogodek = async (title) => {
-      const x = await api("POST", "/events", T.lastnik, { clubId: 1, title, startAt: cezDan, ticketPriceCents: 1000, capacity: 100, minAge: 0 });
+    const cez2Dni = new Date(Date.now() + 48 * 3600 * 1000).toISOString();
+    const dogodek = async (title, startAt = cezDan) => {
+      const x = await api("POST", "/events", T.lastnik, { clubId: 1, title, startAt, ticketPriceCents: 1000, capacity: 100, minAge: 0 });
       assert(x.status === 201, `dogodek ${title}`, x.body); return x.body.id;
     };
     const evA = await dogodek("Sken A");
     const evB = await dogodek("Sken B (odpovedan)");
+    const evC = await dogodek("Sken C (cez 2 dni)", cez2Dni);
     let r = await api("POST", `/events/${evA}/orders`, T.ana, { quantity: 6 });
     assert(r.status === 201 && r.body.tickets.length === 6, "ana kupi 6 vstopnic na A", r.body);
     const a = r.body.tickets.map(t => t.serial);
     r = await api("POST", `/events/${evB}/orders`, T.ana, { quantity: 2 });
     assert(r.status === 201 && r.body.tickets.length === 2, "ana kupi 2 vstopnici na B", r.body);
     const b = r.body.tickets.map(t => t.serial);
+    r = await api("POST", `/events/${evC}/orders`, T.ana, { quantity: 2 });
+    assert(r.status === 201 && r.body.tickets.length === 2, "ana kupi 2 vstopnici na C (zacetek cez 2 dni, izven okna skena)", r.body);
+    const c = r.body.tickets.map(t => t.serial);
     // vrata odprta, dogodek B odpovedan (naročilo ostane placano), a[1] vrnjena, a[2] in a[4] preneseni na bora
     await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '1 hour' WHERE id = ANY($1::int[])", [[evA, evB]]);
     await pool.query("UPDATE events SET status='cancelled' WHERE id=$1", [evB]);
@@ -98,6 +103,10 @@ let srv = null;
     r = await sken(T.vratar, a[2]);
     assert(r.status === 200 && r.body.result === "ok" && brezEposte(r), "preneseno na bora (ok): brez e-naslova kupca ANI imetnika", r.body);
 
+    const rn = await sken(T.vratar, c[0]);
+    assert(rn.status === 409 && rn.body.result === "not_today" && brezEposte(rn), "not_today (I25, dogodek cez 2 dni): brez e-naslovov", rn.body);
+    assert(rn.body.ticket.holder_username === "ana" && rn.body.ticket.status === "valid", "not_today: vratar vidi uporabnisko ime, vstopnica ostane valid", rn.body.ticket);
+
     console.log("\n# 2. Vratar: ostalo ostane");
     assert(r.body.ticket.holder_username === "bor" && r.body.ticket.public_ref && r.body.ticket.serial === a[2] && r.body.ticket.transferred === true, "uporabnisko ime imetnika, public_ref, serial, transferred", r.body.ticket);
     // QR (kot v aplikaciji): isto
@@ -114,6 +123,11 @@ let srv = null;
     assert(r.status === 409 && r.body.result === "already_used" && r.body.ticket.buyer_email === "ana@outly.si", "lastnik (already_used): e-naslov viden", r.body);
     r = await sken(T.manager, b[1]);
     assert(r.status === 409 && r.body.result === "event_cancelled" && r.body.ticket.buyer_email === "ana@outly.si" && r.body.ticket.holder_email === "ana@outly.si", "manager (event_cancelled): e-naslova vidna", r.body);
+
+    r = await sken(T.manager, c[0]);
+    assert(r.status === 409 && r.body.result === "not_today" && r.body.ticket.buyer_email === "ana@outly.si" && r.body.ticket.holder_email === "ana@outly.si", "manager (not_today): e-naslova vidna", r.body);
+    r = await sken(T.lastnik, c[1]);
+    assert(r.status === 409 && r.body.result === "not_today" && r.body.ticket.buyer_email === "ana@outly.si", "lastnik (not_today): e-naslov viden", r.body);
 
     console.log("\n# 4. scan-batch in scan-list: brez e-naslovov");
     r = await api("POST", "/business/tickets/scan-batch", T.vratar, { device_id: crypto.randomUUID(),
