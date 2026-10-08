@@ -457,6 +457,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     const vseVratar = JSON.stringify((await api("GET", `/business/events/${evA}/tickets`, T.vratar)).body);
     assert(!/@example\.com/.test(vseVratar), "vratar: nikjer v seznamu ni gostovega e-naslova");
     const qr1 = gv[0].qr, serial1 = gv[0].serial;
+    await pool.query("UPDATE events SET start_at = NOW() + INTERVAL '2 hours' WHERE id=$1", [evA]);   // okno skena (I25): dogodek zacne cez 2 h (nakupi so se mogoci)
     r = await api("POST", "/business/tickets/scan", T.vratar, { qr: qr1 });
     assert(r.status === 200 && r.body.result === "ok" && r.body.ticket.status === "used", "vratar skenira gostujoco vstopnico: ok (ista QR logika)", r);
     assert(!("buyer_email" in r.body.ticket) && !JSON.stringify(r.body).includes("@example.com") && r.body.ticket.holder_username === "Guest", "odgovor skena: brez e-naslova, imetnik »Guest«", r.body.ticket);

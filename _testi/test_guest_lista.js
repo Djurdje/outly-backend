@@ -271,6 +271,8 @@ let srv = null;
   r = await DEL(L.id, "abc");
   assert(r.status === 400, "uporabnik ni stevilo: 400", r.status);
   // ana vstopi (sken), nato jo gostitelj ne more odstraniti
+  // Sken je mogoc v oknu od 12 h pred zacetkom do 6 h po koncu (I25, test_sken_okno.js): dogodek A zacne cez 2 h (vabila se vedno mogoca).
+  await pool.query("UPDATE events SET start_at = NOW() + INTERVAL '2 hours' WHERE id = $1", [evA]);
   r = await api("GET", "/me/tickets", T.ana);
   const qrAna = r.body.find(t => t.id === anaVstopnica).qr;
   r = await api("POST", "/business/tickets/scan", T.lastnik, { qr: qrAna });

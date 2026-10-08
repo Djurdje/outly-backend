@@ -337,6 +337,7 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     r = await apiB("GET", "/guest/ticket", null, undefined, { ...isti, "x-guest-token": z6 });
     assert(r.status === 200, "VELJAVEN zeton nad mejo neuspesnih: 200 (nikoli 429)", r.status);
     // sken gostove kode: en vstop
+    await pool.query("UPDATE events SET start_at = NOW() + INTERVAL '2 hours' WHERE id = (SELECT event_id FROM tickets WHERE id=$1)", [t6.id]);   // okno skena (I25): dogodek zacne cez 2 h (nakupi so se mogoci)
     const koda = r.body.ticket.qr;
     r = await apiB("POST", "/business/tickets/scan", T.vratar, { qr: koda });
     assert(r.status === 200 && r.body.result === "ok" && r.body.ticket.holder_username === "Guest" && r.body.ticket.is_guest_holder === true, "vratar skenira gostovo kodo: ok, imetnik »Guest«", r.body);

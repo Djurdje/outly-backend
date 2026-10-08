@@ -126,6 +126,8 @@ async function api(method, path, token, body) {
   assert(r.status === 201, "ana kupi 3 vstopnice", r.body);
   const vstopnice = (await pool.query("SELECT id, serial FROM tickets WHERE event_id=$1 ORDER BY id", [dogodek])).rows;
   assert(vstopnice.length === 3, "3 vstopnice ustvarjene", vstopnice.length);
+  // Sken je mogoc v oknu od 12 h pred zacetkom do 6 h po koncu (I25, test_sken_okno.js): dogodek zacne cez 2 h.
+  await pool.query("UPDATE events SET start_at = NOW() + INTERVAL '2 hours' WHERE id=$1", [dogodek]);
 
   r = await api("POST", "/business/tickets/scan", T.lastnik, { serial: vstopnice[0].serial });
   assert(r.status === 200, "lastnik skenira vstopnico 1", r.body);

@@ -211,6 +211,8 @@ function preveriQrV2(qr, javniSurov) {
   assert(testniPi.rows[0].stripe_payment_intent_id.startsWith("test_"), "stripe_payment_intent_id ima predpono test_", testniPi.rows[0]);
 
   console.log("\n# POST /business/tickets/scan");
+  // Sken je mogoc v oknu od 12 h pred zacetkom do 6 h po koncu (I25, test_sken_okno.js): dogodka s skeniranimi vstopnicami zacnemo pred 1 h.
+  await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '1 hour' WHERE id = ANY($1::int[])", [[dogodekZaloga, dogodekOk]]);
   const vseVstopniceZaloga = await pool.query("SELECT id, serial FROM tickets WHERE event_id=$1 ORDER BY id LIMIT 1", [dogodekZaloga]);
   const skenSerial = vseVstopniceZaloga.rows[0].serial;
   r = await api("POST", "/business/tickets/scan", T.lastnik, { serial: skenSerial });

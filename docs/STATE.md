@@ -59,6 +59,11 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   (3) `used_at` s telefona velja le v oknu [največ(nastanek vstopnice, začetek dogodka − 12 h), zdaj], `scanned_at` 2020 … zdaj + 1 dan.
 - **`QR_SECRET` na Renderju ni nastavljen**: kode podpisuje rezervna `JWT_SECRET` (>= 32 znakov; INCIDENTI 2026-10-01). Ob kratki
   ali prazni skrivnosti backend ob zagonu samo opozori (`console.error`). Nastavitev/zamenjava razveljavi vse QR kode — odloči Martin.
+- **Okno skena na strežniku (8. 10. 2026, I25):** nova vrednost `result: "not_today"` v `POST /business/tickets/scan` (409, `message` »This ticket is not for today's event.«, `ticket` kot pri drugih zavrnitvah) in kot element `scan-batch` (`used_at: null`, vstopnica ostane `valid`).
+  Odjemalca: splet (#42) `not_today` pozna (`naslovRezultata`); iOS #68 ima lokalno sodbo `nijeZaDanes`, strežniški `not_today` pa v `SkenPrikaz.iz(streznik:)` je padel v `default` (rdeče »INVALID CODE«) – popravljeno v outly-app #69 (`case "not_today"` -> »NOT TODAY'S EVENT«, tudi v `razlogKonflikta`). Starejše gradnje: rdeče »REFUSED« / konflikt, brez sesutja.
+  Past (ura): `scan-batch` okno presoja po `scanned_at`, zato telefon s krivo uro (> 12 h) dobi `not_today` za vse skene brez povezave. Že nekajurna napaka ure
+  ob skenu blizu nastanka vstopnice (`scanned_at` pred `created_at` -> velja zdaj) ali v zadnjih urah okna lahko da `not_today`, če se telefon sinhronizira po zaprtju okna.
+  Past (večdnevni dogodek): brez vpisanega `end_at` je okno `start − 12 h … start + 18 h`; večdnevni dogodek mora imeti `end_at`, sicer vrata drugi dan vrnejo `not_today`.
 - Dostop: `scan-key` in `scan-list` vidijo vse vloge v klubu (tudi vratar) — vratar tako dobi seznam imen imetnikov vstopnic; e-naslovov ni.
 
 ## VIP mize (od 1. 10. 2026; ARCHITECTURE »VIP mize«, I13; VIP 18+ od 2. 10., I8, DECISIONS)
