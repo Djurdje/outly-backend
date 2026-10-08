@@ -1091,6 +1091,10 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
         });
       }
 
+      // 1b. Guest lista (035, I24): gostiteljeve liste se preklicejo (neuporabljene vstopnice void), vstopnice, ki jih izbrisani uporabnik drzi kot
+      //     povabljenec, so void in mesto se sprosti. Brez tega bi vstopnica z izbrisanim imetnikom (holder_user_id SET NULL) zdrsnila na gostitelja.
+      await guestListaPocistiUporabnika(odjemalec, req.user.userId);
+
       // 2. Osebni podatki na naracilih se odvezejo. Znesek, datum in dogodek
       //    ostanejo, ker so racunovodski podatek; e-naslov ni.
       //    Prevzeta gostujoca narocila (migracija 033): tudi guest_email in zetoni pogleda (kdor ima povezavo, ne vidi vec nicesar).
@@ -2903,7 +2907,8 @@ admin.get("/finance", async (req, res) => {
     if (od > do_) return res.status(400).send("from must be before to.");
     // Meji sta datuma; zgornja je vključujoča (do konca dneva).
     const p = [od, do_];
-    const KJE = `o.status IN ('paid','partially_refunded') AND o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day')`;
+    // o.guest_list_id IS NULL: guest lista (035, I24) ni prodaja (brez zneska); ne sme v stevilo narocil, kupcev, vstopnic.
+    const KJE = `o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day')`;
 
     const [skupaj, poKlubih, poDogodkih, poDnevih, zadnja, vseh] = await Promise.all([
       pool.query(
@@ -2945,20 +2950,20 @@ admin.get("/finance", async (req, res) => {
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets,
                 COUNT(o.id)::int AS orders
          FROM generate_series($1::date, $2::date, '1 day') AS d(dan)
-         LEFT JOIN orders o ON o.status IN ('paid','partially_refunded')
+         LEFT JOIN orders o ON o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL
               AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
          GROUP BY d.dan ORDER BY d.dan`, p),
       pool.query(
         `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, c.name AS club_name, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
          FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs c ON c.id = o.club_id
          LEFT JOIN users u ON u.id = o.user_id
-         WHERE o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day')
+         WHERE o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day') AND o.guest_list_id IS NULL
          ORDER BY o.created_at DESC LIMIT 100`, p),
       pool.query(
         `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold, COUNT(*)::int AS orders
-         FROM orders o WHERE o.status IN ('paid','partially_refunded')`),
+         FROM orders o WHERE o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL`),
     ]);
     return res.json({
       mode: testniNacinPlacil() ? "test" : "live",
@@ -3392,9 +3397,14 @@ const STOLPCI_VIP_VSTOPNICE = `(o.table_id IS NOT NULL) AS is_vip, o.table_label
 // Imetnik vstopnice: kdor jo je prejel s prenosom, sicer kupec (008).
 // Gostujoci imetnik (034) NI nobeden uporabnik: IMETNIK je NULL (ne pade nazaj na kupca), zato ga ne najdejo ne /me/tickets ne prijateljski nacrti.
 const IMETNIK = `(CASE WHEN t.holder_is_guest THEN NULL ELSE COALESCE(t.holder_user_id, o.user_id) END)`;
+// Guest lista (migracija 035, I24): vstopnica narocila z orders.guest_list_id. Polji v odgovorih (scan, scan-list, poslovne vstopnice, /me/tickets):
+// is_guest_list (privzeto false) in guest_list_host_username (pri gostiteljevi vstopnici je to on sam; NULL, ce gostitelj ne obstaja vec).
+// Podpoizvedba, ne JOIN: se izvede samo za vrstice guest liste (CASE), zato vroca pot skena ostane enako poceni. Zahteva alias `o` = orders.
+const GUEST_LISTA_POLJA = `(o.guest_list_id IS NOT NULL) AS is_guest_list,
+  CASE WHEN o.guest_list_id IS NOT NULL THEN (SELECT gu.username FROM guest_lists gl JOIN users gu ON gu.id = gl.host_user_id WHERE gl.id = o.guest_list_id) END AS guest_list_host_username`;
 const STOLPCI_IMETNIKA = `${IMETNIK} AS holder_id, COALESCE(hu.username, ${IME_GOSTA_IMETNIKA}) AS holder_username, hu.email AS holder_email,
   (t.holder_is_guest OR (t.holder_user_id IS NOT NULL AND t.holder_user_id IS DISTINCT FROM o.user_id)) AS transferred, ${GOST_OZNAKA} AS is_guest,
-  (t.holder_is_guest OR ${GOST_OZNAKA}) AS is_guest_holder`;
+  (t.holder_is_guest OR ${GOST_OZNAKA}) AS is_guest_holder, ${GUEST_LISTA_POLJA}`;
 const JOIN_IMETNIK = `LEFT JOIN users hu ON hu.id = ${IMETNIK}`;
 
 // db: neobvezen odjemalec iz pool.connect(); klicatelj, ki ga že drži, MORA
@@ -3745,6 +3755,7 @@ app.get("/me/orders", requireAuth, async (req, res) => {
               CASE WHEN o.status = 'pending' THEN o.checkout_url END AS checkout_url
        FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id
        WHERE o.user_id = $1 AND NOT (o.status IN ('cancelled','failed') AND o.paid_at IS NULL)
+         AND o.guest_list_id IS NULL   -- guest lista (035, I24) ni nakup: brez zneska/racuna; vstopnice so v GET /me/tickets, lista v GET /me/guest-lists
        ORDER BY o.created_at DESC LIMIT 100`, [req.user.userId]
     );
     const vst = await vstopniceNarocil(r.rows.map(o => o.id));
@@ -3806,7 +3817,7 @@ const SQL_VSTOPNICE_POGLED = `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNI
               e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
               cl.id AS club_id, cl.name AS club_name, cl.address, cl.city, cl.logo_url,
               ${STOLPCI_IMETNIKA}, bu.username AS buyer_username,
-              (t.status = 'valid' AND e.start_at > NOW()) AS transferable
+              (t.status = 'valid' AND e.start_at > NOW() AND o.guest_list_id IS NULL) AS transferable   -- vstopnice guest liste se ne prenasajo (035)
        FROM tickets t JOIN orders o ON o.id = t.order_id
        JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id
        ${JOIN_IMETNIK} LEFT JOIN users bu ON bu.id = o.user_id`;
@@ -3822,7 +3833,9 @@ app.get("/me/tickets", requireAuth, async (req, res) => {
          UNION ALL
          SELECT t2.id FROM orders o2 JOIN tickets t2 ON t2.order_id = o2.id
           WHERE o2.user_id = $1 AND t2.holder_user_id IS NULL AND NOT t2.holder_is_guest   -- 034: vstopnica, poslana gostu, ni vec kupceva
+            AND o2.guest_list_id IS NULL   -- 035: vstopnice guest liste imajo VEDNO izrecnega imetnika (gostitelj ali prijatelj); brez njega (izbrisan racun) ne padejo na gostitelja
        ) AND o.status IN ('paid','partially_refunded')
+         AND NOT (o.guest_list_id IS NOT NULL AND t.status = 'void')   -- odstranjen prijatelj / preklicana lista: razveljavljene vstopnice guest liste se ne kazejo
        ORDER BY (e.start_at >= NOW()) DESC, e.start_at ASC, t.id ASC LIMIT 200`, [req.user.userId]
     );
     return res.json(r.rows.map(t => ({ ...t, qr: qrVstopnice(t) })));
@@ -4706,7 +4719,7 @@ async function serijaProdaje(klub, range) {
               COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets
          FROM generate_series(date_trunc('month', CURRENT_DATE - INTERVAL '11 months'),
                                date_trunc('month', CURRENT_DATE), '1 month') AS d(mesec)
-         LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded')
+         LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL
               AND o.created_at >= d.mesec AND o.created_at < d.mesec + INTERVAL '1 month'
         GROUP BY d.mesec ORDER BY d.mesec`, [klub]
     );
@@ -4718,7 +4731,7 @@ async function serijaProdaje(klub, range) {
             COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
             COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets
        FROM generate_series((CURRENT_DATE - $2 * INTERVAL '1 day')::date, CURRENT_DATE, '1 day') AS d(dan)
-       LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded')
+       LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL
             AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
       GROUP BY d.dan ORDER BY d.dan`, [klub, dni]
   );
@@ -4743,7 +4756,7 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.created_at > NOW() - INTERVAL '7 days' AND o.table_id IS NULL),0)::int AS tickets_7d,
                 COUNT(*) FILTER (WHERE o.table_id IS NOT NULL)::int AS tables_sold,
                 COALESCE(SUM(o.total_cents) FILTER (WHERE o.table_id IS NOT NULL),0)::int AS tables_gross_cents
-         FROM orders o WHERE o.club_id = $1 AND o.status IN ('paid','partially_refunded')`, [klub]),
+         FROM orders o WHERE o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL`, [klub]),   // guest lista (035, I24) ni prodaja: ne v bruto, tickets_sold, stevilo narocil
       pool.query(
         `SELECT e.id, e.title, e.start_at, e.poster_url, e.status, e.ticket_price_cents, e.capacity, e.sold_count,
                 COALESCE(SUM(o.total_cents) FILTER (WHERE o.status IN ('paid','partially_refunded')),0)::int AS gross_cents,
@@ -4753,19 +4766,19 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
                 (SELECT COUNT(*)::int FROM tickets t WHERE t.event_id = e.id AND t.status = 'used') AS checked_in,
                 -- Koliko oseb je oznacilo "I'm in" na tem dogodku (migracija 020). DODANO polje.
                 (SELECT COUNT(*)::int FROM event_interest ei WHERE ei.event_id = e.id) AS interested_count
-         FROM events e LEFT JOIN orders o ON o.event_id = e.id
+         FROM events e LEFT JOIN orders o ON o.event_id = e.id AND o.guest_list_id IS NULL
          WHERE e.club_id = $1 GROUP BY e.id ORDER BY e.start_at DESC LIMIT 100`, [klub]),
       pool.query(
         `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
          FROM orders o JOIN events e ON e.id = o.event_id LEFT JOIN users u ON u.id = o.user_id
-         WHERE o.club_id = $1 ORDER BY o.created_at DESC LIMIT 30`, [klub]),
+         WHERE o.club_id = $1 AND o.guest_list_id IS NULL ORDER BY o.created_at DESC LIMIT 30`, [klub]),
       // Zadnjih 14 dni po dnevih (tudi dnevi brez prodaje), za graf v nadzorni plosci.
       pool.query(
         `SELECT to_char(d.dan, 'YYYY-MM-DD') AS day,
                 COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets
          FROM generate_series((CURRENT_DATE - INTERVAL '13 days')::date, CURRENT_DATE, '1 day') AS d(dan)
-         LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded')
+         LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL
               AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
          GROUP BY d.dan ORDER BY d.dan`, [klub]),
       // Novo, samo ce je ?range= navedеn — DODANO polje, star odjemalec (brez range) ga ne dobi.
@@ -4804,7 +4817,8 @@ app.get("/business/events/:id/tickets", requireAuth, requireClub(), async (req, 
     const vratar = req.klub && req.klub.role === "doorman";
     return res.json(r.rows.map(t => {
       const v = { ...t, qr: qrVstopnice(t) };
-      if (vratar) { delete v.buyer_email; delete v.holder_email; }
+      // Guest lista (035): e-naslovov gostitelja in povabljenih prijateljev klub ne vidi (nobena vloga); samo uporabniska imena.
+      if (vratar || t.is_guest_list) { delete v.buyer_email; delete v.holder_email; }
       return v;
     }));
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
@@ -4885,7 +4899,7 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     await nakupZacni(c);   // lock_timeout/statement_timeout kot pri nakupu: zaklepi vrstice vstopnice, posiljatelja in naslova ne cakajo v neskoncnost
     const tr = await c.query(
       `SELECT t.id, t.serial, t.status, t.event_id, ${IMETNIK} AS holder_id, o.status AS order_status,
-              e.title AS event_title, e.start_at, e.min_age, o.package_id
+              e.title AS event_title, e.start_at, e.min_age, o.package_id, (o.guest_list_id IS NOT NULL) AS guest_lista
        FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id
        WHERE t.id = $1 FOR UPDATE OF t`, [id]
     );
@@ -4893,6 +4907,8 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     const t = tr.rows[0];
     // Tuja vstopnica: 404, ne 403 — ne razkrivamo, da obstaja.
     if (Number(t.holder_id) !== Number(req.user.userId)) { await c.query("ROLLBACK"); return res.status(404).send("Ticket not found."); }
+    // Guest lista (035, I24): vstopnica je vezana na povabljenca; prenos (tudi na gosta po e-naslovu) bi obsel preverbo prijateljstva in starosti pri vabilu.
+    if (t.guest_lista) { await c.query("ROLLBACK"); return res.status(409).send("Guest list tickets can't be transferred."); }
     if (!["paid", "partially_refunded"].includes(t.order_status)) { await c.query("ROLLBACK"); return res.status(409).send("Order is not paid."); }
     if (t.status === "used") { await c.query("ROLLBACK"); return res.status(409).send("Ticket was already used."); }
     if (t.status !== "valid") { await c.query("ROLLBACK"); return res.status(409).send(`Ticket is ${t.status}.`); }
@@ -5009,6 +5025,325 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
   } finally { c.release(); }
 });
 
+// ---------------------------
+// GUEST LISTA (migracija 035, 8. 10. 2026, invarianta I24)
+// ---------------------------
+// Martin: admin za EN dogodek da uporabniku (gostitelju) stevilo mest; gostitelj brez placila povabi toliko PRIJATELJEV (samo friendships, ne e-naslova).
+// Gostitelj in vsak povabljenec imata SVOJO vstopnico (svoja koda QR). Model: posebno narocilo (orders.guest_list_id; total 0, status paid, brez Stripa)
+// z vstopnicami: skener, scan-list in /me/tickets delujejo brez sprememb. Guest lista NI prodaja: ne v sold_count/kapaciteto (sprozilca preskocita),
+// ne v tickets_sold, bruto in stevilo narocil (vsaka agregacija izloci o.guest_list_id IS NOT NULL), ne v GET /me/orders; vstopnice se ne prenasajo (409).
+// Preklic liste / odstranitev prijatelja = vstopnica `void` (nikoli brisanje: sled ostane); uporabljena vstopnica se ne razveljavi (409 »Already checked in.«).
+const GUEST_LISTA_SPOTS_NAJVEC = 20;
+const GUEST_LISTA_OPOMBA_NAJVEC = 200;
+// Meja vseh vrstic povabljencev na listi (tudi odstranjenih): vsako vabilo naredi vstopnico, odstranitev jo razveljavi, zato bi neskoncno dodajanje/odstranjevanje
+// napihovalo tickets. 60 = trikrat najvec mest. Nad mejo 409 (admin lahko listo preklice in izda novo).
+const GUEST_LISTA_VRSTIC_NAJVEC = okoljeCelo("GUEST_LISTA_VRSTIC_NAJVEC", 60, 1, 1000);
+// Dogodek je »koncan«, ko mine end_at, sicer start_at + 8 h (kot pri /me/plans). Lista ostane vidna gostitelju se 12 h po koncu.
+const GUEST_LISTA_KONEC = `COALESCE(e.end_at, e.start_at + INTERVAL '8 hours')`;
+
+// Oblika liste (isto za uporabnika in admina; admin dobi se gostitelja, created_at, revoked_at). `kje`: SQL pogoj nad alias-i gl (guest_lists),
+// e (events), cl (clubs). db: pool ali odjemalec, ki ga klicatelj ze drzi (branje po COMMIT-u gre prek njega, ne prek poola; glej nakup).
+async function guestListeOdgovor(db, kje, params, admin = false) {
+  const r = await db.query(
+    `SELECT gl.id, gl.spots, gl.note, gl.created_at, gl.revoked_at, gl.host_user_id,
+            e.id AS event_id, e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.club_id, cl.name AS club_name, e.min_age, e.status AS event_status,
+            (e.status = 'published' AND ${GUEST_LISTA_KONEC} > NOW()) AS dogodek_odprt,
+            hu.username AS host_username, hu.email AS host_email,
+            (SELECT MIN(t.id) FROM tickets t JOIN orders o ON o.id = t.order_id WHERE o.guest_list_id = gl.id) AS my_ticket_id
+       FROM guest_lists gl JOIN events e ON e.id = gl.event_id JOIN clubs cl ON cl.id = e.club_id
+       LEFT JOIN users hu ON hu.id = gl.host_user_id
+      WHERE ${kje}
+      ORDER BY e.start_at ASC, (gl.revoked_at IS NOT NULL), gl.id ASC LIMIT 200`, params);
+  if (!r.rows.length) return [];
+  const m = await db.query(
+    `SELECT m.guest_list_id, u.id AS user_id, u.username, u.avatar_url, t.status
+       FROM guest_list_members m JOIN users u ON u.id = m.user_id JOIN tickets t ON t.id = m.ticket_id
+      WHERE m.guest_list_id = ANY($1::bigint[]) AND m.removed_at IS NULL ORDER BY m.id`, [r.rows.map(x => x.id)]);
+  const povabljeni = new Map();
+  for (const x of m.rows) (povabljeni.get(x.guest_list_id) || povabljeni.set(x.guest_list_id, []).get(x.guest_list_id))
+    .push({ user_id: x.user_id, username: x.username, avatar_url: x.avatar_url || null, status: x.status });
+  return r.rows.map(x => {
+    const invited = povabljeni.get(x.id) || [];
+    const o = {
+      id: x.id,
+      event: { id: x.event_id, title: x.event_title, start_at: x.start_at, end_at: x.end_at, poster_url: x.poster_url, club_id: x.club_id,
+               club_name: x.club_name, min_age: x.min_age, status: x.event_status },
+      spots: x.spots,
+      remaining: Math.max(0, x.spots - invited.length),
+      can_invite: !x.revoked_at && x.dogodek_odprt,
+      my_ticket_id: x.my_ticket_id,
+      note: x.note,
+      invited,
+    };
+    if (admin) {
+      o.host = { user_id: x.host_user_id, username: x.host_username || null, email: x.host_email || null };
+      o.created_at = x.created_at;
+      o.revoked_at = x.revoked_at;
+    }
+    return o;
+  });
+}
+
+// Preklic liste (admin; izbris racuna gostitelja): neuporabljene vstopnice -> void, njihovi povabljenci odstranjeni. Uporabljene ostanejo (vstop je ze bil).
+// Klicatelj drzi zaklep vrstice liste (FOR UPDATE) v svoji transakciji.
+async function guestListaPreklici(c, listId) {
+  await c.query("UPDATE guest_lists SET revoked_at = COALESCE(revoked_at, NOW()) WHERE id = $1", [listId]);
+  await c.query(`UPDATE tickets t SET status = 'void' FROM orders o WHERE o.guest_list_id = $1 AND t.order_id = o.id AND t.status = 'valid'`, [listId]);
+  await c.query(
+    `UPDATE guest_list_members m SET removed_at = NOW() FROM tickets t
+      WHERE m.guest_list_id = $1 AND m.removed_at IS NULL AND t.id = m.ticket_id AND t.status = 'void'`, [listId]);
+}
+
+// Izbris racuna (DELETE /me): gostiteljeve liste se preklicejo, vstopnice povabljenca so void in mesto je prosto. Brez tega bi vstopnica z izbrisanim
+// imetnikom (tickets.holder_user_id ON DELETE SET NULL) zdrsnila nazaj na kupca = gostitelja.
+async function guestListaPocistiUporabnika(c, userId) {
+  const l = await c.query("SELECT id FROM guest_lists WHERE host_user_id = $1 AND revoked_at IS NULL ORDER BY id FOR UPDATE", [userId]);
+  for (const x of l.rows) await guestListaPreklici(c, x.id);
+  await c.query(
+    `UPDATE tickets t SET status = 'void' FROM guest_list_members m
+      WHERE m.user_id = $1 AND m.removed_at IS NULL AND t.id = m.ticket_id AND t.status = 'valid'`, [userId]);
+  await c.query("UPDATE guest_list_members SET removed_at = NOW() WHERE user_id = $1 AND removed_at IS NULL", [userId]);
+}
+
+// GET /me/guest-lists — liste, kjer sem GOSTITELJ: ne preklicane, dogodek se ni koncal pred vec kot 12 h; po zacetku dogodka narascajoce.
+app.get("/me/guest-lists", requireAuth, async (req, res) => {
+  try {
+    const lists = await guestListeOdgovor(pool,
+      `gl.host_user_id = $1 AND gl.revoked_at IS NULL AND ${GUEST_LISTA_KONEC} > NOW() - INTERVAL '12 hours'`, [req.user.userId]);
+    return res.json({ guest_lists: lists });
+  } catch (e) { return odgovoriNaNapako(res, e, "GET /me/guest-lists"); }
+});
+
+// POST /me/guest-lists/:id/invites — telo { user_ids: [..], age_confirmed? }. Vse ali nic (ena transakcija pod zaklepom vrstice liste).
+// Starost (I8): ista pravila kot pri prenosu (znan datum rojstva pod mejo dogodka: 403 vedno; brez datuma: obvezen age_confirmed).
+// Zloraba: omejevalnik 30/h/IP (vabilo + odstranitev) in meja vseh vrstic povabljencev na listi (GUEST_LISTA_VRSTIC_NAJVEC).
+app.post("/me/guest-lists/:id/invites", requireAuth, omeji({ kljuc: "guest-lista", najvec: 30, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+  const id = celoId4(req.params.id);
+  if (!id) return res.status(400).send("Invalid guest list id.");
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  const ids = b.user_ids;
+  if (!Array.isArray(ids) || ids.length < 1) return res.status(400).send("user_ids must be a non-empty array of user ids.");
+  if (ids.length > GUEST_LISTA_SPOTS_NAJVEC) return res.status(400).send(`You can invite at most ${GUEST_LISTA_SPOTS_NAJVEC} people at once.`);
+  if (!ids.every(v => Number.isInteger(v) && v > 0 && v <= INT4_MAX)) return res.status(400).send("user_ids must be user ids (integers).");
+  if (new Set(ids).size !== ids.length) return res.status(400).send("user_ids must not contain duplicates.");
+  if (b.age_confirmed !== undefined && typeof b.age_confirmed !== "boolean") return res.status(400).send("age_confirmed must be true or false.");
+  const starostPotrjena = b.age_confirmed === true;
+  const userId = req.user.userId;
+
+  const c = await pool.connect();
+  try {
+    await nakupZacni(c);   // lock_timeout/statement_timeout kot pri nakupu in prenosu
+    // Zaklep vrstice liste: vabila, odstranitve, PATCH in preklic iste liste se vrstijo (mesta se ne morejo preseci).
+    const lr = await c.query(
+      `SELECT gl.id, gl.spots, gl.revoked_at, e.id AS event_id, e.min_age, e.status AS event_status, ${GUEST_LISTA_KONEC} AS konec, o.id AS order_id
+         FROM guest_lists gl JOIN events e ON e.id = gl.event_id JOIN orders o ON o.guest_list_id = gl.id
+        WHERE gl.id = $1 AND gl.host_user_id = $2 FOR UPDATE OF gl`, [id, userId]);
+    if (!lr.rows.length) { await c.query("ROLLBACK"); return res.status(404).send("Guest list not found."); }
+    const l = lr.rows[0];
+    if (l.revoked_at || l.event_status !== "published" || new Date(l.konec).getTime() <= Date.now()) {
+      await c.query("ROLLBACK"); return res.status(409).send("This guest list is closed.");
+    }
+    // Samo prijatelji (gostitelj sam in neznani id-ji = ista 403: ne razkrivamo obstoja uporabnikov).
+    const fr = await c.query(
+      `SELECT u.id, u.username, starost(u.date_of_birth) AS leta FROM users u
+        WHERE u.id = ANY($2::int[]) AND u.id <> $1::int
+          AND EXISTS (SELECT 1 FROM friendships f WHERE f.user_a = LEAST(u.id, $1::int) AND f.user_b = GREATEST(u.id, $1::int))`, [userId, ids]);
+    if (fr.rows.length !== ids.length) { await c.query("ROLLBACK"); return res.status(403).send("You can only invite friends."); }
+    const poId = new Map(fr.rows.map(x => [x.id, x]));
+    const clani = await c.query("SELECT user_id FROM guest_list_members WHERE guest_list_id = $1 AND removed_at IS NULL", [id]);
+    const ze = new Set(clani.rows.map(x => x.user_id));
+    for (const uid of ids) {
+      if (ze.has(uid)) { await c.query("ROLLBACK"); return res.status(409).send(`${poId.get(uid).username} is already on your guest list.`); }
+    }
+    const prosta = l.spots - clani.rows.length;
+    if (ids.length > prosta) { await c.query("ROLLBACK"); return res.status(409).send(`Only ${Math.max(0, prosta)} spots left.`); }
+    const vseVrstice = (await c.query("SELECT COUNT(*)::int AS n FROM guest_list_members WHERE guest_list_id = $1", [id])).rows[0].n;
+    if (vseVrstice + ids.length > GUEST_LISTA_VRSTIC_NAJVEC) {
+      await c.query("ROLLBACK"); return res.status(409).send("This guest list has reached its limit of changes. Contact Outly.");
+    }
+    // Starost (I8): znan datum rojstva pod mejo je 403 VEDNO (potrditev ga ne prevlada); brez datuma rabi age_confirmed.
+    const meja = Number(l.min_age) || 0;
+    if (meja > 0) {
+      const mladoletnik = ids.map(uid => poId.get(uid)).find(x => x.leta !== null && x.leta < meja);
+      if (mladoletnik) { await c.query("ROLLBACK"); return res.status(403).send(`${mladoletnik.username} is under ${meja}.`); }
+      if (!starostPotrjena && ids.some(uid => poId.get(uid).leta === null)) {
+        await c.query("ROLLBACK");
+        return res.status(400).json({ error: "age_confirmation_required", min_age: meja,
+          message: `Confirm that everyone you are inviting is at least ${meja}.` });
+      }
+    }
+    for (const uid of ids) {
+      const t = await c.query("INSERT INTO tickets (order_id, event_id, holder_user_id) VALUES ($1, $2, $3) RETURNING id", [l.order_id, l.event_id, uid]);
+      await c.query("INSERT INTO guest_list_members (guest_list_id, user_id, ticket_id) VALUES ($1, $2, $3)", [id, uid, t.rows[0].id]);
+    }
+    await c.query("COMMIT");
+    console.log(`Guest lista ${id}: gostitelj ${userId} je povabil ${ids.length} (dogodek ${l.event_id})`);
+    const [guest_list] = await guestListeOdgovor(c, "gl.id = $1", [id]);
+    return res.status(201).json({ guest_list, added: ids });
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+    if (e && e.code === "23505") return res.status(409).send("Someone you selected is already on your guest list.");
+    return odgovoriNaNapako(res, e, "POST /me/guest-lists/:id/invites");
+  } finally { c.release(); }
+});
+
+// DELETE /me/guest-lists/:id/invites/:userId — odstrani povabljenca: njegova vstopnica -> void, mesto se sprosti. Uporabljena vstopnica: 409.
+app.delete("/me/guest-lists/:id/invites/:userId", requireAuth, omeji({ kljuc: "guest-lista", najvec: 30, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+  const id = celoId4(req.params.id), uid = celoId4(req.params.userId);
+  if (!id) return res.status(400).send("Invalid guest list id.");
+  if (!uid) return res.status(400).send("Invalid user id.");
+  const c = await pool.connect();
+  try {
+    await nakupZacni(c);
+    const lr = await c.query("SELECT revoked_at FROM guest_lists WHERE id = $1 AND host_user_id = $2 FOR UPDATE", [id, req.user.userId]);
+    if (!lr.rows.length) { await c.query("ROLLBACK"); return res.status(404).send("Guest list not found."); }
+    if (lr.rows[0].revoked_at) { await c.query("ROLLBACK"); return res.status(409).send("This guest list is closed."); }
+    const m = await c.query(
+      `SELECT m.id, m.ticket_id FROM guest_list_members m WHERE m.guest_list_id = $1 AND m.user_id = $2 AND m.removed_at IS NULL`, [id, uid]);
+    if (!m.rows.length) { await c.query("ROLLBACK"); return res.status(404).send("That person is not on your guest list."); }
+    // Pogojni UPDATE kot pri skenu (I1): sken in odstranitev se ne moreta oba izvesti nad isto vstopnico.
+    const v = await c.query("UPDATE tickets SET status = 'void' WHERE id = $1 AND status = 'valid' RETURNING id", [m.rows[0].ticket_id]);
+    if (!v.rows.length) {
+      const st = (await c.query("SELECT status FROM tickets WHERE id = $1", [m.rows[0].ticket_id])).rows[0];
+      if (st && st.status === "used") { await c.query("ROLLBACK"); return res.status(409).send("Already checked in."); }
+    }
+    await c.query("UPDATE guest_list_members SET removed_at = NOW() WHERE id = $1", [m.rows[0].id]);
+    await c.query("COMMIT");
+    console.log(`Guest lista ${id}: gostitelj ${req.user.userId} je odstranil povabljenca ${uid}`);
+    const [guest_list] = await guestListeOdgovor(c, "gl.id = $1", [id]);
+    return res.status(200).json({ guest_list });
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+    return odgovoriNaNapako(res, e, "DELETE /me/guest-lists/:id/invites/:userId");
+  } finally { c.release(); }
+});
+
+// --- admin: /admin/api/guest-lists (requireRole admin prek routerja `admin`) ---
+function guestListaVhod(b, { zahtevajMesta }) {
+  const o = {};
+  if (b.spots !== undefined || zahtevajMesta) {
+    if (!Number.isInteger(b.spots) || b.spots < 0 || b.spots > GUEST_LISTA_SPOTS_NAJVEC) return { napaka: `spots must be an integer between 0 and ${GUEST_LISTA_SPOTS_NAJVEC}.` };
+    o.spots = b.spots;
+  }
+  if (b.note !== undefined && b.note !== null) {
+    if (typeof b.note !== "string" || b.note.trim().length > GUEST_LISTA_OPOMBA_NAJVEC) return { napaka: `note must be text of at most ${GUEST_LISTA_OPOMBA_NAJVEC} characters.` };
+    o.note = b.note.trim();
+  }
+  return o;
+}
+
+// GET /admin/api/guest-lists?event_id=N — liste dogodka; brez parametra liste prihodnjih in tekocih dogodkov (se ne koncani). Vkljucno s preklicanimi (revoked_at).
+admin.get("/guest-lists", async (req, res) => {
+  try {
+    let kje = `${GUEST_LISTA_KONEC} > NOW()`, p = [];
+    if (req.query.event_id !== undefined) {
+      const eid = celoId4(req.query.event_id);
+      if (!eid) return res.status(400).send("Invalid event_id.");
+      kje = "gl.event_id = $1"; p = [eid];
+    }
+    return res.json({ guest_lists: await guestListeOdgovor(pool, kje, p, true) });
+  } catch (e) { return odgovoriNaNapako(res, e, "GET /admin/api/guest-lists"); }
+});
+
+// POST /admin/api/guest-lists — { event_id, user_id, spots (0-20), note? (0-200) } -> 201. Samo za objavljen dogodek, ki se ni koncal.
+// 409, ce ima uporabnik na dogodku ze AKTIVNO listo (delni unikaten indeks); preklicana ne ovira nove.
+admin.post("/guest-lists", async (req, res) => {
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  const eventId = typeof b.event_id === "number" ? celoId4(b.event_id) : null;
+  const hostId = typeof b.user_id === "number" ? celoId4(b.user_id) : null;
+  if (!eventId) return res.status(400).send("event_id must be an event id (integer).");
+  if (!hostId) return res.status(400).send("user_id must be a user id (integer).");
+  const v = guestListaVhod(b, { zahtevajMesta: true });
+  if (v.napaka) return res.status(400).send(v.napaka);
+  const c = await pool.connect();
+  try {
+    await nakupZacni(c);
+    const er = await c.query(
+      `SELECT e.id, e.club_id, e.currency, e.status, ${GUEST_LISTA_KONEC} AS konec FROM events e WHERE e.id = $1`, [eventId]);
+    if (!er.rows.length) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+    const e = er.rows[0];
+    if (e.status !== "published" || new Date(e.konec).getTime() <= Date.now()) {
+      await c.query("ROLLBACK"); return res.status(409).send("Guest lists can only be created for a published event that has not ended.");
+    }
+    const ur = await c.query("SELECT id, email FROM users WHERE id = $1 AND role <> 'backup'", [hostId]);
+    if (!ur.rows.length) { await c.query("ROLLBACK"); return res.status(404).send("User not found."); }
+    const gl = await c.query(
+      "INSERT INTO guest_lists (event_id, host_user_id, spots, note, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+      [eventId, hostId, v.spots, v.note || "", req.user.userId]);
+    const listId = gl.rows[0].id;
+    // Narocilo liste: brez denarja in Stripa (CHECK orders_guest_lista_chk), sprozilec rezerviraj_zalogo ga preskoci (ne steje v kapaciteto).
+    const or = await c.query(
+      `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency, application_fee_cents,
+                           status, buyer_email, paid_at, guest_list_id)
+       VALUES ($1, $2, $3, $4, 1, 0, 0, $5, 0, 'paid', $6, NOW(), $7) RETURNING id`,
+      [javnaRef(), hostId, eventId, e.club_id, e.currency, ur.rows[0].email, listId]);
+    // Gostiteljeva vstopnica: izrecen imetnik (ne »kupec«), da vstopnica izbrisanega povabljenca nikoli ne zdrsne nanj (glej /me/tickets).
+    await c.query("INSERT INTO tickets (order_id, event_id, holder_user_id) VALUES ($1, $2, $3)", [or.rows[0].id, eventId, hostId]);
+    await c.query("COMMIT");
+    console.log(`Admin ${req.user.userId}: guest lista ${listId} (dogodek ${eventId}, uporabnik ${hostId}, mest ${v.spots})`);
+    const [guest_list] = await guestListeOdgovor(c, "gl.id = $1", [listId], true);
+    return res.status(201).json({ guest_list });
+  } catch (err) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+    if (err && err.code === "23505" && err.constraint === "guest_lists_aktivna_key") return res.status(409).send("This user already has an active guest list for this event.");
+    return odgovoriNaNapako(res, err, "POST /admin/api/guest-lists");
+  } finally { c.release(); }
+});
+
+// PATCH /admin/api/guest-lists/:id — { spots?, note? }. Mest ne moremo zmanjsati pod stevilo aktivnih povabljenih (409). Preklicane liste ni mogoce urejati (409).
+admin.patch("/guest-lists/:id", async (req, res) => {
+  const id = celoId4(req.params.id);
+  if (!id) return res.status(400).send("Invalid guest list id.");
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  const v = guestListaVhod(b, { zahtevajMesta: false });
+  if (v.napaka) return res.status(400).send(v.napaka);
+  if (v.spots === undefined && v.note === undefined) return res.status(400).send("Nothing to update.");
+  const c = await pool.connect();
+  try {
+    await nakupZacni(c);
+    const lr = await c.query("SELECT revoked_at FROM guest_lists WHERE id = $1 FOR UPDATE", [id]);
+    if (!lr.rows.length) { await c.query("ROLLBACK"); return res.status(404).send("Guest list not found."); }
+    if (lr.rows[0].revoked_at) { await c.query("ROLLBACK"); return res.status(409).send("This guest list is revoked."); }
+    if (v.spots !== undefined) {
+      const n = (await c.query("SELECT COUNT(*)::int AS n FROM guest_list_members WHERE guest_list_id = $1 AND removed_at IS NULL", [id])).rows[0].n;
+      if (v.spots < n) { await c.query("ROLLBACK"); return res.status(409).send(`Spots can't be below the number of people already invited (${n}).`); }
+    }
+    await c.query("UPDATE guest_lists SET spots = COALESCE($2::smallint, spots), note = COALESCE($3::text, note) WHERE id = $1", [id, v.spots ?? null, v.note ?? null]);
+    await c.query("COMMIT");
+    console.log(`Admin ${req.user.userId}: guest lista ${id} spremenjena (${Object.keys(v).join(", ")})`);
+    const [guest_list] = await guestListeOdgovor(c, "gl.id = $1", [id], true);
+    return res.status(200).json({ guest_list });
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+    return odgovoriNaNapako(res, e, "PATCH /admin/api/guest-lists/:id");
+  } finally { c.release(); }
+});
+
+// DELETE /admin/api/guest-lists/:id — preklic: neuporabljene vstopnice liste -> void (uporabljene ostanejo). Ponovni preklic je brez ucinka (200).
+admin.delete("/guest-lists/:id", async (req, res) => {
+  const id = celoId4(req.params.id);
+  if (!id) return res.status(400).send("Invalid guest list id.");
+  const c = await pool.connect();
+  try {
+    await nakupZacni(c);
+    const lr = await c.query("SELECT id FROM guest_lists WHERE id = $1 FOR UPDATE", [id]);
+    if (!lr.rows.length) { await c.query("ROLLBACK"); return res.status(404).send("Guest list not found."); }
+    await guestListaPreklici(c, id);
+    await c.query("COMMIT");
+    console.log(`Admin ${req.user.userId}: guest lista ${id} preklicana`);
+    const [guest_list] = await guestListeOdgovor(c, "gl.id = $1", [id], true);
+    return res.status(200).json({ guest_list });
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+    return odgovoriNaNapako(res, e, "DELETE /admin/api/guest-lists/:id");
+  } finally { c.release(); }
+});
+
 // POST /business/tickets/scan — skener na vratih. Telo: { qr } (ali { serial } za ročni vnos).
 // Preveri podpis, lastništvo, stanje; vstopnico označi kot uporabljeno. Ponovni sken -> 409.
 app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (req, res) => {
@@ -5035,6 +5370,9 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (re
     if (r.rows.length === 0) return res.status(404).json({ result: "unknown", message: "Ticket not found." });
     const t = r.rows[0];
     if (t.is_guest) delete t.buyer_email;   // gost brez racuna: vratar ne vidi e-naslova (migracija 033); na zaslonu je imetnik »Guest«
+    // Guest lista (035, I24): vratar vidi uporabnisko ime imetnika in gostitelja (is_guest_list, guest_list_host_username), nikoli e-naslova
+    // (buyer_email = gostitelj, holder_email = povabljeni prijatelj); skener pokaze »Guest list · @host«.
+    if (t.is_guest_list) { delete t.buyer_email; delete t.holder_email; }
     if (t.club_id !== klub) return res.status(403).json({ result: "wrong_club", message: "This ticket is for another club's event." });
     if (ev !== undefined && ev !== null && Number(ev) !== t.event_id) return res.status(400).json({ result: "invalid", message: "QR code does not match the ticket." });
     // Odpovedan dogodek: narocila ostanejo placana (vracilo je rocno), vstopnice pa na vratih ne smejo vec veljati.
@@ -5100,7 +5438,7 @@ app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken(), as
         `SELECT t.serial,
                 CASE WHEN o.status IN ('paid','partially_refunded') OR t.status IN ('refunded','void') THEN t.status ELSE 'unpaid' END AS status,
                 t.used_at, (o.table_id IS NOT NULL) AS is_vip, o.table_label, o.package_name,
-                COALESCE(hu.username, ${IME_GOSTA_IMETNIKA}) AS holder_username
+                COALESCE(hu.username, ${IME_GOSTA_IMETNIKA}) AS holder_username, ${GUEST_LISTA_POLJA}
          FROM tickets t JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK}
          WHERE t.event_id = $1
          ORDER BY t.id`, [id]),
@@ -5112,6 +5450,7 @@ app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken(), as
     const tickets = vst.rows.map(t => ({
       serial: t.serial, status: t.status, used_at: t.used_at, is_vip: t.is_vip, table_label: t.table_label || null,
       package_name: t.package_name || null, holder_username: t.holder_username || null,
+      is_guest_list: t.is_guest_list, guest_list_host_username: t.guest_list_host_username || null,   // 035: skener pokaze »Guest list · @host«
     }));
     const transferred_serials = prenosi.rows.map(x => x.old_serial);
     const etag = 'W/"' + crypto.createHash("sha256").update(JSON.stringify([kid, tickets, transferred_serials])).digest("base64url").slice(0, 27) + '"';

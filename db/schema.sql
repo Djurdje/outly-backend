@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–034, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–035, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,10 +15,10 @@
 -- PostgreSQL database dump
 --
 
-\restrict OEOLAos0s3OI8eyy2giY5L2ssoQJCo2Qa9YslaKfqnbXw1PsjeAY4Xr1OSR9hqr
+\restrict ggBsl9KgXLYwQ6igyX3UWioRn3pgYKe7CHUe03IBwGzmfAnNa2ktUAoioYfkENz
 
--- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
--- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
+-- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
+-- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -60,6 +60,10 @@ BEGIN
     IF NEW.table_id IS NOT NULL THEN
         RETURN NEW;
     END IF;
+    -- Guest lista (035, I24): brezplacne vstopnice, dodeljene od admina; ne stejejo v kapaciteto in ne zaklepajo dogodka.
+    IF NEW.guest_list_id IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
 
     -- FOR UPDATE zaklene vrstico dogodka do konca transakcije.
     SELECT capacity, sold_count INTO zmogljivost, zasedeno
@@ -85,7 +89,7 @@ CREATE FUNCTION public.sprosti_zalogo() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF OLD.table_id IS NOT NULL THEN
+    IF OLD.table_id IS NOT NULL OR OLD.guest_list_id IS NOT NULL THEN
         RETURN NEW;
     END IF;
     IF NEW.status IN ('cancelled','refunded','failed')
@@ -615,6 +619,90 @@ COMMENT ON TABLE public.gost_zetoni_vstopnic IS 'Zetoni za pogled gostujoce vsto
 
 
 --
+-- Name: guest_list_members; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.guest_list_members (
+    id bigint NOT NULL,
+    guest_list_id bigint NOT NULL,
+    user_id integer,
+    ticket_id bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    removed_at timestamp with time zone
+);
+
+
+--
+-- Name: TABLE guest_list_members; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.guest_list_members IS 'Povabljeni prijatelj na guest listi in njegova vstopnica. Odstranitev = removed_at in vstopnica void.';
+
+
+--
+-- Name: guest_list_members_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.guest_list_members_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: guest_list_members_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.guest_list_members_id_seq OWNED BY public.guest_list_members.id;
+
+
+--
+-- Name: guest_lists; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.guest_lists (
+    id bigint NOT NULL,
+    event_id integer NOT NULL,
+    host_user_id integer,
+    spots smallint NOT NULL,
+    note text DEFAULT ''::text NOT NULL,
+    created_by integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    revoked_at timestamp with time zone,
+    CONSTRAINT guest_lists_note_chk CHECK ((char_length(note) <= 200)),
+    CONSTRAINT guest_lists_spots_chk CHECK (((spots >= 0) AND (spots <= 20)))
+);
+
+
+--
+-- Name: TABLE guest_lists; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.guest_lists IS 'Guest lista: admin da gostitelju stevilo mest na enem dogodku; gostitelj povabi prijatelje (brez placila). Preklic = revoked_at (vrstica ostane).';
+
+
+--
+-- Name: guest_lists_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.guest_lists_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: guest_lists_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.guest_lists_id_seq OWNED BY public.guest_lists.id;
+
+
+--
 -- Name: omejitve; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -676,8 +764,10 @@ CREATE TABLE public.orders (
     guest_mail_sent_at timestamp with time zone,
     guest_mail_claimed_at timestamp with time zone,
     guest_mail_attempts smallint DEFAULT 0 NOT NULL,
+    guest_list_id bigint,
     CONSTRAINT orders_fee_chk CHECK (((application_fee_cents >= 0) AND (application_fee_cents <= total_cents))),
     CONSTRAINT orders_guest_chk CHECK (((guest_email IS NULL) OR ((guest_email = lower(guest_email)) AND (char_length(guest_email) <= 254) AND (POSITION(('@'::text) IN (guest_email)) > 1) AND (table_id IS NULL) AND (guest_terms_version IS NOT NULL) AND (guest_terms_accepted_at IS NOT NULL)))),
+    CONSTRAINT orders_guest_lista_chk CHECK (((guest_list_id IS NULL) OR ((status = 'paid'::text) AND (quantity = 1) AND (unit_price_cents = 0) AND (total_cents = 0) AND (application_fee_cents = 0) AND (refunded_cents = 0) AND (table_id IS NULL) AND (package_id IS NULL) AND (guest_email IS NULL) AND (stripe_payment_intent_id IS NULL) AND (stripe_charge_id IS NULL) AND (stripe_checkout_session_id IS NULL) AND (stripe_account_id IS NULL)))),
     CONSTRAINT orders_paid_chk CHECK (((status <> 'paid'::text) OR (paid_at IS NOT NULL))),
     CONSTRAINT orders_price_chk CHECK (((unit_price_cents >= 0) AND (total_cents >= 0))),
     CONSTRAINT orders_qty_chk CHECK (((quantity > 0) AND (quantity <= 20))),
@@ -721,6 +811,13 @@ COMMENT ON COLUMN public.orders.checkout_expires_at IS 'Potek Checkout seje; pos
 --
 
 COMMENT ON COLUMN public.orders.guest_email IS 'E-naslov gosta, ki je kupil brez racuna (user_id NULL do prevzema). Osebni podatek kot buyer_email; ob izbrisu racuna se postavi na NULL.';
+
+
+--
+-- Name: COLUMN orders.guest_list_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.guest_list_id IS 'Narocilo guest liste (035, I24): total 0, status paid, brez Stripa. NI prodaja: izlocitev iz sold_count, tickets_sold, bruto, stevila narocil.';
 
 
 --
@@ -1055,6 +1152,20 @@ ALTER TABLE ONLY public.friend_requests ALTER COLUMN id SET DEFAULT nextval('pub
 
 
 --
+-- Name: guest_list_members id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.guest_list_members ALTER COLUMN id SET DEFAULT nextval('public.guest_list_members_id_seq'::regclass);
+
+
+--
+-- Name: guest_lists id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.guest_lists ALTER COLUMN id SET DEFAULT nextval('public.guest_lists_id_seq'::regclass);
+
+
+--
 -- Name: orders id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -1223,6 +1334,22 @@ ALTER TABLE ONLY public.gost_zetoni
 
 ALTER TABLE ONLY public.gost_zetoni_vstopnic
     ADD CONSTRAINT gost_zetoni_vstopnic_pkey PRIMARY KEY (token_hash);
+
+
+--
+-- Name: guest_list_members guest_list_members_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.guest_list_members
+    ADD CONSTRAINT guest_list_members_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guest_lists guest_lists_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.guest_lists
+    ADD CONSTRAINT guest_lists_pkey PRIMARY KEY (id);
 
 
 --
@@ -1480,6 +1607,48 @@ CREATE INDEX gost_zetoni_vstopnic_ticket_idx ON public.gost_zetoni_vstopnic USIN
 
 
 --
+-- Name: guest_list_members_aktiven_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX guest_list_members_aktiven_key ON public.guest_list_members USING btree (guest_list_id, user_id) WHERE (removed_at IS NULL);
+
+
+--
+-- Name: guest_list_members_uporabnik_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX guest_list_members_uporabnik_idx ON public.guest_list_members USING btree (user_id) WHERE (removed_at IS NULL);
+
+
+--
+-- Name: guest_list_members_vstopnica_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX guest_list_members_vstopnica_key ON public.guest_list_members USING btree (ticket_id);
+
+
+--
+-- Name: guest_lists_aktivna_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX guest_lists_aktivna_key ON public.guest_lists USING btree (event_id, host_user_id) WHERE (revoked_at IS NULL);
+
+
+--
+-- Name: guest_lists_dogodek_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX guest_lists_dogodek_idx ON public.guest_lists USING btree (event_id);
+
+
+--
+-- Name: guest_lists_gostitelj_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX guest_lists_gostitelj_idx ON public.guest_lists USING btree (host_user_id) WHERE (revoked_at IS NULL);
+
+
+--
 -- Name: omejitve_okno_do_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1540,6 +1709,13 @@ CREATE INDEX orders_gost_poslano_idx ON public.orders USING btree (guest_mail_se
 --
 
 CREATE INDEX orders_gost_posta_idx ON public.orders USING btree (id) WHERE ((guest_email IS NOT NULL) AND (guest_mail_sent_at IS NULL) AND (status = 'paid'::text));
+
+
+--
+-- Name: orders_guest_list_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX orders_guest_list_key ON public.orders USING btree (guest_list_id) WHERE (guest_list_id IS NOT NULL);
 
 
 --
@@ -1964,6 +2140,54 @@ ALTER TABLE ONLY public.gost_zetoni_vstopnic
 
 
 --
+-- Name: guest_list_members guest_list_members_guest_list_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.guest_list_members
+    ADD CONSTRAINT guest_list_members_guest_list_id_fkey FOREIGN KEY (guest_list_id) REFERENCES public.guest_lists(id) ON DELETE CASCADE;
+
+
+--
+-- Name: guest_list_members guest_list_members_ticket_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.guest_list_members
+    ADD CONSTRAINT guest_list_members_ticket_id_fkey FOREIGN KEY (ticket_id) REFERENCES public.tickets(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guest_list_members guest_list_members_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.guest_list_members
+    ADD CONSTRAINT guest_list_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: guest_lists guest_lists_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.guest_lists
+    ADD CONSTRAINT guest_lists_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: guest_lists guest_lists_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.guest_lists
+    ADD CONSTRAINT guest_lists_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guest_lists guest_lists_host_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.guest_lists
+    ADD CONSTRAINT guest_lists_host_user_id_fkey FOREIGN KEY (host_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
 -- Name: orders orders_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1977,6 +2201,14 @@ ALTER TABLE ONLY public.orders
 
 ALTER TABLE ONLY public.orders
     ADD CONSTRAINT orders_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: orders orders_guest_list_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_guest_list_id_fkey FOREIGN KEY (guest_list_id) REFERENCES public.guest_lists(id) ON DELETE RESTRICT;
 
 
 --
@@ -2103,5 +2335,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict OEOLAos0s3OI8eyy2giY5L2ssoQJCo2Qa9YslaKfqnbXw1PsjeAY4Xr1OSR9hqr
+\unrestrict ggBsl9KgXLYwQ6igyX3UWioRn3pgYKe7CHUe03IBwGzmfAnNa2ktUAoioYfkENz
 

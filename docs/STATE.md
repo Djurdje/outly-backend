@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-05 (nakup brez računa; prej 2026-10-02: prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
+Zadnja posodobitev: 2026-10-08 (guest lista, migracija 035; prej 2026-10-05: nakup brez računa; prej 2026-10-02: prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -140,6 +140,15 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 - **Postopek: ugovor/izbris prejemnika** (odgovor na mail ali zahteva): admin (račun z vlogo admin) pokliče `POST /admin/api/guest-tickets/erase` z `{ "email": "<naslov>" }`; odgovor `{ tickets, transfers }`. Povezava preneha delovati, vstopnica in koda v mailu veljata naprej (vrnitev pošiljatelju ročno). Ni v admin panelu.
 - **Meja (GDPR 21, za Martina/pravnika):** po izbrisu (erase ali anonimizacija) se štetje na naslov pozabi in seznama zavrnjenih naslovov ni: pošiljatelj lahko isti naslov spet vpiše.
 - **Meja:** po prevzemu v račun se serial NE zamenja (PDF/koda v mailu veljata naprej); ugovor prejemnika (21(4)) gre z odgovorom na mail (ročno), gumba »Zavrni vstopnico« ni.
+
+## Guest lista (od 8. 10. 2026; ARCHITECTURE »Guest lista«, I24, DECISIONS 8. 10.)
+
+- **Odjemalca (ios-dev, web-dev):** nove poti `GET /me/guest-lists` (404 na starem backendu: razdelek skrij), `POST /me/guest-lists/:id/invites { user_ids, age_confirmed? }`, `DELETE /me/guest-lists/:id/invites/:userId`; nova polja `is_guest_list` (privzeto false) in `guest_list_host_username` (privzeto null) v `GET /me/tickets`, odgovoru skena,
+  `scan-list` in poslovnih vstopnicah; `transferable` je pri guest listi false, prenos 409 `Guest list tickets can't be transferred.`. Napake: besedilo (403/409, `userMessage`) in JSON 400 `age_confirmation_required` + `min_age` (kot prenos). **Dodatno k pogodbi:** 409 `This guest list has reached its limit of changes. Contact Outly.` (meja 60 vrstic povabljencev na listi, tudi odstranjenih).
+  Povabljenec dobi vstopnico brez obvestila (ni v `/me/tickets/received`); razveljavljene (`void`) vstopnice guest liste `GET /me/tickets` ne vrača; `GET /me/orders` guest liste ne vrača (ni nakup). VIP razdelitev po nakupu (točka 1 pogodbe) je samo odjemalca: backend nespremenjen. Admin panel (zavihek »Guest lists«) je že v `admin/index.html`.
+- **Past (vsak, ki piše poizvedbo po `orders`/`tickets`):** narocilo guest liste JE vrstica `orders` (total 0, `paid`): vsaka nova agregacija PRODAJE mora imeti `o.guest_list_id IS NULL`, sicer guest lista napihne število naročil, kupcev in vstopnic. Test I24 ujame samo obstoječe poti.
+- **Past:** `checked_in` (prodajni pregled, finance) šteje tudi vstope z guest liste, zato je lahko večji od `tickets_sold`. Dogodek z guest listo se ne da izbrisati (`DELETE /events/:id` ga odpove, FK); lastnik kluba, katerega dogodek ima guest listo, računa ne more izbrisati (`club_has_orders` šteje tudi naročila liste).
+- **Predpostavke agenta (Martin jih ni potrdil):** guest lista ne šteje v kapaciteto (skupaj s prodajo lahko preseže `capacity`); ni obvestila prijatelju; lista samo za objavljen dogodek; ena aktivna lista na (dogodek, gostitelj). Postavljeno z migracijo 035 (samo dodajanje); PR je pod `odobril-martin` (migracija + `orders`/`tickets`).
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 

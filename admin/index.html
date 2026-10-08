@@ -121,6 +121,7 @@
       <button data-z="klubi">Klubi</button>
       <button data-z="uporabniki">Uporabniki</button>
       <button data-z="dogodki">Dogodki</button>
+      <button data-z="guest">Guest lists</button>
       <button data-z="finance">Finance</button>
     </nav>
 
@@ -222,6 +223,31 @@
             <button class="tih mali" onclick="naloziDogodke()">Osveži</button>
           </span></h2>
         <div class="tabela" id="dTabela"></div>
+      </div>
+    </section>
+
+    <!-- GUEST LISTS (migracija 035): dogodek + gostitelj + stevilo mest; gostitelj nato v aplikaciji povabi prijatelje -->
+    <section id="z-guest" class="skrito">
+      <div class="skupina">
+        <h2>Nova guest lista</h2>
+        <div class="telo">
+          <div class="polja">
+            <div class="siroko"><label>Dogodek * (objavljeni, ki se niso koncani)</label><select id="g_dogodek"></select></div>
+            <div class="siroko"><label>Gostitelj * (iskanje po uporabniškem imenu ali e-naslovu)</label>
+              <div class="vrsta"><input id="g_isci" placeholder="npr. ana ali ana@outly.si" style="max-width:320px"><button class="tih mali" id="g_isciGumb" type="button">Išči</button></div>
+              <div id="g_zadetki" class="vrsta" style="margin-top:8px"></div>
+              <div id="g_izbran" style="margin-top:6px;font-size:12.5px;color:var(--muted)">Nihče ni izbran.</div>
+            </div>
+            <div><label>Število mest (0–20) *</label><input id="g_mesta" type="number" min="0" max="20" step="1" value="5"></div>
+            <div class="siroko"><label>Opomba (največ 200 znakov, vidi jo gostitelj)</label><input id="g_opomba" maxlength="200"></div>
+          </div>
+          <div class="vrsta"><button id="g_ustvari" type="button">Ustvari listo</button><span id="g_sporocilo" style="font-size:12.5px;color:var(--faint)"></span></div>
+          <p style="font-size:12.5px;color:var(--faint);margin:12px 0 0">Gostitelj in vsak povabljeni prijatelj dobita vsak svojo vstopnico (svojo kodo QR). Gostitelj lahko povabi samo prijatelje na Outlyju. Vstopnice guest liste ne štejejo v zmogljivost dogodka in ne v prodajo.</p>
+        </div>
+      </div>
+      <div class="skupina">
+        <h2>Liste <span class="desno"><select id="g_filter" style="width:auto"></select><button class="tih mali" id="g_osvezi" type="button">Osveži</button></span></h2>
+        <div class="tabela" id="g_tabela"></div>
       </div>
     </section>
   </div>
@@ -336,7 +362,7 @@ function pokaziPanel() {
 
 // ---------- zavihki ----------
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => pokaziZavihek(b.dataset.z));
-const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke, finance: naloziFinance };
+const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke, guest: naloziGuest, finance: naloziFinance };
 function pokaziZavihek(z) {
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("aktiven", b.dataset.z === z));
   document.querySelectorAll("section[id^=z-]").forEach(s => s.classList.toggle("skrito", s.id !== "z-" + z));
@@ -563,6 +589,104 @@ async function naloziDogodke() {
 async function dStatus(id, status) {
   await varno(async () => { const r = await klic("PATCH", "/admin/api/events/" + id, { status }); obvesti(`"${r.title}" → ${status}.`, "ok"); naloziDogodke(); naloziPregled(); });
 }
+
+// ---------- guest lists ----------
+// Brez nastavljanja HTML-ja iz podatkov: vsi podatki (imena, e-naslovi, opombe) gredo v DOM samo prek textContent / createTextNode / setAttribute (XSS).
+function h(tag, lastnosti, ...otroci) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(lastnosti || {})) {
+    if (k === "onclick") e.onclick = v; else if (k === "class") e.className = v; else e.setAttribute(k, v);
+  }
+  for (const o of otroci.flat()) if (o !== null && o !== undefined && o !== false) e.append(o.nodeType ? o : document.createTextNode(String(o)));
+  return e;
+}
+let gDogodki = [], gIzbran = null;
+function gKonec(x) { return x.end_at ? new Date(x.end_at).getTime() : new Date(x.start_at).getTime() + 8 * 3600 * 1000; }
+async function naloziGuest() {
+  await varno(async () => {
+    const d = await klic("GET", "/admin/api/events?status=published");
+    gDogodki = d.filter(x => gKonec(x) > Date.now()).sort((a, b) => new Date(a.start_at) - new Date(b.start_at));
+    const opis = (x) => `${x.title} · ${x.club_name} · ${datum(x.start_at)}${x.min_age ? " · " + x.min_age + "+" : ""}`;
+    const sel = $("g_dogodek"), f = $("g_filter"), prej = f.value;
+    sel.replaceChildren(...(gDogodki.length ? gDogodki.map(x => h("option", { value: x.id }, opis(x))) : [h("option", { value: "" }, "Ni prihajajočih objavljenih dogodkov")]));
+    f.replaceChildren(h("option", { value: "" }, "vsi prihajajoči dogodki"), ...gDogodki.map(x => h("option", { value: x.id }, opis(x))));
+    f.value = gDogodki.some(x => String(x.id) === prej) ? prej : "";
+    f.onchange = naloziGuestListe;
+    await naloziGuestListe();
+  });
+}
+async function gIsciUporabnika() {
+  await varno(async () => {
+    const q = $("g_isci").value.trim();
+    if (q.length < 2) { $("g_zadetki").replaceChildren(h("span", { style: "color:var(--faint);font-size:12.5px" }, "Vpiši vsaj 2 znaka.")); return; }
+    const u = await klic("GET", "/admin/api/users?q=" + encodeURIComponent(q));
+    $("g_zadetki").replaceChildren(...(u.length
+      ? u.slice(0, 8).map(x => h("button", { class: "tih mali", type: "button", onclick: () => gIzberi(x) }, `${x.username} · ${x.email}`))
+      : [h("span", { style: "color:var(--faint);font-size:12.5px" }, "Ni zadetkov.")]));
+  });
+}
+function gIzberi(u) {
+  gIzbran = { id: u.id, username: u.username, email: u.email };
+  $("g_izbran").replaceChildren(h("span", { class: "znacka ok" }, "izbran"), ` ${u.username} (${u.email}), uporabnik #${u.id}`);
+}
+async function gUstvari() {
+  await varno(async () => {
+    const dogodek = Number($("g_dogodek").value), mesta = Number($("g_mesta").value);
+    if (!Number.isInteger(dogodek) || dogodek <= 0) throw new Error("Izberi dogodek.");
+    if (!gIzbran) throw new Error("Izberi gostitelja (poišči uporabnika in klikni nanj).");
+    if (!Number.isInteger(mesta) || mesta < 0 || mesta > 20) throw new Error("Število mest mora biti celo število od 0 do 20.");
+    $("g_ustvari").disabled = true;
+    try {
+      const r = await klic("POST", "/admin/api/guest-lists", { event_id: dogodek, user_id: gIzbran.id, spots: mesta, note: $("g_opomba").value.trim() });
+      obvesti(`Guest lista #${r.guest_list.id}: ${r.guest_list.host.username}, ${r.guest_list.spots} mest.`, "ok");
+      gIzbran = null; $("g_izbran").replaceChildren("Nihče ni izbran."); $("g_zadetki").replaceChildren(); $("g_isci").value = ""; $("g_opomba").value = "";
+      await naloziGuestListe();
+    } finally { $("g_ustvari").disabled = false; }
+  });
+}
+async function gShrani(id) {
+  await varno(async () => {
+    const r = await klic("PATCH", "/admin/api/guest-lists/" + id, { spots: Number($("g_m" + id).value), note: $("g_o" + id).value.trim() });
+    obvesti(`Lista #${r.guest_list.id} shranjena: ${r.guest_list.spots} mest, ${r.guest_list.remaining} prostih.`, "ok");
+    await naloziGuestListe();
+  });
+}
+async function gPreklici(id, host) {
+  if (!confirm(`Preklicati listo gostitelja ${host}? Vse neuporabljene vstopnice liste (tudi povabljenih) postanejo neveljavne.`)) return;
+  await varno(async () => { await klic("DELETE", "/admin/api/guest-lists/" + id); obvesti(`Lista #${id} preklicana.`, "ok"); await naloziGuestListe(); });
+}
+async function naloziGuestListe() {
+  await varno(async () => {
+    const ev = $("g_filter").value;
+    const d = await klic("GET", "/admin/api/guest-lists" + (ev ? "?event_id=" + encodeURIComponent(ev) : ""));
+    const el = $("g_tabela");
+    if (!d.guest_lists.length) { el.replaceChildren(h("div", { class: "prazno" }, "Ni guest list.")); return; }
+    const vrstica = (x) => {
+      const aktivna = !x.revoked_at;
+      return h("tr", {},
+        h("td", { class: "mono" }, x.id),
+        h("td", {}, h("b", {}, x.event.title), h("span", { class: "drobno" }, `${x.event.club_name} · ${datum(x.event.start_at)}${x.event.min_age ? " · " + x.event.min_age + "+" : ""}`)),
+        h("td", {}, x.host.username || "(izbrisan)", h("span", { class: "drobno" }, x.host.email || "")),
+        h("td", {}, aktivna
+          ? h("div", { class: "vrsta" }, h("input", { id: "g_m" + x.id, type: "number", min: 0, max: 20, step: 1, value: x.spots, style: "width:70px" }), h("span", { class: "drobno" }, `${x.remaining} prostih`))
+          : h("span", { class: "mono" }, `${x.spots}`)),
+        h("td", {}, aktivna ? h("input", { id: "g_o" + x.id, maxlength: 200, value: x.note, style: "min-width:160px" }) : h("span", {}, x.note)),
+        h("td", {}, x.invited.length ? x.invited.map(i => `${i.username}${i.status === "used" ? " ✓" : ""}`).join(", ") : "—"),
+        h("td", {}, aktivna ? h("span", { class: "znacka ok" }, "aktivna") : h("span", { class: "znacka slabo" }, "preklicana"),
+          h("span", { class: "drobno" }, x.event.status !== "published" ? x.event.status : "")),
+        h("td", {}, aktivna ? h("div", { class: "vrsta" },
+          h("button", { class: "tih mali", type: "button", onclick: () => gShrani(x.id) }, "Shrani"),
+          h("button", { class: "nevarno mali", type: "button", onclick: () => gPreklici(x.id, x.host.username || "") }, "Prekliči")) : ""));
+    };
+    el.replaceChildren(h("table", {},
+      h("thead", {}, h("tr", {}, ["#", "Dogodek", "Gostitelj", "Mesta", "Opomba", "Povabljeni (✓ = vstopil)", "Stanje", ""].map(g => h("th", {}, g)))),
+      h("tbody", {}, d.guest_lists.map(vrstica))));
+  });
+}
+$("g_isciGumb").onclick = gIsciUporabnika;
+$("g_isci").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); gIsciUporabnika(); } };
+$("g_ustvari").onclick = gUstvari;
+$("g_osvezi").onclick = naloziGuestListe;
 
 // ---------- zagon ----------
 if (seja.token) {
