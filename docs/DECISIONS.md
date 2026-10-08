@@ -472,3 +472,20 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 - 2026-10-08: **Obvestilo prijatelju ob vabilu na guest listo (Martin, 8. 10. 2026: »dodaj obvestilo prijatelju ob vabilu«).** Odločitev agenta (Martin je ni potrdil): obvestilo = obstoječi **zvonec** (meni obvestil), isti vzorec kot »X ti je poslal vstopnico« (migracija 017); **brez maila in brez pusha** (push obvestil projekt nima).
   Izvedba: `guest_list_members.seen_at` (migracija 036; obstoječa vabila prebrana), `GET /me` `pending_guest_list_invites`, `GET /me/guest-list-invites/received`, `POST /me/guest-list-invites/received/:id/seen`. Lastna tabela/pot namesto `ticket_transfers`: vabilo na listo ni prenos (seriala ne zamenja, I7 `transferred_serials` ostane nedotaknjen).
   *vir/dokaz*: pogovor 8. 10. 2026 · *velja dokler*: Martin ne odloči drugače · *nadomeščena z*: — (točka (9) zgoraj je nadomeščena s to).
+
+## Skener brez izbire dogodka (8. 10. 2026)
+
+- 2026-10-08: **Vratar v skenerju ne izbira dogodka; dogodek se prebere iz QR kode, velja okno 12 h pred začetkom do 6 h po koncu**
+  (Martin: "naredi da tega ne bo rabil izbirat", okno potrdil: "ok 12 h prej in 6 h po koncu"). Velja za iOS in splet.
+  Dogodek je **aktiven**, če je objavljen in je zdaj med `start − 12 h` in `konec + 6 h` (meji vključeni); konec = `end_at`, če je
+  po začetku, sicer `start + 12 h`. Skener sam prenaša sezname vstopnic (`scan-list`) za VSE aktivne dogodke kluba. Koda za dogodek
+  izven okna ali neznan dogodek je rdeča »NOT TODAY'S EVENT« / »NI ZA DANES«; pri kodi v1 se nepodpisani `e` uporabi samo za
+  zavrnitev. Brez aktivnega dogodka zaslon z naslednjim dogodkom; ročne izbire ni več. Ročni »Check in« (splet) upošteva isto okno.
+  Prej okna ni bilo: vratar je ročno izbral katerikoli dogodek (iOS) in vstopnica zanj je veljala kadarkoli.
+  **Okno uveljavlja samo odjemalec, backend ne** (`POST /business/tickets/scan` in `scan-batch` časa ne preverjata;
+  `SKEN_REZERVA_PRED_ZACETKOM_MS` je samo meja za `used_at`). Starejše iOS gradnje in v1 kode brez `e` gredo mimo okna.
+  Strežniško okno bi bila sprememba poti vstopnic (`odobril-martin`) — Martin še ni odločil.
+  Okno uporablja uro telefona; ob razliki > 5 min proti `generated_at` iz `scan-list` skener opozori (ne popravlja).
+  Razlika: backend `KONEC_DOGODKA` (lifecycle `ended`) privzeto `start + 8 h`, skener `start + 12 h` — namenoma (Martin).
+  *vir/dokaz*: Martinova sporočila v pogovoru 8. 10. 2026; outly_webpage #42, outly-app #68 · *velja dokler*: Martin ne reče drugače ·
+  *nadomeščena z*: —
