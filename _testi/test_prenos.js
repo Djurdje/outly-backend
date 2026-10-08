@@ -155,6 +155,8 @@ async function api(method, path, token, body) {
   assert(r.status === 201, "bor kupi vstopnico za sken", r.body);
   const vstopnicaBor = r.body.tickets[0].id;
   const serialBor = (await pool.query("SELECT serial FROM tickets WHERE id=$1", [vstopnicaBor])).rows[0].serial;
+  // Sken je mogoc v oknu od 12 h pred zacetkom do 6 h po koncu (I25, test_sken_okno.js): dogodek zacnemo pred 1 h.
+  await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '1 hour' WHERE id=$1", [dogodekOsnovni]);
   r = await api("POST", "/business/tickets/scan", T.lastnik, { serial: serialBor });
   assert(r.status === 200, "priprava: vstopnica skenirana (used)", r.body);
   r = await api("POST", `/tickets/${vstopnicaBor}/transfer`, T.bor, { email: "cene@outly.si" });
@@ -296,6 +298,7 @@ async function api(method, path, token, body) {
   const vKlubu = r.status === 200 && r.body.find(t => t.id === vA1);
   assert(vKlubu && vKlubu.serial === serialA1Novi && typeof vKlubu.qr === "string" && vKlubu.holder_username === "cene" && vKlubu.holder_email === "cene@outly.si",
     "klub (GET /business/events/:id/tickets) vidi serial in imetnika prenesene vstopnice", r.body);
+  await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '1 hour' WHERE id=$1", [dogodekPogled]);   // okno skena (I25)
   r = await api("POST", "/business/tickets/scan", T.lastnik, { serial: serialA1Novi });
   assert(r.status === 200 && r.body.result === "ok", "vratar skenira nov serial prejemnika -> 200", r.body);
 

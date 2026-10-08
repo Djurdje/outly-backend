@@ -105,8 +105,9 @@ async function api(method, path, token, body, signal) {
   await pool.query("UPDATE users SET role='business' WHERE email='lastnik@outly.si'");
   await pool.query("INSERT INTO clubs (owner_user_id, name, city) VALUES ((SELECT id FROM users WHERE email='lastnik@outly.si'), 'Vrsta Club', 'Ljubljana')");
   const cezDan = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
-  const dogodek = async (naslov, kapaciteta) => (await pool.query(
-    "INSERT INTO events (club_id, title, start_at, status, ticket_price_cents, capacity, min_age) VALUES (1,$1,$2,'published',1000,$3,0) RETURNING id", [naslov, cezDan, kapaciteta])).rows[0].id;
+  const cez2Uri = new Date(Date.now() + 2 * 3600 * 1000).toISOString();   // znotraj okna skena (12 h pred zacetkom, I25), nakup je se mogoc
+  const dogodek = async (naslov, kapaciteta, zacetek = cezDan) => (await pool.query(
+    "INSERT INTO events (club_id, title, start_at, status, ticket_price_cents, capacity, min_age) VALUES (1,$1,$2,'published',1000,$3,0) RETURNING id", [naslov, zacetek, kapaciteta])).rows[0].id;
   const E = await dogodek("E zaklenjen", 1000), F = await dogodek("F capacity 1", 1), H = await dogodek("H capacity 1", 1);
 
   console.log("\n## 503 po izteku cakanja");
@@ -228,7 +229,8 @@ async function api(method, path, token, body, signal) {
   console.log("\n# S4: izcrpan pool ni odjava (PG_POOL_MAX=1, PG_SKEN_POOL_MAX=1, kratki timeouti)");
   await zagon(3144, { PG_POOL_MAX: "1", PG_CONNECT_TIMEOUT_MS: "300", PG_SKEN_POOL_MAX: "1", PG_SKEN_CONNECT_TIMEOUT_MS: "300" });
   const E4 = await dogodek("E4 zaklenjen", 1000);
-  const kup = await api("POST", `/events/${E4}/orders`, U.kupec_c, { quantity: 1 });
+  const E4sken = await dogodek("E4 sken (v oknu skena)", 1000, cez2Uri);
+  const kup = await api("POST", `/events/${E4sken}/orders`, U.kupec_c, { quantity: 1 });
   assert(kup.status === 201 && kup.body.tickets.length === 1, "priprava: vstopnica za sken", kup);
   const koda = kup.body.tickets[0];
   const lkE = await zakleni(E4);

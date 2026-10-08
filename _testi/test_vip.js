@@ -464,6 +464,8 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
   assert(!r.body.some(t => t.id === prenosVst.id) && r.body.filter(t => t.is_vip && t.event_id === E1).length === 5, "ana prenesene vstopnice ne vidi vec (ostane 5)", r.body.length);
 
   console.log("\n# Sken VIP vstopnice in rezervacije");
+  // Sken je mogoc v oknu od 12 h pred zacetkom do 6 h po koncu (I25, test_sken_okno.js): dogodek zacne cez 2 h (nakupi so se mogoci).
+  await pool.query("UPDATE events SET start_at = NOW() + INTERVAL '2 hours' WHERE id=$1", [E1]);
   r = await api("POST", "/business/tickets/scan", T.doorman, { qr: ceneVip.qr });
   assert(r.status === 200 && r.body.result === "ok", "vratar skenira prenesen VIP QR -> 200", r.body);
   assert(r.body.ticket.is_vip === true && r.body.ticket.table_label === "T1" && r.body.ticket.table_seats === 6 && r.body.ticket.package_name === "Jameson 0,7 l" && r.body.ticket.package_description === "4x Red Bull, 1 l orange juice", "sken vrne VIP polja (miza, sedezi, paket)", r.body.ticket);

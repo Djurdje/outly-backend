@@ -685,6 +685,7 @@ function zeljeniKlub(req) {
 // rabijo klub, mu vrnejo 404 kot do zdaj; poti za urejanje dogodkov ga spustijo.
 // Vratar (doorman) sme SAMO skenirati in gledati vstopnice dogodka.
 const INT4_MAX = 2147483647;
+const { jeVOknuSkena, SKEN_OKNO_PRED_MS } = require("./sken_okno");   // casovno okno skena (I25)
 const { jeNapakaPovezave, odgovoriNaNapako } = require("./napaka_povezave");   // 503 samo za napake povezave/baze, ostalo 500
 function requireClubNa(db, vloge) {
   return async (req, res, next) => {
@@ -5415,7 +5416,7 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (re
     if (!klub) return res.status(404).send("Club not found.");
 
     const r = await skenPool.query(
-      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, e.club_id, e.title AS event_title, e.start_at, e.status AS event_status, o.status AS order_status, o.public_ref, o.buyer_email,
+      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, e.club_id, e.title AS event_title, e.start_at, e.end_at, e.status AS event_status, o.status AS order_status, o.public_ref, o.buyer_email,
               ${STOLPCI_IMETNIKA}
        FROM tickets t JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK} WHERE t.serial = $1`, [serial]
     );
@@ -5432,6 +5433,9 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (re
     if (!["paid", "partially_refunded"].includes(t.order_status)) return res.status(409).json({ result: "unpaid", message: "Order is not paid." });
     if (t.status === "used") return res.status(409).json({ result: "already_used", message: "Ticket was already scanned.", used_at: t.used_at, ticket: t });
     if (t.status !== "valid") return res.status(409).json({ result: t.status, message: `Ticket is ${t.status}.`, ticket: t });
+    // Casovno okno (I25, Martin 8. 10. 2026): dogodek je aktiven od 12 h pred zacetkom do 6 h po koncu. Isto pravilo imata odjemalca;
+    // streznik ga uveljavi tudi za starejse gradnje in kode brez `e`. Brez nove poizvedbe: start_at/end_at sta ze v vrstici.
+    if (!jeVOknuSkena(t.start_at, t.end_at, Date.now())) return res.status(409).json({ result: "not_today", message: "This ticket is not for today's event.", ticket: t });
 
     // Pogoj serial=$4: če je bila vstopnica med branjem zgoraj in tem UPDATE-om
     // prenesena prijatelju (prenos ji da NOV serial), stara koda ne sme več
@@ -5519,7 +5523,7 @@ app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken(), as
 // na že uporabljeni vstopnici je ponovitev paketa (-> "ok" z izvirnim used_at); drug zaznamek je pravi dvojni sken (-> "already_used").
 const SKEN_BATCH_NAJVEC = 500;
 const SKEN_NAJZGODNEJE_MS = Date.UTC(2020, 0, 1);
-const SKEN_REZERVA_PRED_ZACETKOM_MS = 12 * 3600 * 1000; // vrata se odprejo pred zacetkom dogodka
+const SKEN_REZERVA_PRED_ZACETKOM_MS = SKEN_OKNO_PRED_MS; // vrata se odprejo pred zacetkom dogodka (isto kot casovno okno skena, I25)
 const SKEN_ID_VZOREC = /^[A-Za-z0-9._:-]{1,64}$/;
 const SERIAL_VZOREC = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const jsonVelik = express.json({ limit: "1mb" });
@@ -5569,7 +5573,7 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken(), jso
     const prenesene = new Map();
     if (serijski.length) {
       const r = await skenPool.query(
-        `SELECT t.id, t.serial, t.status, t.used_at, t.used_by_user_id, t.scan_device, t.event_id, t.created_at, e.club_id, e.start_at, e.status AS event_status, o.status AS order_status
+        `SELECT t.id, t.serial, t.status, t.used_at, t.used_by_user_id, t.scan_device, t.event_id, t.created_at, e.club_id, e.start_at, e.end_at, e.status AS event_status, o.status AS order_status
          FROM tickets t JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = t.order_id
          WHERE t.serial = ANY($1::uuid[])`, [serijski]);
       for (const t of r.rows) vrstice.set(t.serial, t);
@@ -5583,6 +5587,15 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken(), jso
     }
 
     const iso = (d) => (d ? new Date(d).toISOString() : null);
+    // Cas skena za presojo okna (I25): ura na telefonu (scanned_at), ker skeni brez povezave pridejo s zamudo (tudi ure po koncu okna);
+    // enaka razumnost kot za used_at v UPDATE spodaj (ne v prihodnosti, ne pred nastankom vstopnice, ne prej kot 12 h pred zacetkom) -> sicer zdaj.
+    const casSkena = (kdaj, t) => {
+      const zdaj = Date.now();
+      if (!kdaj) return zdaj;
+      const k = Date.parse(kdaj);
+      const najprej = Math.max(new Date(t.created_at).getTime(), new Date(t.start_at).getTime() - SKEN_REZERVA_PRED_ZACETKOM_MS);
+      return Number.isFinite(k) && Number.isFinite(najprej) && k <= zdaj && k >= najprej ? k : zdaj;
+    };
     // Ponovitev paketa = isti zaznamek (device_id + client_scan_id) IN isti uporabnik. Zaznamek izbere odjemalec, zato bi brez
     // preverjanja uporabnika drug clan ekipe z istim parom dobil napacen "ok". Odjemalec naj device_id in client_scan_id generira nakljucno (UUID).
     const jePonovitev = (v, d) => v.scan_device === d.zaznamek && v.used_by_user_id !== null && Number(v.used_by_user_id) === Number(req.user.userId);
@@ -5599,6 +5612,7 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken(), jso
         else if (!["paid", "partially_refunded"].includes(t.order_status)) rez = { result: "unpaid", used_at: null };
         else if (t.status === "used") rez = { result: jePonovitev(t, d) ? "ok" : "already_used", used_at: iso(t.used_at) };
         else if (t.status !== "valid") rez = { result: t.status, used_at: null };
+        else if (!jeVOknuSkena(t.start_at, t.end_at, casSkena(d.kdaj, t))) rez = { result: "not_today", used_at: null };
         else {
           // used_at = ura na telefonu, če je razumna: ne v prihodnosti, ne pred nastankom vstopnice, ne prej kot 12 h pred začetkom dogodka.
           // Pogoj serial = $4 kot pri /scan: prenos med branjem in pisanjem da vstopnici nov serial, stara koda ne sme več veljati.

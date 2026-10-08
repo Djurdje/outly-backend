@@ -218,6 +218,9 @@ let srv = null;   // proces backenda (ubit tudi ob izjemi)
   }
   assert(kodeSken.length === 400, "pripravljenih 400 vstopnic dogodka B za sken", kodeSken.length);
 
+  // Sken je mogoc v oknu od 12 h pred zacetkom do 6 h po koncu (I25, test_sken_okno.js): dogodek B (sken) zacnemo pred 1 h.
+  await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '1 hour' WHERE id=$1", [dogodekB]);
+
   // Rezerva za sken po obremenitvi (skenerji med navalo lahko porabijo vse ostale kode).
   const kodePoNavali = kodeSken.splice(0, 20);
 
