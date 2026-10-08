@@ -486,7 +486,7 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   izven okna vrne 409 `not_today` (»This ticket is not for today's event.«), `scan-batch` presoja okno po času skena (`scanned_at`, če je razumen, sicer zdaj)
   in vrne element `not_today`; vstopnica ostane `valid`. `event_cancelled` ima prednost, ponovitev že sprejetega paketa ostane `ok` (idempotenca).
   Starejše iOS gradnje in v1 kode brez `e` tako ne gredo več mimo okna. `scan-list`, `scan-key` in `GET /business/events` se niso spremenili.
-  Prej (do 8. 10. 2026 zvečer) okna backend ni uveljavljal; `SKEN_REZERVA_PRED_ZACETKOM_MS` je še vedno samo meja za `used_at`.
+  Prej (do 8. 10. 2026 zvečer) okna backend ni uveljavljal; `SKEN_REZERVA_PRED_ZACETKOM_MS` je zdaj alias za `SKEN_OKNO_PRED_MS` (12 h): meja za `used_at` in hkrati meja, do katere se `scanned_at` upošteva pri presoji okna (prej kot 12 h pred začetkom velja zdaj).
   Okno uporablja uro telefona; ob razliki > 5 min proti `generated_at` iz `scan-list` skener opozori (ne popravlja).
   Razlika: backend `KONEC_DOGODKA` (lifecycle `ended`) privzeto `start + 8 h`, skener `start + 12 h` — namenoma (Martin).
   *vir/dokaz*: Martinova sporočila v pogovoru 8. 10. 2026 (tudi »ja dodaj še preverjanje okna na strežniku«); outly_webpage #42, outly-app #68 · *velja dokler*: Martin ne reče drugače ·

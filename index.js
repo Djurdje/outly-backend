@@ -5646,7 +5646,7 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken(), jso
       rezultati[d.i] = { client_scan_id: d.cid, serial: d.serial, ...rez };
     }
     const stevilo = (r) => rezultati.filter(x => x.result === r).length;
-    console.log(`Sken-batch: klub ${klub}, uporabnik ${req.user.userId}: ${n} skenov, ok ${stevilo("ok")}, already_used ${stevilo("already_used")}, transferred ${stevilo("transferred")}, error ${stevilo("error")}`);
+    console.log(`Sken-batch: klub ${klub}, uporabnik ${req.user.userId}: ${n} skenov, ok ${stevilo("ok")}, already_used ${stevilo("already_used")}, transferred ${stevilo("transferred")}, not_today ${stevilo("not_today")}, error ${stevilo("error")}`);
     return res.status(200).json({ results: rezultati });
   } catch (e) { return odgovoriNaNapako(res, e, "POST /business/tickets/scan-batch"); }
 });
