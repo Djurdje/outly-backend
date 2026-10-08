@@ -5426,6 +5426,9 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (re
     // Guest lista (035, I24): vratar vidi uporabnisko ime imetnika in gostitelja (is_guest_list, guest_list_host_username), nikoli e-naslova
     // (buyer_email = gostitelj, holder_email = povabljeni prijatelj); skener pokaze »Guest list · @host«.
     if (t.is_guest_list) { delete t.buyer_email; delete t.holder_email; }
+    // Vratar (zacasno osebje, I21) e-naslovov navadnih kupcev ne vidi nikjer: brisanje je tu, na vrstici `t`, PRED vsemi vejami odgovora
+    // (ok, already_used, event_cancelled, status != valid ...), ker vse vracajo `ticket: t`. Nova veja z `ticket: t` je s tem pokrita sama.
+    if (req.klub.role === "doorman") { delete t.buyer_email; delete t.holder_email; }
     if (t.club_id !== klub) return res.status(403).json({ result: "wrong_club", message: "This ticket is for another club's event." });
     if (ev !== undefined && ev !== null && Number(ev) !== t.event_id) return res.status(400).json({ result: "invalid", message: "QR code does not match the ticket." });
     // Odpovedan dogodek: narocila ostanejo placana (vracilo je rocno), vstopnice pa na vratih ne smejo vec veljati.
