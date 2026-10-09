@@ -14,7 +14,9 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:16
+        # Ista uradna slika, a z AWS-ovega javnega zrcala: Docker Hub neavtenticirane prenose z runnerjev omejuje
+        # (toomanyrequests, 9. 10. 2026 dva zaporedna padca pred prvim testom).
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
