@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–037, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–038, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict UBFoayXLBvcnvIiqgglue8FUiKb2NWf5BrrFSAxhPWbB1cbeICPggJulje4ynZx
+\restrict XDAha7EwGQLn8BFhErkbBAHMCTIZr4DPlbJjraSQEm4dO2at7l1hKk91tLSFs41
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -212,7 +212,7 @@ CREATE TABLE public.club_invites (
     invited_by_user_id integer,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     responded_at timestamp with time zone,
-    CONSTRAINT club_invites_role_check CHECK ((role = ANY (ARRAY['manager'::text, 'doorman'::text]))),
+    CONSTRAINT club_invites_role_check CHECK ((role = ANY (ARRAY['manager'::text, 'doorman'::text, 'bartender'::text]))),
     CONSTRAINT club_invites_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'accepted'::text, 'declined'::text, 'cancelled'::text])))
 );
 
@@ -248,7 +248,7 @@ CREATE TABLE public.club_members (
     role text NOT NULL,
     invited_by_user_id integer,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT club_members_role_check CHECK ((role = ANY (ARRAY['manager'::text, 'doorman'::text])))
+    CONSTRAINT club_members_role_check CHECK ((role = ANY (ARRAY['manager'::text, 'doorman'::text, 'bartender'::text])))
 );
 
 
@@ -966,6 +966,67 @@ ALTER SEQUENCE public.table_holds_id_seq OWNED BY public.table_holds.id;
 
 
 --
+-- Name: table_service; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.table_service (
+    id integer NOT NULL,
+    event_id integer NOT NULL,
+    order_id integer NOT NULL,
+    club_id integer NOT NULL,
+    table_label text NOT NULL,
+    table_seats integer NOT NULL,
+    package_name text,
+    package_description text,
+    scanned_at timestamp with time zone NOT NULL,
+    delivered_at timestamp with time zone,
+    delivered_by_user_id integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE table_service; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.table_service IS 'Strezba VIP mize (038): nastane ob prvem uspesnem skenu vstopnice VIP narocila. Brez kupca: natakar ne sme videti osebnih podatkov (I27).';
+
+
+--
+-- Name: COLUMN table_service.order_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.table_service.order_id IS 'UNIQUE: drugi in naslednji skeni vstopnic istega narocila strezbe ne podvojijo (ON CONFLICT DO NOTHING).';
+
+
+--
+-- Name: COLUMN table_service.delivered_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.table_service.delivered_at IS 'NULL = nedostavljeno. PUT /business/table-service/:id { delivered } nastavi/razveljavi.';
+
+
+--
+-- Name: table_service_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.table_service_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: table_service_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.table_service_id_seq OWNED BY public.table_service.id;
+
+
+--
 -- Name: ticket_transfers; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1226,6 +1287,13 @@ ALTER TABLE ONLY public.table_holds ALTER COLUMN id SET DEFAULT nextval('public.
 
 
 --
+-- Name: table_service id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_service ALTER COLUMN id SET DEFAULT nextval('public.table_service_id_seq'::regclass);
+
+
+--
 -- Name: ticket_transfers id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -1444,6 +1512,22 @@ ALTER TABLE ONLY public.table_holds
 
 ALTER TABLE ONLY public.table_holds
     ADD CONSTRAINT table_holds_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: table_service table_service_order_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_service
+    ADD CONSTRAINT table_service_order_id_key UNIQUE (order_id);
+
+
+--
+-- Name: table_service table_service_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_service
+    ADD CONSTRAINT table_service_pkey PRIMARY KEY (id);
 
 
 --
@@ -1832,6 +1916,13 @@ CREATE INDEX orders_user_idx ON public.orders USING btree (user_id, created_at D
 --
 
 CREATE INDEX table_holds_table_idx ON public.table_holds USING btree (table_id);
+
+
+--
+-- Name: table_service_club_event_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX table_service_club_event_idx ON public.table_service USING btree (club_id, event_id, delivered_at);
 
 
 --
@@ -2328,6 +2419,38 @@ ALTER TABLE ONLY public.table_holds
 
 
 --
+-- Name: table_service table_service_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_service
+    ADD CONSTRAINT table_service_club_id_fkey FOREIGN KEY (club_id) REFERENCES public.clubs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: table_service table_service_delivered_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_service
+    ADD CONSTRAINT table_service_delivered_by_user_id_fkey FOREIGN KEY (delivered_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: table_service table_service_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_service
+    ADD CONSTRAINT table_service_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE CASCADE;
+
+
+--
+-- Name: table_service table_service_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_service
+    ADD CONSTRAINT table_service_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE CASCADE;
+
+
+--
 -- Name: ticket_transfers ticket_transfers_from_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2403,5 +2526,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict UBFoayXLBvcnvIiqgglue8FUiKb2NWf5BrrFSAxhPWbB1cbeICPggJulje4ynZx
+\unrestrict XDAha7EwGQLn8BFhErkbBAHMCTIZr4DPlbJjraSQEm4dO2at7l1hKk91tLSFs41
 
