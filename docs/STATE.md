@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-09 (organizatorji brez prizorišča, migracija 037; prej 2026-10-08: obvestilo o vabilu na guest listo, migracija 036; guest lista, migracija 035; prej 2026-10-05: nakup brez računa; prej 2026-10-02: prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
+Zadnja posodobitev: 2026-10-09 (vloga bartender in strežba VIP miz, migracija 038; prej 2026-10-09: organizatorji brez prizorišča, migracija 037; prej 2026-10-08: obvestilo o vabilu na guest listo, migracija 036; guest lista, migracija 035; prej 2026-10-05: nakup brez računa; prej 2026-10-02: prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -167,6 +167,19 @@ Za **ios-dev** in **web-dev** (backend po migraciji 037; vse polja so DODANA, st
 - Vhod dogodka (`POST /events`, `PATCH /events/:id`): `venueClubId` ali `venueName`+`venueCity` (+`venueAddress`, `venueLat`+`venueLng`); organizator brez prizorišča = 400 »Organizer events need a venue.«; lastni klub 400, neobstoječ/skrit gostitelj 404. Urejevalnik naj pošlje celo prizorišče (gostitelj ali prosto); `venueClubId: null` izbriše gostitelja.
 - **Stari backend (pred 037)**: polj ni, `?clubId=` brez `hosted`, `isOrganizer` se prezre; odjemalec ne sme pasti (privzete vrednosti). Razdelek »Organized by Outly«: `GET /clubs` (`is_official`) + `GET /events?clubId=&upcoming=true` (strežnik nima posebne poti).
 - Past: `is_official` nastavi samo admin (`/admin/api/clubs`); prvi uradni profil mora Martin/admin ustvariti ročno (lastnik = račun Outly), brez njega razdelka ni.
+
+## Vloga bartender in strežba VIP miz (od 9. 10. 2026; ARCHITECTURE »Strežba VIP miz (migracija 038)«, I27, DECISIONS 9. 10.)
+
+Za **ios-dev** in **web-dev** (backend po migraciji 038; vse DODANO, stari odjemalci spregledajo; v modelih privzete vrednosti, ker stari backend polj in poti nima: **na starem backendu so nove poti 404**, `pending_table_service` manjka -> 0):
+- Vloga `bartender` (prikaz »Bartender« / sl »Natakar«): `POST /business/team` `role: "bartender"` (lastnik in manager), `club_role` / `clubs[].role` / `my_role` / `members[].role` / `invites[].role` / `GET /me/invites` `role` jo lahko vrnejo; neznane vloge odjemalec ne sme zrušiti. Natakar NIMA dostopa do skenerja, vstopnic dogodka, VIP rezervacij, prodaje, ekipe (vse 403): prikaži mu samo »Table service«.
+- `GET /me`: `pending_table_service` (int, privzeto 0). Značka zvonca = `pending_received_tickets` + `pending_club_events` + `pending_guest_list_invites` + `pending_table_service`.
+- `GET /me/table-service` -> `{ items: [{ id, club_id, club_name, event_id, event_title, table_label, package_name (lahko null), scanned_at }] }` (zvonec; za druge vloge prazen seznam, 200). Vrstica »Table <label> · <paket> — ready to serve«, odpre Table service tega dogodka (`club_id` za `X-Outly-Club`).
+- `GET /business/events/:id/table-service` (X-Outly-Club; owner, manager, bartender; vratar 403; tuj dogodek 404) -> `{ items: [{ id, order_id, table_label, table_seats, package_name|null, package_description|null, scanned_at, delivered_at|null, delivered_by_username|null }] }`, nedostavljene najprej. Brez podatkov kupca (po dogovoru).
+- `PUT /business/table-service/:id` `{ delivered: true|false }` (owner, manager, bartender) -> **sam element** (isti kot v `items`, brez ovojnice); true je idempotenten, false razveljavi (Undo); tuja strežba 404; `delivered` ni boolean 400.
+- `POST /business/tickets/scan` ob `ok` ima `table_service_created` (bool); `scan-batch` ga ima v rezultatu elementa, ki je ravnokar unovčil vstopnico (pri ponovitvi paketa ga ni). Neobvezno za odjemalca.
+- Past: strežba nastane SAMO iz skena VIP vstopnice (vratar); sken brez povezave jo ustvari šele ob sinhronizaciji (`scanned_at` = ura skena na telefonu, če je razumna). Kdor VIP vstopnic ne skenira, strežbe nima. Rezervacija po telefonu strežbe ne sproži.
+- Past: `GET /business/events/:id/vip`, vstopnice dogodka in skener so zdaj za `owner | manager | doorman` (natakar 403, prej bi bil katerakoli vloga); manager sme vabiti in odstraniti vratarja IN natakarja.
+- Postavljeno z migracijo 038 (CHECK vlog + nova tabela); PR je pod `odobril-martin` (migracija + `requireClub`).
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 

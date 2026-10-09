@@ -646,7 +646,7 @@ function requireRole(...allowed) {
 // Klub uporabnika in vloga v njem (migracija 009)
 // ---------------------------
 // Lastnik: clubs.owner_user_id -> 'owner'. Član ekipe: club_members ->
-// 'manager' ali 'doorman'. Vsak uporabnik ima največ en klub.
+// 'manager', 'doorman' ali 'bartender'. Vsak uporabnik ima največ en klub.
 // Vrne null, če uporabnik nima kluba.
 // Od migracije 018 je oseba lahko v vec ekipah: `zeljeni` (glava X-Outly-Club ali ?club_id=)
 // izbere klub; brez njega prvo clanstvo (najstarejse), da star odjemalec dela kot prej.
@@ -683,7 +683,8 @@ function zeljeniKlub(req) {
 // Brez argumentov spusti vsako vlogo v klubu; z argumenti samo naštete.
 // Admin brez lastnega kluba dobi { clubId: null, role: 'admin' } — poti, ki
 // rabijo klub, mu vrnejo 404 kot do zdaj; poti za urejanje dogodkov ga spustijo.
-// Vratar (doorman) sme SAMO skenirati in gledati vstopnice dogodka.
+// Vratar (doorman) sme SAMO skenirati in gledati vstopnice dogodka. Natakar (bartender, 038) sme SAMO strezbo VIP miz
+// (GET/PUT .../table-service) in nikoli poti s podatki kupcev (vstopnice, skener, VIP rezervacije; I27).
 const INT4_MAX = 2147483647;
 const { jeVOknuSkena, SKEN_OKNO_PRED_MS } = require("./sken_okno");   // casovno okno skena (I25)
 const { jeNapakaPovezave, odgovoriNaNapako } = require("./napaka_povezave");   // 503 samo za napake povezave/baze, ostalo 500
@@ -775,6 +776,16 @@ app.use("/admin", express.static(path.join(__dirname, "admin"), { index: "index.
 // Velja samo za posiljanje GOSTU; potrditev starosti posiljatelja (age_confirmed) pri prenosu na racun NI vezana na stikalo.
 function mozenPrenosGostu(vloga) { return process.env.PRENOS_BREZ_RACUNA === "vsi" || vloga === "admin"; }
 
+// Strezba VIP miz za natakarja (migracija 038, I27): nedostavljene strezbe v klubih, kjer je uporabnik lastnik, manager ali bartender,
+// za dogodke, ki TECEJO (od 2 h pred zacetkom do konca; konec = end_at, sicer start + 8 h kot KONEC_DOGODKA), brez odpovedanih.
+// Skupno stevcu v GET /me (pending_table_service) in seznamu GET /me/table-service ($1 = id uporabnika), da se ne razideta. Vratar strezbe ne vidi.
+const STREZBA_ZVONEC_IZ = `FROM table_service ts
+       JOIN events e ON e.id = ts.event_id
+       JOIN clubs c ON c.id = ts.club_id`;
+const STREZBA_ZVONEC_KJE = `WHERE ts.delivered_at IS NULL AND e.status <> 'cancelled'
+        AND NOW() >= e.start_at - INTERVAL '2 hours' AND NOW() < COALESCE(e.end_at, e.start_at + INTERVAL '8 hours')
+        AND (c.owner_user_id = $1 OR EXISTS (SELECT 1 FROM club_members m WHERE m.club_id = ts.club_id AND m.user_id = $1 AND m.role IN ('manager', 'bartender')))`;
+
 app.get("/me", requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
@@ -805,6 +816,8 @@ app.get("/me", requireAuth, async (req, res) => {
          AND e.status='published' AND NOT c.hidden`,
       [req.user.userId]
     );
+    // Nedostavljene strezbe VIP miz (migracija 038): znacka natakarja/managerja/lastnika; za ostale 0.
+    const ps = await pool.query(`SELECT COUNT(*)::int AS n ${STREZBA_ZVONEC_IZ} ${STREZBA_ZVONEC_KJE}`, [req.user.userId]);
     // Vsa clanstva (migracija 018): club_id/club_role ostaneta prvo clanstvo za stare odjemalce.
     const klubi = await klubiUporabnika(req.user.userId);
     return res.status(200).json({
@@ -817,6 +830,7 @@ app.get("/me", requireAuth, async (req, res) => {
       pending_received_tickets: pv.rows[0] ? pv.rows[0].n : 0,
       pending_guest_list_invites: pv.rows[0] ? pv.rows[0].vabil : 0,
       pending_club_events: pk.rows[0] ? pk.rows[0].n : 0,
+      pending_table_service: ps.rows[0] ? ps.rows[0].n : 0,
       can_transfer_to_guest: mozenPrenosGostu(result.rows[0].role),
     });
   } catch (err) {
@@ -4961,7 +4975,7 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
 });
 
 // GET /business/events/:id/tickets — vstopnice dogodka (za vrata: kdo je prišel).
-app.get("/business/events/:id/tickets", requireAuth, requireClub(), async (req, res) => {
+app.get("/business/events/:id/tickets", requireAuth, requireClub("owner", "manager", "doorman"), async (req, res) => {
   try {
     const id = celoId(req.params.id);
     if (!id) return res.status(400).send("Invalid event id.");
@@ -5553,9 +5567,20 @@ admin.delete("/guest-lists/:id", async (req, res) => {
   } finally { c.release(); }
 });
 
+// Strezba VIP mize (migracija 038, I27): del istega stavka kot UPDATE vstopnice (CTE `u` = pravkar unovcena vstopnica). Prvi uspesen sken
+// katerekoli vstopnice VIP narocila (orders.table_id) vstavi strezbo, naslednji jo zaradi UNIQUE (order_id) preskocijo (ON CONFLICT DO NOTHING).
+// En stavek = sken in strezba nastaneta skupaj ali nic (sken, ki uspe, ne more izgubiti strezbe); brez dodatnega kroga do baze na vroci poti.
+// Podatki mize in paketa so posnetek iz narocila; kupca tabela ne hrani. Navadno narocilo (table_id IS NULL) in rezervacija po telefonu (ni skena) strezbe ne ustvarita.
+const STREZBA_CTE = `s AS (
+  INSERT INTO table_service (event_id, order_id, club_id, table_label, table_seats, package_name, package_description, scanned_at)
+  SELECT o.event_id, o.id, e.club_id, o.table_label, o.table_seats, o.package_name, o.package_description, u.used_at
+    FROM u JOIN orders o ON o.id = u.order_id JOIN events e ON e.id = o.event_id
+   WHERE o.table_id IS NOT NULL
+  ON CONFLICT (order_id) DO NOTHING RETURNING id)`;
+
 // POST /business/tickets/scan — skener na vratih. Telo: { qr } (ali { serial } za ročni vnos).
 // Preveri podpis, lastništvo, stanje; vstopnico označi kot uporabljeno. Ponovni sken -> 409.
-app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (req, res) => {
+app.post("/business/tickets/scan", requireAuthSken, requireClubSken("owner", "manager", "doorman"), async (req, res) => {
   try {
     const b = req.body || {};
     let serial = null, ev = null;
@@ -5601,8 +5626,11 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (re
     // veljati — sicer bi pošiljatelj vstopil s staro kodo, prejemnik pa bi
     // dobil že porabljeno vstopnico (ugotovljeno s testom sočasnosti).
     const u = await skenPool.query(
-      `UPDATE tickets SET status='used', used_at=NOW(), used_by_user_id=$2, scan_device=$3
-       WHERE id=$1 AND status='valid' AND serial=$4 RETURNING id, serial, status, used_at`,
+      `WITH u AS (
+         UPDATE tickets SET status='used', used_at=NOW(), used_by_user_id=$2, scan_device=$3
+          WHERE id=$1 AND status='valid' AND serial=$4 RETURNING id, serial, status, used_at, order_id),
+       ${STREZBA_CTE}
+       SELECT u.id, u.serial, u.status, u.used_at, EXISTS (SELECT 1 FROM s) AS table_service_created FROM u`,
       [t.id, req.user.userId, String(req.headers["user-agent"] || "").slice(0, 100), serial]
     );
     if (u.rows.length === 0) {
@@ -5611,7 +5639,8 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (re
       if (s && s.serial !== serial) return res.status(409).json({ result: "transferred", message: "This ticket was passed on to someone else. Ask them to show their new code." });
       return res.status(409).json({ result: "already_used", message: "Ticket was already scanned." });
     }
-    return res.status(200).json({ result: "ok", message: "Welcome in.", ticket: { ...t, ...u.rows[0] } });
+    const { table_service_created, ...tu } = u.rows[0];
+    return res.status(200).json({ result: "ok", message: "Welcome in.", ticket: { ...t, ...tu }, table_service_created });
   } catch (e) { return odgovoriNaNapako(res, e, "POST /business/tickets/scan"); }
 });
 
@@ -5624,7 +5653,7 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken(), async (re
 // Strežnik ostane razsodnik: dvojni sken iste vstopnice z dveh telefonov da NA STREŽNIKU samo en "ok" (invarianta I14).
 
 // GET /business/scan-key — javni ključ za preverjanje kod v2 (vse vloge v klubu, tudi vratar).
-app.get("/business/scan-key", requireAuthSken, requireClubSken(), (req, res) => {
+app.get("/business/scan-key", requireAuthSken, requireClubSken("owner", "manager", "doorman"), (req, res) => {
   const k = qrKljuci();
   return res.json({
     alg: "Ed25519", kid: k.kid, public_key: k.javniSurov.toString("base64url"),
@@ -5638,7 +5667,7 @@ app.get("/business/scan-key", requireAuthSken, requireClubSken(), (req, res) => 
 // Brez e-naslovov in drugih osebnih podatkov (samo uporabniško ime imetnika, ki ga skener pokaže pri sprejemu).
 // `transferred_serials`: stari serial-i prenesenih vstopnic — koda s takim serialom NE velja več (I7).
 // ETag: osveževanje vsakih nekaj minut pri 1000+ telefonih ne sme vsakič vleči celega seznama (If-None-Match -> 304).
-app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken(), async (req, res) => {
+app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken("owner", "manager", "doorman"), async (req, res) => {
   try {
     const id = celoId4(req.params.id);
     if (!id) return res.status(400).json({ error: "invalid_id", message: "Invalid event id." });
@@ -5686,7 +5715,7 @@ const SKEN_REZERVA_PRED_ZACETKOM_MS = SKEN_OKNO_PRED_MS; // vrata se odprejo pre
 const SKEN_ID_VZOREC = /^[A-Za-z0-9._:-]{1,64}$/;
 const SERIAL_VZOREC = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const jsonVelik = express.json({ limit: "1mb" });
-app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken(), jsonVelik, async (req, res) => {
+app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken("owner", "manager", "doorman"), jsonVelik, async (req, res) => {
   try {
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).json({ error: "not_found", message: "Club not found." });
@@ -5776,16 +5805,19 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken(), jso
           // used_at = ura na telefonu, če je razumna: ne v prihodnosti, ne pred nastankom vstopnice, ne prej kot 12 h pred začetkom dogodka.
           // Pogoj serial = $4 kot pri /scan: prenos med branjem in pisanjem da vstopnici nov serial, stara koda ne sme več veljati.
           const u = await skenPool.query(
-            `UPDATE tickets SET status = 'used',
-                    used_at = CASE WHEN $5::timestamptz IS NOT NULL AND $5::timestamptz <= NOW()
-                                    AND $5::timestamptz >= GREATEST(created_at, $6::timestamptz)
-                                   THEN $5::timestamptz ELSE NOW() END,
-                    used_by_user_id = $2, scan_device = $3
-             WHERE id = $1 AND status = 'valid' AND serial = $4::uuid RETURNING used_at`,
+            `WITH u AS (
+               UPDATE tickets SET status = 'used',
+                      used_at = CASE WHEN $5::timestamptz IS NOT NULL AND $5::timestamptz <= NOW()
+                                      AND $5::timestamptz >= GREATEST(created_at, $6::timestamptz)
+                                     THEN $5::timestamptz ELSE NOW() END,
+                      used_by_user_id = $2, scan_device = $3
+               WHERE id = $1 AND status = 'valid' AND serial = $4::uuid RETURNING used_at, order_id),
+             ${STREZBA_CTE}
+             SELECT u.used_at, EXISTS (SELECT 1 FROM s) AS table_service_created FROM u`,
             [t.id, req.user.userId, d.zaznamek, d.serial, d.kdaj, new Date(new Date(t.start_at).getTime() - SKEN_REZERVA_PRED_ZACETKOM_MS).toISOString()]);
           if (u.rows.length) {
             t.status = "used"; t.scan_device = d.zaznamek; t.used_at = u.rows[0].used_at; t.used_by_user_id = req.user.userId;
-            rez = { result: "ok", used_at: iso(t.used_at) };
+            rez = { result: "ok", used_at: iso(t.used_at), table_service_created: u.rows[0].table_service_created };
           } else {
             // Med branjem in pisanjem je vstopnico nekdo spremenil: preberi dejansko stanje.
             const z = await skenPool.query("SELECT serial, status, used_at, used_by_user_id, scan_device FROM tickets WHERE id = $1", [t.id]);
@@ -5808,6 +5840,70 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken(), jso
     console.log(`Sken-batch: klub ${klub}, uporabnik ${req.user.userId}: ${n} skenov, ok ${stevilo("ok")}, already_used ${stevilo("already_used")}, transferred ${stevilo("transferred")}, not_today ${stevilo("not_today")}, error ${stevilo("error")}`);
     return res.status(200).json({ results: rezultati });
   } catch (e) { return odgovoriNaNapako(res, e, "POST /business/tickets/scan-batch"); }
+});
+
+// ---------------------------
+// STREZBA VIP MIZ (migracija 038, invarianta I27; issue #176, Martin 9. 10. 2026)
+// ---------------------------
+// Strezba nastane SAMO iz skena VIP vstopnice (STREZBA_CTE v /scan in scan-batch), nikoli iz nakupa ali rezervacije po telefonu. Natakar (bartender),
+// manager in lastnik jo vidijo in oznacijo kot dostavljeno; vratar ne. Odgovori nosijo SAMO mizo, sedeze, paket, opis in case (+ uporabnisko ime
+// ZAPOSLENEGA, ki je dostavil), nikoli kupca ali imetnika vstopnice: stolpci so naštevani, tabela kupca ne hrani.
+const STREZBA_STOLPCI = `ts.id, ts.order_id, ts.table_label, ts.table_seats, ts.package_name, ts.package_description, ts.scanned_at, ts.delivered_at,
+  du.username AS delivered_by_username`;
+const STREZBA_IZ = `FROM table_service ts LEFT JOIN users du ON du.id = ts.delivered_by_user_id`;
+
+// GET /business/events/:id/table-service — owner, manager, bartender (vratar 403). Tuj ali neobstojec dogodek: 404.
+// Nedostavljene najprej (po scanned_at), nato dostavljene (po scanned_at).
+app.get("/business/events/:id/table-service", requireAuth, requireClub("owner", "manager", "bartender"), async (req, res) => {
+  try {
+    const id = celoId4(req.params.id);
+    if (!id) return res.status(400).send("Invalid event id.");
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    const e = await pool.query("SELECT 1 FROM events WHERE id = $1 AND club_id = $2", [id, klub]);
+    if (!e.rows.length) return res.status(404).send("Event not found.");
+    const r = await pool.query(
+      `SELECT ${STREZBA_STOLPCI} ${STREZBA_IZ}
+        WHERE ts.event_id = $1 AND ts.club_id = $2
+        ORDER BY (ts.delivered_at IS NOT NULL), ts.scanned_at, ts.id LIMIT 500`, [id, klub]);
+    return res.json({ items: r.rows });
+  } catch (e) { return odgovoriNaNapako(res, e, "GET /business/events/:id/table-service"); }
+});
+
+// PUT /business/table-service/:id { delivered: boolean } — owner, manager, bartender. Vrne posodobljen element (brez ovojnice).
+// true je idempotenten (cas in dostavitelj prvega klica ostaneta), false razveljavi. Strezba tujega kluba: 404.
+app.put("/business/table-service/:id", requireAuth, requireClub("owner", "manager", "bartender"), async (req, res) => {
+  try {
+    const id = celoId4(req.params.id);
+    if (!id) return res.status(400).send("Invalid id.");
+    const b = req.body;
+    if (!b || typeof b !== "object" || typeof b.delivered !== "boolean") return res.status(400).send("delivered must be true or false.");
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    const r = await pool.query(
+      `WITH u AS (
+         UPDATE table_service SET
+                delivered_at = CASE WHEN $3::boolean THEN COALESCE(delivered_at, NOW()) END,
+                delivered_by_user_id = CASE WHEN $3::boolean THEN COALESCE(delivered_by_user_id, $4::int) END
+          WHERE id = $1 AND club_id = $2 RETURNING *)
+       SELECT ${STREZBA_STOLPCI} FROM u ts LEFT JOIN users du ON du.id = ts.delivered_by_user_id`,
+      [id, klub, b.delivered, req.user.userId]);
+    if (!r.rows.length) return res.status(404).send("Not found.");
+    console.log(`Strezba ${id}: ${b.delivered ? "dostavljeno" : "razveljavljeno"}, klub ${klub}, uporabnik ${req.user.userId}`);
+    return res.json(r.rows[0]);
+  } catch (e) { return odgovoriNaNapako(res, e, "PUT /business/table-service/:id"); }
+});
+
+// GET /me/table-service — zvonec natakarja/managerja/lastnika: nedostavljene strezbe vseh njegovih klubov za dogodke, ki tecejo (isti pogoj kot
+// pending_table_service v GET /me). Vloge iz baze ob vsakem klicu (I5); za vse ostale 200 s praznim seznamom.
+app.get("/me/table-service", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT ts.id, ts.club_id, c.name AS club_name, ts.event_id, e.title AS event_title, ts.table_label, ts.package_name, ts.scanned_at
+         ${STREZBA_ZVONEC_IZ} ${STREZBA_ZVONEC_KJE}
+        ORDER BY ts.scanned_at, ts.id LIMIT 100`, [req.user.userId]);
+    return res.json({ items: r.rows });
+  } catch (e) { return odgovoriNaNapako(res, e, "GET /me/table-service"); }
 });
 
 // ---------------------------
@@ -6120,9 +6216,10 @@ async function vipDogodkaOdgovor(db, klub, eventId) {
   };
 }
 
-// GET /business/events/:id/vip — VSE vloge v klubu (tudi vratar/bar mora videti rezervacije).
+// GET /business/events/:id/vip — lastnik, manager in vratar (vratar mora videti rezervacije). Natakar NE (038, I27): booking nosi uporabnisko ime kupca,
+// rezervacija po telefonu pa ime gosta; natakar strezbo dobi iz GET /business/events/:id/table-service.
 // Tuj ali neobstojec dogodek: 404 (ne razkrivamo obstoja).
-app.get("/business/events/:id/vip", requireAuth, requireClub(), async (req, res) => {
+app.get("/business/events/:id/vip", requireAuth, requireClub("owner", "manager", "doorman"), async (req, res) => {
   try {
     const id = vipId(req.params.id);
     if (!id) return res.status(400).send("Invalid event id.");
@@ -6501,12 +6598,14 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
 // ---------------------------
 // EKIPA KLUBA (migracija 009)
 // ---------------------------
-// Lastnik vabi managerje in vratarje; manager sme vabiti in odstranjevati
-// samo vratarje. Od migracije 013 je dodajanje VABILO: uporabnik ga sprejme ali
+// Lastnik vabi managerje, vratarje in natakarje (bartender, 038); manager sme vabiti in odstranjevati
+// samo vratarje in natakarje. Od migracije 013 je dodajanje VABILO: uporabnik ga sprejme ali
 // zavrne v aplikaciji (My clubs -> zvonec), član nastane ob sprejemu. Povabljeni
 // mora že imeti Outly račun (po e-naslovu). Sodelavec je lahko v največ eni
 // ekipi in lastnik kluba ne more biti hkrati član druge.
-const VLOGE_EKIPE = ["manager", "doorman"];
+const VLOGE_EKIPE = ["manager", "doorman", "bartender"];
+// Osebje, ki ga sme vabiti in odstranjevati tudi manager (manager le osebje, managerja samo lastnik).
+const VLOGE_OSEBJE = ["doorman", "bartender"];
 
 async function seznamEkipe(clubId) {
   const r = await pool.query(
@@ -6528,7 +6627,7 @@ async function posljiVabiloEkipi(toEmail, clubName, role) {
   if (!resend) return;
   const from = process.env.EMAIL_FROM || "onboarding@resend.dev";
   const appName = process.env.APP_NAME || "Outly";
-  const vloga = role === "manager" ? "manager" : "door staff";
+  const vloga = role === "manager" ? "manager" : role === "bartender" ? "bartender" : "door staff";
   try {
     const r = await resend.emails.send({
       from, to: toEmail,
@@ -6581,8 +6680,8 @@ app.post("/business/team", requireAuth, requireClub("owner", "manager"), async (
     const email = typeof b.email === "string" ? b.email.trim().toLowerCase() : "";
     const role = typeof b.role === "string" ? b.role.trim().toLowerCase() : "";
     if (!email || !email.includes("@")) return res.status(400).send("Valid email is required.");
-    if (!VLOGE_EKIPE.includes(role)) return res.status(400).send("role must be manager or doorman.");
-    if (req.klub.role === "manager" && role !== "doorman") {
+    if (!VLOGE_EKIPE.includes(role)) return res.status(400).send("role must be manager, doorman or bartender.");
+    if (req.klub.role === "manager" && !VLOGE_OSEBJE.includes(role)) {
       return res.status(403).send("Only the club owner can invite managers.");
     }
 
@@ -6618,7 +6717,7 @@ app.post("/business/team", requireAuth, requireClub("owner", "manager"), async (
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
-// DELETE /business/team/invites/:id — prekliče čakajoče vabilo. Manager sme samo vratarje.
+// DELETE /business/team/invites/:id — prekliče čakajoče vabilo. Manager sme samo vratarje in natakarje.
 // (Definirano PRED /business/team/:userId; poti se ne prekrivata, ker ima ta dodaten del.)
 app.delete("/business/team/invites/:id", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
@@ -6628,7 +6727,7 @@ app.delete("/business/team/invites/:id", requireAuth, requireClub("owner", "mana
     if (!id) return res.status(400).send("Invalid invite id.");
     const i = await pool.query("SELECT role FROM club_invites WHERE id=$1 AND club_id=$2 AND status='pending'", [id, klub]);
     if (i.rows.length === 0) return res.status(404).send("Invitation not found.");
-    if (req.klub.role === "manager" && i.rows[0].role !== "doorman") {
+    if (req.klub.role === "manager" && !VLOGE_OSEBJE.includes(i.rows[0].role)) {
       return res.status(403).send("Only the club owner can cancel manager invitations.");
     }
     await pool.query("UPDATE club_invites SET status='cancelled', responded_at=NOW() WHERE id=$1", [id]);
@@ -7019,7 +7118,7 @@ app.delete("/business/team/me", requireAuth, async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
-// DELETE /business/team/:userId — odstrani člana. Manager sme samo vratarje.
+// DELETE /business/team/:userId — odstrani člana. Manager sme samo vratarje in natakarje.
 app.delete("/business/team/:userId", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
     const klub = await mojKlubId(req);
@@ -7028,7 +7127,7 @@ app.delete("/business/team/:userId", requireAuth, requireClub("owner", "manager"
     if (!uid) return res.status(400).send("Invalid user id.");
     const m = await pool.query("SELECT role FROM club_members WHERE club_id=$1 AND user_id=$2", [klub, uid]);
     if (m.rows.length === 0) return res.status(404).send("Member not found.");
-    if (req.klub.role === "manager" && m.rows[0].role !== "doorman" && Number(uid) !== Number(req.user.userId)) {
+    if (req.klub.role === "manager" && !VLOGE_OSEBJE.includes(m.rows[0].role) && Number(uid) !== Number(req.user.userId)) {
       return res.status(403).send("Only the club owner can remove managers.");
     }
     await pool.query("DELETE FROM club_members WHERE club_id=$1 AND user_id=$2", [klub, uid]);

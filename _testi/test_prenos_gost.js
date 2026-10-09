@@ -458,6 +458,11 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     assert(r.status === 429 && r.body.error === "guest_transfer_limit", "C: tudi prenos na RACUN (allow_guest) steje v mejo posiljatelja: 429 enako kot za gosta (brez razkritja racuna)", r.body);
     // hkratnost: dva prenosa iste vstopnice (B) -> en uspe
     const hk = await kupi(T.kupec, E0, 1);
+    // Maili prejsnjih prenosov (C1-C3) gredo asinhrono po odgovoru 200: pocakaj, da so zapisani kot poslani,
+    // sicer zamudnik pristane v R.poslano po zajemu prejHk in "natanko en mail" steje 2 (CI, 9. 10. 2026).
+    for (const t of [cV[0], cV[1], cV[2]]) {
+      assert(await cakaj(async () => (await poslanoOb(t.id)) !== null), "C: mail prejsnjega prenosa poslan pred testom hkratnosti");
+    }
     const prejHk = R.poslano.length;
     const [x1, x2] = await Promise.all([
       apiB("POST", `/tickets/${hk[0].id}/transfer`, T.kupec, { email: "hk1@example.com", allow_guest: true }),
