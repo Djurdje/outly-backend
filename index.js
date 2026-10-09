@@ -1692,6 +1692,8 @@ const KONEC_DOGODKA = `COALESCE(end_at, start_at + INTERVAL '8 hours')`;
 const VIP_OD_CENTOV = `(SELECT MIN(COALESCE(vet.price_cents, vct.price_cents))::int
           FROM club_tables vct LEFT JOIN event_tables vet ON vet.event_id = events.id AND vet.table_id = vct.id
          WHERE events.vip_enabled AND vct.club_id = events.club_id AND vct.archived_at IS NULL
+           -- Razpored dogodka (039): vir 'event' = mize z event_id = dogodek, sicer klubske mize (event_id IS NULL).
+           AND (CASE WHEN events.vip_layout_source = 'event' THEN vct.event_id = events.id ELSE vct.event_id IS NULL END)
            AND NOT COALESCE(vet.disabled, FALSE))`;
 
 // Prizorisce dogodka (migracija 037, organizatorji brez prizorisca). DODANA polja: dogodek ima ali gostiteljski klub z Outlyja (venue_club_id + ime + logotip,
@@ -1778,6 +1780,8 @@ const STOLPCI_DOGODKA = `
         -- aktivno mizo; vip_from_cents = najnizja efektivna cena (prepis dogodka, sicer privzeta).
         ${VIP_OD_CENTOV} IS NOT NULL AS vip_enabled,
         ${VIP_OD_CENTOV} AS vip_from_cents,
+        -- Vir razporeda VIP miz (migracija 039): club = tloris kluba, event = razpored tega dogodka. DODANO polje.
+        vip_layout_source,
         ${STOLPCI_PRIZORISCA}`;
 
 // Lahka razlicica seznama (GET /events?lite=true, #114): brez `description` (pri 200 dogodkih je to vecina teze odgovora).
@@ -6039,6 +6043,16 @@ function preveriMize(vhod, plan) {
   return { mize };
 }
 
+// Skupna validacija tlorisa in miz (PUT /business/vip in PUT /business/events/:id/vip-layout, 039): mreza 8-40, elementi <= 80, mize <= 60,
+// seats 1-20, cene v centih >= 0, oznake unikatne. Vrne { plan, mize } (ociscene kopije) ali { napaka }.
+function preveriRazpored(planVhod, mizeVhod) {
+  const tl = preveriTloris(planVhod);
+  if (tl.napaka) return { napaka: tl.napaka };
+  const mz = preveriMize(mizeVhod, tl.plan);
+  if (mz.napaka) return { napaka: mz.napaka };
+  return { plan: tl.plan, mize: mz.mize };
+}
+
 // Bottle paketi: seznam { id?, name, description }. Vrstni red v seznamu je vrstni red prikaza.
 function preveriPakete(vhod) {
   if (!Array.isArray(vhod)) return { napaka: "packages must be an array." };
@@ -6070,7 +6084,7 @@ async function vipKlubaOdgovor(db, klub) {
   const k = await db.query("SELECT floor_plan FROM clubs WHERE id = $1", [klub]);
   const m = await db.query(
     `SELECT id, label, x, y, w, h, shape, seats, price_cents
-       FROM club_tables WHERE club_id = $1 AND archived_at IS NULL ORDER BY id`, [klub]);
+       FROM club_tables WHERE club_id = $1 AND event_id IS NULL AND archived_at IS NULL ORDER BY id`, [klub]);
   const p = await db.query(
     `SELECT id, name, description FROM bottle_packages
       WHERE club_id = $1 AND archived_at IS NULL ORDER BY sort, id`, [klub]);
@@ -6095,10 +6109,9 @@ app.put("/business/vip", requireAuth, requireClub("owner", "manager"), async (re
   if (!klub) return res.status(404).send("Club not found.");
   const b = req.body || {};
   if (b.plan === undefined) return res.status(400).send("plan is required (an object or null).");
-  const tl = preveriTloris(b.plan);
-  if (tl.napaka) return res.status(400).send(tl.napaka);
-  const mz = preveriMize(b.tables, tl.plan);
-  if (mz.napaka) return res.status(400).send(mz.napaka);
+  const rz = preveriRazpored(b.plan, b.tables);
+  if (rz.napaka) return res.status(400).send(rz.napaka);
+  const tl = { plan: rz.plan }, mz = { mize: rz.mize };
   const pk = preveriPakete(b.packages);
   if (pk.napaka) return res.status(400).send(pk.napaka);
 
@@ -6110,7 +6123,8 @@ app.put("/business/vip", requireAuth, requireClub("owner", "manager"), async (re
     await c.query("SELECT id FROM clubs WHERE id = $1 FOR NO KEY UPDATE", [klub]);
 
     // --- mize ---
-    const obst = await c.query("SELECT id FROM club_tables WHERE club_id = $1 AND archived_at IS NULL", [klub]);
+    // event_id IS NULL: mize razporeda posameznih dogodkov (039) niso del klubskega tlorisa in jih ta PUT ne sme arhivirati.
+    const obst = await c.query("SELECT id FROM club_tables WHERE club_id = $1 AND event_id IS NULL AND archived_at IS NULL", [klub]);
     const aktivne = new Set(obst.rows.map(r => r.id));
     for (const t of mz.mize) {
       if (t.id !== null && !aktivne.has(t.id)) { await c.query("ROLLBACK"); return res.status(400).send(`tables: id ${t.id} does not belong to this club.`); }
@@ -6168,8 +6182,9 @@ app.put("/business/vip", requireAuth, requireClub("owner", "manager"), async (re
 // Stanje VIP miz dogodka za klub: tloris, mize s ceno, izjemo in rezervacijo, paketi. db = pool ali odjemalec.
 // Vrne null, ce dogodek ne obstaja ali ni od tega kluba.
 async function vipDogodkaOdgovor(db, klub, eventId) {
-  const e = await db.query("SELECT id, vip_enabled, currency FROM events WHERE id = $1 AND club_id = $2", [eventId, klub]);
+  const e = await db.query("SELECT id, vip_enabled, currency, vip_layout_source, floor_plan FROM events WHERE id = $1 AND club_id = $2", [eventId, klub]);
   if (e.rows.length === 0) return null;
+  const razporedDogodka = e.rows[0].vip_layout_source === "event";   // 039: tloris in mize dogodka namesto klubskih
   const k = await db.query("SELECT floor_plan FROM clubs WHERE id = $1", [klub]);
   const m = await db.query(
     `SELECT ct.id, ct.label, ct.x, ct.y, ct.w, ct.h, ct.shape, ct.seats,
@@ -6191,8 +6206,10 @@ async function vipDogodkaOdgovor(db, klub, eventId) {
           WHERE o.event_id = $1 AND o.table_id = ct.id AND o.status IN ${VIP_ZASEDENA_STANJA}
           ORDER BY o.id LIMIT 1
        ) b ON TRUE
-      WHERE ct.club_id = $2 AND (ct.archived_at IS NULL OR b.order_id IS NOT NULL OR h.id IS NOT NULL)
-      ORDER BY ct.id`, [eventId, klub]);
+      -- Aktivne mize veljavnega razporeda (klubske ali dogodka, 039) + vsaka miza (tudi arhivirana ali iz drugega razporeda) z narocilom/rezervacijo na tem dogodku.
+      WHERE ct.club_id = $2 AND (ct.event_id IS NULL OR ct.event_id = $1)
+        AND ((ct.archived_at IS NULL AND (ct.event_id IS NOT NULL) = $3::boolean) OR b.order_id IS NOT NULL OR h.id IS NOT NULL)
+      ORDER BY ct.id`, [eventId, klub, razporedDogodka]);
   const p = await db.query(
     `SELECT id, name, description FROM bottle_packages
       WHERE club_id = $1 AND archived_at IS NULL ORDER BY sort, id`, [klub]);
@@ -6200,7 +6217,7 @@ async function vipDogodkaOdgovor(db, klub, eventId) {
     event_id: e.rows[0].id,
     enabled: e.rows[0].vip_enabled,
     currency: e.rows[0].currency,
-    plan: (k.rows[0] && k.rows[0].floor_plan) || null,
+    plan: (razporedDogodka ? e.rows[0].floor_plan : (k.rows[0] && k.rows[0].floor_plan)) || null,
     tables: m.rows.map(r => ({
       id: r.id, label: r.label, x: r.x, y: r.y, w: r.w, h: r.h, shape: r.shape, seats: r.seats,
       price_cents: r.price_cents, default_price_cents: r.default_price_cents, disabled: r.disabled, archived: r.archived,
@@ -6271,12 +6288,14 @@ app.put("/business/events/:id/vip", requireAuth, requireClub("owner", "manager")
     if (izjeme.length) {
       // Mize TEGA kluba, tudi arhivirane: GET vrne arhivirano mizo z rezervacijo na dogodku, odjemalec pa
       // poslje nazaj vse mize iz GET. Arhivirana miza se tiho preskoci (izjema zanjo nima pomena); 400 samo za tuje/neobstojece.
+      // Razpored dogodka (039): izjeme veljajo tudi za mize TEGA dogodka (event_id = :id); miza drugega dogodka istega kluba je 404.
       const v = await c.query(
-        "SELECT id, archived_at IS NOT NULL AS arhivirana FROM club_tables WHERE club_id = $1 AND id = ANY($2::int[])",
+        "SELECT id, event_id, archived_at IS NOT NULL AS arhivirana FROM club_tables WHERE club_id = $1 AND id = ANY($2::int[])",
         [klub, izjeme.map(t => t.table_id)]);
       const mize = new Map(v.rows.map(r => [r.id, r.arhivirana]));
       const slaba = izjeme.find(t => !mize.has(t.table_id));
       if (slaba) { await c.query("ROLLBACK"); return res.status(400).send(`tables: id ${slaba.table_id} does not belong to this club.`); }
+      if (v.rows.some(r => r.event_id !== null && r.event_id !== id)) { await c.query("ROLLBACK"); return res.status(404).send("Table not found."); }
       for (let i = izjeme.length - 1; i >= 0; i--) if (mize.get(izjeme[i].table_id)) izjeme.splice(i, 1);
     }
     await c.query("UPDATE events SET vip_enabled = $2 WHERE id = $1", [id, b.enabled]);
@@ -6294,6 +6313,166 @@ app.put("/business/events/:id/vip", requireAuth, requireClub("owner", "manager")
     return res.json(await vipDogodkaOdgovor(c, klub, id));
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});
+    console.error(err);
+    return res.status(500).send("Server error.");
+  } finally { c.release(); }
+});
+
+// ---------------------------
+// RAZPORED VIP MIZ PO DOGODKU (migracija 039, Martin 9. 10. 2026; issue #175; invarianta I28)
+// ---------------------------
+// Organizator (clubs.is_organizer) nima lastne dvorane: pri dogodku izbere vir razporeda VIP miz.
+//   source 'club'  = tloris in mize kluba prodajalca (club_tables.event_id IS NULL), kot doslej;
+//   source 'event' = razpored TEGA dogodka: events.floor_plan + club_tables z event_id = dogodek (club_id = events.club_id), nastane kot
+//                    posnetek tlorisa in miz gostitelja (events.venue_club_id; kasnejse spremembe gostitelja ne vplivajo) ali kot lasten risan razpored.
+// Paketi steklenic in denar ostanejo pri prodajalcu; narocila, vstopnice, sken in strezba delajo nespremenjeno (FK orders.table_id -> club_tables).
+// Navaden klub sme razpored dogodka prav tako uporabiti (ni izpostavljen v UI). Izjeme po dogodku (event_tables) in rezervacije po telefonu
+// delujejo tudi za mize dogodka. Miza z narocilom se ob odstranitvi ARHIVIRA, brez narocila IZBRISE; telefonske rezervacije odstranjenih miz se izbrisejo.
+
+// Odgovor GET/PUT vip-layout: vir, tloris dogodka, mize dogodka (aktivne + arhivirane z aktivnim narocilom, archived: true), kopija in gostitelj.
+// Vrne null, ce dogodek ne obstaja ali ni od tega kluba. Gostitelj, ki je skrit, javno ne obstaja (venue_club_id null, brez kopije).
+async function vipRazporedOdgovor(db, klub, eventId) {
+  const e = await db.query(
+    `SELECT e.id, e.vip_layout_source, e.floor_plan, e.vip_layout_from_club_id, fc.name AS from_club_name,
+            vc.id AS venue_club_id, vc.name AS venue_club_name, (vc.floor_plan IS NOT NULL) AS venue_has_layout
+       FROM events e
+       LEFT JOIN clubs fc ON fc.id = e.vip_layout_from_club_id
+       LEFT JOIN clubs vc ON vc.id = e.venue_club_id AND NOT vc.hidden
+      WHERE e.id = $1 AND e.club_id = $2`, [eventId, klub]);
+  if (e.rows.length === 0) return null;
+  const m = await db.query(
+    `SELECT ct.id, ct.label, ct.x, ct.y, ct.w, ct.h, ct.shape, ct.seats, ct.price_cents, (ct.archived_at IS NOT NULL) AS archived
+       FROM club_tables ct
+      WHERE ct.event_id = $1
+        AND (ct.archived_at IS NULL
+             OR EXISTS (SELECT 1 FROM orders o WHERE o.table_id = ct.id AND o.event_id = $1 AND o.status IN ${VIP_ZASEDENA_STANJA}))
+      ORDER BY ct.id`, [eventId]);
+  const r = e.rows[0];
+  return {
+    source: r.vip_layout_source,
+    floor_plan: r.floor_plan || null,
+    tables: m.rows,
+    from_club_id: r.vip_layout_from_club_id,
+    from_club_name: r.vip_layout_from_club_id ? r.from_club_name : null,
+    venue_club_id: r.venue_club_id,
+    venue_club_name: r.venue_club_name,
+    venue_has_layout: r.venue_club_id !== null && r.venue_has_layout === true,
+  };
+}
+
+// GET /business/events/:id/vip-layout — owner, manager. Tuj ali neobstojec dogodek: 404.
+app.get("/business/events/:id/vip-layout", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  try {
+    const id = vipId(req.params.id);
+    if (!id) return res.status(400).send("Invalid event id.");
+    const klub = await mojKlubId(req);
+    if (!klub) return res.status(404).send("Club not found.");
+    const o = await vipRazporedOdgovor(pool, klub, id);
+    if (!o) return res.status(404).send("Event not found.");
+    return res.json(o);
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// PUT /business/events/:id/vip-layout — owner, manager. Telo:
+//   { source: "club" }                                  nazaj na klubski tloris; mize dogodka se arhivirajo (z narocilom) ali izbrisejo
+//   { source: "event", copy_from_venue: true }          posnetek tlorisa in aktivnih miz kluba gostitelja (400 brez gostitelja ali brez njegovega tlorisa)
+//   { source: "event", floor_plan, tables: [...] }      lasten razpored (validacija kot PUT /business/vip); mize z id se posodobijo,
+//                                                       manjkajoce se arhivirajo/izbrisejo, nove se dodajo; floor_plan null + tables [] = prazen zacetek
+// Vse v eni transakciji; dogodek je zaklenjen (FOR NO KEY UPDATE), da dva hkratna PUT-a ne prepisujeta drug drugega. Odgovor = GET + released_holds.
+app.put("/business/events/:id/vip-layout", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  const id = vipId(req.params.id);
+  if (!id) return res.status(400).send("Invalid event id.");
+  const klub = await mojKlubId(req);
+  if (!klub) return res.status(404).send("Club not found.");
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  if (b.source !== "club" && b.source !== "event") return res.status(400).send('source must be "club" or "event".');
+  const izVenue = b.source === "event" && b.copy_from_venue === true;
+  let rz = null;
+  if (b.source === "event" && !izVenue) {
+    if (b.floor_plan === undefined) return res.status(400).send("floor_plan is required (an object or null), or send copy_from_venue: true.");
+    if (b.tables === undefined) return res.status(400).send("tables is required (an array).");
+    rz = preveriRazpored(b.floor_plan, b.tables);
+    if (rz.napaka) return res.status(400).send(rz.napaka);
+  }
+
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    const er = await c.query("SELECT id FROM events WHERE id = $1 AND club_id = $2 FOR NO KEY UPDATE", [id, klub]);
+    if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+
+    let plan = null, mize = [], izKluba = null;
+    if (izVenue) {
+      const g = await c.query(
+        `SELECT vc.id, vc.floor_plan FROM events e JOIN clubs vc ON vc.id = e.venue_club_id AND NOT vc.hidden WHERE e.id = $1`, [id]);
+      if (g.rows.length === 0) { await c.query("ROLLBACK"); return res.status(400).send("This event has no venue club on Outly."); }
+      if (!g.rows[0].floor_plan) { await c.query("ROLLBACK"); return res.status(400).send("The venue club has no floor plan."); }
+      izKluba = g.rows[0].id;
+      plan = g.rows[0].floor_plan;
+      const gm = await c.query(
+        `SELECT label, x, y, w, h, shape, seats, price_cents FROM club_tables
+          WHERE club_id = $1 AND event_id IS NULL AND archived_at IS NULL ORDER BY id`, [izKluba]);
+      mize = gm.rows.map(t => ({ id: null, label: t.label, x: t.x, y: t.y, w: t.w, h: t.h, shape: t.shape, seats: t.seats, price_cents: t.price_cents }));
+    } else if (rz) {
+      plan = rz.plan;
+      mize = rz.mize;
+    }
+
+    // --- mize dogodka: obstojece (aktivne in arhivirane) ---
+    const obst = await c.query("SELECT id, archived_at IS NOT NULL AS arhivirana FROM club_tables WHERE event_id = $1 AND club_id = $2", [id, klub]);
+    const aktivne = new Set(obst.rows.filter(t => !t.arhivirana).map(t => t.id));
+    const arhivirane = new Set(obst.rows.filter(t => t.arhivirana).map(t => t.id));
+    const vhodne = [];
+    for (const t of mize) {
+      if (t.id !== null && arhivirane.has(t.id)) continue;   // arhivirano mizo odjemalec lahko poslje nazaj (GET jo vrne): preskoci se
+      if (t.id !== null && !aktivne.has(t.id)) { await c.query("ROLLBACK"); return res.status(400).send(`tables: id ${t.id} does not belong to this event.`); }
+      vhodne.push(t);
+    }
+    const ostanejo = vhodne.filter(t => t.id !== null).map(t => t.id);
+    const odstranjene = [...aktivne].filter(x => !ostanejo.includes(x));
+    let sproscene = 0;
+    if (odstranjene.length) {
+      // Mize niso vec v ponudbi: rezervacije po telefonu se izbrisejo (released_holds), miza z narocilom se arhivira, brez narocila izbrise.
+      // Najprej zaklep vrstic (FOR UPDATE ceka nakup z FOR SHARE in rezervacijo z FOR NO KEY UPDATE, nov nakup pa ceka nas): potem je
+      // prebrano stanje narocil/rezervacij dokoncno, zato DELETE ne pade na orders.table_id (RESTRICT) in nakup arhivirane/izbrisane mize dobi 404.
+      await c.query("SELECT id FROM club_tables WHERE event_id = $1 AND id = ANY($2::int[]) ORDER BY id FOR UPDATE", [id, odstranjene]);
+      const h = await c.query("DELETE FROM table_holds WHERE event_id = $1 AND table_id = ANY($2::int[])", [id, odstranjene]);
+      sproscene = h.rowCount;
+      const z = await c.query("SELECT DISTINCT table_id FROM orders WHERE table_id = ANY($1::int[])", [odstranjene]);
+      const znarocili = new Set(z.rows.map(r => r.table_id));
+      const zaArhiv = odstranjene.filter(x => znarocili.has(x));
+      const zaBris = odstranjene.filter(x => !znarocili.has(x));
+      if (zaArhiv.length) await c.query("UPDATE club_tables SET archived_at = NOW() WHERE event_id = $1 AND id = ANY($2::int[])", [id, zaArhiv]);
+      if (zaBris.length) await c.query("DELETE FROM club_tables WHERE event_id = $1 AND id = ANY($2::int[])", [id, zaBris]);
+    }
+    // Zacasne oznake: zamenjava oznak med dvema mizama (T1 <-> T2) bi sicer trcila ob unikatnem indeksu.
+    if (ostanejo.length) await c.query("UPDATE club_tables SET label = '~' || id WHERE event_id = $1 AND id = ANY($2::int[])", [id, ostanejo]);
+    for (const t of vhodne) {
+      if (t.id !== null) {
+        await c.query(
+          `UPDATE club_tables SET label=$3, x=$4, y=$5, w=$6, h=$7, shape=$8, seats=$9, price_cents=$10
+            WHERE id=$1 AND event_id=$2`,
+          [t.id, id, t.label, t.x, t.y, t.w, t.h, t.shape, t.seats, t.price_cents]);
+      } else {
+        await c.query(
+          `INSERT INTO club_tables (club_id, event_id, label, x, y, w, h, shape, seats, price_cents)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [klub, id, t.label, t.x, t.y, t.w, t.h, t.shape, t.seats, t.price_cents]);
+      }
+    }
+
+    // --- dogodek: vir, tloris (JSONB prek JSON.stringify), izvor kopije (ostane tudi po rocnem urejanju: zgodovina) ---
+    await c.query(
+      `UPDATE events SET vip_layout_source = $2, floor_plan = $3::jsonb, vip_layout_from_club_id = COALESCE($4::int, vip_layout_from_club_id) WHERE id = $1`,
+      [id, b.source, b.source === "event" && plan !== null ? JSON.stringify(plan) : null, izKluba]);
+    await c.query("COMMIT");
+    for (const x of odstranjene) razprodanoPozabi("m:" + id + ":" + x);   // nakup, zavrnjen zaradi rezervacije, je mizo oznacil »zasedena« v pomnilniku
+    console.log(`Razpored dogodka ${id}: vir ${b.source}${izVenue ? " (kopija gostitelja " + izKluba + ")" : ""}, ${vhodne.length} miz, odstranjenih ${odstranjene.length}, sproscenih rezervacij ${sproscene}`);
+    // Branje po COMMIT-u prek istega odjemalca c (glej opombo pri POST /events/:id/orders).
+    return res.json({ ...(await vipRazporedOdgovor(c, klub, id)), released_holds: sproscene });
+  } catch (err) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (err && err.code === "23505") return res.status(400).send("Table labels must be unique.");
     console.error(err);
     return res.status(500).send("Server error.");
   } finally { c.release(); }
@@ -6328,14 +6507,16 @@ app.post("/business/events/:id/tables/:tableId/hold", requireAuth, requireClub("
   try { c = await pool.connect(); } catch (err) { console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
   try {
     await nakupZacni(c);
-    const er = await c.query(`SELECT id, (${KONEC_DOGODKA} <= NOW()) AS koncan FROM events WHERE id = $1 AND club_id = $2`, [id, klub]);
+    const er = await c.query(`SELECT id, vip_layout_source, (${KONEC_DOGODKA} <= NOW()) AS koncan FROM events WHERE id = $1 AND club_id = $2`, [id, klub]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
     // Koncan dogodek (isti izraz kot »ended« drugje): ime gosta se ne shrani brez smisla. Dogodek, ki tece, rezervacijo se sprejme.
     if (er.rows[0].koncan) { await c.query("ROLLBACK"); return res.status(409).send("This event has already ended."); }
     // Miza TEGA kluba, ne arhivirana. Rezervacija je dovoljena tudi, ce je miza na dogodku izklopljena ali VIP na dogodku ni vklopljen
     // (klub tloris uporablja tudi samo za telefonske rezervacije).
+    // Razpored dogodka (039): pri vip_layout_source = 'event' je rezervirana miza lahko samo miza TEGA dogodka, sicer samo klubska (event_id IS NULL).
     const mr = await c.query(
-      "SELECT id FROM club_tables WHERE id = $1 AND club_id = $2 AND archived_at IS NULL FOR NO KEY UPDATE", [mizaId, klub]);
+      `SELECT id FROM club_tables WHERE id = $1 AND club_id = $2 AND archived_at IS NULL
+          AND (CASE WHEN $3::text = 'event' THEN event_id = $4 ELSE event_id IS NULL END) FOR NO KEY UPDATE`, [mizaId, klub, er.rows[0].vip_layout_source, id]);
     if (mr.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Table not found."); }
     // Zaklep imamo: aktivna naročila (isti pogoj kot unikatni indeks orders_miza_dogodek_key) so zdaj dokončna.
     const nr = await c.query(
@@ -6412,7 +6593,8 @@ app.get("/events/:id/vip", async (req, res) => {
     const id = vipId(req.params.id);
     if (!id) return res.status(400).send("Invalid event id.");
     const er = await pool.query(
-      `SELECT e.id, e.club_id, e.vip_enabled, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.min_age
+      `SELECT e.id, e.club_id, e.vip_enabled, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.min_age,
+              e.vip_layout_source, e.floor_plan
          FROM events e JOIN clubs c ON c.id = e.club_id
         WHERE e.id = $1 AND e.status = 'published' AND NOT c.hidden`, [id]);
     if (er.rows.length === 0) return res.status(404).send("Event not found.");
@@ -6430,18 +6612,22 @@ app.get("/events/:id/vip", async (req, res) => {
                      -- Rezervacija po telefonu (032): za kupca je miza zasedena; ime gosta ni v tem odgovoru.
                      OR EXISTS (SELECT 1 FROM table_holds h WHERE h.event_id = $1 AND h.table_id = ct.id)) AS zasedena
                FROM club_tables ct LEFT JOIN event_tables et ON et.event_id = $1 AND et.table_id = ct.id
-              WHERE ct.club_id = $2
+              -- Razpored dogodka (039): mize dogodka (event_id = :id) ali klubske (event_id IS NULL); oblika odgovora je ista.
+              WHERE ct.club_id = $2 AND (CASE WHEN $3::text = 'event' THEN ct.event_id = $1 ELSE ct.event_id IS NULL END)
            ) t
           -- Izklopljena ali arhivirana miza je skrita, RAZEN ce je na tem dogodku ze prodana: kupci vidijo "Booked".
           WHERE NOT t.skrita OR t.zasedena
-          ORDER BY t.id`, [id, e.club_id]);
+          ORDER BY t.id`, [id, e.club_id, e.vip_layout_source]);
       mize = m.rows;
     }
     const enabled = e.vip_enabled && mize.length > 0;
     let plan = null, paketi = [];
     if (enabled) {
-      const k = await pool.query("SELECT floor_plan FROM clubs WHERE id = $1", [e.club_id]);
-      plan = (k.rows[0] && k.rows[0].floor_plan) || null;
+      if (e.vip_layout_source === "event") plan = e.floor_plan || null;
+      else {
+        const k = await pool.query("SELECT floor_plan FROM clubs WHERE id = $1", [e.club_id]);
+        plan = (k.rows[0] && k.rows[0].floor_plan) || null;
+      }
       const p = await pool.query(
         `SELECT id, name, description FROM bottle_packages
           WHERE club_id = $1 AND archived_at IS NULL ORDER BY sort, id`, [e.club_id]);
@@ -6495,7 +6681,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
       if (obst) { await c.query("ROLLBACK"); return await idemOdgovori(res, c, obst, idemV); }
     }
     const er = await c.query(
-      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled,
+      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_layout_source,
               e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps
          FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
@@ -6509,7 +6695,9 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
       `SELECT ct.id, ct.label, ct.seats, COALESCE(et.price_cents, ct.price_cents) AS price_cents
          FROM club_tables ct LEFT JOIN event_tables et ON et.event_id = $1 AND et.table_id = ct.id
         WHERE ct.id = $2 AND ct.club_id = $3 AND ct.archived_at IS NULL AND NOT COALESCE(et.disabled, FALSE)
-        FOR SHARE OF ct`, [e.id, mizaId, e.club_id]);
+          -- Razpored dogodka (039): miza mora biti iz veljavnega razporeda (miza drugega dogodka ali klubska pri razporedu dogodka = 404).
+          AND (CASE WHEN $4::text = 'event' THEN ct.event_id = $1 ELSE ct.event_id IS NULL END)
+        FOR SHARE OF ct`, [e.id, mizaId, e.club_id, e.vip_layout_source]);
     if (mr.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Table not found."); }
     const miza = mr.rows[0];
 

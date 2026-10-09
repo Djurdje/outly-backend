@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–038, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–039, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict XDAha7EwGQLn8BFhErkbBAHMCTIZr4DPlbJjraSQEm4dO2at7l1hKk91tLSFs41
+\restrict 2zlLVMyhwEgIYwyXRk5VrJNjhcufsHlxdkIEWY85nWdOgjDSgvnQS2sfSg398fP
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -289,12 +289,20 @@ CREATE TABLE public.club_tables (
     price_cents integer NOT NULL,
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    event_id integer,
     CONSTRAINT club_tables_label_chk CHECK (((char_length(label) >= 1) AND (char_length(label) <= 20))),
     CONSTRAINT club_tables_pos_chk CHECK (((x >= 0) AND (y >= 0) AND (w >= 1) AND (h >= 1))),
     CONSTRAINT club_tables_price_chk CHECK ((price_cents >= 0)),
     CONSTRAINT club_tables_seats_chk CHECK (((seats >= 1) AND (seats <= 20))),
     CONSTRAINT club_tables_shape_chk CHECK ((shape = ANY (ARRAY['round'::text, 'rect'::text])))
 );
+
+
+--
+-- Name: COLUMN club_tables.event_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.club_tables.event_id IS 'NULL = miza kluba; sicer miza razporeda tega dogodka (039), club_id = events.club_id. event_tables (izjeme) veljajo samo za mize z event_id IS NULL.';
 
 
 --
@@ -522,8 +530,12 @@ CREATE TABLE public.events (
     venue_city text DEFAULT ''::text NOT NULL,
     venue_lat double precision,
     venue_lng double precision,
+    vip_layout_source text DEFAULT 'club'::text NOT NULL,
+    floor_plan jsonb,
+    vip_layout_from_club_id integer,
     CONSTRAINT events_capacity_chk CHECK (((capacity IS NULL) OR (capacity > 0))),
     CONSTRAINT events_end_chk CHECK (((end_at IS NULL) OR (end_at > start_at))),
+    CONSTRAINT events_floor_plan_chk CHECK (((floor_plan IS NULL) OR (jsonb_typeof(floor_plan) = 'object'::text))),
     CONSTRAINT events_min_age_chk CHECK (((min_age >= 0) AND (min_age <= 99))),
     CONSTRAINT events_price_chk CHECK (((ticket_price_cents IS NULL) OR (ticket_price_cents >= 0))),
     CONSTRAINT events_sales_window_chk CHECK (((sales_close_at IS NULL) OR (sales_open_at IS NULL) OR (sales_close_at > sales_open_at))),
@@ -532,7 +544,8 @@ CREATE TABLE public.events (
     CONSTRAINT events_title_chk CHECK ((length(TRIM(BOTH FROM title)) > 0)),
     CONSTRAINT events_vat_chk CHECK (((vat_rate IS NULL) OR ((vat_rate >= (0)::numeric) AND (vat_rate < (1)::numeric)))),
     CONSTRAINT events_venue_club_chk CHECK (((venue_club_id IS NULL) OR (venue_club_id <> club_id))),
-    CONSTRAINT events_venue_coords_chk CHECK ((((venue_lat IS NULL) = (venue_lng IS NULL)) AND ((venue_lat IS NULL) OR (((venue_lat >= ('-90'::integer)::double precision) AND (venue_lat <= (90)::double precision)) AND ((venue_lng >= ('-180'::integer)::double precision) AND (venue_lng <= (180)::double precision))))))
+    CONSTRAINT events_venue_coords_chk CHECK ((((venue_lat IS NULL) = (venue_lng IS NULL)) AND ((venue_lat IS NULL) OR (((venue_lat >= ('-90'::integer)::double precision) AND (venue_lat <= (90)::double precision)) AND ((venue_lng >= ('-180'::integer)::double precision) AND (venue_lng <= (180)::double precision)))))),
+    CONSTRAINT events_vip_layout_source_chk CHECK ((vip_layout_source = ANY (ARRAY['club'::text, 'event'::text])))
 );
 
 
@@ -548,6 +561,27 @@ COMMENT ON COLUMN public.events.venue_club_id IS 'Gostiteljski klub z Outlyja (0
 --
 
 COMMENT ON COLUMN public.events.venue_name IS 'Prosto vpisano prizorisce (037); prazno, ce je venue_club_id podan.';
+
+
+--
+-- Name: COLUMN events.vip_layout_source; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.events.vip_layout_source IS 'Vir razporeda VIP miz (039): club = tloris kluba prodajalca, event = razpored dogodka (events.floor_plan + club_tables WHERE event_id = id).';
+
+
+--
+-- Name: COLUMN events.floor_plan; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.events.floor_plan IS 'Tloris razporeda dogodka (039), enaka oblika kot clubs.floor_plan. Pomemben samo pri vip_layout_source = event.';
+
+
+--
+-- Name: COLUMN events.vip_layout_from_club_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.events.vip_layout_from_club_id IS 'Klub, iz katerega je kopija razporeda (039; posnetek, poznejse spremembe kluba ne vplivajo). Samo informativno.';
 
 
 --
@@ -1632,10 +1666,24 @@ CREATE INDEX club_tables_club_idx ON public.club_tables USING btree (club_id) WH
 
 
 --
+-- Name: club_tables_event_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_tables_event_idx ON public.club_tables USING btree (event_id) WHERE (event_id IS NOT NULL);
+
+
+--
+-- Name: club_tables_event_label_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX club_tables_event_label_key ON public.club_tables USING btree (event_id, lower(label)) WHERE ((event_id IS NOT NULL) AND (archived_at IS NULL));
+
+
+--
 -- Name: club_tables_label_key; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX club_tables_label_key ON public.club_tables USING btree (club_id, lower(label)) WHERE (archived_at IS NULL);
+CREATE UNIQUE INDEX club_tables_label_key ON public.club_tables USING btree (club_id, lower(label)) WHERE ((event_id IS NULL) AND (archived_at IS NULL));
 
 
 --
@@ -2155,6 +2203,14 @@ ALTER TABLE ONLY public.club_tables
 
 
 --
+-- Name: club_tables club_tables_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.club_tables
+    ADD CONSTRAINT club_tables_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE CASCADE;
+
+
+--
 -- Name: clubs clubs_owner_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2248,6 +2304,14 @@ ALTER TABLE ONLY public.events
 
 ALTER TABLE ONLY public.events
     ADD CONSTRAINT events_venue_club_id_fkey FOREIGN KEY (venue_club_id) REFERENCES public.clubs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: events events_vip_layout_from_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.events
+    ADD CONSTRAINT events_vip_layout_from_club_id_fkey FOREIGN KEY (vip_layout_from_club_id) REFERENCES public.clubs(id) ON DELETE SET NULL;
 
 
 --
@@ -2526,5 +2590,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict XDAha7EwGQLn8BFhErkbBAHMCTIZr4DPlbJjraSQEm4dO2at7l1hKk91tLSFs41
+\unrestrict 2zlLVMyhwEgIYwyXRk5VrJNjhcufsHlxdkIEWY85nWdOgjDSgvnQS2sfSg398fP
 

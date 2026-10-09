@@ -181,6 +181,18 @@ Za **ios-dev** in **web-dev** (backend po migraciji 038; vse DODANO, stari odjem
 - Past: `GET /business/events/:id/vip`, vstopnice dogodka in skener so zdaj za `owner | manager | doorman` (natakar 403, prej bi bil katerakoli vloga); manager sme vabiti in odstraniti vratarja IN natakarja.
 - Postavljeno z migracijo 038 (CHECK vlog + nova tabela); PR je pod `odobril-martin` (migracija + `requireClub`).
 
+## Razpored VIP miz po dogodku (od 9. 10. 2026; ARCHITECTURE »Razpored miz po dogodku (migracija 039)«, I28, DECISIONS 9. 10.)
+
+Za **ios-dev** in **web-dev** (backend po migraciji 039; vse DODANO, na starem backendu je `vip-layout` 404 -> razdelek skrij; v modelih privzete vrednosti):
+- `GET /events/:id` in seznami: `vip_layout_source` (`"club"` | `"event"`, privzeto `"club"`). **`GET /events/:id/vip` (javno) in `GET /business/events/:id/vip` imata NESPREMENJENO obliko** (`plan`, `tables`, `packages`); pri `event` viru kažeta tloris in mize dogodka. Nakup mize, `hold`, izjeme: iste poti.
+- `GET /business/events/:id/vip-layout` (X-Outly-Club; owner, manager; vratar/natakar 403; tuj dogodek 404) -> `{ source, floor_plan, tables, from_club_id, from_club_name, venue_club_id, venue_club_name, venue_has_layout }`.
+  `floor_plan` = `{ width, height, elements }` (isto kot `plan` pri `/business/vip`; `null` brez tlorisa), `tables` = `{ id, label, x, y, w, h, shape, seats, price_cents, archived }` (osnovna cena brez izjem po dogodku; `archived: true` = odstranjena miza z naročilom, odjemalec jo filtrira). `venue_*` so gostitelj (skrit gostitelj = null), `venue_has_layout` = gostitelj ima tloris.
+- `PUT /business/events/:id/vip-layout`: `{ source: "club" }` (nazaj; mize dogodka se arhivirajo ali izbrišejo) | `{ source: "event", copy_from_venue: true }` (400 brez gostitelja na Outlyju ali brez njegovega tlorisa) | `{ source: "event", floor_plan, tables }` (validacija kot `PUT /business/vip`; `floor_plan: null` + `tables: []` je veljaven začetek;
+  mize z `id` se posodobijo, manjkajoče odstranijo, nove dodajo; arhivirane `id` se prezrejo). Odgovor = GET + **`released_holds`** (število izbrisanih telefonskih rezervacij odstranjenih miz). Po kopiji odpri urejevalnik (isti kot za klub).
+- Izjeme (`PUT /business/events/:id/vip` `tables[].table_id`) veljajo tudi za mize dogodka; miza drugega dogodka istega kluba 404, tuj klub / neobstoječa 400 (kot doslej).
+- Past: preklop vira ali odstranitev mize **izbriše telefonsko rezervacijo** te mize (opozori uporabnika). Miza z naročilom ostane (arhivirana, `booking` v poslovnem pogledu); javno ostane »Booked«.
+- Past: `PUT /business/vip` (klubski tloris) mize dogodkov NE vidi in jih ne spreminja (`event_id IS NULL`).
+
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 
 - **Stripe v sandboxu (3. 10.):** klub brez dokončanega Connect onboardinga v sandboxu še vedno prodaja v testnem načinu (da demo klubi
