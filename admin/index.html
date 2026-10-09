@@ -192,6 +192,11 @@
             <div class="siroko"><label>Logotip (URL, Cloudinary)</label><input id="k_logoUrl" placeholder="https://res.cloudinary.com/..."></div>
             <div class="siroko"><label>Pasica (URL)</label><input id="k_bannerUrl" placeholder="https://"></div>
             <div class="siroko"><label>Opis</label><textarea id="k_description"></textarea></div>
+            <div class="siroko">
+              <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="k_isOrganizer" style="width:auto"> Organizator (brez prizorišča)</label>
+              <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;margin-top:6px"><input type="checkbox" id="k_isOfficial" style="width:auto"> Uradni profil Outly</label>
+              <span style="font-size:12.5px;color:var(--faint)">Organizator nima naslova in pina na zemljevidu; vsak njegov dogodek ima prizorišče (klub na Outlyju ali prosta lokacija). Uradni profil: njegovi prihajajoči dogodki so na vrhu domačega zaslona (»Organized by Outly«). To kljukico nastavi samo admin.</span>
+            </div>
           </div>
           <div class="vrsta"><button id="kShrani" onclick="kShrani()">Ustvari klub</button><span id="kSporocilo" style="font-size:12.5px;color:var(--faint)"></span></div>
         </div>
@@ -480,6 +485,7 @@ const kPolja = ["ownerEmail", "name", "city", "country", "address", "lat", "lng"
 function kPocisti() {
   $("k_id").value = ""; kPolja.forEach(p => $("k_" + p).value = "");
   $("k_city").value = "Ljubljana"; $("k_country").value = "Slovenija"; $("k_minAge").value = "18";
+  $("k_isOrganizer").checked = false; $("k_isOfficial").checked = false;
   $("kNaslov").firstChild.textContent = "Nov klub "; $("kShrani").textContent = "Ustvari klub"; $("kSporocilo").textContent = "";
 }
 function kTelo() {
@@ -492,6 +498,7 @@ function kTelo() {
     if (p === "genres") { t.genres = v ? v.split(",").map(s => s.trim()).filter(Boolean) : []; continue; }
     t[p] = v;
   }
+  t.isOrganizer = $("k_isOrganizer").checked; t.isOfficial = $("k_isOfficial").checked;
   const lat = $("k_lat").value.trim(), lng = $("k_lng").value.trim();
   if (lat || lng) { t.lat = Number(lat.replace(",", ".")); t.lng = Number(lng.replace(",", ".")); }
   else { t.lat = null; t.lng = null; }
@@ -518,6 +525,7 @@ function kUredi(id) {
     minAge: k.min_age, commissionPercent: k.commission_bps === null || k.commission_bps === undefined ? "" : String(k.commission_bps / 100), genres: (k.genres || []).join(", "), contactEmail: k.contact_email, contactPhone: k.contact_phone, instagram: k.instagram,
     website: k.website, logoUrl: k.logo_url, bannerUrl: k.banner_url, description: k.description };
   for (const p of kPolja) $("k_" + p).value = m[p] ?? "";
+  $("k_isOrganizer").checked = !!k.is_organizer; $("k_isOfficial").checked = !!k.is_official;
   $("kNaslov").firstChild.textContent = `Uredi klub #${k.id} `; $("kShrani").textContent = "Shrani spremembe";
   $("kSporocilo").textContent = "Sprememba e-naslova lastnika prenese klub na drug račun.";
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -532,7 +540,7 @@ async function naloziKlube() {
       <tr>
         <td class="mono">${k.id}</td>
         <td>${k.logo_url ? `<img class="mini" src="${ubezi(k.logo_url)}" alt="">` : `<span class="mini" style="display:inline-block"></span>`}</td>
-        <td><b>${ubezi(k.name)}</b><span class="drobno">${[(k.genres || []).join(", "), k.min_age ? k.min_age + "+" : "", k.commission_bps !== null && k.commission_bps !== undefined ? "provizija " + (k.commission_bps / 100).toLocaleString("sl-SI") + " %" : "provizija privzeta"].filter(Boolean).join(" · ")}</span></td>
+        <td><b>${ubezi(k.name)}</b><span class="drobno">${[(k.genres || []).join(", "), k.min_age ? k.min_age + "+" : "", k.commission_bps !== null && k.commission_bps !== undefined ? "provizija " + (k.commission_bps / 100).toLocaleString("sl-SI") + " %" : "provizija privzeta", k.is_organizer ? "organizator" : "", k.is_official ? "uradni profil Outly" : ""].filter(Boolean).join(" · ")}</span></td>
         <td>${ubezi(k.owner_email || "—")}<span class="drobno">${ubezi(k.owner_username || "")}</span></td>
         <td>${ubezi(k.city)}<span class="drobno">${ubezi(k.address)}</span></td>
         <td class="mono">${k.lat !== null ? k.lat.toFixed(4) + ", " + k.lng.toFixed(4) : '<span class="znacka opoz">brez</span>'}</td>

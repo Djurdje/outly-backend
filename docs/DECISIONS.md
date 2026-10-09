@@ -491,3 +491,18 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   Razlika: backend `KONEC_DOGODKA` (lifecycle `ended`) privzeto `start + 8 h`, skener `start + 12 h` — namenoma (Martin).
   *vir/dokaz*: Martinova sporočila v pogovoru 8. 10. 2026 (tudi »ja dodaj še preverjanje okna na strežniku«); outly_webpage #42, outly-app #68 · *velja dokler*: Martin ne reče drugače ·
   *nadomeščena z*: —
+
+## Organizatorji brez prizorišča in »Organized by Outly« (9. 10. 2026)
+
+- 2026-10-09: **Organizator dogodkov brez lastnega kluba je isti poslovni profil kot klub** (Martin, pogovor 9. 10. 2026): ista vrstica v `clubs` (slideshow, video, dogodki, ekipa, Stripe), razlika `clubs.is_organizer = true`.
+  Nima naslova in pina na zemljevidu (address/city smeta biti prazna). Nova vloga ali tabela se NE uvaja (vse je vezano na `club_id`). *vir/dokaz*: pogovor 9. 10. 2026; migracija 037 · *velja dokler*: Martin ne odloči drugače · *nadomeščena z*: —
+- 2026-10-09: **Vsak dogodek organizatorja ima prizorišče** (Martin 9. 10.): klub z Outlyja (`venue_club_id`, prikaz »at <klub>« s povezavo) ali prosto vpisana lokacija (`venue_name`, `venue_address`, `venue_city`, `venue_lat/lng`). Organizator mora podati eno od obeh (400);
+  navaden klub prizorišča ne potrebuje (privzeto njegov naslov), sme pa ga podati.
+- 2026-10-09: **Gostovani dogodek je viden tudi na strani gostiteljskega kluba** (z oznako »Hosted · organizer <ime>«), **skenira pa samo organizatorjeva ekipa** (Martin 9. 10.). Gostitelj dobi 403 `wrong_club` (obstoječe vedenje `requireClub`/`events.club_id`; invarianta I26).
+- 2026-10-09: **Denar gre na Stripe račun organizatorja** (Martin 9. 10.): prodajalec je `events.club_id`, kot doslej; provizija in Connect se ne spremenijo.
+- 2026-10-09: **Podjetje Outly ima profil organizatorja z `clubs.is_official = true`** (Martin 9. 10.); nastavi ga SAMO admin (admin panel / `/admin/api/clubs`), `PATCH /business/clubs/me` polja ne sprejme. Na vrhu Home (nad Suggestions) je razdelek
+  »Organized by Outly« (naslov samo v angleščini, brez prevoda v sl) samo s prihajajočimi objavljenimi dogodki klubov z `is_official`; prvi kot velika kartica, ostali kot vodoravna vrsta; brez dogodkov se razdelek ne kaže; »Big events coming up« ostane, Outlyjevi dogodki se v njem ne ponovijo.
+  Admin kljukice »featured« NI (Martin: na vrhu samo Outly). *vir/dokaz*: pogovor 9. 10. 2026 · *velja dokler*: Martin ne odloči drugače · *nadomeščena z*: —
+- 2026-10-09: **Odločitve agenta (Martin jih ni potrdil), podrobnosti 037.** (1) Stran kluba bere dogodke prek `GET /events?clubId=X` (pot `GET /clubs/:id/events` ne obstaja in je nismo uvedli): vrne tudi dogodke, ki jih X gosti, z `hosted`; skrit klub = prazen seznam.
+  (2) `GET /events` ima poleg `club_id` zdaj `club_name` (ime prodajalca/organizatorja za kartico gostovanega dogodka). (3) `PATCH /events/:id` preverja prizorišče samo, če ga zahtevek spreminja; prosto besedilo brez `venueClubId` prepiše gostitelja. (4) Skrit gostitelj javno ne obstaja tudi kot prizorišče
+  (`venue_club_id`/`venue_club_name` = null; v mailu/PDF vstopnice ostane, ker je to uporabnikova vstopnica). (5) `is_organizer` sme lastnik preklopiti sam (PATCH); `is_official` samo admin. (6) Lastnik ima še vedno en klub (organizator je zamenjava, ne dodatek: odločitev »en klub na poslovni račun« velja).
