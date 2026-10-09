@@ -663,14 +663,14 @@ async function klubUporabnika(userId, zeljeni = null, db = pool) {
 // Vsa clanstva uporabnika (lastnistvo + ekipe) za GET /me `clubs` — aplikacija kaze seznam My Clubs.
 async function klubiUporabnika(userId) {
   const r = await pool.query(
-    `SELECT c.id AS club_id, c.name AS club_name, c.logo_url AS club_logo_url, 'owner' AS role, 0 AS vrstni
+    `SELECT c.id AS club_id, c.name AS club_name, c.logo_url AS club_logo_url, 'owner' AS role, 0 AS vrstni, c.is_organizer
        FROM clubs c WHERE c.owner_user_id = $1
      UNION ALL
-     SELECT c.id, c.name, c.logo_url, m.role, 1
+     SELECT c.id, c.name, c.logo_url, m.role, 1, c.is_organizer
        FROM club_members m JOIN clubs c ON c.id = m.club_id WHERE m.user_id = $1
      ORDER BY 5, 1`, [userId]
   );
-  return r.rows.map(x => ({ club_id: x.club_id, club_name: x.club_name, club_logo_url: x.club_logo_url || "", role: x.role }));
+  return r.rows.map(x => ({ club_id: x.club_id, club_name: x.club_name, club_logo_url: x.club_logo_url || "", role: x.role, is_organizer: x.is_organizer }));
 }
 
 // Klub, ki ga zeli odjemalec: glava X-Outly-Club ali ?club_id= (celo stevilo), sicer null.
@@ -1156,6 +1156,7 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 const JAVNI_STOLPCI_KLUBA = `id, name, logo_url, banner_url, description,
   contact_email, contact_phone, instagram, website, address, city, country,
   lat, lng, min_age, genres, created_at, bar_prices, gallery_urls, video_url,
+  is_organizer, is_official,
   (SELECT COUNT(*)::int FROM club_follows cf WHERE cf.club_id = clubs.id) AS followers_count`;
 
 // Cenik bara (migracija 014): seznam postavk, ki ga klub ureja v celoti.
@@ -1327,6 +1328,9 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
       minAge,
       genres
     } = req.body;
+    // Organizator brez prizorisca (037): isti profil kot klub, brez obveznega mesta/naslova. is_official NI vhod (samo admin pot, 037).
+    const isOrganizer = req.body.isOrganizer ?? req.body.is_organizer;
+    if (isOrganizer !== undefined && typeof isOrganizer !== "boolean") return res.status(400).send("isOrganizer must be true or false.");
 
     if (!name) return res.status(400).send("Missing name.");
 
@@ -1334,9 +1338,9 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
       `INSERT INTO clubs
       (owner_user_id, name, logo_url, banner_url, description,
        contact_email, contact_phone, instagram, website,
-       address, city, country, lat, lng, min_age, genres)
+       address, city, country, lat, lng, min_age, genres, is_organizer)
        VALUES
-      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
        RETURNING ${STOLPCI_KLUBA_LASTNIKA}`,
       [
         req.user.userId,
@@ -1354,7 +1358,8 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
         lat ?? null,
         lng ?? null,
         minAge ?? 18,
-        Array.isArray(genres) ? genres : []
+        Array.isArray(genres) ? genres : [],
+        isOrganizer === true
       ]
     );
 
@@ -1577,8 +1582,13 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
       bar_prices: body.bar_prices ?? body.barPrices,
       // Slideshow (do 3 slike) in predstavitveni video (migracija 015).
       gallery_urls: body.gallery_urls ?? body.galleryUrls,
-      video_url: body.video_url ?? body.videoUrl
+      video_url: body.video_url ?? body.videoUrl,
+      // Organizator brez prizorisca (037). is_official NAMENOMA ni tu: nastavi ga samo admin (PATCH /admin/api/clubs/:id).
+      is_organizer: body.is_organizer ?? body.isOrganizer
     };
+    if (incoming.is_organizer !== undefined && typeof incoming.is_organizer !== "boolean") {
+      return res.status(400).send("isOrganizer must be true or false.");
+    }
 
     // URL slike/videa: https, brez presledkov, razumna dolzina. Prazen niz je dovoljen (odstrani).
     const veljavenUrl = (u) => typeof u === "string" && u.length <= 500 && /^https:\/\/\S+$/.test(u);
@@ -1670,10 +1680,48 @@ const VIP_OD_CENTOV = `(SELECT MIN(COALESCE(vet.price_cents, vct.price_cents))::
          WHERE events.vip_enabled AND vct.club_id = events.club_id AND vct.archived_at IS NULL
            AND NOT COALESCE(vet.disabled, FALSE))`;
 
+// Prizorisce dogodka (migracija 037, organizatorji brez prizorisca). DODANA polja: dogodek ima ali gostiteljski klub z Outlyja (venue_club_id + ime + logotip,
+// podpoizvedbe: skrit klub javno ne obstaja, zato izgine tudi kot prizorisce) ali prosto vpisano lokacijo (venue_name/_address/_city/_lat/_lng); navaden klub
+// ju obicajno nima (prazen niz / null) in je prizorisce njegov naslov. Podpoizvedbe se sklicujejo na tabelo `events` (brez vzdevka), kot VIP_OD_CENTOV.
+const STOLPCI_PRIZORISCA = `(SELECT vc.id FROM clubs vc WHERE vc.id = events.venue_club_id AND NOT vc.hidden) AS venue_club_id,
+        (SELECT vc.name FROM clubs vc WHERE vc.id = events.venue_club_id AND NOT vc.hidden) AS venue_club_name,
+        (SELECT vc.logo_url FROM clubs vc WHERE vc.id = events.venue_club_id AND NOT vc.hidden) AS venue_club_logo_url,
+        venue_name,
+        venue_address,
+        venue_city,
+        venue_lat,
+        venue_lng`;
+// Isto za poizvedbe z vzdevkoma e (events) in vcl (LEFT JOIN clubs gostitelja, PRIZORISCE_JOIN).
+const PRIZORISCE_E = `vcl.id AS venue_club_id, vcl.name AS venue_club_name, vcl.logo_url AS venue_club_logo_url,
+              e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng`;
+const PRIZORISCE_JOIN = `LEFT JOIN clubs vcl ON vcl.id = e.venue_club_id`;
+// Javni pogledi (iskanje): skrit gostitelj javno ne obstaja.
+const PRIZORISCE_JOIN_JAVNO = `LEFT JOIN clubs vcl ON vcl.id = e.venue_club_id AND NOT vcl.hidden`;
+// Prizorisce kot niz za mail in PDF vstopnice (ime, naslov, mesto): gostiteljski klub, sicer prosto vpisana lokacija, sicer naslov prodajalca (kluba).
+// Vrstica mora imeti polja iz PRIZORISCE_MAIL_STOLPCI in club_name/club_address/club_city. Organizatorjev naslov NIKOLI ni prizorisce, ce ga dogodek ima.
+const PRIZORISCE_MAIL_STOLPCI = `vcl.id AS venue_club_id, vcl.name AS venue_club_name, vcl.address AS venue_club_address, vcl.city AS venue_club_city,
+            e.venue_name, e.venue_address, e.venue_city`;
+function prizoriscePodatki(x) {
+  if (x.venue_club_id) return [x.venue_club_name, x.venue_club_address, x.venue_club_city].filter(Boolean).join(", ");
+  if (x.venue_name || x.venue_city) return [x.venue_name, x.venue_address, x.venue_city].filter(Boolean).join(", ");
+  return [x.club_name, x.club_address, x.club_city].filter(Boolean).join(", ");
+}
+
+// Polja prizorisca iz vrstice s PRIZORISCE_E (za gnezdene objekte `event`).
+// Naslov prizorisca za polji `address` / `city` v pogledih vstopnic (nakup brez racuna, /me/tickets): gostitelj, sicer prosto vpisano, sicer naslov kluba (alias: e, cl, vcl).
+const PRIZORISCE_NASLOV = `CASE WHEN vcl.id IS NOT NULL THEN vcl.address WHEN e.venue_name <> '' OR e.venue_city <> '' THEN e.venue_address ELSE cl.address END AS address,
+              CASE WHEN vcl.id IS NOT NULL THEN vcl.city WHEN e.venue_name <> '' OR e.venue_city <> '' THEN e.venue_city ELSE cl.city END AS city`;
+function prizoriscePolja(x) {
+  return { venue_club_id: x.venue_club_id, venue_club_name: x.venue_club_name, venue_club_logo_url: x.venue_club_logo_url,
+    venue_name: x.venue_name, venue_address: x.venue_address, venue_city: x.venue_city, venue_lat: x.venue_lat, venue_lng: x.venue_lng };
+}
+
 // Stolpci dogodka na enem mestu (javni GET /events, GET /events/:id, GET /business/events).
 const STOLPCI_DOGODKA = `
         id,
         club_id,
+        -- Ime prodajalca/organizatorja (037): kartica gostovanega dogodka na strani gostitelja ga kaze. DODANO polje.
+        (SELECT cn.name FROM clubs cn WHERE cn.id = events.club_id) AS club_name,
         title,
         description,
         poster_url,
@@ -1715,7 +1763,8 @@ const STOLPCI_DOGODKA = `
         -- VIP mize (migracija 025). DODANI polji: dogodek ima VIP vklopljen IN vsaj eno vklopljeno
         -- aktivno mizo; vip_from_cents = najnizja efektivna cena (prepis dogodka, sicer privzeta).
         ${VIP_OD_CENTOV} IS NOT NULL AS vip_enabled,
-        ${VIP_OD_CENTOV} AS vip_from_cents`;
+        ${VIP_OD_CENTOV} AS vip_from_cents,
+        ${STOLPCI_PRIZORISCA}`;
 
 // Lahka razlicica seznama (GET /events?lite=true, #114): brez `description` (pri 200 dogodkih je to vecina teze odgovora).
 // Polje je IZPUSCENO (ne null). Privzeti odgovor ostane nespremenjen (pravilo "spremembe API-ja so samo dodajanje").
@@ -1769,7 +1818,9 @@ function kljucDogodkov(q) {
   return JSON.stringify(["events", clubId || null, pop ? null : (upcoming === "true" || upcoming === "false" ? upcoming : null), pop, lite === "true"]);
 }
 
-app.get("/events", async (req, res) => {
+// Javni seznam dogodkov (GET /events). Z ?clubId= vrne dogodke kluba IN dogodke, ki jih klub GOSTI (events.venue_club_id, 037);
+// vsaka vrstica ima takrat `hosted` (true = dogodek organizatorja z gostiteljem clubId, club_id/club_name ostaneta organizatorjeva).
+async function javniSeznamDogodkov(req, res) {
   try {
     const { clubId, upcoming, popular } = req.query;
     const stolpci = req.query.lite === "true" ? STOLPCI_DOGODKA_LAHKI : STOLPCI_DOGODKA;
@@ -1797,7 +1848,9 @@ app.get("/events", async (req, res) => {
 
     if (clubId) {
       params.push(clubId);
-      where.push(`club_id = $${params.length}`);
+      where.push(`(club_id = $${params.length} OR venue_club_id = $${params.length})`);
+      // Skrit klub javno ne obstaja: tudi dogodki, ki jih (kot gostitelj) gosti, se na njegovi strani ne kazejo.
+      where.push(`NOT EXISTS (SELECT 1 FROM clubs hc WHERE hc.id = $${params.length} AND hc.hidden)`);
     }
 
     // coming soon vs popular. Pretekli dogodki so javno vidni samo 7 dni po zacetku
@@ -1814,7 +1867,7 @@ app.get("/events", async (req, res) => {
     where.push(`club_id NOT IN (SELECT id FROM clubs WHERE hidden)`);
 
     const sql = `
-      SELECT ${stolpci}
+      SELECT ${stolpci}${clubId ? `, (club_id <> $1) AS hosted` : ""}
       FROM events
       WHERE ${where.join(" AND ")}
       ORDER BY start_at ASC
@@ -1829,7 +1882,8 @@ app.get("/events", async (req, res) => {
     console.error(e);
     res.status(500).send("Server error.");
   }
-});
+}
+app.get("/events", javniSeznamDogodkov);
 
 // neobveznaPrijava: brez zetona pot dela naprej (javna stran dogodka), z zetonom pove
 // se moj_plan in nacrte prijateljev (glej ZANIMANJE ZA DOGODEK spodaj, migracija 020).
@@ -1994,6 +2048,72 @@ app.post("/views", omeji({ kljuc: "ogled", najvec: 600, oknoSekund: 3600, priNap
   }
 });
 
+// ---------------------------
+// PRIZORISCE DOGODKA (migracija 037, organizatorji brez prizorisca)
+// ---------------------------
+// Dogodek ima ali gostiteljski klub z Outlyja (venue_club_id) ali prosto vpisano lokacijo (venue_name/_address/_city/_lat/_lng). Organizator (clubs.is_organizer)
+// MORA podati eno od obeh (400 »Organizer events need a venue.«); navaden klub sme, ni pa obvezno (prizorisce je tedaj njegov naslov).
+// Ce je venue_club_id podan, se prosta polja pocistijo (prazen niz / null). Gostitelj ne sme biti klub sam (400), mora obstajati in ne biti skrit (404).
+// Prizorisce NE spremeni prodajalca (events.club_id) in ne tega, kdo skenira (I26).
+const PRIZORISCE_NAJVEC = { venue_name: 120, venue_address: 200, venue_city: 100 };
+// Iz telesa zahtevka (camelCase ali snake_case) samo polja, ki so podana. Vrne { dano } ali { napaka: "besedilo" } (400).
+function prizoriscaIzTelesa(b) {
+  const dano = {};
+  const v = (...imena) => { for (const i of imena) if (b[i] !== undefined) return b[i]; return undefined; };
+  const klub = v("venueClubId", "venue_club_id");
+  if (klub !== undefined) {
+    if (klub === null || klub === "") dano.venue_club_id = null;
+    else if (!/^\d+$/.test(String(klub)) || Number(klub) < 1 || Number(klub) > INT4_MAX) return { napaka: "venueClubId must be a club id." };
+    else dano.venue_club_id = Number(klub);
+  }
+  for (const [kljuc, ...imena] of [["venue_name", "venueName", "venue_name"], ["venue_address", "venueAddress", "venue_address"], ["venue_city", "venueCity", "venue_city"]]) {
+    const x = v(...imena);
+    if (x === undefined) continue;
+    if (x !== null && typeof x !== "string") return { napaka: `${imena[0]} must be a string.` };
+    const t = x === null ? "" : x.trim();
+    if (t.length > PRIZORISCE_NAJVEC[kljuc]) return { napaka: `${imena[0]} too long (max ${PRIZORISCE_NAJVEC[kljuc]}).` };
+    dano[kljuc] = t;
+  }
+  const lat = v("venueLat", "venue_lat"), lng = v("venueLng", "venue_lng");
+  if ((lat === undefined) !== (lng === undefined)) return { napaka: "venueLat and venueLng must be sent together." };
+  if (lat !== undefined) {
+    if (lat === null && lng === null) { dano.venue_lat = null; dano.venue_lng = null; }
+    else {
+      const st = (x) => ((typeof x === "number" || (typeof x === "string" && x.trim() !== "")) ? Number(x) : NaN);
+      const a = st(lat), o = st(lng);
+      if (!Number.isFinite(a) || !Number.isFinite(o) || a < -90 || a > 90 || o < -180 || o > 180) return { napaka: "venueLat/venueLng out of range." };
+      dano.venue_lat = a; dano.venue_lng = o;
+    }
+  }
+  return { dano };
+}
+const PRAZNO_PRIZORISCE = { venue_club_id: null, venue_name: "", venue_address: "", venue_city: "", venue_lat: null, venue_lng: null };
+// Z gostiteljem so prosta polja prazna (gostitelj ima prednost; polja se ignorirajo).
+function uskladiPrizorisce(stanje) {
+  return stanje.venue_club_id ? { ...PRAZNO_PRIZORISCE, venue_club_id: stanje.venue_club_id } : { ...stanje, venue_club_id: null };
+}
+// Preveri stanje prizorisca; ob napaki sam poslje odgovor in vrne false. `clubId` = prodajalec (dogodek), `jeOrganizator` = clubs.is_organizer.
+async function preveriPrizorisce(stanje, clubId, jeOrganizator, res) {
+  if (stanje.venue_club_id) {
+    if (Number(stanje.venue_club_id) === Number(clubId)) { res.status(400).send("venueClubId must be a different club than the event's club."); return false; }
+    const g = await pool.query("SELECT 1 FROM clubs WHERE id=$1 AND hidden = FALSE", [stanje.venue_club_id]);
+    if (g.rows.length === 0) { res.status(404).send("Venue club not found."); return false; }
+  } else if (jeOrganizator && !(stanje.venue_name && stanje.venue_city)) {
+    res.status(400).send("Organizer events need a venue.");
+    return false;
+  }
+  return true;
+}
+// Odgovor POST/PATCH /events (RETURNING *) dobi se ime in logotip gostitelja, da je oblika enaka kot v GET /events.
+async function dopolniPrizorisce(vrstica) {
+  let ime = null, logo = null;
+  if (vrstica.venue_club_id) {
+    const g = await pool.query("SELECT name, logo_url FROM clubs WHERE id=$1", [vrstica.venue_club_id]);
+    if (g.rows[0]) { ime = g.rows[0].name; logo = g.rows[0].logo_url; }
+  }
+  return { ...vrstica, venue_club_name: ime, venue_club_logo_url: logo };
+}
+
 // POST /events (updated: accepts camelCase + snake_case, includes ticket fields)
 app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
@@ -2035,7 +2155,10 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
       if (!Number.isInteger(a) || a < 0 || a > 99) return res.status(400).send("minAge must be between 0 and 99.");
     }
 
-    const clubR = await pool.query("SELECT id, owner_user_id, min_age, genres FROM clubs WHERE id=$1", [clubId]);
+    const pz = prizoriscaIzTelesa(req.body);
+    if (pz.napaka) return res.status(400).send(pz.napaka);
+
+    const clubR = await pool.query("SELECT id, owner_user_id, min_age, genres, is_organizer FROM clubs WHERE id=$1", [clubId]);
     if (clubR.rows.length === 0) return res.status(404).send("Club not found.");
 
     const club = clubR.rows[0];
@@ -2043,6 +2166,10 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
     if (req.klub.role !== "admin" && Number(club.id) !== Number(req.klub.clubId)) {
       return res.status(403).send("You can only create events for your own club.");
     }
+
+    // Prizorisce (037): gostiteljski klub ali prosta lokacija; organizator ga mora podati.
+    const prizorisce = uskladiPrizorisce({ ...PRAZNO_PRIZORISCE, ...pz.dano });
+    if (!(await preveriPrizorisce(prizorisce, club.id, club.is_organizer, res))) return;
 
     const finalMinAge = (minAge ?? club.min_age ?? 18);
     const finalGenres = Array.isArray(genres) ? genres : (club.genres || []);
@@ -2052,10 +2179,11 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
       (
         club_id, title, description, poster_url, start_at, end_at,
         min_age, genres, status,
-        ticket_price_cents, currency, ticket_url, capacity
+        ticket_price_cents, currency, ticket_url, capacity,
+        venue_club_id, venue_name, venue_address, venue_city, venue_lat, venue_lng
       )
       VALUES
-      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
       RETURNING *`,
       [
         clubId,
@@ -2070,7 +2198,13 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
         ticketPriceCents,
         currency,
         ticketUrl,
-        capacity
+        capacity,
+        prizorisce.venue_club_id,
+        prizorisce.venue_name,
+        prizorisce.venue_address,
+        prizorisce.venue_city,
+        prizorisce.venue_lat,
+        prizorisce.venue_lng
       ]
     );
 
@@ -2082,7 +2216,7 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
       catch (e) { console.error("Obvescanje sledilcev ni uspelo:", e.message); }
     }
 
-    res.status(201).json(r.rows[0]);
+    res.status(201).json(await dopolniPrizorisce(r.rows[0]));
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
@@ -2123,7 +2257,8 @@ async function dogodekZaUrejanje(req, res) {
   if (!/^\d+$/.test(req.params.id)) { res.status(400).send("Invalid event id."); return null; }
 
   const r = await pool.query(
-    `SELECT e.id, e.club_id, e.status, c.owner_user_id,
+    `SELECT e.id, e.club_id, e.status, c.owner_user_id, c.is_organizer,
+            e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng,
             (COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') <= NOW()) AS je_koncan
      FROM events e JOIN clubs c ON c.id = e.club_id
      WHERE e.id = $1`,
@@ -2183,6 +2318,18 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
       dovoljeno.recap_video_url = v;
     }
 
+    // Prizorisce (037): preverja se samo, ce ga zahtevek spreminja (urejanje naslova ne sme pasti zaradi starega dogodka brez prizorisca).
+    const pz = prizoriscaIzTelesa(b);
+    if (pz.napaka) return res.status(400).send(pz.napaka);
+    if (Object.keys(pz.dano).length > 0) {
+      const stanje = { venue_club_id: d.venue_club_id, venue_name: d.venue_name, venue_address: d.venue_address, venue_city: d.venue_city, venue_lat: d.venue_lat, venue_lng: d.venue_lng, ...pz.dano };
+      // Prosto besedilo brez venueClubId prepise gostitelja (urejevalnik poslje bodisi gostitelja bodisi lokacijo).
+      if (pz.dano.venue_club_id === undefined && (pz.dano.venue_name || pz.dano.venue_address || pz.dano.venue_city)) stanje.venue_club_id = null;
+      const prizorisce = uskladiPrizorisce(stanje);
+      if (!(await preveriPrizorisce(prizorisce, d.club_id, d.is_organizer, res))) return;
+      Object.assign(dovoljeno, prizorisce);
+    }
+
     if (dovoljeno.capacity !== undefined && dovoljeno.capacity !== null) {
       const c = Number(dovoljeno.capacity);
       if (!Number.isInteger(c) || c < 1 || c > 100000) return res.status(400).send("capacity must be a positive integer.");
@@ -2220,7 +2367,7 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
       catch (e) { console.error("Obvescanje sledilcev ni uspelo:", e.message); }
     }
 
-    return res.status(200).json(r.rows[0]);
+    return res.status(200).json(await dopolniPrizorisce(r.rows[0]));
   } catch (e) {
     console.error(e);
     return res.status(500).send("Server error.");
@@ -2285,8 +2432,8 @@ app.get("/search", async (req, res) => {
       ),
       pool.query(
         `SELECT e.id, e.club_id, e.title, e.poster_url, e.start_at,
-                e.ticket_price_cents, e.currency, c.name AS club_name
-         FROM events e JOIN clubs c ON c.id = e.club_id
+                e.ticket_price_cents, e.currency, c.name AS club_name, ${PRIZORISCE_E}
+         FROM events e JOIN clubs c ON c.id = e.club_id ${PRIZORISCE_JOIN_JAVNO}
          WHERE e.status = 'published' AND c.hidden = FALSE
            AND (e.title ILIKE $1 OR e.description ILIKE $1 OR c.name ILIKE $1)
          ORDER BY (e.start_at > NOW()) DESC, e.start_at
@@ -2332,6 +2479,7 @@ const ADMIN_POLJA_UPORABNIKA = `id, email, username, role, email_verified, avata
 const ADMIN_STOLPCI_KLUBA = `c.id, c.owner_user_id, c.name, c.logo_url, c.banner_url, c.description,
   c.contact_email, c.contact_phone, c.instagram, c.website, c.address, c.city, c.country,
   c.lat, c.lng, c.min_age, c.genres, c.hidden, c.stripe_charges_enabled, c.commission_bps, c.created_at,
+  c.is_organizer, c.is_official,
   u.email AS owner_email, u.username AS owner_username`;
 
 const VELJAVEN_EMAIL = /^[^@\s]+@[^@\s.]+\.[^@\s]+$/;
@@ -2685,6 +2833,13 @@ function poljaKluba(b, zaVstavljanje) {
     if (typeof b.hidden !== "boolean") return { napaka: "hidden must be true or false." };
     out.hidden = b.hidden;
   }
+  // Organizator brez prizorisca in uradni profil Outly (037). is_official se nastavi SAMO tu (admin pot); PATCH /business/clubs/me ga ne sprejme.
+  for (const [kljuc, ...imena] of [["is_organizer", "isOrganizer", "is_organizer"], ["is_official", "isOfficial", "is_official"]]) {
+    const ime = imena.find(i => b[i] !== undefined);
+    if (ime === undefined) continue;
+    if (typeof b[ime] !== "boolean") return { napaka: `${imena[0]} must be true or false.` };
+    out[kljuc] = b[ime];
+  }
   if (zaVstavljanje && out.name === undefined) return { napaka: "name is required." };
   return { polja: out };
 }
@@ -2870,8 +3025,8 @@ admin.get("/events", async (req, res) => {
     const r = await pool.query(
       `SELECT e.id, e.club_id, c.name AS club_name, c.hidden AS club_hidden, e.title, e.poster_url,
               e.start_at, e.end_at, e.min_age, e.genres, e.status, e.ticket_price_cents, e.currency,
-              e.ticket_url, e.created_at
-       FROM events e JOIN clubs c ON c.id = e.club_id
+              e.ticket_url, e.created_at, ${PRIZORISCE_E}
+       FROM events e JOIN clubs c ON c.id = e.club_id ${PRIZORISCE_JOIN}
        ${kje} ORDER BY e.start_at DESC LIMIT 500`, p
     );
     return res.json(r.rows);
@@ -3820,11 +3975,11 @@ app.delete("/me/favorites/:eventId", requireAuth, async (req, res) => {
 // Oblika vstopnice za zaslon »moje vstopnice«; isti stolpci tudi pri gostu (GET /guest/order), da imata odjemalca eno obliko.
 const SQL_VSTOPNICE_POGLED = `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.status AS order_status,
               e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
-              cl.id AS club_id, cl.name AS club_name, cl.address, cl.city, cl.logo_url,
+              cl.id AS club_id, cl.name AS club_name, ${PRIZORISCE_NASLOV}, cl.logo_url, ${PRIZORISCE_E},
               ${STOLPCI_IMETNIKA}, bu.username AS buyer_username,
               (t.status = 'valid' AND e.start_at > NOW() AND o.guest_list_id IS NULL) AS transferable   -- vstopnice guest liste se ne prenasajo (035)
        FROM tickets t JOIN orders o ON o.id = t.order_id
-       JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id
+       JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN}
        ${JOIN_IMETNIK} LEFT JOIN users bu ON bu.id = o.user_id`;
 app.get("/me/tickets", requireAuth, async (req, res) => {
   try {
@@ -4167,8 +4322,8 @@ async function gostNarociloOdgovor(db, oid) {
             COALESCE(o.stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test, o.created_at, o.paid_at,
             CASE WHEN o.status = 'pending' THEN o.checkout_url END AS checkout_url,
             e.id AS event_id, e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
-            cl.id AS club_id, cl.name AS club_name, cl.address, cl.city, cl.logo_url
-       FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id WHERE o.id = $1`, [oid]);
+            cl.id AS club_id, cl.name AS club_name, ${PRIZORISCE_NASLOV}, cl.logo_url, ${PRIZORISCE_E}
+       FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id ${PRIZORISCE_JOIN} WHERE o.id = $1`, [oid]);
   if (!nr.rows.length) return null;
   const x = nr.rows[0];
   return {
@@ -4177,7 +4332,7 @@ async function gostNarociloOdgovor(db, oid) {
     created_at: x.created_at, paid_at: x.paid_at, checkout_url: x.checkout_url,
     event_id: x.event_id, club_id: x.club_id, event_title: x.event_title, start_at: x.start_at, poster_url: x.poster_url, club_name: x.club_name,
     event: { id: x.event_id, title: x.event_title, start_at: x.start_at, end_at: x.end_at, poster_url: x.poster_url, min_age: x.min_age,
-             club_id: x.club_id, club_name: x.club_name, address: x.address, city: x.city, logo_url: x.logo_url },
+             club_id: x.club_id, club_name: x.club_name, address: x.address, city: x.city, logo_url: x.logo_url, ...prizoriscePolja(x) },
   };
 }
 
@@ -4340,7 +4495,7 @@ function gostPotrdilo(o, povezava, prevzeto, kode = []) {
   const starost = o.min_age > 0 ? `Age limit: ${o.min_age}+. Every visitor must meet the age limit. ID is checked at the door; the club may refuse entry if you don't meet it.` : "No age limit.";
   const razdelki = [
     { naslov: "Order", vrstice: [`Order ${o.public_ref}, placed on ${ljDatum(o.paid_at || o.created_at)}.`] },
-    { naslov: "Event", vrstice: [o.event_title, ljDatum(o.start_at), [o.club_name, o.club_address, o.club_city].filter(Boolean).join(", "), starost] },
+    { naslov: "Event", vrstice: [o.event_title, ljDatum(o.start_at), prizoriscePodatki(o), starost] },
     { naslov: "Tickets", vrstice: [`${o.quantity} x ${znesek(o.unit_price_cents, o.currency)} = ${znesek(o.total_cents, o.currency)}. ${davekStavek(o.vat_rate)}`] },
     { naslov: "Seller", vrstice: [`The ticket is sold by the club: ${[o.club_name, ...klubKontakt].join(", ")}.`, `Outly is only the intermediary: ${POSREDNIK_VRSTICA}.`] },
     { naslov: "No right of withdrawal", vrstice: ["There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply."] },
@@ -4373,7 +4528,7 @@ async function prilogeVstopnic(ev, kode, imePdf) {
   if (kode.length) priloge.push({ filename: `${kode[0].cid}.png`, content: (await qrPng(kode[0].koda)).toString("base64"), content_type: "image/png", content_id: kode[0].cid });
   if (kode.length) {
     const pdf = await pdfVstopnice({
-      dogodek: { naslov: ev.event_title, zacetek: ljDatum(ev.start_at), prizoriscePodatki: [ev.club_name, ev.club_address, ev.club_city].filter(Boolean).join(", "),
+      dogodek: { naslov: ev.event_title, zacetek: ljDatum(ev.start_at), prizoriscePodatki: prizoriscePodatki(ev),
                  starost: ev.starostPdf || starost, organizator: [ev.club_phone, ev.club_email].filter(Boolean).join(" | ") },
       vstopnice: kode.map(k => ({ koda: k.koda, vrsta: k.vrsta, oznaka: k.oznaka })), varnost: QR_STAVEK });
     priloge.push({ filename: imePdf, content: pdf.toString("base64"), content_type: "application/pdf" });
@@ -4440,8 +4595,8 @@ async function gostPosljiEnoPosto(oid) {
   const o = k.rows[0];
   const ev = await pool.query(
     `SELECT e.title AS event_title, e.start_at, e.min_age, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
-            cl.contact_phone AS club_phone, cl.contact_email AS club_email
-       FROM events e JOIN clubs cl ON cl.id = e.club_id WHERE e.id = $1`, [o.event_id]);
+            cl.contact_phone AS club_phone, cl.contact_email AS club_email, ${PRIZORISCE_MAIL_STOLPCI}
+       FROM events e JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN} WHERE e.id = $1`, [o.event_id]);
   if (!ev.rows.length) return false;
   const x = { ...o, ...ev.rows[0] };
   const zeton = o.user_id === null ? await gostKujZeton(pool, oid) : null;
@@ -4583,11 +4738,12 @@ app.get("/guest/ticket", async (req, res) => {
     // public_ref ostane: spletna stran ga kaze kot »ORDER« (webapp/js/views/vstopnice.js QrTelo).
     const bel = {};
     for (const k of ["id", "serial", "status", "used_at", "created_at", "event_id", "event_title", "start_at", "end_at", "poster_url", "min_age", "club_id", "club_name",
-      "address", "city", "logo_url", "is_vip", "table_label", "table_seats", "package_name", "package_description", "public_ref", "transferred", "holder_username", "is_guest_holder"]) bel[k] = t[k];
+      "address", "city", "logo_url", "venue_club_id", "venue_club_name", "venue_club_logo_url", "venue_name", "venue_address", "venue_city", "venue_lat", "venue_lng",
+      "is_vip", "table_label", "table_seats", "package_name", "package_description", "public_ref", "transferred", "holder_username", "is_guest_holder"]) bel[k] = t[k];
     return res.json({
       ticket: { ...bel, qr: qrVstopnice(t), transferable: false, from_username: pos, buyer_username: pos },   // gost vstopnice ne more naprej (brez racuna)
       event: { id: t.event_id, title: t.event_title, start_at: t.start_at, end_at: t.end_at, poster_url: t.poster_url, min_age: t.min_age,
-               club_id: t.club_id, club_name: t.club_name, address: t.address, city: t.city, logo_url: t.logo_url },
+               club_id: t.club_id, club_name: t.club_name, address: t.address, city: t.city, logo_url: t.logo_url, ...prizoriscePolja(t) },
     });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
@@ -4606,7 +4762,7 @@ function prenosPotrdilo(x, povezava, kode) {
   const posiljatelj = x.from_username || "An Outly user";
   const razdelki = [
     { naslov: "This is your ticket", vrstice: [QR_STAVEK] },
-    { naslov: "Event", vrstice: [x.event_title, ljDatum(x.start_at), [x.club_name, x.club_address, x.club_city].filter(Boolean).join(", "),
+    { naslov: "Event", vrstice: [x.event_title, ljDatum(x.start_at), prizoriscePodatki(x),
         `Organiser: ${x.club_name}${klubKontakt ? ` (${klubKontakt})` : ""}. Contact the organiser about the event itself.`, starost] },
     { naslov: "Your ticket", vrstice: [vrsta, `Show this QR code at the door (it is also in the attached PDF, outly-ticket.pdf): ${povezava}`], slika: true },
     { naslov: "Ticket rules", vrstice: ["One entry per code.", "The organiser may refuse entry under its house rules or the law.", "Reselling the ticket is not allowed.",
@@ -4655,9 +4811,9 @@ async function prenosPosljiEnoPosto(tid) {
   const t = k.rows[0];
   const ev = await pool.query(
     `SELECT e.title AS event_title, e.start_at, e.min_age, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
-            cl.contact_phone AS club_phone, cl.contact_email AS club_email, o.package_id, o.table_label, o.package_name,
+            cl.contact_phone AS club_phone, cl.contact_email AS club_email, o.package_id, o.table_label, o.package_name, ${PRIZORISCE_MAIL_STOLPCI},
             (SELECT u.username FROM ticket_transfers tt JOIN users u ON u.id = tt.from_user_id WHERE tt.ticket_id = t.id AND tt.to_guest ORDER BY tt.id DESC LIMIT 1) AS from_username
-       FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id WHERE t.id = $1`, [tid]);
+       FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN} WHERE t.id = $1`, [tid]);
   if (!ev.rows.length) return false;
   const x = ev.rows[0];
   const zeton = await gostKujZetonVstopnice(pool, tid);

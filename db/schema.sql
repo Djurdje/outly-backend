@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–036, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–037, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ggBsl9KgXLYwQ6igyX3UWioRn3pgYKe7CHUe03IBwGzmfAnNa2ktUAoioYfkENz
+\restrict UBFoayXLBvcnvIiqgglue8FUiKb2NWf5BrrFSAxhPWbB1cbeICPggJulje4ynZx
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -350,6 +350,8 @@ CREATE TABLE public.clubs (
     video_url text DEFAULT ''::text NOT NULL,
     floor_plan jsonb,
     commission_bps integer,
+    is_organizer boolean DEFAULT false NOT NULL,
+    is_official boolean DEFAULT false NOT NULL,
     CONSTRAINT clubs_bar_prices_chk CHECK ((jsonb_typeof(bar_prices) = 'array'::text)),
     CONSTRAINT clubs_commission_bps_chk CHECK (((commission_bps IS NULL) OR ((commission_bps >= 0) AND (commission_bps <= 5000)))),
     CONSTRAINT clubs_coords_chk CHECK (((lat IS NULL) = (lng IS NULL))),
@@ -366,6 +368,20 @@ CREATE TABLE public.clubs (
 --
 
 COMMENT ON COLUMN public.clubs.commission_bps IS 'Provizija Outlyja za ta klub v baznih tockah (100 = 1 %). NULL = privzeta (PROVIZIJA_ODSTOTEK). Nastavi admin.';
+
+
+--
+-- Name: COLUMN clubs.is_organizer; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.clubs.is_organizer IS 'Organizator dogodkov brez lastnega prizorisca (037): isti profil kot klub, brez naslova in pina; vsak njegov dogodek ima prizorisce.';
+
+
+--
+-- Name: COLUMN clubs.is_official; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.clubs.is_official IS 'Uradni profil Outly (037): njegovi prihajajoci dogodki so v razdelku »Organized by Outly« na Home. Nastavi SAMO admin (admin panel).';
 
 
 --
@@ -500,6 +516,12 @@ CREATE TABLE public.events (
     sales_close_at timestamp with time zone,
     recap_video_url text DEFAULT ''::text NOT NULL,
     vip_enabled boolean DEFAULT false NOT NULL,
+    venue_club_id integer,
+    venue_name text DEFAULT ''::text NOT NULL,
+    venue_address text DEFAULT ''::text NOT NULL,
+    venue_city text DEFAULT ''::text NOT NULL,
+    venue_lat double precision,
+    venue_lng double precision,
     CONSTRAINT events_capacity_chk CHECK (((capacity IS NULL) OR (capacity > 0))),
     CONSTRAINT events_end_chk CHECK (((end_at IS NULL) OR (end_at > start_at))),
     CONSTRAINT events_min_age_chk CHECK (((min_age >= 0) AND (min_age <= 99))),
@@ -508,8 +530,24 @@ CREATE TABLE public.events (
     CONSTRAINT events_sold_chk CHECK (((sold_count >= 0) AND ((capacity IS NULL) OR (sold_count <= capacity)))),
     CONSTRAINT events_status_chk CHECK ((status = ANY (ARRAY['draft'::text, 'published'::text, 'cancelled'::text]))),
     CONSTRAINT events_title_chk CHECK ((length(TRIM(BOTH FROM title)) > 0)),
-    CONSTRAINT events_vat_chk CHECK (((vat_rate IS NULL) OR ((vat_rate >= (0)::numeric) AND (vat_rate < (1)::numeric))))
+    CONSTRAINT events_vat_chk CHECK (((vat_rate IS NULL) OR ((vat_rate >= (0)::numeric) AND (vat_rate < (1)::numeric)))),
+    CONSTRAINT events_venue_club_chk CHECK (((venue_club_id IS NULL) OR (venue_club_id <> club_id))),
+    CONSTRAINT events_venue_coords_chk CHECK ((((venue_lat IS NULL) = (venue_lng IS NULL)) AND ((venue_lat IS NULL) OR (((venue_lat >= ('-90'::integer)::double precision) AND (venue_lat <= (90)::double precision)) AND ((venue_lng >= ('-180'::integer)::double precision) AND (venue_lng <= (180)::double precision))))))
 );
+
+
+--
+-- Name: COLUMN events.venue_club_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.events.venue_club_id IS 'Gostiteljski klub z Outlyja (037). Dogodek je viden tudi na njegovi strani (hosted), skenira pa samo ekipa events.club_id. Ob izbrisu gostitelja NULL.';
+
+
+--
+-- Name: COLUMN events.venue_name; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.events.venue_name IS 'Prosto vpisano prizorisce (037); prazno, ce je venue_club_id podan.';
 
 
 --
@@ -1580,6 +1618,13 @@ CREATE INDEX events_start_idx ON public.events USING btree (start_at);
 
 
 --
+-- Name: events_venue_club_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX events_venue_club_idx ON public.events USING btree (venue_club_id, start_at) WHERE (venue_club_id IS NOT NULL);
+
+
+--
 -- Name: friend_requests_pending_uniq; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2107,6 +2152,14 @@ ALTER TABLE ONLY public.events
 
 
 --
+-- Name: events events_venue_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.events
+    ADD CONSTRAINT events_venue_club_id_fkey FOREIGN KEY (venue_club_id) REFERENCES public.clubs(id) ON DELETE SET NULL;
+
+
+--
 -- Name: friend_requests friend_requests_from_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2350,5 +2403,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ggBsl9KgXLYwQ6igyX3UWioRn3pgYKe7CHUe03IBwGzmfAnNa2ktUAoioYfkENz
+\unrestrict UBFoayXLBvcnvIiqgglue8FUiKb2NWf5BrrFSAxhPWbB1cbeICPggJulje4ynZx
 

@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-08 (obvestilo o vabilu na guest listo, migracija 036; guest lista, migracija 035; prej 2026-10-05: nakup brez računa; prej 2026-10-02: prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
+Zadnja posodobitev: 2026-10-09 (organizatorji brez prizorišča, migracija 037; prej 2026-10-08: obvestilo o vabilu na guest listo, migracija 036; guest lista, migracija 035; prej 2026-10-05: nakup brez računa; prej 2026-10-02: prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -157,6 +157,16 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 - **Past (vsak, ki piše poizvedbo po `orders`/`tickets`):** narocilo guest liste JE vrstica `orders` (total 0, `paid`): vsaka nova agregacija PRODAJE mora imeti `o.guest_list_id IS NULL`, sicer guest lista napihne število naročil, kupcev in vstopnic. Test I24 ujame samo obstoječe poti.
 - **Past:** `checked_in` (prodajni pregled, finance) šteje tudi vstope z guest liste, zato je lahko večji od `tickets_sold`. Dogodek z guest listo se ne da izbrisati (`DELETE /events/:id` ga odpove, FK); lastnik kluba, katerega dogodek ima guest listo, računa ne more izbrisati (`club_has_orders` šteje tudi naročila liste).
 - **Predpostavke agenta (Martin jih ni potrdil):** guest lista ne šteje v kapaciteto (skupaj s prodajo lahko preseže `capacity`); lista samo za objavljen dogodek; ena aktivna lista na (dogodek, gostitelj). Postavljeno z migracijo 035 (samo dodajanje); PR je pod `odobril-martin` (migracija + `orders`/`tickets`).
+
+## Organizatorji brez prizorišča (od 9. 10. 2026; ARCHITECTURE »Organizatorji brez prizorišča«, I26, DECISIONS 9. 10.)
+
+Za **ios-dev** in **web-dev** (backend po migraciji 037; vse polja so DODANA, stari odjemalci jih spregledajo; v modelih privzete vrednosti, ker stari backend polj nima):
+- Klub: `is_organizer`, `is_official` (bool, privzeto false) v `GET /clubs`, `/clubs/:id`, `/business/clubs/me`, `/me/clubs/following`; `GET /me` `clubs[]` ima `is_organizer`. Vhod: `isOrganizer` v `POST /clubs` in `PATCH /business/clubs/me` (mesto neobvezno); `is_official` ni vhod.
+- Dogodek (vsi odgovori z dogodkom + `/me/tickets`, `/guest/order`, `/search`): `venue_club_id`, `venue_club_name`, `venue_club_logo_url` (null brez gostitelja), `venue_name`, `venue_address`, `venue_city` (prazen niz), `venue_lat`, `venue_lng` (null). »Kje je dogodek« = `venue_club_name` ?? (`venue_name` neprazno ? venue_* : naslov kluba). V pogledih vstopnic (`/me/tickets`, `/guest/order`, `/guest/ticket`) sta `address` in `city` že prizorišče (gostitelj ali venue_*), ne organizatorjev naslov.
+  `GET /events` ima novo `club_name` (organizator). **`GET /events?clubId=X` vrne tudi gostovane dogodke z `hosted: true`** (lastni `hosted: false`); brez `clubId` `hosted` ni. Poti `GET /clubs/:id/events` NI.
+- Vhod dogodka (`POST /events`, `PATCH /events/:id`): `venueClubId` ali `venueName`+`venueCity` (+`venueAddress`, `venueLat`+`venueLng`); organizator brez prizorišča = 400 »Organizer events need a venue.«; lastni klub 400, neobstoječ/skrit gostitelj 404. Urejevalnik naj pošlje celo prizorišče (gostitelj ali prosto); `venueClubId: null` izbriše gostitelja.
+- **Stari backend (pred 037)**: polj ni, `?clubId=` brez `hosted`, `isOrganizer` se prezre; odjemalec ne sme pasti (privzete vrednosti). Razdelek »Organized by Outly«: `GET /clubs` (`is_official`) + `GET /events?clubId=&upcoming=true` (strežnik nima posebne poti).
+- Past: `is_official` nastavi samo admin (`/admin/api/clubs`); prvi uradni profil mora Martin/admin ustvariti ročno (lastnik = račun Outly), brez njega razdelka ni.
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 
