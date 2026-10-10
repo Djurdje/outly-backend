@@ -4740,14 +4740,15 @@ const gostVTeku = new Set();
 const prenosVTeku = new Set();
 async function posljiGostuVstopnice(oid) {
   if (!resend) return false;
-  if (gostVTeku.has(oid)) return false;
-  gostVTeku.add(oid);
+  const kljuc = String(oid);   // kljuc mnozice vedno niz: id pride kot stevilo ali kot niz
+  if (gostVTeku.has(kljuc)) return false;
+  gostVTeku.add(kljuc);
   try {
     if (!(await gostPostaVstopi())) return false;
     try { return await gostPosljiEnoPosto(oid); }
     catch (err) { console.error(`Resend napaka (gost, vstopnice, narocilo ${oid}):`, err && (err.message || String(err))); return false; }
     finally { gostPostaIzstopi(); }
-  } finally { gostVTeku.delete(oid); }
+  } finally { gostVTeku.delete(kljuc); }
 }
 async function gostPosljiEnoPosto(oid) {
   const pre = (await pool.query(
@@ -4974,14 +4975,15 @@ function prenosPotrdilo(x, povezava, kode) {
 // Meje maila (zloraba: mail na tuj naslov) so v transakciji prenosa (POST /tickets/:id/transfer): GOST_PRENOS_NA_DAN na posiljatelja, GOST_PRENOS_NA_NASLOV na naslov.
 async function posljiPrenosGostu(tid) {
   if (!resend) return false;
-  if (prenosVTeku.has(tid)) return false;   // isti vzorec kot posljiGostuVstopnice (#201)
-  prenosVTeku.add(tid);
+  const kljuc = String(tid);   // kot pri posljiGostuVstopnice: kljuc je vedno niz
+  if (prenosVTeku.has(kljuc)) return false;   // isti vzorec kot posljiGostuVstopnice (#201)
+  prenosVTeku.add(kljuc);
   try {
     if (!(await gostPostaVstopi())) return false;
     try { return await prenosPosljiEnoPosto(tid); }
     catch (err) { console.error(`Resend napaka (prenos gostu, vstopnica ${tid}):`, err && (err.message || String(err))); return false; }
     finally { gostPostaIzstopi(); }
-  } finally { prenosVTeku.delete(tid); }
+  } finally { prenosVTeku.delete(kljuc); }
 }
 async function prenosPosljiEnoPosto(tid) {
   const k = await pool.query(
