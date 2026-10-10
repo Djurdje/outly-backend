@@ -62,6 +62,10 @@ app.use(javniPredpomnilnik.razveljaviOdPisanja([
   // Zetoni naprav (040) ne vplivajo na noben predpomnjen odgovor; aplikacija jih registrira pogosto.
   { metoda: "POST", pot: /^\/me\/devices$/ },
   { metoda: "DELETE", pot: /^\/me\/devices\/[0-9A-Fa-f]+$/ },
+  // Prijave zlorabe in bloki (041): pisejo samo reports, user_blocks, friendships in friend_requests; noben predpomnjen odgovor jih ne bere.
+  { metoda: "POST", pot: /^\/reports$/ },
+  { metoda: "POST", pot: /^\/me\/blocks\/\d+$/ },
+  { metoda: "DELETE", pot: /^\/me\/blocks\/\d+$/ },
 ]));
 // Privzeta omejitev telesa (100 kB) povsod, razen pri paketu skenov brez povezave (do 500 elementov, ima svoj razčlenjevalnik).
 // Stripe webhook rabi SUROVO telo (podpis se preverja nad bajti), zato ga JSON razclenjevalnik preskoci.
@@ -2801,7 +2805,8 @@ admin.get("/summary", async (req, res) => {
         (SELECT COUNT(*)::int FROM users WHERE role='business')              AS business_users,
         (SELECT COUNT(*)::int FROM users WHERE role='admin')                 AS admins,
         (SELECT COUNT(*)::int FROM events)                                   AS events,
-        (SELECT COUNT(*)::int FROM events WHERE status='published' AND start_at > NOW()) AS upcoming_events`);
+        (SELECT COUNT(*)::int FROM events WHERE status='published' AND start_at > NOW()) AS upcoming_events,
+        (SELECT COUNT(*)::int FROM reports WHERE status='open')              AS open_reports`);
     return res.json(r.rows[0]);
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
@@ -5265,6 +5270,15 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
       ? await c.query("SELECT id, email, username, email_verified, starost(date_of_birth) AS leta FROM users WHERE id = $1", [prejemnikId])
       : await c.query("SELECT id, email, username, email_verified, starost(date_of_birth) AS leta FROM users WHERE LOWER(email) = $1", [email]);
     const p = pr.rows[0] || null;
+    // Blok (041) v obe smeri: prejemnik z racunom, ki je blokiran ali je blokiral posiljatelja, je kot da racuna ni (isto sporocilo kot za neznan e-naslov
+    // oz. neprijatelja; tudi nepotrjen racun in allow_guest ne obideta bloka). Pod zaklepom para: blokiranje in prenos se vrstita.
+    if (p && Number(p.id) !== Number(req.user.userId)) {
+      await zakleniPar(c, req.user.userId, p.id);
+      if (await jeBlokiran(c, req.user.userId, p.id)) {
+        await c.query("ROLLBACK");
+        return res.status(404).send(prejemnikId ? "You can only send a ticket by user to one of your friends." : "No Outly account with this email. Ask your friend to sign up first.");
+      }
+    }
     // GOST: allow_guest in e-naslov brez racuna ali z se nepotrjenim racunom (ob potrditvi se vstopnica prevzame v racun, GET /me).
     const gost = dovoliGosta && (!p || !p.email_verified);
     if (!p && !gost) { await c.query("ROLLBACK"); return res.status(404).send("No Outly account with this email. Ask your friend to sign up first."); }
@@ -5516,11 +5530,14 @@ app.post("/me/guest-lists/:id/invites", requireAuth, omeji({ kljuc: "guest-lista
     if (l.revoked_at || l.event_status !== "published" || new Date(l.konec).getTime() <= Date.now()) {
       await c.query("ROLLBACK"); return res.status(409).send("This guest list is closed.");
     }
-    // Samo prijatelji (gostitelj sam in neznani id-ji = ista 403: ne razkrivamo obstoja uporabnikov).
+    // Blok (041): zaklep vsakega para v narascajocem vrstnem redu (dve vabili hkrati se ne zaklenita v krogu), nato prijateljstvo IN brez bloka v nobeni smeri.
+    for (const uid of [...ids].sort((x, y) => x - y)) if (uid !== userId) await zakleniPar(c, userId, uid);
+    // Samo prijatelji (gostitelj sam, neznani id-ji in blokirani = ista 403: ne razkrivamo obstoja uporabnikov).
     const fr = await c.query(
       `SELECT u.id, u.username, starost(u.date_of_birth) AS leta FROM users u
         WHERE u.id = ANY($2::int[]) AND u.id <> $1::int
-          AND EXISTS (SELECT 1 FROM friendships f WHERE f.user_a = LEAST(u.id, $1::int) AND f.user_b = GREATEST(u.id, $1::int))`, [userId, ids]);
+          AND EXISTS (SELECT 1 FROM friendships f WHERE f.user_a = LEAST(u.id, $1::int) AND f.user_b = GREATEST(u.id, $1::int))
+          AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE (b.blocker_id = u.id AND b.blocked_id = $1::int) OR (b.blocker_id = $1::int AND b.blocked_id = u.id))`, [userId, ids]);
     if (fr.rows.length !== ids.length) { await c.query("ROLLBACK"); return res.status(403).send("You can only invite friends."); }
     const poId = new Map(fr.rows.map(x => [x.id, x]));
     const clani = await c.query("SELECT user_id FROM guest_list_members WHERE guest_list_id = $1 AND removed_at IS NULL", [id]);
@@ -7036,6 +7053,10 @@ app.post("/business/team", requireAuth, requireClub("owner", "manager"), async (
     }
     const clan = u.rows[0];
     if (Number(clan.id) === Number(req.user.userId)) return res.status(400).send("You are already in this team.");
+    // Blok (041) v obe smeri: vabila v ekipo ne prejme, kdor je blokiral vabitelja (ali ga je vabitelj blokiral); odgovor kot za neznan e-naslov.
+    if (await jeBlokiran(pool, req.user.userId, clan.id)) {
+      return res.status(404).json({ error: "no_account", message: "No Outly account with this email. Ask them to sign up first." });
+    }
 
     const jeLastnik = await pool.query("SELECT id FROM clubs WHERE owner_user_id=$1 LIMIT 1", [clan.id]);
     if (jeLastnik.rows.length) {
@@ -7052,10 +7073,25 @@ app.post("/business/team", requireAuth, requireClub("owner", "manager"), async (
       return res.status(409).json({ error: "already_invited", message: "This user already has a pending invitation from your club." });
     }
 
-    await pool.query(
-      "INSERT INTO club_invites (club_id, user_id, role, invited_by_user_id) VALUES ($1,$2,$3,$4)",
-      [klub, clan.id, role, req.user.userId]
-    );
+    // Avtoritativna preverba bloka (041) pod zaklepom para, v isti transakciji kot vpis vabila: blokiranje in vabilo se vrstita
+    // (zaklep para pred zaklepi vrstic, kot povsod); zgornja preverba samo prihrani transakcijo.
+    const cv = await pool.connect();
+    try {
+      await cv.query("BEGIN");
+      await zakleniPar(cv, req.user.userId, clan.id);
+      if (await jeBlokiran(cv, req.user.userId, clan.id)) {
+        await cv.query("ROLLBACK");
+        return res.status(404).json({ error: "no_account", message: "No Outly account with this email. Ask them to sign up first." });
+      }
+      await cv.query(
+        "INSERT INTO club_invites (club_id, user_id, role, invited_by_user_id) VALUES ($1,$2,$3,$4)",
+        [klub, clan.id, role, req.user.userId]
+      );
+      await cv.query("COMMIT");
+    } catch (e) {
+      await cv.query("ROLLBACK").catch(() => {});
+      throw e;
+    } finally { cv.release(); }
     const ime = await pool.query("SELECT name FROM clubs WHERE id=$1", [klub]);
     posljiVabiloEkipi(clan.email, ime.rows[0] ? ime.rows[0].name : "A club", role); // brez await: mail ne sme zadrževati odgovora
     return res.status(201).json(await odgovorEkipe(req, klub));
@@ -7168,6 +7204,20 @@ async function staPrijatelja(a, b) {
   return r.rows.length > 0;
 }
 
+// Blok med dvema uporabnikoma (041): velja v OBE smeri, blokirani ne izve (odgovor je enak kot za neobstojecega uporabnika).
+// zakleniPar vrsti vse, kar vzpostavlja ali preverja odnos para (blokiranje, prosnja za prijateljstvo, sprejem, prenos vstopnice, vabilo na guest listo):
+// brez zaklepa bi prosnja, ki je ze prebrala »ni bloka«, lahko zapisala prijateljstvo tik po commitu bloka. Kljuc je neodvisen od smeri (manjsi:vecji id).
+// Zaklep se vzame PRED zaklepi vrstic friend_requests/friendships (isti vrstni red povsod: brez zastoja).
+async function zakleniPar(db, a, b) {
+  await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`blok-par:${Math.min(Number(a), Number(b))}:${Math.max(Number(a), Number(b))}`]);
+}
+async function jeBlokiran(db, a, b) {
+  const r = await db.query(
+    "SELECT 1 FROM user_blocks WHERE (blocker_id = $1::int AND blocked_id = $2::int) OR (blocker_id = $2::int AND blocked_id = $1::int) LIMIT 1", [a, b]
+  );
+  return r.rows.length > 0;
+}
+
 async function mojiPrijatelji(userId) {
   const r = await pool.query(
     `SELECT ${POLJA_PRIJATELJA}, f.created_at AS since
@@ -7216,6 +7266,7 @@ app.get("/users/search", requireAuth, omeji({ kljuc: "iskanje", najvec: 120, okn
                 LIMIT 1) AS req_relation
          FROM users u
         WHERE u.username ILIKE $1 || '%' ESCAPE '\\' AND u.id <> $2 AND u.email_verified AND u.role <> 'backup'
+          AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE (b.blocker_id = u.id AND b.blocked_id = $2::int) OR (b.blocker_id = $2::int AND b.blocked_id = u.id))   -- blok (041) velja v obe smeri
         ORDER BY (LOWER(u.username) = LOWER($1)) DESC, LOWER(u.username)
         LIMIT 10`,
       [vzorec, req.user.userId]
@@ -7358,6 +7409,12 @@ app.post("/me/friends/requests", requireAuth, omeji({ kljuc: "prijatelji", najve
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      // Blok (041) v obe smeri: kot da uporabnik ne obstaja (isti odgovor kot za neznano ime). Pod zaklepom para: blokiranje in prosnja se vrstita.
+      await zakleniPar(client, req.user.userId, cilj.id);
+      if (await jeBlokiran(client, req.user.userId, cilj.id)) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ error: "no_account", message: "No Outly account with this username." });
+      }
       // Nasprotna prošnja že čaka -> sprejmi jo (oba sta hotela isto).
       const obratna = await client.query(
         "SELECT id FROM friend_requests WHERE from_user_id = $1 AND to_user_id = $2 AND status = 'pending' FOR UPDATE", [cilj.id, req.user.userId]
@@ -7392,11 +7449,15 @@ app.post("/me/friends/requests/:id/accept", requireAuth, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    // Blok (041): najprej zaklep para (posiljatelja preberemo brez zaklepa vrstice), sele nato zaklep vrstice; blokiranje prosnjo ze preklice.
+    const pred = await client.query("SELECT from_user_id FROM friend_requests WHERE id = $1 AND to_user_id = $2 AND status = 'pending'", [id, req.user.userId]);
+    if (pred.rows.length === 0) { await client.query("ROLLBACK"); return res.status(404).send("Request not found or no longer pending."); }
+    await zakleniPar(client, req.user.userId, pred.rows[0].from_user_id);
     const r = await client.query(
       `SELECT r.id, r.from_user_id, ${POLJA_PRIJATELJA} FROM friend_requests r JOIN users u ON u.id = r.from_user_id
         WHERE r.id = $1 AND r.to_user_id = $2 AND r.status = 'pending' FOR UPDATE OF r`, [id, req.user.userId]
     );
-    if (r.rows.length === 0) { await client.query("ROLLBACK"); return res.status(404).send("Request not found or no longer pending."); }
+    if (r.rows.length === 0 || await jeBlokiran(client, req.user.userId, r.rows[0].from_user_id)) { await client.query("ROLLBACK"); return res.status(404).send("Request not found or no longer pending."); }
     const p = r.rows[0];
     await client.query(
       "INSERT INTO friendships (user_a, user_b) VALUES (LEAST($1::int,$2::int), GREATEST($1::int,$2::int)) ON CONFLICT DO NOTHING",
@@ -7448,6 +7509,218 @@ app.delete("/me/friends/:userId", requireAuth, async (req, res) => {
     if (r.rows.length === 0) return res.status(404).send("Not friends.");
     return res.json({ ok: true });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// ---------------------------
+// PRIJAVE ZLORABE IN BLOKI (migracija 041, issue #189, Apple App Review 1.2 »uporabniska vsebina«)
+// ---------------------------
+// POST /reports: vsak prijavljen uporabnik prijavi uporabnika, klub, dogodek ali sliko kluba (media: target_id = id kluba). Admin prijave pregleda
+// v admin panelu (GET/PATCH /admin/api/reports) in dobi mail, ce je nastavljen ADMIN_PRIJAVE_EMAIL. Blokiranje je tiho: blokirani ne izve, blok
+// velja v obe smeri (iskanje, prosnja za prijateljstvo, prenos vstopnice, vabilo na guest listo, vabilo v ekipo), prijateljstvo in cakajoce prosnje
+// ob blokiranju izginejo in se ob odblokiranju NE obnovijo. Napake: { error: "koda", message }.
+const PRIJAVA_CILJI = ["user", "club", "event", "media"];
+const PRIJAVA_VZROKI = ["spam", "harassment", "inappropriate", "impersonation", "illegal", "other"];
+const PRIJAVA_DETAJLI_NAJVEC = 1000;
+const PRIJAVE_NA_DAN = okoljeCelo("PRIJAVE_NA_DAN", 50, 1, 1000);                 // najvec prijav enega uporabnika v 24 h (zloraba prijav = poplava admina)
+const PRIJAVE_MAIL_NA_URO = okoljeCelo("PRIJAVE_MAIL_NA_URO", 10, 0, 1000);       // najvec mailov adminu na uro na proces (0 = nikoli); ostale prijave so v panelu
+const BLOKOV_NAJVEC = okoljeCelo("BLOKI_NAJVEC", 500, 1, 100000);                 // najvec blokov enega uporabnika
+
+// Cilj prijave: obstaja in je javen (uporabnik ni racun za kopije; klub ni skrit; dogodek je objavljen in klub ni skrit). Vrne { label } ali null.
+async function najdiCiljPrijave(db, tip, id) {
+  let r;
+  if (tip === "user") r = await db.query("SELECT username AS label FROM users WHERE id = $1 AND role <> 'backup'", [id]);
+  else if (tip === "club" || tip === "media") r = await db.query("SELECT name AS label FROM clubs WHERE id = $1 AND NOT hidden", [id]);
+  else r = await db.query(
+    "SELECT e.title || ' (' || c.name || ')' AS label FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1 AND e.status = 'published' AND NOT c.hidden", [id]);
+  return r.rows[0] || null;
+}
+
+// Mail adminu ob novi prijavi: samo ce je ADMIN_PRIJAVE_EMAIL (naslovi z vejico) IN Resend nastavljen. Klic je brez await po commitu in odgovoru:
+// napaka ali pocasen Resend ne podre ne upocasni prijave (gostResendPosli ima rok in vrne { error }, ne vrze). V mailu je od prijavitelja samo
+// uporabnisko ime; besedila `details` (prosto besedilo prijavitelja) ni, admin ga vidi v panelu.
+let prijavaMailOkno = { od: 0, n: 0 };
+function posljiMailPrijave(p) {
+  const naslovi = String(process.env.ADMIN_PRIJAVE_EMAIL || "").split(",").map(e => e.trim()).filter(Boolean);
+  if (!naslovi.length || !resend) return;
+  const zdaj = Date.now();
+  if (zdaj - prijavaMailOkno.od >= 3600 * 1000) prijavaMailOkno = { od: zdaj, n: 0 };
+  if (prijavaMailOkno.n >= PRIJAVE_MAIL_NA_URO) { console.log(`[prijave] mail za prijavo ${p.id} preskocen (meja ${PRIJAVE_MAIL_NA_URO} na uro); prijava je v admin panelu`); return; }
+  prijavaMailOkno.n++;
+  const appName = process.env.APP_NAME || "Outly";
+  const vrstica = (k, v) => `<tr><td style="padding:4px 12px 4px 0;color:#666">${k}</td><td style="padding:4px 0"><b>${ubeziHtml(v)}</b></td></tr>`;
+  void (async () => {
+    try {
+      const r = await gostResendPosli({
+        to: naslovi,
+        subject: `Nova prijava zlorabe #${p.id} (${p.tip})`,
+        html: `<div style="font-family: Arial, sans-serif; line-height:1.5"><h2>${ubeziHtml(appName)} – nova prijava zlorabe (#${p.id})</h2>
+      <table>${vrstica("Vrsta cilja", p.tip)}${vrstica("Cilj", p.label)}${vrstica("Razlog", p.vzrok)}${vrstica("Prijavil", p.prijavitelj || "-")}</table>
+      <p>Pregled in razresitev: <a href="https://outly-backend-roy3.onrender.com/admin/">outly-backend-roy3.onrender.com/admin</a> → Reports.</p></div>`,
+        text: `${appName}: nova prijava zlorabe #${p.id}\nVrsta cilja: ${p.tip}\nCilj: ${p.label}\nRazlog: ${p.vzrok}\nPrijavil: ${p.prijavitelj || "-"}\nPregled: https://outly-backend-roy3.onrender.com/admin/ (zavihek Reports)`,
+      });
+      if (r && r.error) console.error("Resend napaka (prijava zlorabe):", JSON.stringify(r.error));
+    } catch (e) { console.error("Resend napaka (prijava zlorabe):", e && (e.message || String(e))); }
+  })();
+}
+
+// POST /reports { target_type, target_id, reason, details? } -> 201 { ok: true, id }; ista prijava istega cilja istega uporabnika v 24 h -> 200 { ok: true, id }
+// (brez podvajanja). 400 invalid_target_type | invalid_reason | invalid_target | invalid_details, 404 not_found, 429 (omejevalnik ali too_many_reports).
+app.post("/reports", requireAuth, omeji({ kljuc: "prijava", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  if (typeof b.target_type !== "string" || !PRIJAVA_CILJI.includes(b.target_type)) {
+    return res.status(400).json({ error: "invalid_target_type", message: `target_type must be one of: ${PRIJAVA_CILJI.join(", ")}.` });
+  }
+  if (typeof b.reason !== "string" || !PRIJAVA_VZROKI.includes(b.reason)) {
+    return res.status(400).json({ error: "invalid_reason", message: `reason must be one of: ${PRIJAVA_VZROKI.join(", ")}.` });
+  }
+  const ciljId = Number.isInteger(b.target_id) && b.target_id > 0 ? b.target_id : (typeof b.target_id === "string" ? celoId4(b.target_id) : null);
+  if (!ciljId || ciljId > INT4_MAX) return res.status(400).json({ error: "invalid_target", message: "target_id must be a positive integer id." });
+  let podrobnosti = null;
+  if (b.details !== undefined && b.details !== null) {
+    if (typeof b.details !== "string") return res.status(400).json({ error: "invalid_details", message: "details must be text." });
+    podrobnosti = b.details.replace(/\u0000/g, "").trim() || null;   // NUL baza zavrne (500); prazno besedilo = brez podrobnosti
+    if (podrobnosti && Array.from(podrobnosti).length > PRIJAVA_DETAJLI_NAJVEC) {
+      return res.status(400).json({ error: "invalid_details", message: `details can be at most ${PRIJAVA_DETAJLI_NAJVEC} characters.` });
+    }
+  }
+  const userId = req.user.userId;
+  if (b.target_type === "user" && ciljId === Number(userId)) return res.status(400).json({ error: "invalid_target", message: "You can't report yourself." });
+
+  const c = await pool.connect();
+  try {
+    await nakupZacni(c);
+    // Prijave istega uporabnika se vrstijo (podvojena prijava in dnevna meja ne smeta pasti pri socasnih zahtevkih).
+    await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`prijava:${userId}`]);
+    const cilj = await najdiCiljPrijave(c, b.target_type, ciljId);
+    if (!cilj) { await c.query("ROLLBACK"); return res.status(404).json({ error: "not_found", message: "Nothing to report here." }); }
+    const ze = await c.query(
+      `SELECT id FROM reports WHERE reporter_id = $1 AND target_type = $2 AND target_id = $3 AND created_at > NOW() - INTERVAL '24 hours' ORDER BY id DESC LIMIT 1`,
+      [userId, b.target_type, ciljId]);
+    if (ze.rows.length) { await c.query("ROLLBACK"); return res.status(200).json({ ok: true, id: ze.rows[0].id }); }
+    const dan = (await c.query("SELECT COUNT(*)::int AS n FROM reports WHERE reporter_id = $1 AND created_at > NOW() - INTERVAL '24 hours'", [userId])).rows[0].n;
+    if (dan >= PRIJAVE_NA_DAN) {
+      await c.query("ROLLBACK");
+      res.set("Retry-After", "3600");
+      return res.status(429).json({ error: "too_many_reports", message: "Too many reports today. Please try again later." });
+    }
+    const ins = await c.query(
+      "INSERT INTO reports (reporter_id, target_type, target_id, reason, details) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+      [userId, b.target_type, ciljId, b.reason, podrobnosti]);
+    await c.query("COMMIT");
+    const id = ins.rows[0].id;
+    res.status(201).json({ ok: true, id });
+    console.log(`[prijave] nova prijava ${id}: ${b.target_type} ${ciljId}, razlog ${b.reason}`);
+    posljiMailPrijave({ id, tip: b.target_type, label: cilj.label, vzrok: b.reason, prijavitelj: req.user.username });
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+    return odgovoriNaNapako(res, e, "POST /reports");
+  } finally { c.release(); }
+});
+
+// POST /me/blocks/:userId -> 204 (idempotentno). Prijateljstvo (obe smeri) in cakajoce prosnje med njima izginejo; 400 invalid_target (sebe / neveljaven id),
+// 404 not_found (uporabnik ne obstaja), 409 blocks_limit.
+app.post("/me/blocks/:userId", requireAuth, omeji({ kljuc: "bloki", najvec: 60, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+  const uid = celoId4(req.params.userId);
+  const jaz = Number(req.user.userId);
+  if (!uid || uid === jaz) return res.status(400).json({ error: "invalid_target", message: "You can't block yourself." });
+  const c = await pool.connect();
+  try {
+    await nakupZacni(c);
+    await zakleniPar(c, jaz, uid);
+    const t = await c.query("SELECT 1 FROM users WHERE id = $1 AND role <> 'backup'", [uid]);
+    if (!t.rows.length) { await c.query("ROLLBACK"); return res.status(404).json({ error: "not_found", message: "User not found." }); }
+    const ze = await c.query("SELECT 1 FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2", [jaz, uid]);
+    if (!ze.rows.length) {
+      const st = (await c.query("SELECT COUNT(*)::int AS n FROM user_blocks WHERE blocker_id = $1", [jaz])).rows[0].n;
+      if (st >= BLOKOV_NAJVEC) { await c.query("ROLLBACK"); return res.status(409).json({ error: "blocks_limit", message: "You have reached the limit of blocked users." }); }
+      await c.query("INSERT INTO user_blocks (blocker_id, blocked_id) VALUES ($1, $2)", [jaz, uid]);
+    }
+    // Tudi ob ponovnem blokiranju (idempotentno) se ostanki odnosa pospravijo.
+    await c.query("DELETE FROM friendships WHERE user_a = LEAST($1::int, $2::int) AND user_b = GREATEST($1::int, $2::int)", [jaz, uid]);
+    await c.query(
+      `UPDATE friend_requests SET status = 'cancelled', responded_at = NOW()
+        WHERE status = 'pending' AND LEAST(from_user_id, to_user_id) = LEAST($1::int, $2::int) AND GREATEST(from_user_id, to_user_id) = GREATEST($1::int, $2::int)`, [jaz, uid]);
+    await c.query("COMMIT");
+    return res.status(204).send();
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (e && e.code === "23503") return res.status(404).json({ error: "not_found", message: "User not found." });   // uporabnik izbrisan med preverbo in vpisom
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+    return odgovoriNaNapako(res, e, "POST /me/blocks/:userId");
+  } finally { c.release(); }
+});
+
+// DELETE /me/blocks/:userId -> 204 (idempotentno; tudi ce bloka ni). Prijateljstvo se NE obnovi.
+app.delete("/me/blocks/:userId", requireAuth, omeji({ kljuc: "bloki", najvec: 60, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+  try {
+    const uid = celoId4(req.params.userId);
+    if (!uid) return res.status(400).json({ error: "invalid_target", message: "Invalid user id." });
+    await pool.query("DELETE FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2", [req.user.userId, uid]);
+    return res.status(204).send();
+  } catch (e) { return odgovoriNaNapako(res, e, "DELETE /me/blocks/:userId"); }
+});
+
+// GET /me/blocks -> { blocks: [{ user_id, username, avatar_url, blocked_at }] } (samo koga sem blokiral jaz; kdo je blokiral mene se ne razkrije).
+app.get("/me/blocks", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT u.id AS user_id, u.username, u.avatar_url, b.created_at AS blocked_at
+         FROM user_blocks b JOIN users u ON u.id = b.blocked_id
+        WHERE b.blocker_id = $1 ORDER BY b.created_at DESC, u.id LIMIT 1000`, [req.user.userId]);
+    return res.json({ blocks: r.rows });
+  } catch (e) { return odgovoriNaNapako(res, e, "GET /me/blocks"); }
+});
+
+// --- admin: prijave zlorabe (migracija 041; vloga admin prek routerja `admin`) ---
+// Oblika vrstice: id, reporter_username (null = racun prijavitelja je izbrisan), target_type, target_id, target_label (null = cilj ne obstaja vec),
+// reason, details, created_at, status, resolved_at, note.
+const PRIJAVE_ADMIN_SQL = `
+  SELECT r.id, ru.username AS reporter_username, r.target_type, r.target_id,
+         CASE r.target_type
+           WHEN 'user'  THEN (SELECT x.username FROM users x WHERE x.id = r.target_id)
+           WHEN 'club'  THEN (SELECT x.name FROM clubs x WHERE x.id = r.target_id)
+           WHEN 'media' THEN (SELECT x.name FROM clubs x WHERE x.id = r.target_id)
+           WHEN 'event' THEN (SELECT x.title || ' (' || c.name || ')' FROM events x JOIN clubs c ON c.id = x.club_id WHERE x.id = r.target_id)
+         END AS target_label,
+         r.reason, r.details, r.created_at, r.status, r.resolved_at, r.note
+    FROM reports r LEFT JOIN users ru ON ru.id = r.reporter_id`;
+
+// GET /admin/api/reports?status=open|resolved|all (privzeto open) -> { reports: [...] } najnovejse prve, najvec 500.
+admin.get("/reports", async (req, res) => {
+  try {
+    const status = req.query.status === undefined ? "open" : String(req.query.status);
+    if (!["open", "resolved", "all"].includes(status)) return res.status(400).json({ error: "invalid_status", message: "status must be open, resolved or all." });
+    const r = await pool.query(`${PRIJAVE_ADMIN_SQL} WHERE ($1::text = 'all' OR r.status = $1::text) ORDER BY r.created_at DESC, r.id DESC LIMIT 500`, [status]);
+    return res.json({ reports: r.rows });
+  } catch (e) { return odgovoriNaNapako(res, e, "GET /admin/api/reports"); }
+});
+
+// PATCH /admin/api/reports/:id { status: "resolved" | "open", note? } -> { report }. note: niz do 1000 znakov; null ali "" ga zbrise; brez polja ostane.
+admin.patch("/reports/:id", async (req, res) => {
+  try {
+    const id = celoId4(req.params.id);
+    if (!id) return res.status(400).json({ error: "invalid_id", message: "Invalid report id." });
+    const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+    if (b.status !== "resolved" && b.status !== "open") return res.status(400).json({ error: "invalid_status", message: "status must be resolved or open." });
+    let spremeniOpombo = false, opomba = null;
+    if (b.note !== undefined) {
+      if (b.note !== null && typeof b.note !== "string") return res.status(400).json({ error: "invalid_note", message: "note must be text." });
+      opomba = typeof b.note === "string" ? (b.note.replace(/\u0000/g, "").trim() || null) : null;
+      if (opomba && Array.from(opomba).length > 1000) return res.status(400).json({ error: "invalid_note", message: "note can be at most 1000 characters." });
+      spremeniOpombo = true;
+    }
+    const u = await pool.query(
+      `UPDATE reports SET status = $2::text,
+              note = CASE WHEN $3::boolean THEN $4::text ELSE note END,
+              resolved_at = CASE WHEN $2::text = 'resolved' THEN COALESCE(resolved_at, NOW()) ELSE NULL END,
+              resolved_by = CASE WHEN $2::text = 'resolved' THEN COALESCE(resolved_by, $5::int) ELSE NULL END
+        WHERE id = $1 RETURNING id`, [id, b.status, spremeniOpombo, opomba, req.user.userId]);
+    if (!u.rows.length) return res.status(404).json({ error: "not_found", message: "Report not found." });
+    const r = await pool.query(`${PRIJAVE_ADMIN_SQL} WHERE r.id = $1`, [id]);
+    console.log(`[prijave] admin ${req.user.userId}: prijava ${id} -> ${b.status}`);
+    return res.json({ report: r.rows[0] });
+  } catch (e) { return odgovoriNaNapako(res, e, "PATCH /admin/api/reports/:id"); }
 });
 
 // DELETE /business/team/me — član sam zapusti ekipo (tudi vratar).

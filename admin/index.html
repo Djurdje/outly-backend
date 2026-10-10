@@ -122,6 +122,7 @@
       <button data-z="uporabniki">Uporabniki</button>
       <button data-z="dogodki">Dogodki</button>
       <button data-z="guest">Guest lists</button>
+      <button data-z="prijave">Reports <span class="n skrito" id="nPrijav"></span></button>
       <button data-z="finance">Finance</button>
     </nav>
 
@@ -135,6 +136,15 @@
       </div>
     </section>
 
+
+    <!-- REPORTS (prijave zlorabe, migracija 041) -->
+    <section id="z-prijave" class="skrito">
+      <div class="skupina">
+        <h2>Prijave zlorabe <span class="desno"><select id="r_filter" style="width:auto"><option value="open">odprte</option><option value="resolved">rešene</option><option value="all">vse</option></select><button class="tih mali" id="r_osvezi" type="button">Osveži</button></span></h2>
+        <div class="telo" style="font-size:12.5px;color:var(--faint)">Uporabniki prijavijo uporabnika, klub, dogodek ali sliko iz aplikacije. Ukrepe (skrij klub, odstrani dogodek, zakleni račun) naredi v zavihkih Klubi, Dogodki in Uporabniki; tu prijavo samo označiš kot rešeno (z opombo).</div>
+        <div class="tabela" id="r_tabela"></div>
+      </div>
+    </section>
     <!-- FINANCE -->
     <section id="z-finance" class="skrito">
       <div class="skupina"><h2>Finance <span id="fNacin" class="znacka"></span>
@@ -367,7 +377,7 @@ function pokaziPanel() {
 
 // ---------- zavihki ----------
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => pokaziZavihek(b.dataset.z));
-const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke, guest: naloziGuest, finance: naloziFinance };
+const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke, guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance };
 function pokaziZavihek(z) {
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("aktiven", b.dataset.z === z));
   document.querySelectorAll("section[id^=z-]").forEach(s => s.classList.toggle("skrito", s.id !== "z-" + z));
@@ -389,6 +399,7 @@ async function naloziPregled() {
       kos(s.events, "dogodkov") + kos(s.upcoming_events, "prihajajočih") + kos(s.users, "uporabnikov") +
       kos(s.business_users, "poslovnih računov") + kos(s.admins, "adminov");
     $("nProsenj").textContent = s.new_applications; $("nProsenj").classList.toggle("skrito", !s.new_applications);
+    $("nPrijav").textContent = s.open_reports || 0; $("nPrijav").classList.toggle("skrito", !s.open_reports);
   });
 }
 
@@ -695,6 +706,49 @@ $("g_isciGumb").onclick = gIsciUporabnika;
 $("g_isci").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); gIsciUporabnika(); } };
 $("g_ustvari").onclick = gUstvari;
 $("g_osvezi").onclick = naloziGuestListe;
+
+// ---------- reports ----------
+// Prijave zlorabe (migracija 041). Podatki prijaviteljev (uporabnisko ime, prosto besedilo `details`, opomba) gredo v DOM samo prek h() / textContent (XSS).
+const R_VZROKI = { spam: "Spam", harassment: "Harassment", inappropriate: "Inappropriate", impersonation: "Impersonation", illegal: "Illegal", other: "Other" };
+const R_CILJI = { user: "uporabnik", club: "klub", event: "dogodek", media: "slika kluba" };
+async function rObravnavaj(id, status) {
+  await varno(async () => {
+    const opomba = $("r_o" + id) ? $("r_o" + id).value : undefined;
+    const telo = { status };
+    if (opomba !== undefined) telo.note = opomba;
+    await klic("PATCH", "/admin/api/reports/" + id, telo);
+    obvesti(status === "resolved" ? `Prijava #${id} rešena.` : `Prijava #${id} spet odprta.`, "ok");
+    await naloziPrijave();
+    naloziPregled();
+  });
+}
+async function naloziPrijave() {
+  await varno(async () => {
+    const d = await klic("GET", "/admin/api/reports?status=" + encodeURIComponent($("r_filter").value));
+    const el = $("r_tabela");
+    if (!d.reports.length) { el.replaceChildren(h("div", { class: "prazno" }, "Ni prijav.")); return; }
+    const vrstica = (x) => {
+      const odprta = x.status === "open";
+      return h("tr", {},
+        h("td", { class: "mono" }, x.id),
+        h("td", {}, datum(x.created_at), h("span", { class: "drobno" }, x.reporter_username ? "prijavil: " + x.reporter_username : "prijavitelj izbrisan")),
+        h("td", {}, h("b", {}, R_CILJI[x.target_type] || x.target_type), h("span", { class: "drobno" }, `#${x.target_id} · ${x.target_label === null ? "(ne obstaja več)" : x.target_label}`)),
+        h("td", {}, R_VZROKI[x.reason] || x.reason),
+        h("td", { style: "max-width:320px;white-space:pre-wrap;word-break:break-word" }, x.details || "—"),
+        h("td", {}, odprta ? h("span", { class: "znacka opoz" }, "odprta") : h("span", { class: "znacka ok" }, "rešena"),
+          h("span", { class: "drobno" }, x.resolved_at ? datum(x.resolved_at) : "")),
+        h("td", {}, h("input", { id: "r_o" + x.id, maxlength: 1000, value: x.note || "", placeholder: "opomba (neobvezno)", style: "min-width:160px" })),
+        h("td", {}, odprta
+          ? h("button", { class: "mali", type: "button", onclick: () => rObravnavaj(x.id, "resolved") }, "Označi kot rešeno")
+          : h("button", { class: "tih mali", type: "button", onclick: () => rObravnavaj(x.id, "open") }, "Odpri znova")));
+    };
+    el.replaceChildren(h("table", {},
+      h("thead", {}, h("tr", {}, ["#", "Kdaj", "Cilj", "Razlog", "Podrobnosti", "Stanje", "Opomba", ""].map(g => h("th", {}, g)))),
+      h("tbody", {}, d.reports.map(vrstica))));
+  });
+}
+$("r_osvezi").onclick = naloziPrijave;
+$("r_filter").onchange = naloziPrijave;
 
 // ---------- zagon ----------
 if (seja.token) {

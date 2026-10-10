@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–040, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–041, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 2zlLVMyhwEgIYwyXRk5VrJNjhcufsHlxdkIEWY85nWdOgjDSgvnQS2sfSg398fP
+\restrict eWqM0o0zcTAGrdYkf9O2phn5BgBcJ95hBB7AuTtELkJWbdfiiTJ1tdPoLSjHnWQ
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -971,6 +971,65 @@ ALTER SEQUENCE public.orders_id_seq OWNED BY public.orders.id;
 
 
 --
+-- Name: reports; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.reports (
+    id integer NOT NULL,
+    reporter_id integer,
+    target_type text NOT NULL,
+    target_id integer NOT NULL,
+    reason text NOT NULL,
+    details text,
+    status text DEFAULT 'open'::text NOT NULL,
+    note text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    resolved_at timestamp with time zone,
+    resolved_by integer,
+    CONSTRAINT reports_details_chk CHECK (((details IS NULL) OR (char_length(details) <= 1000))),
+    CONSTRAINT reports_note_chk CHECK (((note IS NULL) OR (char_length(note) <= 1000))),
+    CONSTRAINT reports_reason_chk CHECK ((reason = ANY (ARRAY['spam'::text, 'harassment'::text, 'inappropriate'::text, 'impersonation'::text, 'illegal'::text, 'other'::text]))),
+    CONSTRAINT reports_resolved_chk CHECK (((status = 'resolved'::text) = (resolved_at IS NOT NULL))),
+    CONSTRAINT reports_status_chk CHECK ((status = ANY (ARRAY['open'::text, 'resolved'::text]))),
+    CONSTRAINT reports_target_type_chk CHECK ((target_type = ANY (ARRAY['user'::text, 'club'::text, 'event'::text, 'media'::text])))
+);
+
+
+--
+-- Name: TABLE reports; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.reports IS 'Prijave zlorabe (041): uporabnik, klub, dogodek ali slika kluba (media: target_id = id kluba). Brez tujega kljuca na cilj. reporter_id SET NULL ob izbrisu racuna.';
+
+
+--
+-- Name: COLUMN reports.target_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.reports.target_id IS 'Id cilja glede na target_type (users.id | clubs.id | events.id | clubs.id za media). Polimorfen, brez FK: prijava ostane kot dokaz.';
+
+
+--
+-- Name: reports_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.reports_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: reports_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.reports_id_seq OWNED BY public.reports.id;
+
+
+--
 -- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1211,6 +1270,25 @@ ALTER SEQUENCE public.tickets_id_seq OWNED BY public.tickets.id;
 
 
 --
+-- Name: user_blocks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_blocks (
+    blocker_id integer NOT NULL,
+    blocked_id integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_blocks_not_self_chk CHECK ((blocker_id <> blocked_id))
+);
+
+
+--
+-- Name: TABLE user_blocks; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.user_blocks IS 'Bloki med uporabniki (041): blocker_id je blokiral blocked_id. Velja v obe smeri; blokirani ne izve. Izbris racuna pobrise (CASCADE).';
+
+
+--
 -- Name: users; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1369,6 +1447,13 @@ ALTER TABLE ONLY public.guest_lists ALTER COLUMN id SET DEFAULT nextval('public.
 --
 
 ALTER TABLE ONLY public.orders ALTER COLUMN id SET DEFAULT nextval('public.orders_id_seq'::regclass);
+
+
+--
+-- Name: reports id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reports ALTER COLUMN id SET DEFAULT nextval('public.reports_id_seq'::regclass);
 
 
 --
@@ -1591,6 +1676,14 @@ ALTER TABLE ONLY public.orders
 
 
 --
+-- Name: reports reports_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reports
+    ADD CONSTRAINT reports_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: schema_migrations schema_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1652,6 +1745,14 @@ ALTER TABLE ONLY public.ticket_transfers
 
 ALTER TABLE ONLY public.tickets
     ADD CONSTRAINT tickets_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: user_blocks user_blocks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_blocks
+    ADD CONSTRAINT user_blocks_pkey PRIMARY KEY (blocker_id, blocked_id);
 
 
 --
@@ -2041,6 +2142,20 @@ CREATE INDEX orders_user_idx ON public.orders USING btree (user_id, created_at D
 
 
 --
+-- Name: reports_reporter_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX reports_reporter_idx ON public.reports USING btree (reporter_id, created_at DESC) WHERE (reporter_id IS NOT NULL);
+
+
+--
+-- Name: reports_status_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX reports_status_idx ON public.reports USING btree (status, created_at DESC);
+
+
+--
 -- Name: table_holds_table_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2129,6 +2244,13 @@ CREATE INDEX tickets_order_idx ON public.tickets USING btree (order_id);
 --
 
 CREATE UNIQUE INDEX tickets_serial_key ON public.tickets USING btree (serial);
+
+
+--
+-- Name: user_blocks_blocked_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_blocks_blocked_idx ON public.user_blocks USING btree (blocked_id);
 
 
 --
@@ -2548,6 +2670,22 @@ ALTER TABLE ONLY public.orders
 
 
 --
+-- Name: reports reports_reporter_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reports
+    ADD CONSTRAINT reports_reporter_id_fkey FOREIGN KEY (reporter_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: reports reports_resolved_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reports
+    ADD CONSTRAINT reports_resolved_by_fkey FOREIGN KEY (resolved_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
 -- Name: table_holds table_holds_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2660,6 +2798,22 @@ ALTER TABLE ONLY public.tickets
 
 
 --
+-- Name: user_blocks user_blocks_blocked_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_blocks
+    ADD CONSTRAINT user_blocks_blocked_id_fkey FOREIGN KEY (blocked_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_blocks user_blocks_blocker_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_blocks
+    ADD CONSTRAINT user_blocks_blocker_id_fkey FOREIGN KEY (blocker_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: view_counts view_counts_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2679,5 +2833,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 2zlLVMyhwEgIYwyXRk5VrJNjhcufsHlxdkIEWY85nWdOgjDSgvnQS2sfSg398fP
+\unrestrict eWqM0o0zcTAGrdYkf9O2phn5BgBcJ95hBB7AuTtELkJWbdfiiTJ1tdPoLSjHnWQ
 
