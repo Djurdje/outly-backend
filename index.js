@@ -59,6 +59,9 @@ app.use(javniPredpomnilnik.razveljaviOdPisanja([
   { metoda: "PUT", pot: /^\/me\/favorites\/\d+$/ },
   { metoda: "DELETE", pot: /^\/me\/favorites\/\d+$/ },
   { metoda: "POST", pot: /^\/tickets\/\d+\/transfer$/ },
+  // Zetoni naprav (040) ne vplivajo na noben predpomnjen odgovor; aplikacija jih registrira pogosto.
+  { metoda: "POST", pot: /^\/me\/devices$/ },
+  { metoda: "DELETE", pot: /^\/me\/devices\/[0-9A-Fa-f]+$/ },
 ]));
 // Privzeta omejitev telesa (100 kB) povsod, razen pri paketu skenov brez povezave (do 500 elementov, ima svoj razčlenjevalnik).
 // Stripe webhook rabi SUROVO telo (podpis se preverja nad bajti), zato ga JSON razclenjevalnik preskoci.
@@ -725,6 +728,143 @@ function requireClub(...vloge) { return requireClubNa(pool, vloge); }
 // Isto prek skenPool (poti skena na vratih).
 function requireClubSken(...vloge) { return requireClubNa(skenPool, vloge); }
 
+// ---------------------------
+// POTISNA OBVESTILA (APNs; migracija 040, invarianta I29, issue #183)
+// ---------------------------
+// Push je POLEG zvonca, nikoli namesto njega (vrstica v zvoncu nastane kot doslej). Poslje se PO commitu, brez await (`void posljiPush…`):
+// izpad ali pocasnost APNs nikoli ne podre ali upocasni zahtevka, najmanj skena na vratih (I16). Brez APNS_KEY_ID/APNS_TEAM_ID/APNS_KEY_P8
+// je push izklopljen (no-op). Protokol, JWT in omejitve so v push_apns.js; pogodba z iOS (polja, `outly.type`): DECISIONS 10. 10. 2026.
+const { ustvariApns, sestaviObvestilo, ZETON_VZOREC } = require("./push_apns");
+const apns = ustvariApns();
+// Strezba starejsa od tega (sken brez povezave, poslan pozno) ne sprozi pusha: »miza je pripravljena« po pol ure ni vec novica (seznam strezbe ostane).
+const PUSH_STREZBA_SVEZE_MIN = 30;
+const NAPRAV_NA_UPORABNIKA = 10;   // najvec zetonov naprav na uporabnika (POST /me/devices pobrise najstarejse)
+
+const PUSH = {
+  prejetaVstopnica: (vstopnicaId, posiljatelj) => sestaviObvestilo({ tip: "ticket_received", id: vstopnicaId, naslov: "New ticket",
+    kljuc: "%@ sent you a ticket", argumenti: [posiljatelj || "Someone"] }),
+  dogodekKluba: (dogodekId, klub, naslov) => sestaviObvestilo({ tip: "club_event", id: dogodekId, naslov: "New event",
+    kljuc: "%@ posted a new event: %@", argumenti: [klub, naslov] }),
+  vabiloGuestLista: (vstopnicaId, gostitelj) => sestaviObvestilo({ tip: "guest_list_invite", id: vstopnicaId, naslov: "Guest list",
+    kljuc: "%@ added you to their guest list", argumenti: [gostitelj || "Someone"] }),
+  // Brez kupca/gosta (I27): samo oznaka mize. Ne dostavljeno v pol ure ni vec aktualno: apns-expiration 1 h.
+  strezba: (strezbaId, oznakaMize) => sestaviObvestilo({ tip: "table_service", id: strezbaId, naslov: "VIP table",
+    kljuc: "VIP table %@ is ready to be served", argumenti: [oznakaMize], velja: 3600 }),
+};
+
+async function zetoniUporabnikov(ids) {
+  const urejeni = [...new Set((ids || []).filter((x) => Number.isInteger(x) && x > 0))];
+  if (!urejeni.length) return [];
+  const r = await pool.query("SELECT token FROM device_tokens WHERE user_id = ANY($1::int[]) AND invalid_at IS NULL", [urejeni]);
+  return r.rows.map((x) => x.token);
+}
+// Poslje eno obvestilo na zetone in neveljavne (410 / Unregistered / BadDeviceToken) oznaci invalid_at. DeviceTokenNotForTopic je napaka nastavitve (topic): ne oznaci.
+// `last_seen_at <= zacetek`: zeton, ki ga je aplikacija med posiljanjem znova registrirala, ostane veljaven.
+// Varovalo: ce je v enem posiljanju vsaj PUSH_MNOZICNO_MIN zetonov in vec kot polovica zavrnjena z BadDeviceToken, je skoraj gotovo narobe okolje
+// (npr. sandbox zetoni proti produkciji), ne zetoni: BadDeviceToken NE oznacimo in zapisemo alarm. 410 / Unregistered (reinstalacija, odjava) oznacimo VEDNO:
+// to so dokazano mrtvi zetoni in sicer bi zastareli zetoni trajno blokirali ciscenje. ALARM najvec enkrat na minuto.
+const PUSH_MNOZICNO_MIN = 10;
+let pushAlarmZadnji = 0;
+// Vrne zetone, ki so bili oznaceni kot neveljavni (klicatelj z vec obvestili jih izloci iz naslednjih).
+async function posljiNaZetone(zetoni, obvestilo, tip) {
+  if (!zetoni.length) return [];
+  const zacetek = new Date();
+  const rez = await apns.posljiVsem(zetoni, obvestilo);
+  const zavrnjenih = rez.filter((r) => r.neveljaven).length;
+  let neveljavni = rez.filter((r) => r.neveljaven).map((r) => r.zeton);
+  const slabih = rez.filter((r) => r.neveljaven && r.razlog === "BadDeviceToken");
+  if (rez.length >= PUSH_MNOZICNO_MIN && slabih.length * 2 > rez.length) {
+    const slabiZetoni = new Set(slabih.map((r) => r.zeton));
+    neveljavni = neveljavni.filter((z) => !slabiZetoni.has(z));   // 410 / Unregistered ostanejo oznaceni
+    if (Date.now() - pushAlarmZadnji >= 60000) {
+      pushAlarmZadnji = Date.now();
+      console.error(`[push] ALARM: ${slabih.length} od ${rez.length} zetonov zavrnjenih z BadDeviceToken v enem posiljanju (${tip}), teh ne oznacim: verjetno napacno okolje/kljuc (sandbox zetoni proti produkciji? APNS_TOPIC? APNS_KEY_*?)`);
+    }
+  }
+  if (neveljavni.length) {
+    await pool.query("UPDATE device_tokens SET invalid_at = NOW() WHERE token = ANY($1::text[]) AND invalid_at IS NULL AND last_seen_at <= $2", [neveljavni, zacetek]);
+  }
+  console.log(`[push] ${tip}: ${rez.length} naprav, poslano ${rez.filter((r) => r.ok).length}, neveljavnih ${neveljavni.length}, zavrnjenih ${zavrnjenih}, napak ${rez.filter((r) => !r.ok && !r.neveljaven).length}`);
+  return neveljavni;
+}
+// Klic MORA biti `void posljiPush(...)` PO commitu: nikoli ne vrze (vse napake v dnevnik), zato ne podre klicatelja.
+async function posljiPush(uporabnikiIds, obvestilo, tip) {
+  if (!apns.vklopljen) return;
+  try { await posljiNaZetone(await zetoniUporabnikov(uporabnikiIds), obvestilo, tip); }
+  catch (e) { console.error(`[push] ${tip} ni uspel:`, e && e.message); }
+}
+// Objava dogodka sledilcem: samo tisti, ki so pravkar dobili vrstico v zvoncu (ponovna objava ne poslje znova); skriti klub ne objavlja.
+async function pushObjavaDogodka(eventId, uporabnikiIds) {
+  if (!apns.vklopljen || !uporabnikiIds.length) return;
+  try {
+    const e = await pool.query(
+      `SELECT e.title, c.name FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1 AND e.status = 'published' AND NOT c.hidden`, [eventId]);
+    if (!e.rows.length) { console.log("[push] club_event: preskoceno (dogodek ni objavljen ali je klub skrit)"); return; }
+    await posljiNaZetone(await zetoniUporabnikov(uporabnikiIds), PUSH.dogodekKluba(eventId, e.rows[0].name, e.rows[0].title), "club_event");
+  } catch (e) { console.error("[push] club_event ni uspel:", e && e.message); }
+}
+// Strezba VIP mize: lastnik + manager + bartender kluba (vloge iz baze ob posiljanju, I5), NE vratar; vsebina brez kupca (I27).
+async function pushStrezba(klubId, strezbaIds) {
+  if (!apns.vklopljen || !strezbaIds.length) return;
+  try {
+    // Samo strezba, ki bi bila vidna v zvoncu (isti casovni pogoj kot stevec in seznam: STREZBA_ZVONEC_CAS) in je sveza.
+    const s = await pool.query(
+      `SELECT ts.id, ts.table_label ${STREZBA_ZVONEC_IZ}
+        WHERE ts.id = ANY($1::int[]) AND ts.club_id = $2 AND ts.delivered_at IS NULL AND ${STREZBA_ZVONEC_CAS}
+          AND ts.scanned_at > NOW() - make_interval(mins => $3::int) ORDER BY ts.id`,
+      [strezbaIds, klubId, PUSH_STREZBA_SVEZE_MIN]);
+    if (!s.rows.length) { console.log("[push] table_service: preskoceno (strezba ni vidna v zvoncu ali je zastarela)"); return; }
+    const p = await pool.query(
+      `SELECT owner_user_id AS user_id FROM clubs WHERE id = $1 AND owner_user_id IS NOT NULL
+       UNION SELECT user_id FROM club_members WHERE club_id = $1 AND role IN ('manager', 'bartender')`, [klubId]);
+    let zetoni = await zetoniUporabnikov(p.rows.map((x) => x.user_id));
+    for (const x of s.rows) {
+      const neveljavni = new Set(await posljiNaZetone(zetoni, PUSH.strezba(x.id, x.table_label), "table_service"));
+      if (neveljavni.size) zetoni = zetoni.filter((z) => !neveljavni.has(z));   // naslednja strezba teh zetonov ne dobi
+    }
+  } catch (e) { console.error("[push] table_service ni uspel:", e && e.message); }
+}
+
+// POST /me/devices { token, platform } — registracija zetona naprave (aplikacija po dovoljenju za obvestila). Idempotentno; isti zeton na drugem racunu
+// (odjava in prijava na isti napravi) se prepise na trenutnega, invalid_at -> NULL, last_seen_at = zdaj. Neveljaven zeton 400.
+// Omejevalnik je na IP: aplikacija naj klice ob spremembi zetona ali najvec enkrat na dan, ne ob vsakem zagonu (omrezja z NAT delijo IP).
+app.post("/me/devices", requireAuth, omeji({ kljuc: "naprave", najvec: 60, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+  try {
+    const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+    if (typeof b.token !== "string" || !ZETON_VZOREC.test(b.token)) return res.status(400).json({ error: "invalid_token", message: "token must be a hex device token (64-200 characters)." });
+    const platforma = b.platform === undefined ? "ios" : b.platform;
+    if (platforma !== "ios") return res.status(400).json({ error: "invalid_platform", message: "platform must be \"ios\"." });
+    // Najvec NAPRAV_NA_UPORABNIKA zetonov: v ISTI transakciji kot vpis se izbrisejo najstarejsi (po last_seen_at) cez mejo, da en racun ne nabira zetonov
+    // (vsak zeton je en zahtevek APNs na vsak push).
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      // Sočasne registracije ISTEGA uporabnika se vrstijo (brez zastoja 40P01 in brez preseganja meje): advisory lock na uporabnika do konca transakcije.
+      await c.query("SELECT pg_advisory_xact_lock(hashtext('dev:' || $1::text))", [req.user.userId]);
+      await c.query(
+        `INSERT INTO device_tokens (user_id, token, platform) VALUES ($1, $2, $3)
+         ON CONFLICT (token) DO UPDATE SET user_id = EXCLUDED.user_id, platform = EXCLUDED.platform, last_seen_at = NOW(), invalid_at = NULL`,
+        [req.user.userId, b.token.toLowerCase(), platforma]);
+      await c.query(
+        `DELETE FROM device_tokens WHERE user_id = $1 AND id NOT IN
+           (SELECT id FROM device_tokens WHERE user_id = $1 ORDER BY last_seen_at DESC, id DESC LIMIT $2)`, [req.user.userId, NAPRAV_NA_UPORABNIKA]);
+      await c.query("COMMIT");
+    } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
+    finally { c.release(); }
+    return res.status(200).json({ ok: true });
+  } catch (e) { return odgovoriNaNapako(res, e, "POST /me/devices"); }
+});
+
+// DELETE /me/devices/:token — odjava naprave (aplikacija ob odjavi). Brise SAMO zeton trenutnega uporabnika; tuj ali neobstojec zeton je tudi 204
+// (ne razkrijemo, ali obstaja). Neveljaven zapis zetona 400.
+app.delete("/me/devices/:token", requireAuth, omeji({ kljuc: "naprave", najvec: 60, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+  try {
+    if (!ZETON_VZOREC.test(req.params.token)) return res.status(400).json({ error: "invalid_token", message: "token must be a hex device token (64-200 characters)." });
+    await pool.query("DELETE FROM device_tokens WHERE token = $1 AND user_id = $2", [req.params.token.toLowerCase(), req.user.userId]);
+    return res.status(204).end();
+  } catch (e) { return odgovoriNaNapako(res, e, "DELETE /me/devices/:token"); }
+});
+
 // test endpoint
 app.get("/", (req, res) => {
   res.send("Outly backend OK");
@@ -782,8 +922,10 @@ function mozenPrenosGostu(vloga) { return process.env.PRENOS_BREZ_RACUNA === "vs
 const STREZBA_ZVONEC_IZ = `FROM table_service ts
        JOIN events e ON e.id = ts.event_id
        JOIN clubs c ON c.id = ts.club_id`;
-const STREZBA_ZVONEC_KJE = `WHERE ts.delivered_at IS NULL AND e.status <> 'cancelled'
-        AND NOW() >= e.start_at - INTERVAL '2 hours' AND NOW() < COALESCE(e.end_at, e.start_at + INTERVAL '8 hours')
+// Casovni pogoj »strezba je v zvoncu« je skupen zvoncu (stevec, seznam) in pushu (pushStrezba): push se ne poslje za strezbo, ki je v zvoncu ne bi bilo.
+const STREZBA_ZVONEC_CAS = `e.status <> 'cancelled'
+        AND NOW() >= e.start_at - INTERVAL '2 hours' AND NOW() < COALESCE(e.end_at, e.start_at + INTERVAL '8 hours')`;
+const STREZBA_ZVONEC_KJE = `WHERE ts.delivered_at IS NULL AND ${STREZBA_ZVONEC_CAS}
         AND (c.owner_user_id = $1 OR EXISTS (SELECT 1 FROM club_members m WHERE m.club_id = ts.club_id AND m.user_id = $1 AND m.role IN ('manager', 'bartender')))`;
 
 app.get("/me", requireAuth, async (req, res) => {
@@ -2243,13 +2385,16 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
 
 // Vsakemu sledilcu kluba vstavi obvestilo o dogodku. UNIQUE (user_id, event_id) poskrbi,
 // da ponovna objava (draft -> published -> draft -> published) ne podvoji zvonca.
+// Push (040): samo tisti, ki so pravkar dobili NOVO vrstico (RETURNING), po commitu stavka, brez await (I29).
 async function obvestiSledilce(eventId, clubId) {
-  await pool.query(
+  const r = await pool.query(
     `INSERT INTO club_event_notifications (user_id, event_id)
      SELECT f.user_id, $1 FROM club_follows f WHERE f.club_id = $2
-     ON CONFLICT (user_id, event_id) DO NOTHING`,
+     ON CONFLICT (user_id, event_id) DO NOTHING
+     RETURNING user_id`,
     [eventId, clubId]
   );
+  if (r.rows.length) void pushObjavaDogodka(eventId, r.rows.map((x) => x.user_id));
 }
 
 // Ali je migracija 002 (placila) ze pognana? Od nje naprej se racun ne sme
@@ -5181,6 +5326,7 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     console.log(`Prenos vstopnice ${t.id}: uporabnik ${req.user.userId} -> ${gost ? "gost" : p.id} (dogodek ${t.event_id})`);
     // Posiljatelj nove kode ne dobi — vstopnica ni vec njegova (gost: zetona posiljatelj NIKOLI ne dobi; kuje se ob posiljanju maila).
     if (gost) posljiPrenosGostu(t.id);   // brez await: odgovor ne caka na Resend; napaka maila ne podre prenosa (pospravljalec ponovi)
+    else void posljiPush([p.id], PUSH.prejetaVstopnica(u.rows[0].id, req.user.username), "ticket_received");   // push poleg zvonca (040), po commitu, brez await
     if (dovoliGosta) {
       // ENOTEN odgovor za racun in gosta (brez razkritja, ali ima naslov racun): novi odjemalci so vedno poslali allow_guest.
       return res.status(200).json({
@@ -5399,12 +5545,16 @@ app.post("/me/guest-lists/:id/invites", requireAuth, omeji({ kljuc: "guest-lista
           message: `Confirm that everyone you are inviting is at least ${meja}.` });
       }
     }
+    const vstopniceVabljenih = [];
     for (const uid of ids) {
       const t = await c.query("INSERT INTO tickets (order_id, event_id, holder_user_id) VALUES ($1, $2, $3) RETURNING id", [l.order_id, l.event_id, uid]);
       await c.query("INSERT INTO guest_list_members (guest_list_id, user_id, ticket_id) VALUES ($1, $2, $3)", [id, uid, t.rows[0].id]);
+      vstopniceVabljenih.push([uid, t.rows[0].id]);
     }
     await c.query("COMMIT");
     console.log(`Guest lista ${id}: gostitelj ${userId} je povabil ${ids.length} (dogodek ${l.event_id})`);
+    // Push poleg zvonca (040): vsak povabljenec dobi obvestilo z id-jem SVOJE vstopnice (denarnica). Po commitu, brez await.
+    for (const [uid, vstopnicaId] of vstopniceVabljenih) void posljiPush([uid], PUSH.vabiloGuestLista(vstopnicaId, req.user.username), "guest_list_invite");
     const [guest_list] = await guestListeOdgovor(c, "gl.id = $1", [id]);
     return res.status(201).json({ guest_list, added: ids });
   } catch (e) {
@@ -5634,7 +5784,7 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken("owner", "ma
          UPDATE tickets SET status='used', used_at=NOW(), used_by_user_id=$2, scan_device=$3
           WHERE id=$1 AND status='valid' AND serial=$4 RETURNING id, serial, status, used_at, order_id),
        ${STREZBA_CTE}
-       SELECT u.id, u.serial, u.status, u.used_at, EXISTS (SELECT 1 FROM s) AS table_service_created FROM u`,
+       SELECT u.id, u.serial, u.status, u.used_at, EXISTS (SELECT 1 FROM s) AS table_service_created, (SELECT id FROM s) AS table_service_id FROM u`,
       [t.id, req.user.userId, String(req.headers["user-agent"] || "").slice(0, 100), serial]
     );
     if (u.rows.length === 0) {
@@ -5643,8 +5793,11 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken("owner", "ma
       if (s && s.serial !== serial) return res.status(409).json({ result: "transferred", message: "This ticket was passed on to someone else. Ask them to show their new code." });
       return res.status(409).json({ result: "already_used", message: "Ticket was already scanned." });
     }
-    const { table_service_created, ...tu } = u.rows[0];
-    return res.status(200).json({ result: "ok", message: "Welcome in.", ticket: { ...t, ...tu }, table_service_created });
+    const { table_service_created, table_service_id, ...tu } = u.rows[0];
+    res.status(200).json({ result: "ok", message: "Welcome in.", ticket: { ...t, ...tu }, table_service_created });
+    // Push natakarju (040, I29): SAMO po odgovoru, brez await, mimo skenPool (poizvedbe prejemnikov gredo na glavni pool). Sken ne caka na push in ne pade zaradi njega.
+    if (table_service_id) void pushStrezba(klub, [table_service_id]);
+    return;
   } catch (e) { return odgovoriNaNapako(res, e, "POST /business/tickets/scan"); }
 });
 
@@ -5779,6 +5932,7 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken("owner
     }
 
     const iso = (d) => (d ? new Date(d).toISOString() : null);
+    const strezbeZaPush = [];   // nove strezbe tega paketa; push (040) gre sele po odgovoru
     // Cas skena za presojo okna (I25): ura na telefonu (scanned_at), ker skeni brez povezave pridejo s zamudo (tudi ure po koncu okna);
     // enaka razumnost kot za used_at v UPDATE spodaj (ne v prihodnosti, ne pred nastankom vstopnice, ne prej kot 12 h pred zacetkom) -> sicer zdaj.
     const casSkena = (kdaj, t) => {
@@ -5817,11 +5971,12 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken("owner
                       used_by_user_id = $2, scan_device = $3
                WHERE id = $1 AND status = 'valid' AND serial = $4::uuid RETURNING used_at, order_id),
              ${STREZBA_CTE}
-             SELECT u.used_at, EXISTS (SELECT 1 FROM s) AS table_service_created FROM u`,
+             SELECT u.used_at, EXISTS (SELECT 1 FROM s) AS table_service_created, (SELECT id FROM s) AS table_service_id FROM u`,
             [t.id, req.user.userId, d.zaznamek, d.serial, d.kdaj, new Date(new Date(t.start_at).getTime() - SKEN_REZERVA_PRED_ZACETKOM_MS).toISOString()]);
           if (u.rows.length) {
             t.status = "used"; t.scan_device = d.zaznamek; t.used_at = u.rows[0].used_at; t.used_by_user_id = req.user.userId;
             rez = { result: "ok", used_at: iso(t.used_at), table_service_created: u.rows[0].table_service_created };
+            if (u.rows[0].table_service_id) strezbeZaPush.push(u.rows[0].table_service_id);
           } else {
             // Med branjem in pisanjem je vstopnico nekdo spremenil: preberi dejansko stanje.
             const z = await skenPool.query("SELECT serial, status, used_at, used_by_user_id, scan_device FROM tickets WHERE id = $1", [t.id]);
@@ -5842,7 +5997,9 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken("owner
     }
     const stevilo = (r) => rezultati.filter(x => x.result === r).length;
     console.log(`Sken-batch: klub ${klub}, uporabnik ${req.user.userId}: ${n} skenov, ok ${stevilo("ok")}, already_used ${stevilo("already_used")}, transferred ${stevilo("transferred")}, not_today ${stevilo("not_today")}, error ${stevilo("error")}`);
-    return res.status(200).json({ results: rezultati });
+    res.status(200).json({ results: rezultati });
+    if (strezbeZaPush.length) void pushStrezba(klub, strezbeZaPush);   // po odgovoru, brez await (I29)
+    return;
   } catch (e) { return odgovoriNaNapako(res, e, "POST /business/tickets/scan-batch"); }
 });
 

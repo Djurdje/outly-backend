@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-09 (vloga bartender in strežba VIP miz, migracija 038; prej 2026-10-09: organizatorji brez prizorišča, migracija 037; prej 2026-10-08: obvestilo o vabilu na guest listo, migracija 036; guest lista, migracija 035; prej 2026-10-05: nakup brez računa; prej 2026-10-02: prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
+Zadnja posodobitev: 2026-10-10 (potisna obvestila APNs, migracija 040; prej 2026-10-09: vloga bartender in strežba VIP miz, migracija 038; prej 2026-10-09: organizatorji brez prizorišča, migracija 037; prej 2026-10-08: obvestilo o vabilu na guest listo, migracija 036; guest lista, migracija 035; prej 2026-10-05: nakup brez računa; prej 2026-10-02: prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -192,6 +192,16 @@ Za **ios-dev** in **web-dev** (backend po migraciji 039; vse DODANO, na starem b
 - Izjeme (`PUT /business/events/:id/vip` `tables[].table_id`) veljajo tudi za mize dogodka; miza drugega dogodka istega kluba 404, tuj klub / neobstoječa 400 (kot doslej).
 - Past: preklop vira ali odstranitev mize **izbriše telefonsko rezervacijo** te mize (opozori uporabnika). Miza z naročilom ostane (arhivirana, `booking` v poslovnem pogledu); javno ostane »Booked«.
 - Past: `PUT /business/vip` (klubski tloris) mize dogodkov NE vidi in jih ne spreminja (`event_id IS NULL`).
+
+## Potisna obvestila APNs (od 10. 10. 2026; ARCHITECTURE »Potisna obvestila (APNs, migracija 040)«, I29, DECISIONS 10. 10.)
+
+Za **ios-dev** (#184); splet push ne dobi. Backend po migraciji 040; vse DODANO (na starem backendu sta poti 404: napako ignoriraj):
+- `POST /me/devices` `{ token (hex 64–200), platform: "ios" }` -> 200 `{ ok: true }` (idempotentno; isti žeton na drugem računu se prepiše; 400 `{ error, message }`; 429 po 60/h/IP; **največ 10 žetonov na uporabnika**, najstarejši odpadejo). `DELETE /me/devices/:token` -> 204 (tuj/neobstoječ tudi 204): **pokliči PRED brisanjem seje ob odjavi**. Registriraj ob spremembi žetona ali največ enkrat na dan. Samo produkcijski žeton (Xcode Debug/sandbox ni podprt).
+- Payload `{ aps: { alert: { "title-loc-key", "loc-key", "loc-args" }, sound }, outly: { type, id } }`, angleški ključi kot v `Localizable.xcstrings` (dodaj prevode): `ticket_received` (`New ticket`, `%@ sent you a ticket`; `id` = vstopnica -> denarnica), `club_event` (`New event`, `%@ posted a new event: %@`; `id` = dogodek),
+  `guest_list_invite` (`Guest list`, `%@ added you to their guest list`; `id` = **vstopnica** povabljenca), `table_service` (`VIP table`, `VIP table %@ is ready to be served`; `id` = strežba; lastnik, manager, bartender). `outly.id` je število; neznane `type` ignoriraj. `apns-expiration`: 24 h, strežba 1 h.
+- Brez `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_KEY_P8` na Renderju push ne teče (`[push] izklopljen`); registracija deluje. Strežba: push samo če bi bila vidna v zvoncu (od 2 h pred začetkom) in sken ≤ 30 min star.
+- Pasti: JWT podpis `ieee-p1363` (DER = tih 403 `InvalidProviderToken`); preklic `.p8` = nov ključ v Render secrets (`[push] APNs: status 403 ...`, največ 1/min); `DeviceTokenNotForTopic` = napačen `APNS_TOPIC` (žetona ne označi); ≥ 10 žetonov in > polovica `BadDeviceToken` v enem pošiljanju = `[push] ALARM` (največ 1/min; verjetno napačno okolje/ključ), teh ne označi (410 se označi vedno).
+  Žeton je skrivnost (ni v dnevniku/odgovoru; backup ga vsebuje). **Znana omejitev:** stari `invalid_at` žetoni se ne pospravljajo.
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 
