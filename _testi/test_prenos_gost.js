@@ -78,7 +78,7 @@ const zetonIzMaila = (m) => { const x = /\/app\/guest\/ticket#t=([A-Za-z0-9_-]{4
 function zagon(port, okolje) {
   const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
     TEST_PLACILA: "", GOST_PREVZEM_MS: "0", RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>",
-    GOST_POSTA_PONOVI_MS: "500", GOST_POSTA_PREMOR_MS: "400", GOST_POSTA_TIMEOUT_MS: "1500", REZERVACIJE_CISCENJE_MS: "1000", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
+    GOST_POSTA_PONOVI_MS: "500", GOST_POSTA_PREMOR_MS: "400", GOST_POSTA_TIMEOUT_MS: "1500", GOST_POSTA_REZERVA_MS: "100", REZERVACIJE_CISCENJE_MS: "1000", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
   const s = { srv, log: "" };
   srv.stdout.on("data", d => s.log += d); srv.stderr.on("data", d => s.log += d);
   return s;
@@ -620,6 +620,39 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     const dolg = await pdfT({ dogodek: { naslov: "N".repeat(3000), zacetek: "x", prizoriscePodatki: "P".repeat(3000), starost: "", organizator: "O".repeat(3000) }, vstopnice: [{ koda: kod(), vrsta: "S", oznaka: "" }], varnost: "v" });
     const dolgS = dolg.toString("latin1");
     assert(dolg.length < 80000 && dolgS.includes("\x85") && (dolgS.match(/ re f/g) || []).length > 100 && !dolgS.includes("N".repeat(130)), "N1: PDF z 3000-znakovnim naslovom: skrajsan (…), koda QR na strani", dolg.length);
+
+    // ============================================================
+    console.log("\n# 11. Mail prijatelju natanko enkrat tudi ob pocasni pripravi (#201, prenosVTeku)");
+    // Brez pomoci spodnje meje premora: rok Resenda 1 s + rezerva 0 = 1 s, priprava maila pa traja 2,5 s (testna prozilca v bazi uspava vstavljanje
+    // zetona SAMO za to vstopnico in SAMO po prevzemu). Ko pospravljalec (100 ms) vstopnico spet vidi, je prevzem v bazi ze potekel; brez mnozice
+    // prenosVTeku bi jo prevzel znova -> dva maila. Stari instance (A, B, C, D, E) bi isto vstopnico pospravljali po svoje, zato jih ugasnemo.
+    const zVst = await kupi(T.kupec, E0, 1);   // nakup na B, dokler B se tece
+    for (const x of [a, b, c, ...dodatni]) x.srv.kill();   // tudi d in e iz razdelka 10 (imata pospravljalca)
+    dodatni.length = 0;
+    await pocakaj(500);
+    await pool.query("UPDATE tickets SET holder_guest_mail_attempts = 8 WHERE holder_is_guest AND holder_guest_mail_sent_at IS NULL");
+    await pool.query(`CREATE OR REPLACE FUNCTION test_pocasna_priprava() RETURNS trigger LANGUAGE plpgsql AS $f$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM tickets t WHERE t.id = NEW.ticket_id AND t.holder_guest_mail_claimed_at IS NOT NULL AND t.holder_guest_email = 'pocasna-priprava@example.com') THEN PERFORM pg_sleep(2.5); END IF;
+        RETURN NEW;
+      END $f$`);
+    await pool.query("CREATE TRIGGER test_pocasna_priprava BEFORE INSERT ON gost_zetoni_vstopnic FOR EACH ROW EXECUTE FUNCTION test_pocasna_priprava()");
+    try {
+      const PORT_G = 3202, G = `http://127.0.0.1:${PORT_G}`;
+      const gi = zagon(PORT_G, { PRENOS_BREZ_RACUNA: "vsi", GOST_PRENOS_NA_DAN: "1000", GOST_PRENOS_NA_NASLOV: "1000", GOST_POSTA_PONOVI_MS: "100", GOST_POSTA_PREMOR_MS: "200",
+        GOST_POSTA_TIMEOUT_MS: "1000", GOST_POSTA_REZERVA_MS: "0" }); dodatni.push(gi);
+      await cakajStreznik(G);
+      r = await zahtevek(G, "POST", `/tickets/${zVst[0].id}/transfer`, T.kupec, { email: "pocasna-priprava@example.com", allow_guest: true });
+      assert(r.status === 200, "11: prenos prijatelju 200", r.body);
+      assert(await cakaj(() => poslanoNa("pocasna-priprava@example.com").length >= 1, 10000), "11: mail poslan (priprava 2,5 s)");
+      await pocakaj(4000);   // pri mutaciji (brez mnozice) bi pospravljalec po 1 s prevzel znova in poslal drugi mail ~2,5 s za prvim
+      assert(poslanoNa("pocasna-priprava@example.com").length === 1, "11: priprava dlje od spodnje meje premora: mail natanko enkrat zaradi mnozice v teku", poslanoNa("pocasna-priprava@example.com").length);
+      const aT = (await pool.query("SELECT holder_guest_mail_attempts AS n FROM tickets WHERE id=$1", [zVst[0].id])).rows[0];
+      assert(aT.n === 1, "11: en sam prevzem v bazi", aT);
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS test_pocasna_priprava ON gost_zetoni_vstopnic");
+      await pool.query("DROP FUNCTION IF EXISTS test_pocasna_priprava()");
+    }
 
     console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
     const napake = (a.log + b.log + c.log).split("\n").filter(l => /TypeError|Unhandled|ReferenceError|error: /i.test(l) && !/Resend napaka/.test(l) && !/stub/.test(l));

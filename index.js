@@ -4190,8 +4190,11 @@ const GOST_POSTA_SOCASNIH = 3;                                                  
 const GOST_POSTA_TIMEOUT_MS = okoljeCelo("GOST_POSTA_TIMEOUT_MS", 10000, 100, 60000);        // rok za klic Resenda
 const GOST_POSTA_PONOVI_MS = okoljeCelo("GOST_POSTA_PONOVI_MS", 120000, 0, 3600000);   // pospravljalec neposlanih mailov; 0 = izklop
 const GOST_POSTA_PREMOR_MS = okoljeCelo("GOST_POSTA_PREMOR_MS", 120000, 0, 3600000);   // premor po 1. neuspelem poskusu; naslednji so mnogokratniki
+const GOST_POSTA_REZERVA_MS = okoljeCelo("GOST_POSTA_REZERVA_MS", 30000, 0, 600000);   // rezerva za pripravo maila (QR, PDF) povrh roka Resenda
 // Premor po n-tem neuspelem poskusu (indeks n; 0 = prvi poskus takoj): 2 min, 5 min, 15 min, 1 h, 3 h, 12 h, 24 h (pri privzetih 120000 ms), skupaj 8 poskusov.
-const GOST_POSTA_PREMORI = [0, 1, 2.5, 7.5, 30, 90, 360, 720].map((x) => Math.round(x * GOST_POSTA_PREMOR_MS));
+// Spodnja meja premora = rok Resenda + rezerva (#201): prevzem v bazi ne sme potekniti, dokler isto narocilo (v tem ali drugem procesu) se poslje.
+const GOST_POSTA_PREMOR_MIN_MS = GOST_POSTA_TIMEOUT_MS + GOST_POSTA_REZERVA_MS;
+const GOST_POSTA_PREMORI = [0, 1, 2.5, 7.5, 30, 90, 360, 720].map((x) => x === 0 ? 0 : Math.max(Math.round(x * GOST_POSTA_PREMOR_MS), GOST_POSTA_PREMOR_MIN_MS));
 const GOST_POSTA_POSKUSOV = GOST_POSTA_PREMORI.length;
 const GOST_PREVZEM_MS = okoljeCelo("GOST_PREVZEM_MS", 30000, 0, 3600000);   // kako pogosto /me/orders in /me/tickets znova iscejo gostujoca narocila
 const GOST_PREKLIC_OKNO_MS = okoljeCelo("GOST_PREKLIC_OKNO_MS", 5000, 0, 600000);   // najmanjsi razmik med Stripovimi klici za isto narocilo (preklic)
@@ -4731,12 +4734,21 @@ function gostPostaDnevnik(vrsta, sporocilo, raven = "error") {
 }
 const gostPostaIzcrpaj = (oid) => pool.query("UPDATE orders SET guest_mail_attempts = $2 WHERE id = $1 AND guest_mail_sent_at IS NULL", [oid, GOST_POSTA_POSKUSOV]);
 
+// Narocila / vstopnice, ki se v TEM procesu ravnokar posiljajo (#201): pospravljalec in nakup sta lahko hkrati pri istem; drugi klic ne sme prevzeti znova.
+// (Med procesi varuje spodnja meja premora GOST_POSTA_PREMOR_MIN_MS.) Kljuc se doda pred cakanjem na mesto in odstrani v finally.
+const gostVTeku = new Set();
+const prenosVTeku = new Set();
 async function posljiGostuVstopnice(oid) {
   if (!resend) return false;
-  if (!(await gostPostaVstopi())) return false;
-  try { return await gostPosljiEnoPosto(oid); }
-  catch (err) { console.error(`Resend napaka (gost, vstopnice, narocilo ${oid}):`, err && (err.message || String(err))); return false; }
-  finally { gostPostaIzstopi(); }
+  const kljuc = String(oid);   // kljuc mnozice vedno niz: id pride kot stevilo ali kot niz
+  if (gostVTeku.has(kljuc)) return false;
+  gostVTeku.add(kljuc);
+  try {
+    if (!(await gostPostaVstopi())) return false;
+    try { return await gostPosljiEnoPosto(oid); }
+    catch (err) { console.error(`Resend napaka (gost, vstopnice, narocilo ${oid}):`, err && (err.message || String(err))); return false; }
+    finally { gostPostaIzstopi(); }
+  } finally { gostVTeku.delete(kljuc); }
 }
 async function gostPosljiEnoPosto(oid) {
   const pre = (await pool.query(
@@ -4963,10 +4975,15 @@ function prenosPotrdilo(x, povezava, kode) {
 // Meje maila (zloraba: mail na tuj naslov) so v transakciji prenosa (POST /tickets/:id/transfer): GOST_PRENOS_NA_DAN na posiljatelja, GOST_PRENOS_NA_NASLOV na naslov.
 async function posljiPrenosGostu(tid) {
   if (!resend) return false;
-  if (!(await gostPostaVstopi())) return false;
-  try { return await prenosPosljiEnoPosto(tid); }
-  catch (err) { console.error(`Resend napaka (prenos gostu, vstopnica ${tid}):`, err && (err.message || String(err))); return false; }
-  finally { gostPostaIzstopi(); }
+  const kljuc = String(tid);   // kot pri posljiGostuVstopnice: kljuc je vedno niz
+  if (prenosVTeku.has(kljuc)) return false;   // isti vzorec kot posljiGostuVstopnice (#201)
+  prenosVTeku.add(kljuc);
+  try {
+    if (!(await gostPostaVstopi())) return false;
+    try { return await prenosPosljiEnoPosto(tid); }
+    catch (err) { console.error(`Resend napaka (prenos gostu, vstopnica ${tid}):`, err && (err.message || String(err))); return false; }
+    finally { gostPostaIzstopi(); }
+  } finally { prenosVTeku.delete(kljuc); }
 }
 async function prenosPosljiEnoPosto(tid) {
   const k = await pool.query(

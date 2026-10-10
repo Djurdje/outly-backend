@@ -19,6 +19,8 @@
  *  10c preklic: ob ponavljanju in vzporednih klicih Stripa ne obremenjujemo (409 request_in_progress)
  *  14  dnevna meja mailov samo za testna narocila; placano potrdilo gre vedno
  *  15  pospravljalec: naroila v premoru ne stradajo novejsih
+ *  16  mail natanko enkrat tudi ob pocasnem posiljanju (#201): 16a pocasen Resend, 16b spodnja meja premora (drug proces), 16c samo mnozica v teku
+ *      (priprava maila upocasnjena s testno prozilcem v bazi, dlje od spodnje meje)
  *  11  obstojeci nakupi prijavljenih nespremenjeni
  */
 const crypto = require("crypto");
@@ -140,7 +142,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
   await new Promise(r => resendServer.listen(RESEND_PORT, r));
   const a = zagon(PORT_A, { RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>",
     STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_POSPRAVI_MS: "600",
-    GOST_NAKUP_NA_URO: "1000", GOST_PREKLIC_OKNO_MS: "1500", GOST_POSTA_PONOVI_MS: "500", GOST_POSTA_PREMOR_MS: "400", GOST_POSTA_TIMEOUT_MS: "1000", GOST_NEUSPESNI_NA_URO: "1000", REZERVACIJE_CISCENJE_MS: "1000", GOST_HRAMBA_DNI: "180" });
+    GOST_NAKUP_NA_URO: "1000", GOST_PREKLIC_OKNO_MS: "1500", GOST_POSTA_PONOVI_MS: "500", GOST_POSTA_PREMOR_MS: "400", GOST_POSTA_TIMEOUT_MS: "1000", GOST_POSTA_REZERVA_MS: "100", GOST_NEUSPESNI_NA_URO: "1000", REZERVACIJE_CISCENJE_MS: "1000", GOST_HRAMBA_DNI: "180" });
   let b = null;
   await cakajStreznik(A);
 
@@ -849,6 +851,69 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     await pocakaj(900);
     assert(R.poslano.filter(m => /^premor\d+@/.test(String(m.to))).length === 0, "narocila v premoru niso bila poslana pred iztekom premora");
     f.srv.kill();
+
+    // ============================================================
+    // #201: pospravljalec ne sme prevzeti narocila, ki ga isti ali drug proces SE poslje (priprava maila + Resend trajata dlje od premora).
+    console.log("\n# 16. Mail gostu natanko enkrat tudi ob pocasnem posiljanju (#201)");
+    await pool.query("UPDATE orders SET guest_mail_attempts = 8 WHERE guest_email IS NOT NULL AND guest_mail_sent_at IS NULL");
+    const PORT_G = 3197, G = `http://127.0.0.1:${PORT_G}`;
+    // premor 200 ms, rok Resenda 3 s, rezerva 100 ms; pospravljalec vsakih 100 ms
+    const okoljeG = { RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, GOST_POSTA_PONOVI_MS: "100", GOST_POSTA_PREMOR_MS: "200",
+      GOST_POSTA_TIMEOUT_MS: "3000", GOST_POSTA_REZERVA_MS: "100", GOST_NAKUP_NA_URO: "1000" };
+    const gp = zagon(PORT_G, okoljeG);
+    await cakajStreznik(G);
+    // (a) en proces: Resend odgovori po 900 ms (> premor 200 ms, < rok 3 s), pospravljalec tece vsakih 100 ms
+    R.zamik = 900;
+    r = await nakup(evA, "pocasno-enkrat@example.com", {}, {}, G);
+    assert(r.status === 201, "16a: nakup 201", r.body);
+    assert(await cakaj(() => poslanoNa("pocasno-enkrat@example.com").length >= 1, 8000), "16a: mail poslan");
+    await pocakaj(2500);   // pospravljalec bi v tem casu po premoru prevzel isto narocilo
+    R.zamik = 0;
+    assert(poslanoNa("pocasno-enkrat@example.com").length === 1, "16a: pocasen Resend (900 ms > premor 200 ms): mail natanko enkrat", poslanoNa("pocasno-enkrat@example.com").length);
+    const aG = (await pool.query("SELECT guest_mail_attempts AS n, guest_mail_sent_at FROM orders WHERE id=$1", [r.body.order.id])).rows[0];
+    assert(aG.n === 1 && aG.guest_mail_sent_at !== null, "16a: v bazi en poskus, poslano", aG);
+    gp.srv.kill(); await pocakaj(500);
+    // (b) drug proces: prevzem je v bazi (guest_mail_claimed_at) in ga lokalna mnozica ne vidi. Premor za ponovni prevzem je vsaj rok Resenda + rezerva
+    // (3 s + 2 s), ne samo 200 ms. Prevzem v drugem procesu simuliramo z vrstico v bazi, pospravljalec tece v svežem procesu.
+    const nDrug = await vstavi(null, "drug-proces@example.com", null);
+    await pool.query("UPDATE orders SET guest_mail_attempts = 1, guest_mail_claimed_at = NOW() WHERE id = $1", [nDrug]);
+    const t0drug = Date.now();
+    const hp = zagon(3198, { ...okoljeG, GOST_POSTA_REZERVA_MS: "2000" });
+    await cakajStreznik("http://127.0.0.1:3198");
+    await pocakaj(Math.max(0, 1800 - (Date.now() - t0drug)));
+    assert(poslanoNa("drug-proces@example.com").length === 0 && (await pool.query("SELECT guest_mail_attempts AS n FROM orders WHERE id=$1", [nDrug])).rows[0].n === 1,
+      "16b: 1,8 s po prevzemu v drugem procesu pospravljalec narocila se ne prevzame (premor >= rok Resenda + rezerva)", poslanoNa("drug-proces@example.com").length);
+    assert(await cakaj(() => poslanoNa("drug-proces@example.com").length >= 1, 10000), "16b: po izteku spodnje meje premora pospravljalec vseeno poslje (ponovni poskus deluje)");
+    await pocakaj(1000);
+    assert(poslanoNa("drug-proces@example.com").length === 1, "16b: mail natanko enkrat", poslanoNa("drug-proces@example.com").length);
+    hp.srv.kill(); await pocakaj(500);
+    // 16c: SAMO mnozica v teku (brez pomoci spodnje meje premora). Spodnja meja = rok Resenda 1 s + rezerva 0 = 1 s; priprava maila pa traja 2,5 s
+    // (testna prozilca v bazi uspava vstavljanje zetona SAMO za to narocilo in SAMO po prevzemu, torej v pripravi maila, ne pri nakupu), zato je prevzem
+    // v bazi ze potekel, ko pospravljalec (vsakih 100 ms) isto narocilo spet vidi. Brez mnozice gostVTeku ga prevzame znova -> dva maila.
+    await pool.query("UPDATE orders SET guest_mail_attempts = 8 WHERE guest_email IS NOT NULL AND guest_mail_sent_at IS NULL");
+    await pool.query(`CREATE OR REPLACE FUNCTION test_pocasna_priprava() RETURNS trigger LANGUAGE plpgsql AS $f$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM orders o WHERE o.id = NEW.order_id AND o.guest_mail_claimed_at IS NOT NULL AND o.guest_email = 'pocasna-priprava@example.com') THEN PERFORM pg_sleep(2.5); END IF;
+        RETURN NEW;
+      END $f$`);
+    await pool.query("CREATE TRIGGER test_pocasna_priprava BEFORE INSERT ON gost_zetoni FOR EACH ROW EXECUTE FUNCTION test_pocasna_priprava()");
+    let ip = null;
+    try {
+      ip = zagon(3199, { ...okoljeG, GOST_POSTA_TIMEOUT_MS: "1000", GOST_POSTA_REZERVA_MS: "0" });
+      await cakajStreznik("http://127.0.0.1:3199");
+      r = await nakup(evA, "pocasna-priprava@example.com", {}, {}, "http://127.0.0.1:3199");
+      assert(r.status === 201, "16c: nakup 201 (zeton pri nakupu ni upocasnjen)", r.body);
+      const nPri = r.body.order.id;
+      assert(await cakaj(() => poslanoNa("pocasna-priprava@example.com").length >= 1, 10000), "16c: mail poslan (priprava 2,5 s)");
+      await pocakaj(4000);   // pri mutaciji (brez mnozice) bi pospravljalec po 1 s prevzel znova in poslal drugi mail ~2,5 s za prvim
+      assert(poslanoNa("pocasna-priprava@example.com").length === 1, "16c: priprava (2,5 s) dlje od spodnje meje premora (1 s): mail natanko enkrat zaradi mnozice v teku", poslanoNa("pocasna-priprava@example.com").length);
+      const aP = (await pool.query("SELECT guest_mail_attempts AS n FROM orders WHERE id=$1", [nPri])).rows[0];
+      assert(aP.n === 1, "16c: en sam prevzem v bazi", aP);
+    } finally {
+      if (ip) ip.srv.kill();
+      await pool.query("DROP TRIGGER IF EXISTS test_pocasna_priprava ON gost_zetoni");
+      await pool.query("DROP FUNCTION IF EXISTS test_pocasna_priprava()");
+    }
   } catch (e) {
     fail++; console.error("NAPAKA TESTA:", e);
   } finally {
