@@ -153,6 +153,18 @@ async function zakljuci(c, seja) {
   return o.id;
 }
 
+// Odlozeno placilo (SEPA ipd.): seja je `complete`, denar pa se ni `paid` (pride async_payment_succeeded ali _failed, lahko po dnevih).
+// Narocilo ostane `pending`, a povezava ni vec uporabna (kupec je ze opravil svoj del) in NI »potekla«: checkout_url postavimo na NULL
+// (seja je ustvarjena, zato NULL + stripe_checkout_session_id pomeni »placilo v obdelavi«, `payment_processing` v odgovorih; ne rabi nove migracije).
+async function oznaciVObdelavi(c, seja) {
+  const id = idNarocilaIzSeje(seja);
+  if (!id) return;
+  const r = await c.query(
+    `UPDATE orders SET checkout_url = NULL
+      WHERE id = $1 AND status = 'pending' AND stripe_checkout_session_id = $2 AND checkout_url IS NOT NULL RETURNING public_ref`, [id, seja.id]);
+  if (r.rows.length) console.log(`[stripe] narocilo ${r.rows[0].public_ref}: placilo v obdelavi (odlozeno placilo)`);
+}
+
 // Seja potekla ali placilo padlo: pending -> cancelled/failed (sprozilec sprosti zalogo, unikatni indeks mize jo spusti).
 async function prekini(c, seja, stanje) {
   const id = idNarocilaIzSeje(seja);
@@ -205,6 +217,7 @@ async function obdelajDogodek(c, d, o) {
   switch (d.type) {
     case "checkout.session.completed":
       if (o.payment_status === "paid") return zakljuci(c, o);   // "unpaid" = odlozeno placilo, pride async_payment_succeeded
+      if (o.status === "complete") await oznaciVObdelavi(c, o);
       break;
     case "checkout.session.async_payment_succeeded": return zakljuci(c, o);
     case "checkout.session.expired": await prekini(c, o, "cancelled"); break;
@@ -265,7 +278,9 @@ function ustvari({ pool, naPlacano }) {
 
   // Eno cakajoce narocilo s sejo: vprasaj Stripe, kaj je res (pospravljalec in potekel checkout_url, #149). Brez seje -> failed.
   // Idempotentno: zakljuci/prekini zaklenita vrstico in ponovni klic ne naredi nicesar. Napaka (Stripe nedosegljiv) se vrze klicatelju.
-  async function preveriEno(o) {
+  // smemIsteci: samo pospravljalec (5 min po roku) sme `expire()` na seji, ki je po Stripu se `open`; preverjanje ob branju (preveriPoteklo) ne:
+  // kupec je lahko sredi 3DS in expire() bi preklical njegovo placilo.
+  async function preveriEno(o, smemIsteci = true) {
     const s = stripe();
     if (!o.stripe_checkout_session_id) {
       await pool.query("UPDATE orders SET status = 'failed', cancelled_at = NOW() WHERE id = $1 AND status = 'pending'", [o.id]);
@@ -273,14 +288,17 @@ function ustvari({ pool, naPlacano }) {
       return;
     }
     let seja = await s.checkout.sessions.retrieve(o.stripe_checkout_session_id);
-    if (seja.status === "open") seja = await s.checkout.sessions.expire(seja.id);
+    if (seja.status === "open") {
+      if (!smemIsteci) return;
+      seja = await s.checkout.sessions.expire(seja.id);
+    }
     if (seja.status === "complete" && seja.payment_status === "paid") {
       let placano = null;
       await vTransakciji(async (c) => { placano = await zakljuci(c, seja); });
       poPlacilu(placano);
     }
     else if (seja.status === "expired") await vTransakciji((c) => prekini(c, seja, "cancelled"));
-    // complete + unpaid: odlozeno placilo, pocakaj na async webhook
+    else if (seja.status === "complete") await vTransakciji((c) => oznaciVObdelavi(c, seja));   // odlozeno placilo: pocakaj na async webhook
   }
 
   // Narocila, ki cakajo predolgo (izgubljen webhook, padla seja): vprasaj Stripe, kaj je res.
@@ -295,7 +313,7 @@ function ustvari({ pool, naPlacano }) {
           WHERE status = 'pending' AND stripe_payment_intent_id IS NULL
             AND ((checkout_expires_at IS NOT NULL AND checkout_expires_at < NOW() - INTERVAL '5 minutes')
               OR (checkout_expires_at IS NULL AND created_at < NOW() - INTERVAL '15 minutes'))
-          ORDER BY created_at LIMIT 50`);
+          ORDER BY (checkout_url IS NULL AND stripe_checkout_session_id IS NOT NULL), created_at LIMIT 50`);   // odlozena placila (v obdelavi) zadnja: ne stradajo drugih
       for (const o of r.rows) {
         try { await preveriEno(o); }
         catch (e) { console.error(`[stripe] pospravljanje narocila ${o.public_ref}:`, e.message); }
@@ -317,6 +335,9 @@ function ustvari({ pool, naPlacano }) {
   const razcleni = (ime, privzeto, najvec) => { const n = Number.parseInt(process.env[ime], 10); return Number.isInteger(n) && n >= 0 && n <= najvec ? n : privzeto; };
   const PREVERI_OKNO_MS = razcleni("PREVERI_OKNO_MS", 5000, 600000);   // samo za teste (0 = brez razmika)
   const PREVERI_ROK_MS = razcleni("PREVERI_ROK_MS", 4000, 60000);
+  // Odlog po roku seje: kupec je lahko sredi 3DS ali potrjevanja v banki; Stripe seje ob roku ne zapre takoj. Do takrat odgovor kaze
+  // checkout_expired, a Stripa ne sprasujemo (pospravljalec ima svojih 5 min).
+  const PREVERI_ODLOG_MS = razcleni("PREVERI_ODLOG_MS", 120000, 3600000);
   async function preveriPotekloDelo(oid) {
     const kljuc = String(oid);
     if (preveriVObdelavi.has(kljuc)) return false;
@@ -327,9 +348,10 @@ function ustvari({ pool, naPlacano }) {
       const r = await pool.query(
         `SELECT id, public_ref, stripe_checkout_session_id FROM orders
           WHERE id = $1 AND status = 'pending' AND stripe_payment_intent_id IS NULL
-            AND checkout_expires_at IS NOT NULL AND checkout_expires_at <= NOW()`, [oid]);
+            AND checkout_expires_at IS NOT NULL AND checkout_expires_at <= NOW() - ($2::bigint * INTERVAL '1 millisecond')
+            AND checkout_url IS NOT NULL`, [oid, PREVERI_ODLOG_MS]);   // v obdelavi (url NULL) ni potekla
       if (!r.rows.length) return true;   // ni (vec) cakajoce s poteklo sejo
-      try { await preveriEno(r.rows[0]); return true; }
+      try { await preveriEno(r.rows[0], false); return true; }
       catch (e) { console.error(`[stripe] preverjanje potekle seje narocila ${r.rows[0].public_ref}:`, e && e.message); return false; }
     } finally {
       preveriVObdelavi.delete(kljuc);
@@ -351,6 +373,11 @@ function ustvari({ pool, naPlacano }) {
   }
 
   function zazeni() {
+    // Produkcija (Render nastavi RENDER) brez Stripe ključa ali s sandbox ključem ali z vsiljenim testnim nacinom: vstopnice se izdajajo BREZ placila
+    // (klubi brez Connecta). Danes je to namerno (TestFlight, demo klubi), zato samo glasno opozorilo, brez blokade (I31).
+    if ((process.env.RENDER || process.env.NODE_ENV === "production") && (!process.env.STRIPE_SECRET_KEY || jeSandbox() || testVsiljen())) {
+      console.error("[placila] POZOR: placila v TESTNEM nacinu — vstopnice brez placila (" + (!process.env.STRIPE_SECRET_KEY ? "brez STRIPE_SECRET_KEY" : jeSandbox() ? "sandbox kljuc sk_test_" : "TEST_PLACILA=true") + "). Pred prodajo nastavi zivi kljuc.");
+    }
     if (!process.env.STRIPE_SECRET_KEY) return;
     if (process.env.TEST_PLACILA === "true" && jeLive()) {
       console.error("[placila] POZOR: TEST_PLACILA=true je nastavljen ob ZIVEM Stripe kljucu (sk_live_). IGNORIRAN: nakupi gredo prek pravega Stripa, testni nacin se ne vklopi. Odstrani TEST_PLACILA iz okolja (Render).");

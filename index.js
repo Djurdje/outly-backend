@@ -3622,11 +3622,41 @@ async function omejitevCakajocih(c, userId, eventId) {
   await c.query("SELECT pg_advisory_xact_lock($1::int, $2::int)", [CAKAJOCA_ZAKLEP_RAZRED, userId]);
   const r = await c.query(
     `SELECT COUNT(*)::int AS vse, COUNT(*) FILTER (WHERE event_id = $2)::int AS ta
-       FROM orders WHERE user_id = $1 AND status = 'pending'`, [userId, eventId]);
+       FROM orders WHERE user_id = $1 AND status = 'pending'
+        -- odlozeno placilo v obdelavi (seja opravljena, denar na poti) ne steje med »nedokoncana placila«: kupec je svoje opravil, cakanje na banko ga ne sme blokirati
+        AND NOT (stripe_checkout_session_id IS NOT NULL AND checkout_url IS NULL)`, [userId, eventId]);
   const { vse, ta } = r.rows[0];
   if (ta > 0) return "You already have an unfinished payment for this event. Finish it in My tickets, or wait up to 30 minutes for it to expire.";
   if (vse >= CAKAJOCA_NAJVEC) return "You have too many unfinished payments. Finish one in My tickets, or wait up to 30 minutes for them to expire.";
   return null;
+}
+
+// Zgornja meja BREZPLACNIH vstopnic (0 EUR) na osebo in dogodek (#191, pregled PR #203): brez nje bi en racun (ali gost z mnogo naslovi) z nekaj kliki pobral vso
+// zalogo prostega dogodka, ne da bi kaj placal in brez cakajocega narocila (I20 ne zajame). Oseba = uporabnik (user_id) ALI normaliziran e-naslov gosta
+// (naslovKljuc: mala crka, brez »+oznake«, gmail brez pik). Enota = vstopnica; VIP miza za 0 EUR steje 1. Steje placano (paid / delno vrnjeno) brezplacno
+// narocilo brez guest liste. Pod advisory zaklepom (uporabnik/naslov + dogodek): hkratna klica ne obideta meje. Meja ne ovira racuna, ki kupi kot gost z
+// drugim naslovom (znana omejitev: ni zaščita pred odlocnim zlorabnikom, ta je omejen z IP omejevalnikom nakupov in kapaciteto dogodka).
+// Vrne telo 409 { error: "free_limit", message } ali null.
+const ZASTONJ_NA_OSEBO = okoljeCelo("ZASTONJ_NA_OSEBO", 10, 1, 1000);
+async function omejitevBrezplacnih(c, { userId = null, gostEmail = null, eventId, enot }) {
+  let n;
+  if (userId !== null) {
+    await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [`zastonj:u:${userId}:${eventId}`]);
+    n = (await c.query(
+      `SELECT COALESCE(SUM(CASE WHEN table_id IS NOT NULL THEN 1 ELSE quantity END), 0)::int AS n FROM orders
+        WHERE event_id = $1 AND user_id = $2 AND total_cents = 0 AND guest_list_id IS NULL AND status IN ('paid','partially_refunded')`, [eventId, userId])).rows[0].n;
+  } else {
+    const kljuc = naslovKljuc(gostEmail);
+    await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [`zastonj:g:${kljuc}:${eventId}`]);
+    n = (await c.query(
+      `SELECT COALESCE(SUM(quantity), 0)::int AS n FROM orders o, LATERAL (SELECT split_part(lower(o.guest_email), '@', 1) AS l, split_part(lower(o.guest_email), '@', 2) AS d) p
+        WHERE o.event_id = $1 AND o.guest_email IS NOT NULL AND o.total_cents = 0 AND o.status IN ('paid','partially_refunded')
+          AND (CASE WHEN p.d IN ('gmail.com','googlemail.com') THEN replace(split_part(p.l, '+', 1), '.', '') || '@gmail.com' ELSE split_part(p.l, '+', 1) || '@' || p.d END) = $2`,
+      [eventId, kljuc])).rows[0].n;
+  }
+  if (n + enot <= ZASTONJ_NA_OSEBO) return null;
+  const ostane = Math.max(0, ZASTONJ_NA_OSEBO - n);
+  return { error: "free_limit", message: `You can get at most ${ZASTONJ_NA_OSEBO} free tickets for this event${ostane > 0 ? ` (${ostane} left for you)` : ""}.` };
 }
 
 async function nakupStripeSeja(res, c, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna }) {
@@ -3732,7 +3762,9 @@ const STOLPCI_NAROCILA = `o.id, o.public_ref, o.event_id, o.club_id, o.quantity,
 // pospravi pospravljalec (do ~10 min po roku). V tem oknu odgovor namesto potekle povezave pove `checkout_url: null` + `checkout_expired: true`
 // (DODANO polje; narocilo je potem kmalu `cancelled`, ali `paid`, ce je kupec placal tik pred rokom). Alias `o`.
 const SQL_CHECKOUT_URL = `CASE WHEN o.status = 'pending' AND (o.checkout_expires_at IS NULL OR o.checkout_expires_at > NOW()) THEN o.checkout_url END AS checkout_url,
-  (o.status = 'pending' AND o.checkout_url IS NOT NULL AND o.checkout_expires_at IS NOT NULL AND o.checkout_expires_at <= NOW()) AS checkout_expired`;
+  (o.status = 'pending' AND o.checkout_url IS NOT NULL AND o.checkout_expires_at IS NOT NULL AND o.checkout_expires_at <= NOW()) AS checkout_expired,
+  -- Odlozeno placilo (SEPA ipd.): seja je opravljena, denar se ni potrjen (placila_stripe.js oznaciVObdelavi: checkout_url NULL ob obstojeci seji). Ni »potekla«.
+  (o.status = 'pending' AND o.stripe_checkout_session_id IS NOT NULL AND o.checkout_url IS NULL) AS payment_processing`;
 // Gostujoce narocilo (nakup brez racuna, migracija 033): user_id NULL + guest_email. Po prevzemu v racun (GET /me) je user_id nastavljen
 // in narocilo ni vec »gostujoce«. V poslovnih pogledih se gost pokaze kot »Guest« (brez e-naslova kot imetnik; vratar ne vidi e-naslovov).
 const GOST_OZNAKA = `(o.user_id IS NULL AND o.guest_email IS NOT NULL)`;
@@ -4078,6 +4110,10 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     // 0 EUR (#191): Stripe Checkout ima najmanjsi znesek (Stripe zavrne sejo, nakup bi koncal s 502), zato brezplacno narocilo NE gre v Stripe:
     // takoj `paid`, brez provizije (provizija od 0 je 0) in brez cakajocega narocila; zaloga, idempotenca in starost veljajo enako kot pri placanih.
     const placanoTakoj = test || skupaj === 0;
+    if (skupaj === 0) {
+      const brezplacno = await omejitevBrezplacnih(c, { userId: req.user.userId, eventId: e.id, enot: q });
+      if (brezplacno) { await c.query("ROLLBACK"); return res.status(409).json(brezplacno); }
+    }
     if (!placanoTakoj) {
       const omejitev = await omejitevCakajocih(c, req.user.userId, e.id);
       if (omejitev) { await c.query("ROLLBACK"); return res.status(409).send(omejitev); }
@@ -4486,6 +4522,10 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     const test = nacin === "test";
     const skupaj = e.ticket_price_cents * g.quantity;
     const placanoTakoj = test || skupaj === 0;   // 0 EUR gre mimo Stripa (#191), kot pri nakupu z racunom
+    if (skupaj === 0) {
+      const brezplacno = await omejitevBrezplacnih(c, { gostEmail: g.email, eventId: e.id, enot: g.quantity });
+      if (brezplacno) { await c.query("ROLLBACK"); return res.status(409).json(brezplacno); }
+    }
     if (!placanoTakoj && e.capacity !== null) {
       // Skupna meja CAKAJOCIH gostujocih vstopnic na dogodek (zaloga je zaklenjena do ~35 min): zaklep vrstice dogodka (kot sprozilec
       // rezerviraj_zalogo) serializira hkratne nakupe, stetje v isti transakciji je zato tocno. Brez nje bi mnogo e-naslovov zaklenilo dogodek.
@@ -4572,7 +4612,7 @@ async function gostNarociloOdgovor(db, oid) {
   return {
     id: x.id, public_ref: x.public_ref, status: x.status, quantity: x.quantity, unit_price_cents: x.unit_price_cents,
     total_cents: x.total_cents, currency: x.currency, refunded_cents: x.refunded_cents, is_test: x.is_test,
-    created_at: x.created_at, paid_at: x.paid_at, checkout_url: x.checkout_url, checkout_expired: x.checkout_expired,
+    created_at: x.created_at, paid_at: x.paid_at, checkout_url: x.checkout_url, checkout_expired: x.checkout_expired, payment_processing: x.payment_processing,
     event_id: x.event_id, club_id: x.club_id, event_title: x.event_title, start_at: x.start_at, poster_url: x.poster_url, club_name: x.club_name,
     event: { id: x.event_id, title: x.event_title, start_at: x.start_at, end_at: x.end_at, poster_url: x.poster_url, min_age: x.min_age,
              club_id: x.club_id, club_name: x.club_name, address: x.address, city: x.city, logo_url: x.logo_url, ...prizoriscePolja(x) },
@@ -4829,8 +4869,9 @@ async function posljiGostuVstopnice(oid) {
 }
 async function gostPosljiEnoPosto(oid) {
   const pre = (await pool.query(
-    // is_test = narocilo BREZ placila: testni nacin ali brezplacno (0 EUR, #191). Za obe veljajo meje spodaj (mail na tuj naslov brez placila je orodje zlorabe).
-    `SELECT guest_email, status, guest_mail_sent_at, guest_mail_attempts, public_ref, (COALESCE(stripe_payment_intent_id LIKE 'test_%', FALSE) OR total_cents = 0) AS is_test
+    // Meje spodaj veljajo SAMO za testna narocila. Mail za 0 EUR (#191) je gostov edini dostop do vstopnic, zato se obravnava kot placano narocilo;
+    // zloraba je omejena z mejo brezplacnih vstopnic na naslov in dogodek (ZASTONJ_NA_OSEBO) ter z IP omejevalnikom nakupov.
+    `SELECT guest_email, status, guest_mail_sent_at, guest_mail_attempts, public_ref, COALESCE(stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test
        FROM orders WHERE id = $1`, [oid])).rows[0];
   if (!pre || !pre.guest_email || pre.status !== "paid" || pre.guest_mail_sent_at || pre.guest_mail_attempts >= GOST_POSTA_POSKUSOV) return false;
   // Meje (zloraba: mail na tuj naslov brez placila) veljajo SAMO za testna narocila: globalno na dan in 1 mail na naslov na 24 h.
@@ -4910,6 +4951,17 @@ async function gostPosljiNeposlane() {
 // Mail na izbrisan racun (buyer_email *@outly.invalid) se ne poslje. Za narocila brez placila (testni nacin, 0 EUR) velja meja POTRDILO_BREZ_PLACILA_NA_DAN na uporabnika na 24 h.
 const POTRDILO_BREZ_PLACILA_NA_DAN = okoljeCelo("POTRDILO_BREZ_PLACILA_NA_DAN", 20, 1, 100000);
 const potrdiloVTeku = new Set();
+// Lasten, ozji semafor (2 sočasni) in vrsta za potrdila: mail z vstopnicami gostu je edini gostov dostop do vstopnic in ne sme cakati za mnozico potrdil
+// (potrdilo je dodatek; ob preveliki vrsti ga prevzame pospravljalec). Skupaj z gostovim semaforjem (GOST_POSTA_SOCASNIH) je najvec 2 + 3 sočasnih klicev Resenda.
+const POTRDILO_SOCASNIH = 2, POTRDILO_VRSTA_NAJVEC = 200;
+const potrdiloPosta = { aktivnih: 0, cakajoci: [] };
+async function potrdiloPostaVstopi() {
+  if (potrdiloPosta.aktivnih < POTRDILO_SOCASNIH) { potrdiloPosta.aktivnih++; return true; }
+  if (potrdiloPosta.cakajoci.length >= POTRDILO_VRSTA_NAJVEC) return false;
+  await new Promise((r) => potrdiloPosta.cakajoci.push(r));
+  return true;
+}
+function potrdiloPostaIzstopi() { const n = potrdiloPosta.cakajoci.shift(); if (n) n(); else potrdiloPosta.aktivnih--; }
 const potrdiloIzcrpaj = (oid) => pool.query("UPDATE orders SET receipt_mail_attempts = $2 WHERE id = $1 AND receipt_mail_sent_at IS NULL", [oid, GOST_POSTA_POSKUSOV]);
 
 // Vsebina potrdila kupcu (angleško kot ostali maili; brez sledilnikov in oglasov). #94: ko `clubs` dobi firmo, sedež, matično in davčno številko ter DDV status,
@@ -4949,10 +5001,10 @@ async function posljiPotrdiloKupcu(oid) {
   if (potrdiloVTeku.has(kljuc)) return false;
   potrdiloVTeku.add(kljuc);
   try {
-    if (!(await gostPostaVstopi())) return false;
+    if (!(await potrdiloPostaVstopi())) return false;
     try { return await potrdiloPosljiEno(oid); }
     catch (err) { console.error(`Resend napaka (potrdilo kupcu, narocilo ${oid}):`, err && (err.message || String(err))); return false; }
-    finally { gostPostaIzstopi(); }
+    finally { potrdiloPostaIzstopi(); }
   } finally { potrdiloVTeku.delete(kljuc); }
 }
 async function potrdiloPosljiEno(oid) {
@@ -7127,6 +7179,10 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     const test = nacin === "test";
     const cena = miza.price_cents;
     const placanoTakoj = test || cena === 0;   // miza za 0 EUR gre mimo Stripa (#191), kot vstopnice
+    if (cena === 0) {
+      const brezplacno = await omejitevBrezplacnih(c, { userId: req.user.userId, eventId: e.id, enot: 1 });
+      if (brezplacno) { await c.query("ROLLBACK"); return res.status(409).json(brezplacno); }
+    }
     if (!placanoTakoj) {
       const omejitev = await omejitevCakajocih(c, req.user.userId, e.id);
       if (omejitev) { await c.query("ROLLBACK"); return res.status(409).send(omejitev); }
