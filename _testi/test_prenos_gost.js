@@ -78,7 +78,7 @@ const zetonIzMaila = (m) => { const x = /\/app\/guest\/ticket#t=([A-Za-z0-9_-]{4
 function zagon(port, okolje) {
   const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
     TEST_PLACILA: "", GOST_PREVZEM_MS: "0", RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>",
-    GOST_POSTA_PONOVI_MS: "500", GOST_POSTA_PREMOR_MS: "400", GOST_POSTA_TIMEOUT_MS: "1500", REZERVACIJE_CISCENJE_MS: "1000", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
+    GOST_POSTA_PONOVI_MS: "500", GOST_POSTA_PREMOR_MS: "400", GOST_POSTA_TIMEOUT_MS: "1500", GOST_POSTA_REZERVA_MS: "100", REZERVACIJE_CISCENJE_MS: "1000", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
   const s = { srv, log: "" };
   srv.stdout.on("data", d => s.log += d); srv.stderr.on("data", d => s.log += d);
   return s;
