@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-09 (vloga bartender in strežba VIP miz, migracija 038; prej 2026-10-09: organizatorji brez prizorišča, migracija 037; prej 2026-10-08: obvestilo o vabilu na guest listo, migracija 036; guest lista, migracija 035; prej 2026-10-05: nakup brez računa; prej 2026-10-02: prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
+Zadnja posodobitev: 2026-10-10 (potisna obvestila APNs, migracija 040; prej 2026-10-09: vloga bartender in strežba VIP miz, migracija 038; prej 2026-10-09: organizatorji brez prizorišča, migracija 037; prej 2026-10-08: obvestilo o vabilu na guest listo, migracija 036; guest lista, migracija 035; prej 2026-10-05: nakup brez računa; prej 2026-10-02: prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
 
@@ -192,6 +192,19 @@ Za **ios-dev** in **web-dev** (backend po migraciji 039; vse DODANO, na starem b
 - Izjeme (`PUT /business/events/:id/vip` `tables[].table_id`) veljajo tudi za mize dogodka; miza drugega dogodka istega kluba 404, tuj klub / neobstoječa 400 (kot doslej).
 - Past: preklop vira ali odstranitev mize **izbriše telefonsko rezervacijo** te mize (opozori uporabnika). Miza z naročilom ostane (arhivirana, `booking` v poslovnem pogledu); javno ostane »Booked«.
 - Past: `PUT /business/vip` (klubski tloris) mize dogodkov NE vidi in jih ne spreminja (`event_id IS NULL`).
+
+## Potisna obvestila APNs (od 10. 10. 2026; ARCHITECTURE »Potisna obvestila (APNs, migracija 040)«, I29, DECISIONS 10. 10.)
+
+Za **ios-dev** (#184) in **web-dev** (splet push ne dobi; nič za storiti). Backend po migraciji 040; vse DODANO, na starem backendu sta poti 404 (odjemalec naj napako ignorira):
+- `POST /me/devices` `{ "token": "<hex 64–200 znakov>", "platform": "ios" }` -> 200 `{ "ok": true }` (idempotentno; isti žeton na drugem računu se prepiše; 400 `{ error, message }` za neveljaven žeton/platformo; 429 po 60 klicih/h/IP). `DELETE /me/devices/:token` -> 204 (ob odjavi; tuj/neobstoječ tudi 204). Registriraj ob spremembi žetona ali največ enkrat na dan, ne ob vsakem zagonu. Pošiljaj SAMO produkcijski žeton (TestFlight/App Store); Xcode Debug (sandbox) žeton bi APNs zavrnil in backend bi ga označil za neveljavnega do naslednje registracije.
+- Payload: `{ aps: { alert: { "title-loc-key", "loc-key", "loc-args" }, sound: "default" }, outly: { type, id } }`. `title-loc-key` in `loc-key` sta ANGLEŠKA niza, enaka ključem v `Localizable.xcstrings` (dodaj prevode, sicer iOS pokaže angleščino):
+  `ticket_received` (naslov `New ticket`, `%@ sent you a ticket` / [uporabniško ime pošiljatelja]; `id` = id vstopnice -> denarnica), `club_event` (`New event`, `%@ posted a new event: %@` / [ime kluba, naslov]; `id` = id dogodka -> EventDetail),
+  `guest_list_invite` (`Guest list`, `%@ added you to their guest list` / [uporabniško ime gostitelja]; `id` = **id vstopnice** povabljenca, kot pri `ticket_received` -> denarnica), `table_service` (`VIP table`, `VIP table %@ is ready to be served` / [oznaka mize]; `id` = id strežbe -> seznam strežb; samo lastnik, manager, bartender kluba).
+  `outly.id` je število. Neznane `outly.type` vrednosti ignoriraj.
+- Brez ključa na Renderju (`APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_KEY_P8`) push ne teče: ena vrstica `[push] izklopljen` ob zagonu; registracija naprav deluje tudi tako. Vrstica v zvoncu in značke so nespremenjene (push je poleg).
+- Past (podpis): JWT mora biti podpisan z `dsaEncoding: "ieee-p1363"`; privzeti DER da APNs 403 `InvalidProviderToken` in push tiho ne dela. Past (ključ): ob preklicu ali poteku `.p8` je v dnevniku (največ ena vrstica na minuto) `[push] APNs: status 403 razlog ...`; popravek = nov APNs ključ v Apple Developer (Keys), nov `APNS_KEY_ID` + `APNS_KEY_P8` v Render secrets in redeploy; žetoni naprav ostanejo veljavni.
+- Past (žeton): žeton naprave je skrivnost (nikoli v dnevniku ali odgovoru); backup baze ga vsebuje. 410 / `BadDeviceToken` / `DeviceTokenNotForTopic` / `Unregistered` ga označi `invalid_at` (ne pošilja se več, dokler ga aplikacija znova ne pošlje v `POST /me/devices`).
+- Strežba: push samo za sken, mlajši od 30 min (sken brez povezave, poslan pozno, pusha ne sproži); apns-expiration +1 h.
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 

@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–039, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–040, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -461,6 +461,57 @@ CREATE SEQUENCE public.creator_applications_id_seq
 --
 
 ALTER SEQUENCE public.creator_applications_id_seq OWNED BY public.creator_applications.id;
+
+
+--
+-- Name: device_tokens; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.device_tokens (
+    id integer NOT NULL,
+    user_id integer NOT NULL,
+    token text NOT NULL,
+    platform text DEFAULT 'ios'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    invalid_at timestamp with time zone,
+    CONSTRAINT device_tokens_platform_chk CHECK ((platform = 'ios'::text)),
+    CONSTRAINT device_tokens_token_dolzina_chk CHECK (((char_length(token) >= 64) AND (char_length(token) <= 200)))
+);
+
+
+--
+-- Name: TABLE device_tokens; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.device_tokens IS 'Zetoni naprav za potisna obvestila APNs (040). Zeton je skrivnost naprave: nikoli v dnevniku, nikoli v odgovorih API-ja.';
+
+
+--
+-- Name: COLUMN device_tokens.invalid_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.device_tokens.invalid_at IS 'Nastavi backend ob odzivu APNs 410 / BadDeviceToken / DeviceTokenNotForTopic / Unregistered. POST /me/devices ga postavi na NULL.';
+
+
+--
+-- Name: device_tokens_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.device_tokens_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: device_tokens_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.device_tokens_id_seq OWNED BY public.device_tokens.id;
 
 
 --
@@ -1279,6 +1330,13 @@ ALTER TABLE ONLY public.creator_applications ALTER COLUMN id SET DEFAULT nextval
 
 
 --
+-- Name: device_tokens id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.device_tokens ALTER COLUMN id SET DEFAULT nextval('public.device_tokens_id_seq'::regclass);
+
+
+--
 -- Name: events id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -1418,6 +1476,22 @@ ALTER TABLE ONLY public.clubs
 
 ALTER TABLE ONLY public.creator_applications
     ADD CONSTRAINT creator_applications_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: device_tokens device_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.device_tokens
+    ADD CONSTRAINT device_tokens_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: device_tokens device_tokens_token_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.device_tokens
+    ADD CONSTRAINT device_tokens_token_key UNIQUE (token);
 
 
 --
@@ -1712,6 +1786,13 @@ CREATE INDEX clubs_owner_idx ON public.clubs USING btree (owner_user_id);
 --
 
 CREATE UNIQUE INDEX clubs_stripe_account_key ON public.clubs USING btree (stripe_account_id) WHERE (stripe_account_id IS NOT NULL);
+
+
+--
+-- Name: device_tokens_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX device_tokens_user_idx ON public.device_tokens USING btree (user_id);
 
 
 --
@@ -2240,6 +2321,14 @@ ALTER TABLE ONLY public.creator_applications
 
 ALTER TABLE ONLY public.creator_applications
     ADD CONSTRAINT creator_applications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: device_tokens device_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.device_tokens
+    ADD CONSTRAINT device_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
