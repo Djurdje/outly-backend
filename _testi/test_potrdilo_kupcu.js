@@ -57,12 +57,12 @@ const pocakaj = (ms) => new Promise(r => setTimeout(r, ms));
 async function cakaj(pogoj, ms = 8000) { const do_ = Date.now() + ms; while (Date.now() < do_) { if (await pogoj()) return true; await pocakaj(100); } return false; }
 
 // ---------- lazni Resend ----------
-const R = { poslano: [], napaka: false, zamik: 0, drzi: false, zadrzani: [] };   // drzi: zahtevki cakajo, dokler jih test ne spusti (sprosti())
+const R = { poslano: [], napaka: false, zamik: 0, drzi: false, zadrzani: [], zavrnjenih: 0 };   // zavrnjenih: stevec zahtevkov, ki jih je stub zavrnil (napaka = true)   // drzi: zahtevki cakajo, dokler jih test ne spusti (sprosti())
 const resendServer = http.createServer((req, res) => {
   let d = ""; req.on("data", x => d += x);
   req.on("end", () => {
     if (req.method === "POST" && req.url === "/emails") {
-      if (R.napaka) { res.writeHead(422, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "validation_error", message: "stub: zavrnjeno", statusCode: 422 })); }
+      if (R.napaka) { R.zavrnjenih++; res.writeHead(422, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "validation_error", message: "stub: zavrnjeno", statusCode: 422 })); }
       const m = JSON.parse(d);
       const koncaj = () => { R.poslano.push(m); res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "mail_" + R.poslano.length })); };
       if (R.drzi) { R.zadrzani.push({ to: m.to, koncaj }); return; }
@@ -376,12 +376,16 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(mailiNa("mia@outly.si").length === 1, "natanko enkrat");
     // izbrisan racun
     R.napaka = true;
+    const zavrnjenihPrej = R.zavrnjenih;
     r = await nakup(T.jan, evTest);
     const o7c = r.body.order.id;
-    await cakaj(async () => (await vrstica(o7c)).receipt_mail_attempts >= 1);   // prvi (neuspeli) poskus je opravljen, preden spremenimo naslov
+    // Dogodek: stub je ZAVRNIL prvi zahtevek za to narocilo. (Stevec poskusov v bazi je narasel ze ob rezervaciji, PRED klicem Resenda; ce bi tedaj vklopili Resend in
+    // spremenili naslov, bi prvi poskus lahko uspel ali poslal na ze izbrisan naslov.) Prvi poskus gre takoj ob nakupu; pospravljalec ima najmanj 400 ms premora.
+    assert(await cakaj(() => R.zavrnjenih > zavrnjenihPrej, 10000), "izbrisan racun: stub je zavrnil prvi poskus", [R.zavrnjenih, zavrnjenihPrej]);
     await pool.query("UPDATE orders SET buyer_email = 'izbrisan-' || id || '@outly.invalid' WHERE id=$1", [o7c]);
+    // Resend ostane zavrnjen, dokler pospravljalec ne izcrpa poskusov: izbrisan naslov se ne poslje nikoli (izcrpanje ne kliče Resenda), zato dirke z vmesnim uspehom ni.
+    await cakaj(async () => (await vrstica(o7c)).receipt_mail_attempts >= 8, 10000);   // dogodek, ne cas
     R.napaka = false;
-    await cakaj(async () => (await vrstica(o7c)).receipt_mail_attempts >= 8, 10000);   // dogodek, ne cas: pospravljalec izcrpa poskuse (brez cakanja 2,5 s, ki je obcasno padlo)
     v = await vrstica(o7c);
     assert(v.receipt_mail_sent_at === null && v.receipt_mail_attempts === 8 && R.poslano.every(x => !/outly\.invalid/.test(String(x.to))), "izbrisan racun: potrdilo se ne poslje, poskusi izcrpani", [v.receipt_mail_attempts, A.log.slice(-600)]);
     // meja za narocila brez placila: 3 na uporabnika na 24 h
