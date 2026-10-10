@@ -25,6 +25,9 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
 
 **Seznam je v GitHub Issues**, ne tukaj: <https://github.com/Djurdje/outly-backend/issues>
 
+**Zagon (komercialna uporaba): glavni seznam je [#198](https://github.com/Djurdje/outly-backend/issues/198)** (oznaka `zagon`) — kaj manjka do prave prodaje in App Store
+in kaj je že narejeno. Preberi ga pred vsako nalogo, povezano s plačili, pravom, App Store ali zanesljivostjo; ob zaključku točko odkljukaj.
+
 ## Spremljanje napak
 
 - **Backend:** Render logi (`list_logs` na `srv-d5fuiovgi27c73e4boq0`, filter `*rror*`), brez Sentryja. Request logov (500)
@@ -75,7 +78,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   bere klub prek tujega kljuca in bi se s polnim zaklepom zaciklal (mrtva zanka).
 - `PUT /business/events/:id/vip` id arhivirane mize TEGA kluba tiho preskoči (400 samo za tuje); javni `GET /events/:id/vip` obdrži
   prodano mizo tudi po izklopu/arhivu (`available: false`); `POST .../orders` sprejme `expected_price_cents` (409 ob spremembi cene).
-- **Vračil miz ni** (poti ni; `DELETE /events/:id` z naročili dogodek odpove, mize ostanejo pri kupcih); Stripe poti za mize ni (#19).
+- **Vračil miz ni** (poti ni; `DELETE /events/:id` z naročili dogodek odpove, mize ostanejo pri kupcih); nakup mize gre skozi isti `nacinPlacila` kot vstopnice (Stripe Checkout). Vračila: #190.
 - **Past:** vsak paket velja za alkohol; brezalkoholnih paketov ni mogoce oznaciti, dokler ne pride stolpec (DECISIONS 2. 10.).
 - **VIP 18+ na odjemalcih še ni:** iOS in splet polja `package_min_age` (lahko `undefined` na starem backendu — privzeto 18) še ne
   kažeta. 403 sta navadno besedilo (kot pri `min_age`); odjemalec starosti ne preverja sam.
@@ -114,10 +117,9 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`ST
   `charge.refunded`, `account.updated`. Če je `account.updated` za povezane račune na ločenem endpointu: `STRIPE_CONNECT_WEBHOOK_SECRET`.
 - Poti: `POST /business/stripe/onboard` (lastnik → `{url}` Stripovega obrazca), `GET /business/stripe/status` (lastnik/manager),
   `POST /business/stripe/dashboard` (lastnik → Express pregled). Nakup v Stripe načinu vrne `mode:"stripe"`, `checkout_url`, `tickets: []`.
-- **Odjemalci še ne znajo `checkout_url`:** iOS in splet morata ob `mode:"stripe"` odpreti `checkout_url` (iOS: Safari/SFSafariViewController,
-  brez paketa), nato osvežiti `GET /me/orders`. Do takrat Stripe nakup deluje samo za klube z dokončanim onboardingom; ostali v sandboxu kupujejo testno.
-- **Vračil prek API-ja ni** (poti ni): vračilo se naredi v Stripovi nadzorni plošči, webhook `charge.refunded` ga zapiše (`refunded_cents`, stanje, vstopnice).
-- **Potrdila po e-pošti ni** (pravna analiza 1. 10., točka 3): do takrat samo Stripov račun, če je v nadzorni plošči vklopljen (Settings → Emails → Successful payments).
+- Odjemalca `checkout_url` znata (iOS `StripeSeja.swift` v ASWebAuthenticationSession, splet `placilo.html`); klub brez dokončanega onboardinga v sandboxu kupuje testno, z `sk_live_` dobi 409.
+- **Vračil prek API-ja ni** (poti ni; #190 — brez `reverse_transfer` vračilo plača platforma): vračilo se naredi v Stripovi nadzorni plošči, webhook `charge.refunded` ga zapiše (`refunded_cents`, stanje, vstopnice).
+- **Potrdila po e-pošti ni** za kupca z računom (gost ga dobi; #95): do takrat samo Stripov račun, če je v nadzorni plošči vklopljen (Settings → Emails → Successful payments).
 - **Past:** plačilo za že preklicano naročilo (seja potekla, nato vseeno plačana — redko) se NE vknjiži samodejno: dnevnik izpiše
   `POZOR: placilo za neaktivno narocilo …`, vrni ga ročno v Stripu.
 - Klic Stripa (ustvarjanje seje, ~0,5–1,5 s) teče znotraj nakupnega mesta (`NAKUP_VZPOREDNO`, I16) — pod navalom manjša prepustnost.
