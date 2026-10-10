@@ -230,26 +230,31 @@ let sa = null, sb = null, sc = null;
   assert(!vsebina.includes("evi@outly.si") && !vsebina.includes("@outly.si") && !vsebina.includes("SECRET-DETAILS-MAIL"), "mail NE vsebuje e-naslova prijavitelja ne prostega besedila prijave");
   r = await prijava(T.evi, { target_type: "event", target_id: evB, reason: "spam" });
   assert(r.status === 200, "podvojena prijava: 200", r.status);
-  await pocakaj(500);
-  assert(R.poslano.length === 1, "podvojena prijava NE poslje novega maila", R.poslano.length);
   r = await prijava(T.evi, { target_type: "event", target_id: 99999, reason: "spam" });
-  await pocakaj(300);
-  assert(r.status === 404 && R.poslano.length === 1, "zavrnjena prijava (404) maila ne poslje", R.poslano.length);
+  assert(r.status === 404, "prijava neobstojecega cilja: 404", r.status);
+  // Negativne trditve brez fiksnega cakanja: za podvojeno in zavrnjeno prijavo posljemo NOVO veljavno prijavo in pocakamo na NJEN mail;
+  // ker mailov ne izgubljamo in se posiljajo po vrsti prijav, prej bi prisel morebitni mail podvojene/zavrnjene prijave.
+  r = await prijava(T.evi, { target_type: "user", target_id: U.dan, reason: "spam" });
+  assert(r.status === 201, "nova veljavna prijava (evi -> dan): 201", r.body); const idSentinel = r.body.id;
+  assert(await cakaj(() => R.poslano.length >= 2), "mail nove prijave je prisel", R.poslano.length);
+  assert(R.poslano.length === 2 && String(R.poslano[1].subject).includes("#" + idSentinel) && String(R.poslano[0].subject).includes("#" + idMail),
+    "podvojena in zavrnjena (404) prijava NISTA poslali maila: do maila nove prijave sta le mail 1. prijave in njen", R.poslano.map(m => m.subject));
+  R.poslano.length = 0;
 
   R.napaka = true;
-  let t0 = Date.now();
   r = await prijava(T.evi, { target_type: "club", target_id: 1, reason: "spam" });
   assert(r.status === 201, "Resend vrne { error }: prijava je vseeno 201", [r.status, r.body]);
   assert(await cakaj(() => /Resend napaka \(prijava zlorabe\)/.test(sa.log)), "napaka Resenda je zapisana v dnevnik (brez izjeme)");
   R.napaka = false;
   assert((await pool.query("SELECT COUNT(*)::int AS n FROM reports WHERE id=$1", [r.body.id])).rows[0].n === 1, "prijava je shranjena kljub napaki maila");
-  R.zamik = 1500;
-  t0 = Date.now();
-  r = await prijava(T.evi, { target_type: "club", target_id: 1, reason: "inappropriate" });   // isti cilj kot prej -> 200 (brez maila)
+  R.zamik = 2500;
+  await prijava(T.evi, { target_type: "club", target_id: 1, reason: "inappropriate" });   // isti cilj kot prej -> 200 (brez maila)
+  const t0 = Date.now();
   r = await prijava(T.evi, { target_type: "media", target_id: 1, reason: "spam" });
   const trajanje = Date.now() - t0;
-  assert(r.status === 201 && trajanje < 1000, `pocasen Resend (1500 ms) odgovora NE upocasni (${trajanje} ms)`, [r.status, trajanje]);
-  assert(await cakaj(() => R.poslano.length === 2, 5000), "mail pride pozneje (po odgovoru)", R.poslano.length);
+  const ob_odgovoru = R.poslano.length;
+  assert(r.status === 201 && ob_odgovoru === 0 && trajanje < 2000, `pocasen Resend (zamik 2500 ms): odgovor pride PREJ kot mail (${trajanje} ms, mailov ob odgovoru: ${ob_odgovoru})`, [r.status, trajanje, ob_odgovoru]);
+  assert(await cakaj(() => R.poslano.length === 1, 8000), "mail pride pozneje (po odgovoru)", R.poslano.length);
   R.zamik = 0;
 
   sb = zagon(PORT_B, { ADMIN_PRIJAVE_EMAIL: "admin1@outly.test", PRIJAVE_MAIL_NA_URO: "2" });
@@ -261,13 +266,17 @@ let sa = null, sb = null, sc = null;
     r = await zahtevek(B, "POST", "/reports", T.blokar, { target_type: "user", target_id: U[k], reason: "spam" });
     assert(r.status === 201, `instanca B (meja 2 maila/h): prijava ${k}: 201`, r.body);
   }
-  await pocakaj(800);
-  assert(R.poslano.length === 2, "meja PRIJAVE_MAIL_NA_URO=2: poslana natanko 2 maila od 4 prijav", R.poslano.length);
-  assert(/mail za prijavo \d+ preskocen/.test(sb.log), "preskok maila je zapisan v dnevnik");
+  // Odlocitev o mailu pade sinhrono po odgovoru: ko sta v dnevniku 2 preskoka, je bilo obdelanih vseh 4 prijav, poslana pa morata biti 2 maila.
+  assert(await cakaj(() => (sb.log.match(/mail za prijavo \d+ preskocen/g) || []).length === 2), "preskok maila je zapisan v dnevnik (2 od 4 prijav)");
+  assert(await cakaj(() => R.poslano.length === 2), "meja PRIJAVE_MAIL_NA_URO=2: poslana natanko 2 maila od 4 prijav", R.poslano.length);
   R.poslano.length = 0;
   r = await zahtevek(C, "POST", "/reports", T.blokar, { target_type: "user", target_id: U.cene, reason: "spam" });
-  await pocakaj(600);
-  assert(r.status === 201 && R.poslano.length === 0, "instanca C brez ADMIN_PRIJAVE_EMAIL: prijava 201, mail NI poslan", [r.status, R.poslano.length]);
+  assert(r.status === 201, "instanca C brez ADMIN_PRIJAVE_EMAIL: prijava 201", r.body); const idC = r.body.id;
+  const rA = await api("POST", "/reports", T.blokar, { target_type: "user", target_id: U.dan, reason: "spam" });
+  assert(rA.status === 201, "kontrolna prijava na instanci A (z naslovom): 201", rA.body);
+  assert(await cakaj(() => R.poslano.length >= 1), "mail kontrolne prijave pride", R.poslano.length);
+  assert(R.poslano.length === 1 && String(R.poslano[0].subject).includes("#" + rA.body.id) && !String(R.poslano[0].subject).includes("#" + idC),
+    "instanca C brez ADMIN_PRIJAVE_EMAIL: mail NI poslan (do kontrolnega maila ni drugega)", R.poslano.map(m => m.subject));
   sb.srv.kill(); sc.srv.kill();
 
   // ====================================================================================================
@@ -469,6 +478,15 @@ let sa = null, sb = null, sc = null;
   assert(r.status === 404 && /No Outly account/.test(String(r.body)), "prenos ana -> bor (e-naslov): 404 »No Outly account«", [r.status, r.body]);
   r = await api("POST", `/tickets/${vstAna}/transfer`, T.ana, { email: "bor@outly.si", allow_guest: true });
   assert(r.status === 404, "prenos ana -> bor (e-naslov, allow_guest): 404 (gost ne obide bloka)", [r.status, r.body]);
+  // IZRECNO ZAPISANO VEDENJE (DECISIONS 10. 10. 2026, ARCHITECTURE I30): pot allow_guest z e-naslovom RACUNA, ki je v bloku, vrne 404, za neznan e-naslov pa
+  // gostujoci prenos uspe (200). Razlika razkrije blok SAMO tistemu, ki pozna tocen e-naslov blokirajocega. Navidezni 200 bi pustil vstopnico pri posiljatelju
+  // (zavedel bi ga), prenos kot gost pa bi obsel blok. Ce kdo to spremeni, mora spremeniti tudi odlocitev in ta test.
+  r = await api("POST", `/events/${evB}/orders`, T.ana, { quantity: 1 });
+  assert(r.status === 201, "ana kupi se eno vstopnico (dogodek Drugi) za preizkus gostujocega prenosa", r.body); const vstAna2 = r.body.tickets[0].id;
+  r = await api("POST", `/tickets/${vstAna2}/transfer`, T.ana, { email: "bor@outly.si", allow_guest: true });
+  assert(r.status === 404, "allow_guest + e-naslov racuna v bloku: 404 (blok ni obvod)", [r.status, r.body]);
+  r = await api("POST", `/tickets/${vstAna2}/transfer`, T.ana, { email: "nihce.znan@example.com", allow_guest: true });
+  assert(r.status === 200 && r.body.result === "ok", "allow_guest + neznan e-naslov: 200 (gostujoci prenos) - znana razlika do 404 zgoraj, zavestno", [r.status, r.body]);
   r = await api("POST", `/tickets/${vstBor}/transfer`, T.bor, { user_id: U.ana });
   assert(r.status === 404, "prenos bor -> ana (user_id, obratna smer): 404", [r.status, r.body]);
   r = await api("POST", `/tickets/${vstBor}/transfer`, T.bor, { email: "ana@outly.si" });

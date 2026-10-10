@@ -7073,10 +7073,25 @@ app.post("/business/team", requireAuth, requireClub("owner", "manager"), async (
       return res.status(409).json({ error: "already_invited", message: "This user already has a pending invitation from your club." });
     }
 
-    await pool.query(
-      "INSERT INTO club_invites (club_id, user_id, role, invited_by_user_id) VALUES ($1,$2,$3,$4)",
-      [klub, clan.id, role, req.user.userId]
-    );
+    // Avtoritativna preverba bloka (041) pod zaklepom para, v isti transakciji kot vpis vabila: blokiranje in vabilo se vrstita
+    // (zaklep para pred zaklepi vrstic, kot povsod); zgornja preverba samo prihrani transakcijo.
+    const cv = await pool.connect();
+    try {
+      await cv.query("BEGIN");
+      await zakleniPar(cv, req.user.userId, clan.id);
+      if (await jeBlokiran(cv, req.user.userId, clan.id)) {
+        await cv.query("ROLLBACK");
+        return res.status(404).json({ error: "no_account", message: "No Outly account with this email. Ask them to sign up first." });
+      }
+      await cv.query(
+        "INSERT INTO club_invites (club_id, user_id, role, invited_by_user_id) VALUES ($1,$2,$3,$4)",
+        [klub, clan.id, role, req.user.userId]
+      );
+      await cv.query("COMMIT");
+    } catch (e) {
+      await cv.query("ROLLBACK").catch(() => {});
+      throw e;
+    } finally { cv.release(); }
     const ime = await pool.query("SELECT name FROM clubs WHERE id=$1", [klub]);
     posljiVabiloEkipi(clan.email, ime.rows[0] ? ime.rows[0].name : "A club", role); // brez await: mail ne sme zadrževati odgovora
     return res.status(201).json(await odgovorEkipe(req, klub));
