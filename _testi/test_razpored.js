@@ -348,8 +348,8 @@ const nakup = (eid, mid, tok, telo) => api("POST", `/events/${eid}/tables/${mid}
     r = await api("GET", `/events/${EA}/vip`);
     assert(r.status === 200 && r.body.enabled === true && r.body.tables.length === 4, "javni GET /events/:id/vip: 4 mize dogodka", r.body);
     assert(enako(r.body.plan, { width: 24, height: 16, elements: [{ type: "dj", x: 9, y: 0, w: 6, h: 2, label: "DJ" }] }), "javni plan = tloris dogodka", r.body.plan);
-    assert(Object.keys(r.body).sort().join() === "currency,enabled,event_id,on_sale,package_min_age,packages,plan,tables" && Object.keys(r.body.tables[0]).sort().join() === "available,h,id,label,price_cents,seats,shape,w,x,y",
-      "oblika javnega odgovora nespremenjena (ista polja kot prej)", [Object.keys(r.body), Object.keys(r.body.tables[0])]);
+    assert(Object.keys(r.body).sort().join() === "currency,enabled,event_id,on_sale,package_min_age,packages,payment_mode,plan,tables" && Object.keys(r.body.tables[0]).sort().join() === "available,h,id,label,price_cents,seats,shape,w,x,y",
+      "oblika javnega odgovora nespremenjena (ista polja kot prej + dodano payment_mode, #149)", [Object.keys(r.body), Object.keys(r.body.tables[0])]);
     assert(r.body.tables.every(t => t.available === true), "vse mize proste", r.body.tables);
     assert(r.body.packages.length === 1 && r.body.packages[0].name === "Vodka 0,7 l", "javni paketi so organizatorjevi", r.body.packages);
     assert(!JSON.stringify(r.body).includes("Tuji paket gostitelja"), "paketi gostitelja se ne pokazejo");
@@ -488,7 +488,7 @@ const nakup = (eid, mid, tok, telo) => api("POST", `/events/${eid}/tables/${mid}
     assert(enako(r.body.plan, PLAN_K) && r.body.tables.find(t => t.id === KLUB_MIZE[1]).price_cents === 22222 && r.body.tables.find(t => t.id === KLUB_MIZE[1]).default_price_cents === 25000, "plan = klubski tloris; izjema za klubsko mizo dela", r.body.tables);
     r = await api("GET", `/events/${EK}/vip`);
     assert(r.status === 200 && r.body.enabled === true && r.body.tables.length === 2 && enako(r.body.plan, PLAN_K), "javni GET /events/:id/vip: klubske mize in tloris nespremenjeni", r.body);
-    assert(Object.keys(r.body).sort().join() === "currency,enabled,event_id,on_sale,package_min_age,packages,plan,tables" && r.body.packages[0].id === KLUB_PAKET, "oblika odgovora enaka, paket kluba", Object.keys(r.body));
+    assert(Object.keys(r.body).sort().join() === "currency,enabled,event_id,on_sale,package_min_age,packages,payment_mode,plan,tables" && r.body.packages[0].id === KLUB_PAKET, "oblika odgovora enaka, paket kluba", Object.keys(r.body));
     assert(r.body.tables.find(t => t.id === KLUB_MIZE[1]).price_cents === 22222, "cena po dogodku se uporabi", r.body.tables);
     r = await api("GET", `/events/${EK}`);
     assert(r.body.vip_layout_source === "club" && r.body.vip_from_cents === 15000 && r.body.vip_enabled === true, "vip_from_cents navadnega kluba nespremenjen (15000)", [r.body.vip_layout_source, r.body.vip_from_cents]);
