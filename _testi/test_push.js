@@ -209,6 +209,12 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     r = await api("POST", "/me/devices", T.sledilec2, { token: zet("m12") });
     vrst = (await pool.query("SELECT token FROM device_tokens WHERE user_id=$1", [U.sledilec2])).rows.map(x => x.token);
     assert(vrst.length === 10 && !vrst.includes(zet("m2")) && vrst.includes(zet("m5")) && vrst.includes(zet("m12")), "po osvezenem m5 in novem m12 odpade najstarejsi (m2), osvezeni m5 ostane", vrst.map(t => t.slice(0, 6)));
+    // Sočasne registracije ISTEGA uporabnika (advisory lock): brez zastoja 40P01 in brez preseganja meje. 4 kroga po 16 vzporednih z razlicnimi zetoni.
+    for (let krog = 0; krog < 4; krog++) {
+      const vzp = await Promise.all(Array.from({ length: 16 }, (_, i) => api("POST", "/me/devices", T.sledilec2, { token: zet(`par-${krog}-${i}`) })));
+      const st = (await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE user_id=$1", [U.sledilec2])).rows[0].n;
+      assert(vzp.every(x => x.status === 200) && st === 10, `16 vzporednih POST /me/devices istega uporabnika (krog ${krog + 1}): vsi 200, v bazi tocno 10 vrstic`, [vzp.map(x => x.status).filter(x => x !== 200), st]);
+    }
     await pool.query("DELETE FROM device_tokens WHERE user_id IN ($1, $2)", [U.sledilec2, U.kupec]);   // sledilec2 mora ostati brez naprav (objava dogodka), kupec brez tujega zetona
 
     // ------------------------------------------------------------------------------------------------------------------
@@ -515,12 +521,15 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     assert(zahteve.length === 60, "(h) brez ponovnih poskusov zdravih zahtevkov (60 zahtevkov)", zahteve.length);
     for (const st of viseci) { try { st.close(); } catch { /* ze zaprt */ } }
     viseci.clear();
-    // seja se zavrze SELE po TIMEOUTOV_ZA_NOVO_SEJO (3) zaporednih timeoutih: 3 viseci + zdravi za njimi se po novi seji vseeno izvedejo
-    const h3 = Array.from({ length: 30 }, (_, i) => zet("h3-" + i));
+    // seja gre v pokoj SELE po TIMEOUTOV_ZA_NOVO_SEJO (3) zaporednih timeoutih in nikoli z destroy() seje z zdravimi zahtevki: 3 viseci + 57 zdravih,
+    // VSAK zdrav zeton mora streznik prejeti NATANKO enkrat (stara koda: destroy trenutne seje -> zdravi v teku so se poslali dvakrat = dvojno obvestilo)
+    const h3 = Array.from({ length: 60 }, (_, i) => zet("h3-" + i));
     h3.forEach((z, i) => vedenje.set(z, i < 3 ? "hang" : { zakasni: 1500 }));
     zahteve.length = 0;
     hr = await poModulu(h3);
-    assert(hr && hr.length === 30 && hr.filter(x => x.ok).length >= 27 - 0 && hr.slice(0, 3).every(x => x.razlog === "timeout"), "(h) 3 zaporedni timeouti zavrzejo sejo, zdravi zahtevki (27) se po ponovnem poskusu vseeno uspesno koncajo", hr && hr.filter(x => !x.ok).map(x => [x.status, x.razlog]));
+    assert(hr && hr.length === 60 && hr.filter(x => x.ok).length === 57 && hr.slice(0, 3).every(x => x.razlog === "timeout"), "(h) 3 zaporedni timeouti: 3 timeouti, vseh 57 zdravih zahtevkov ok", hr && hr.filter(x => !x.ok).map(x => [x.status, x.razlog]));
+    const dvojni = h3.slice(3).filter(z => urejeniZahtevki(z).length !== 1);
+    assert(dvojni.length === 0, "(h) 3 viseci + 57 zdravih: vsak zdrav zeton streznik prejme NATANKO enkrat (brez dvojnih obvestil)", dvojni.map(z => [z.slice(0, 6), urejeniZahtevki(z).length]));
     for (const st of viseci) { try { st.close(); } catch { /* ze zaprt */ } }
     viseci.clear();
     // seja prekinjena na strani APNs (GOAWAY / zaprta povezava) sredi zahtevkov: konec brez statusa je omrezna napaka -> en ponovni poskus
@@ -543,26 +552,36 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     await pool.query("DELETE FROM device_tokens");   // samo lastnik, 10 naprav: natanko 10 zetonov v enem posiljanju
     rezim = "ok";
     const GR = Array.from({ length: 10 }, (_, i) => zet("GR" + i));
-    for (const z of GR) { vedenje.set(z, { status: 410, reason: "Unregistered" }); r = await api("POST", "/me/devices", T.lastnik, { token: z }); }
+    const BAD = { status: 400, reason: "BadDeviceToken" }, NEREG = { status: 410, reason: "Unregistered" };
+    for (const z of GR) { vedenje.set(z, BAD); r = await api("POST", "/me/devices", T.lastnik, { token: z }); }
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens")).rows[0].n === 10, "10 zetonov lastnika (meja na uporabnika)");
-    // 1) vseh 10 »neveljavnih« (napacno okolje): NOBEN ne dobi invalid_at, alarm v dnevniku
+    const stAlarm = () => (srv.log.match(/\[push\] ALARM/g) || []).length;
+    const zadnjiPovzetek = () => srv.log.split("\n").filter(l => /\[push\] table_service: \d+ naprav/.test(l)).pop() || "";
+    const nova = async (i) => {   // nova VIP strezba na E7 (nakup mize + sken)
+      const x = await api("POST", `/events/${E7}/tables/${M[i]}/orders`, T.kupec, { package_id: P1 });
+      const qr = (await api("GET", "/me/tickets", T.kupec)).body.find(t => t.order_id === x.body.order.id && t.is_vip).qr;
+      return skeniraj(T.doorman, qr);
+    };
+    // 1) vseh 10 zavrnjenih z BadDeviceToken (napacno okolje): NOBEN ne dobi invalid_at, alarm v dnevniku
     zahteve.length = 0;
     p0 = stPush("table_service");
     r = await skeniraj(T.doorman, qr7(0));
     assert(r.status === 200 && r.body.table_service_created === true, "sken: nova strezba (varovalo)");
     assert(await pocakajPush("table_service", p0), "varovalo: povzetek pusha v dnevniku");
-    assert(zahteve.length === 10, "varovalo: 10 zahtevkov na APNs, vsi so dobili 410", zahteve.length);
-    assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE invalid_at IS NOT NULL")).rows[0].n === 0, "varovalo: ≥10 zetonov, vec kot polovica neveljavnih -> NOBEN ni oznacen (invalid_at ostane NULL)");
-    assert(/\[push\] ALARM: 10 od 10 zetonov zavrnjenih kot neveljavnih v enem posiljanju \(table_service\), nobenega ne oznacim: verjetno napacno okolje\/kljuc/.test(srv.log), "varovalo: v dnevniku »[push] ALARM: ... verjetno napacno okolje/kljuc«");
-    assert(/neveljavnih 0,/.test(srv.log.split("\n").filter(l => l.includes("[push] table_service: 10 naprav")).pop() || ""), "varovalo: povzetek pove »neveljavnih 0«");
-    // 2) 4 od 10 neveljavnih (manj kot polovica): označeni so tisti 4
-    GR.forEach((z, i) => vedenje.set(z, i < 4 ? { status: 410, reason: "Unregistered" } : "ok"));
+    assert(zahteve.length === 10, "varovalo: 10 zahtevkov na APNs, vsi so dobili 400 BadDeviceToken", zahteve.length);
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE invalid_at IS NOT NULL")).rows[0].n === 0, "varovalo: ≥10 zetonov, vec kot polovica BadDeviceToken -> NOBEN ni oznacen (invalid_at ostane NULL)");
+    assert(/\[push\] ALARM: 10 od 10 zetonov zavrnjenih z BadDeviceToken v enem posiljanju \(table_service\), teh ne oznacim: verjetno napacno okolje\/kljuc/.test(srv.log), "varovalo: v dnevniku »[push] ALARM: ... verjetno napacno okolje/kljuc«");
+    assert(/neveljavnih 0, zavrnjenih 10,/.test(zadnjiPovzetek()), "varovalo: povzetek pove »neveljavnih 0, zavrnjenih 10« (zavrnjene steje tudi, ko jih ne oznaci)", zadnjiPovzetek());
+    assert(stAlarm() === 1, "varovalo: natanko 1 ALARM", stAlarm());
+    // 2) 4 od 10 z 410 Unregistered: oznaceni so ti 4 (410 se oznaci vedno), brez novega alarma
+    GR.forEach((z, i) => vedenje.set(z, i < 4 ? NEREG : "ok"));
     zahteve.length = 0;
     p0 = stPush("table_service");
     r = await skeniraj(T.doorman, qr7(1));
     assert(await pocakajPush("table_service", p0), "4 od 10: povzetek pusha v dnevniku");
     const oz = (await pool.query("SELECT token FROM device_tokens WHERE invalid_at IS NOT NULL")).rows.map(x => x.token).sort();
-    assert(JSON.stringify(oz) === JSON.stringify(GR.slice(0, 4).sort()), "4 od 10 neveljavnih (pod mejo): oznaceni natanko ti 4", oz.map(t => t.slice(0, 6)));
+    assert(JSON.stringify(oz) === JSON.stringify(GR.slice(0, 4).sort()), "4 od 10 neveljavnih (410 Unregistered): oznaceni natanko ti 4", oz.map(t => t.slice(0, 6)));
+    assert(stAlarm() === 1 && /neveljavnih 4, zavrnjenih 4,/.test(zadnjiPovzetek()), "4 od 10: brez novega alarma, povzetek »neveljavnih 4, zavrnjenih 4«", zadnjiPovzetek());
     // 3) pushStrezba v zanki: zeton, ki ga prva strezba oznaci kot neveljaven, druga ne dobi vec
     const sk7 = (qr) => ({ client_scan_id: `cs-gr-${++n}`, qr, scanned_at: new Date(Date.now() - 60000).toISOString(), device_id: "telefon-push-gr" });
     vedenje.set(GR[4], { status: 410, reason: "Unregistered" });   // veljaven v bazi, a ga APNs zavrne
@@ -573,6 +592,24 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     assert(await pocakajPush("table_service", p0, 2), "zanka: 2 povzetka pusha v dnevniku");
     assert(urejeniZahtevki(GR[4]).length === 1, "zanka: zeton, ki ga je 1. strezba oznacila kot neveljavnega (410), 2. strezba NE dobi vec (1 zahtevek)", urejeniZahtevki(GR[4]).length);
     assert(zahteve.length === 6 + 5, "zanka: 1. strezba 6 naprav (GR4..GR9), 2. strezba 5", zahteve.length);
+    // 3b) mesano: 6 x BadDeviceToken (napacno okolje) + 4 x 410 Unregistered: BadDeviceToken ostanejo, 410 se oznacijo; drugi ALARM v isti minuti se ne zapise
+    await pool.query("UPDATE device_tokens SET invalid_at = NULL");
+    GR.forEach((z, i) => vedenje.set(z, i < 6 ? BAD : NEREG));
+    zahteve.length = 0;
+    p0 = stPush("table_service");
+    await nova(5);
+    assert(await pocakajPush("table_service", p0), "mesano 6+4: povzetek pusha v dnevniku");
+    const oz2 = (await pool.query("SELECT token FROM device_tokens WHERE invalid_at IS NOT NULL")).rows.map(x => x.token).sort();
+    assert(zahteve.length === 10 && JSON.stringify(oz2) === JSON.stringify(GR.slice(6).sort()), "mesano 6 BadDeviceToken + 4 x 410: oznaceni SAMO 410 (GR6..GR9), BadDeviceToken ne", oz2.map(t => t.slice(0, 6)));
+    assert(stAlarm() === 1 && /neveljavnih 4, zavrnjenih 10,/.test(zadnjiPovzetek()), "ALARM najvec 1/min (se vedno 1 vrstica), povzetek »neveljavnih 4, zavrnjenih 10«", [stAlarm(), zadnjiPovzetek()]);
+    // 3c) vseh 10 x 410 Unregistered (npr. zastareli zetoni po reinstalaciji): VSI oznaceni, ni alarma
+    await pool.query("UPDATE device_tokens SET invalid_at = NULL");
+    GR.forEach((z) => vedenje.set(z, NEREG));
+    zahteve.length = 0;
+    p0 = stPush("table_service");
+    await nova(6);
+    assert(await pocakajPush("table_service", p0), "10 x 410: povzetek pusha v dnevniku");
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE invalid_at IS NOT NULL")).rows[0].n === 10 && stAlarm() === 1, "10 od 10 z 410 Unregistered: vsi oznaceni (410 se oznaci vedno), brez novega alarma", stAlarm());
     // 4) DeviceTokenNotForTopic je napaka nastavitve: noben zeton ni oznacen (ze preverjeno zgoraj za N3-topic); tu se mnozicno
     await pool.query("DELETE FROM device_tokens"); GR.forEach((z) => vedenje.set(z, { status: 400, reason: "DeviceTokenNotForTopic" }));
     for (const z of GR.slice(0, 3)) await api("POST", "/me/devices", T.lastnik, { token: z });

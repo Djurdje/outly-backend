@@ -491,7 +491,7 @@ COMMENT ON TABLE public.device_tokens IS 'Zetoni naprav za potisna obvestila APN
 -- Name: COLUMN device_tokens.invalid_at; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.device_tokens.invalid_at IS 'Nastavi backend ob odzivu APNs 410 / BadDeviceToken / DeviceTokenNotForTopic / Unregistered. POST /me/devices ga postavi na NULL.';
+COMMENT ON COLUMN public.device_tokens.invalid_at IS 'Nastavi backend ob odzivu APNs 410 / Unregistered ali 400 BadDeviceToken (DeviceTokenNotForTopic je napaka nastavitve topica in zetona NE oznaci). POST /me/devices ga postavi na NULL.';
 
 
 --

@@ -118,8 +118,15 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
 
   // --- HTTP/2 seja ---
   let seja = null;
-  let zaporednihTimeoutov = 0;           // zahtevki brez odgovora zapored; vsak prejet odgovor ga ponastavi
   function pozabi(s) { if (seja === s) seja = null; }
+  // Seja v pokoj: nobeni novi zahtevek je ne dobi, obstojeci se v miru dokoncajo (graceful close). destroy() sele po roku zahtevka (+1 s),
+  // ko je vsak zahtevek na njej ze koncal ali potekel (zombi seja polodprtega TCP ne ostane odprta za vedno). NIKOLI takojsnji destroy: na seji so lahko zdravi zahtevki.
+  function upokoji(s) {
+    pozabi(s);
+    try { s.close(); } catch { /* ze zaprta */ }
+    const t = setTimeout(() => { try { s.destroy(); } catch { /* ze unicena */ } }, timeoutMs + 1000);
+    if (typeof t.unref === "function") t.unref();
+  }
   function dobiSejo() {
     if (seja && !seja.closed && !seja.destroyed) return seja;
     const s = http2.connect(origin);
@@ -141,12 +148,12 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
       timer = setTimeout(() => {
         koncaj({ ok: false, status: 0, razlog: "timeout", timeout: true });
         try { if (req) req.close(http2.constants.NGHTTP2_CANCEL); } catch { /* ignoriraj */ }
-        // Samo ta stream je obvisel: zapremo ga, seja (in do 19 drugih zdravih zahtevkov na njej) ostane. Seja je mrtva (polodprt TCP) sele,
-        // ko jih ni odgovorilo vec zaporednih: tedaj jo zavrzemo in naslednji zahtevek odpre novo.
-        zaporednihTimeoutov++;
-        if (zaporednihTimeoutov >= TIMEOUTOV_ZA_NOVO_SEJO) {
-          zaporednihTimeoutov = 0;
-          try { const s = seja; if (s) { pozabi(s); s.destroy(); } } catch { /* ignoriraj */ }
+        // Samo ta stream je obvisel: zapremo ga, seja (in drugi zdravi zahtevki na njej) ostane. Stevec timeoutov je VEZAN NA SEJO ZAHTEVKA
+        // (ne na trenutno `seja`): seja je mrtva (polodprt TCP) sele, ko jih ni odgovorilo vec zaporednih; tedaj gre v pokoj (upokoji), novi zahtevki odprejo novo.
+        const s = uporabljena;
+        if (s) {
+          s.outlyTimeouti = (s.outlyTimeouti || 0) + 1;
+          if (s.outlyTimeouti >= TIMEOUTOV_ZA_NOVO_SEJO) upokoji(s);
         }
       }, timeoutMs);
       try {
@@ -164,7 +171,7 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
         req = uporabljena.request(glave);
         let status = 0, telo = "";
         req.setEncoding("utf8");
-        req.on("response", (h) => { status = Number(h[":status"]) || 0; zaporednihTimeoutov = 0; });
+        req.on("response", (h) => { status = Number(h[":status"]) || 0; if (uporabljena) uporabljena.outlyTimeouti = 0; });
         req.on("data", (d) => { if (telo.length < 4096) telo += d; });
         req.on("end", () => {
           let razlog = null;
@@ -199,7 +206,7 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
       try {
         let r = await enaZahteva(zeton, obvestilo, false);
         if (r.omrezna) {                                                 // prekinjena seja: ponovni poskus VEDNO na novi (stara se zapre, drugi zahtevki na njej se dokoncajo)
-          if (r.seja) { pozabi(r.seja); try { r.seja.close(); } catch { /* ze zaprta */ } }
+          if (r.seja) upokoji(r.seja);
           r = await enaZahteva(zeton, obvestilo, false);
         }
         if (r.status === 403 && r.razlog === "ExpiredProviderToken") r = await enaZahteva(zeton, obvestilo, true);

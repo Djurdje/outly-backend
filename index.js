@@ -758,25 +758,33 @@ async function zetoniUporabnikov(ids) {
   const r = await pool.query("SELECT token FROM device_tokens WHERE user_id = ANY($1::int[]) AND invalid_at IS NULL", [urejeni]);
   return r.rows.map((x) => x.token);
 }
-// Poslje eno obvestilo na zetone in neveljavne (410 / BadDeviceToken / DeviceTokenNotForTopic / Unregistered) oznaci invalid_at.
+// Poslje eno obvestilo na zetone in neveljavne (410 / Unregistered / BadDeviceToken) oznaci invalid_at. DeviceTokenNotForTopic je napaka nastavitve (topic): ne oznaci.
 // `last_seen_at <= zacetek`: zeton, ki ga je aplikacija med posiljanjem znova registrirala, ostane veljaven.
-// Varovalo: ce je v enem posiljanju vsaj PUSH_MNOZICNO_MIN zetonov in vec kot polovica »neveljavnih«, je skoraj gotovo narobe okolje ali kljuc
-// (npr. sandbox zetoni proti produkciji), ne zetoni: NOBENEGA ne oznacimo in zapisemo alarm (sicer bi ena napacna nastavitev pobila vse naprave).
+// Varovalo: ce je v enem posiljanju vsaj PUSH_MNOZICNO_MIN zetonov in vec kot polovica zavrnjena z BadDeviceToken, je skoraj gotovo narobe okolje
+// (npr. sandbox zetoni proti produkciji), ne zetoni: BadDeviceToken NE oznacimo in zapisemo alarm. 410 / Unregistered (reinstalacija, odjava) oznacimo VEDNO:
+// to so dokazano mrtvi zetoni in sicer bi zastareli zetoni trajno blokirali ciscenje. ALARM najvec enkrat na minuto.
 const PUSH_MNOZICNO_MIN = 10;
+let pushAlarmZadnji = 0;
 // Vrne zetone, ki so bili oznaceni kot neveljavni (klicatelj z vec obvestili jih izloci iz naslednjih).
 async function posljiNaZetone(zetoni, obvestilo, tip) {
   if (!zetoni.length) return [];
   const zacetek = new Date();
   const rez = await apns.posljiVsem(zetoni, obvestilo);
+  const zavrnjenih = rez.filter((r) => r.neveljaven).length;
   let neveljavni = rez.filter((r) => r.neveljaven).map((r) => r.zeton);
-  if (rez.length >= PUSH_MNOZICNO_MIN && neveljavni.length * 2 > rez.length) {
-    console.error(`[push] ALARM: ${neveljavni.length} od ${rez.length} zetonov zavrnjenih kot neveljavnih v enem posiljanju (${tip}), nobenega ne oznacim: verjetno napacno okolje/kljuc (sandbox zetoni proti produkciji? APNS_TOPIC? APNS_KEY_*?)`);
-    neveljavni = [];
+  const slabih = rez.filter((r) => r.neveljaven && r.razlog === "BadDeviceToken");
+  if (rez.length >= PUSH_MNOZICNO_MIN && slabih.length * 2 > rez.length) {
+    const slabiZetoni = new Set(slabih.map((r) => r.zeton));
+    neveljavni = neveljavni.filter((z) => !slabiZetoni.has(z));   // 410 / Unregistered ostanejo oznaceni
+    if (Date.now() - pushAlarmZadnji >= 60000) {
+      pushAlarmZadnji = Date.now();
+      console.error(`[push] ALARM: ${slabih.length} od ${rez.length} zetonov zavrnjenih z BadDeviceToken v enem posiljanju (${tip}), teh ne oznacim: verjetno napacno okolje/kljuc (sandbox zetoni proti produkciji? APNS_TOPIC? APNS_KEY_*?)`);
+    }
   }
   if (neveljavni.length) {
     await pool.query("UPDATE device_tokens SET invalid_at = NOW() WHERE token = ANY($1::text[]) AND invalid_at IS NULL AND last_seen_at <= $2", [neveljavni, zacetek]);
   }
-  console.log(`[push] ${tip}: ${rez.length} naprav, poslano ${rez.filter((r) => r.ok).length}, neveljavnih ${neveljavni.length}, napak ${rez.filter((r) => !r.ok && !r.neveljaven).length}`);
+  console.log(`[push] ${tip}: ${rez.length} naprav, poslano ${rez.filter((r) => r.ok).length}, neveljavnih ${neveljavni.length}, zavrnjenih ${zavrnjenih}, napak ${rez.filter((r) => !r.ok && !r.neveljaven).length}`);
   return neveljavni;
 }
 // Klic MORA biti `void posljiPush(...)` PO commitu: nikoli ne vrze (vse napake v dnevnik), zato ne podre klicatelja.
@@ -831,6 +839,8 @@ app.post("/me/devices", requireAuth, omeji({ kljuc: "naprave", najvec: 60, oknoS
     const c = await pool.connect();
     try {
       await c.query("BEGIN");
+      // Sočasne registracije ISTEGA uporabnika se vrstijo (brez zastoja 40P01 in brez preseganja meje): advisory lock na uporabnika do konca transakcije.
+      await c.query("SELECT pg_advisory_xact_lock(hashtext('dev:' || $1::text))", [req.user.userId]);
       await c.query(
         `INSERT INTO device_tokens (user_id, token, platform) VALUES ($1, $2, $3)
          ON CONFLICT (token) DO UPDATE SET user_id = EXCLUDED.user_id, platform = EXCLUDED.platform, last_seen_at = NOW(), invalid_at = NULL`,
