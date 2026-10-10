@@ -3617,15 +3617,19 @@ const odjemalecNakupa = (req) => (String(req.get("x-outly-client") || "").toLowe
 // Zaklep (uporabnik) v isti transakciji kot INSERT: dva hkratna nakupa istega uporabnika ne prideta mimo stetja oba.
 // Ponovitev z istim Idempotency-Key se vrne prej (plast 3), zato je to pravilo ne zavrne.
 const CAKAJOCA_NAJVEC = 3;
+// Placila »v obdelavi« (odlozeno placilo: seja opravljena, denar na poti, checkout_url NULL ob seji) NE stejejo med nedokoncana (kupec je svoje opravil), imajo pa
+// LASTNO mejo (pregled PR #203, 2. krog): brez nje bi en racun z nekaj odlozenimi placili (SEPA) in izgubljenim `async_payment_failed` drzal zalogo neomejeno.
+// Ob preseganju 409, dokler banka ne potrdi (ali zavrne) kaksnega od njih.
+const OBDELAVI_NAJVEC = 3;
 const CAKAJOCA_ZAKLEP_RAZRED = 73110;   // prvi del dvodelnega advisory kljuca (drugi = id uporabnika); ne trci z migrate.js (enodelni kljuc)
 async function omejitevCakajocih(c, userId, eventId) {
   await c.query("SELECT pg_advisory_xact_lock($1::int, $2::int)", [CAKAJOCA_ZAKLEP_RAZRED, userId]);
   const r = await c.query(
-    `SELECT COUNT(*)::int AS vse, COUNT(*) FILTER (WHERE event_id = $2)::int AS ta
-       FROM orders WHERE user_id = $1 AND status = 'pending'
-        -- odlozeno placilo v obdelavi (seja opravljena, denar na poti) ne steje med »nedokoncana placila«: kupec je svoje opravil, cakanje na banko ga ne sme blokirati
-        AND NOT (stripe_checkout_session_id IS NOT NULL AND checkout_url IS NULL)`, [userId, eventId]);
-  const { vse, ta } = r.rows[0];
+    `SELECT COUNT(*) FILTER (WHERE NOT obd)::int AS vse, COUNT(*) FILTER (WHERE NOT obd AND event_id = $2)::int AS ta, COUNT(*) FILTER (WHERE obd)::int AS obd
+       FROM (SELECT event_id, (stripe_checkout_session_id IS NOT NULL AND checkout_url IS NULL) AS obd
+               FROM orders WHERE user_id = $1 AND status = 'pending') x`, [userId, eventId]);
+  const { vse, ta, obd } = r.rows[0];
+  if (obd >= OBDELAVI_NAJVEC) return "You have too many payments still processing. Wait for your bank to confirm them.";
   if (ta > 0) return "You already have an unfinished payment for this event. Finish it in My tickets, or wait up to 30 minutes for it to expire.";
   if (vse >= CAKAJOCA_NAJVEC) return "You have too many unfinished payments. Finish one in My tickets, or wait up to 30 minutes for them to expire.";
   return null;
@@ -3638,6 +3642,10 @@ async function omejitevCakajocih(c, userId, eventId) {
 // drugim naslovom (znana omejitev: ni zaščita pred odlocnim zlorabnikom, ta je omejen z IP omejevalnikom nakupov in kapaciteto dogodka).
 // Vrne telo 409 { error: "free_limit", message } ali null.
 const ZASTONJ_NA_OSEBO = okoljeCelo("ZASTONJ_NA_OSEBO", 10, 1, 1000);
+// SQL enakovreden naslovKljuc (mala crka, brez »+oznake«, gmail/googlemail brez pik): st = izraz SQL z e-naslovom. Mora ostati v skladu z naslovKljuc().
+const sqlNaslovKljuc = (st) => `(CASE WHEN split_part(lower(${st}), '@', 2) IN ('gmail.com','googlemail.com')
+    THEN replace(split_part(split_part(lower(${st}), '@', 1), '+', 1), '.', '') || '@gmail.com'
+    ELSE split_part(split_part(lower(${st}), '@', 1), '+', 1) || '@' || split_part(lower(${st}), '@', 2) END)`;
 async function omejitevBrezplacnih(c, { userId = null, gostEmail = null, eventId, enot }) {
   let n;
   if (userId !== null) {
@@ -3649,14 +3657,15 @@ async function omejitevBrezplacnih(c, { userId = null, gostEmail = null, eventId
     const kljuc = naslovKljuc(gostEmail);
     await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [`zastonj:g:${kljuc}:${eventId}`]);
     n = (await c.query(
-      `SELECT COALESCE(SUM(quantity), 0)::int AS n FROM orders o, LATERAL (SELECT split_part(lower(o.guest_email), '@', 1) AS l, split_part(lower(o.guest_email), '@', 2) AS d) p
+      `SELECT COALESCE(SUM(quantity), 0)::int AS n FROM orders o
         WHERE o.event_id = $1 AND o.guest_email IS NOT NULL AND o.total_cents = 0 AND o.status IN ('paid','partially_refunded')
-          AND (CASE WHEN p.d IN ('gmail.com','googlemail.com') THEN replace(split_part(p.l, '+', 1), '.', '') || '@gmail.com' ELSE split_part(p.l, '+', 1) || '@' || p.d END) = $2`,
+          AND ${sqlNaslovKljuc("o.guest_email")} = $2`,
       [eventId, kljuc])).rows[0].n;
   }
   if (n + enot <= ZASTONJ_NA_OSEBO) return null;
+  // Gostu NE povemo, koliko vstopnic ima naslov ze (brez prijave bi kdorkoli iz sporocila razbral, koliko jih ima tuj naslov); uporabnik vidi svoje.
   const ostane = Math.max(0, ZASTONJ_NA_OSEBO - n);
-  return { error: "free_limit", message: `You can get at most ${ZASTONJ_NA_OSEBO} free tickets for this event${ostane > 0 ? ` (${ostane} left for you)` : ""}.` };
+  return { error: "free_limit", message: `You can get at most ${ZASTONJ_NA_OSEBO} free tickets for this event${userId !== null && ostane > 0 ? ` (${ostane} left for you)` : ""}.` };
 }
 
 async function nakupStripeSeja(res, c, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna }) {
@@ -4285,6 +4294,8 @@ const GOST_IDEM_ISKANJ_NA_URO = okoljeCelo("GOST_IDEM_ISKANJ_NA_URO", 300, 1, 10
 const GOST_CAKAJOCIH_ODSTOTEK = okoljeCelo("GOST_CAKAJOCIH_ODSTOTEK", 20, 1, 100);           // skupno cakajocih gostujocih vstopnic na dogodek: odstotek kapacitete
 const GOST_CAKAJOCIH_NAJMANJ = okoljeCelo("GOST_CAKAJOCIH_NAJMANJ", 10, 1, 10000);           // ... vendar vsaj toliko
 const GOST_POSTA_DNEVNO = okoljeCelo("GOST_POSTA_DNEVNO", 300, 1, 1000000);                  // globalna dnevna meja gostujocih mailov
+const GOST_POSTA_ZASTONJ_DNEVNO = okoljeCelo("GOST_POSTA_ZASTONJ_DNEVNO", 300, 1, 1000000);   // globalna dnevna meja mailov gostom za 0 EUR (brez placila in potrditve naslova)
+const GOST_POSTA_ZASTONJ_NA_NASLOV = 3;                                                     // mailov za 0 EUR na normaliziran naslov na 24 h
 const GOST_POSTA_SOCASNIH = 3;                                                              // socasnih posiljanj v procesu
 const GOST_POSTA_TIMEOUT_MS = okoljeCelo("GOST_POSTA_TIMEOUT_MS", 10000, 100, 60000);        // rok za klic Resenda
 const GOST_POSTA_PONOVI_MS = okoljeCelo("GOST_POSTA_PONOVI_MS", 120000, 0, 3600000);   // pospravljalec neposlanih mailov; 0 = izklop
@@ -4766,6 +4777,9 @@ async function prevzemiGostujocaNarocila(userId, zVmesnimSpominom = false) {
 // Resend ob napaki NE vrze (vrne { error }): napaka se zapise v dnevnik (brez e-naslova), poskus ponovi pospravljalec z narascajocim premorom
 // (GOST_POSTA_PREMORI, 8 poskusov ~ 42 h); ob izcrpanju console.error. Socasno najvec GOST_POSTA_SOCASNIH posiljanj; klic ima rok GOST_POSTA_TIMEOUT_MS.
 // Meje: v TESTNEM nacinu (brez placila) najvec 1 mail na naslov na 24 h; globalno GOST_POSTA_DNEVNO na 24 h (testni se izpusti, resnicno placan se odlozi).
+// Mail za 0 EUR (ne-testni) nima potrditve naslova in placila, zato: najvec GOST_POSTA_ZASTONJ_NA_NASLOV (3) mailov na NORMALIZIRAN naslov na 24 h in globalno
+// GOST_POSTA_ZASTONJ_DNEVNO (300) na 24 h; nad mejo se mail IZPUSTI (ne ponavlja), nakup in guest_token v odgovoru ostaneta (pregled PR #203, 2. krog).
+// Placano (total > 0, ne-testno) potrdilo ostane zakonska obveznost (ZVPot-1): nikoli izpuscen.
 // Napaka maila NE sme podreti placila ali webhooka (klicatelji ne cakajo in ne vidijo izjem). Vrne true, ce je mail poslan.
 const POSREDNIK_VRSTICA = "NEXT DIMENSIONS, družba za marketing, d.o.o., Trebče 81, 3256 Bistrica ob Sotli, luka@outly.si";
 const POSTA_ODGOVOR = "luka@outly.si";
@@ -4869,27 +4883,55 @@ async function posljiGostuVstopnice(oid) {
 }
 async function gostPosljiEnoPosto(oid) {
   const pre = (await pool.query(
-    // Meje spodaj veljajo SAMO za testna narocila. Mail za 0 EUR (#191) je gostov edini dostop do vstopnic, zato se obravnava kot placano narocilo;
-    // zloraba je omejena z mejo brezplacnih vstopnic na naslov in dogodek (ZASTONJ_NA_OSEBO) ter z IP omejevalnikom nakupov.
-    `SELECT guest_email, status, guest_mail_sent_at, guest_mail_attempts, public_ref, COALESCE(stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test
+    // Mail za 0 EUR (#191) je poleg povezave iz odgovora nakupa (guest_token) gostov dostop do vstopnic, vendar nima potrditve naslova ne placila:
+    // ima svoji meji (spodaj). Meje testnega nacina veljajo samo za testna narocila.
+    `SELECT guest_email, status, guest_mail_sent_at, guest_mail_attempts, public_ref, total_cents, COALESCE(stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test
        FROM orders WHERE id = $1`, [oid])).rows[0];
   if (!pre || !pre.guest_email || pre.status !== "paid" || pre.guest_mail_sent_at || pre.guest_mail_attempts >= GOST_POSTA_POSKUSOV) return false;
-  // Meje (zloraba: mail na tuj naslov brez placila) veljajo SAMO za testna narocila: globalno na dan in 1 mail na naslov na 24 h.
-  // Potrdilo placanega narocila je zakonska obveznost (ZVPot-1): nikoli se ne odlozi ne izpusti, ob preseznem stevilu samo opozorilo (brez e-naslova).
+  // Meje (zloraba: mail na tuj naslov brez placila) veljajo za testna narocila in za narocila za 0 EUR: testna globalno na dan in 1 mail na naslov na 24 h,
+  // brezplacna po GOST_POSTA_ZASTONJ_*. Potrdilo PLACANEGA narocila je zakonska obveznost (ZVPot-1): nikoli se ne odlozi ne izpusti, ob preseznem stevilu samo opozorilo (brez e-naslova).
+  const brezplacno = !pre.is_test && Number(pre.total_cents) === 0;
   const dnevno = (await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE guest_mail_sent_at > NOW() - INTERVAL '24 hours'")).rows[0].n;
   if (pre.is_test) {
     if (dnevno >= GOST_POSTA_DNEVNO) { await gostPostaIzcrpaj(oid); gostPostaDnevnik("testni", `[gost] dnevna meja gostujocih mailov (${GOST_POSTA_DNEVNO}): testni mail izpuscen (narocilo ${pre.public_ref})`); return false; }
     const ze = await pool.query("SELECT 1 FROM orders WHERE guest_email = $1 AND id <> $2 AND guest_mail_sent_at > NOW() - INTERVAL '24 hours' LIMIT 1", [pre.guest_email, oid]);
     if (ze.rows.length) { await gostPostaIzcrpaj(oid); console.error(`[gost] testni nacin: mail na isti naslov je bil ze poslan v 24 h, izpuscen (narocilo ${pre.public_ref})`); return false; }
-  } else if (dnevno >= GOST_POSTA_DNEVNO) {
+  } else if (!brezplacno && dnevno >= GOST_POSTA_DNEVNO) {
     gostPostaDnevnik("placan", `[gost] opozorilo: ze ${dnevno} gostujocih mailov v 24 h (meja ${GOST_POSTA_DNEVNO} velja samo za testna narocila); potrdilo placanega narocila ${pre.public_ref} se poslje vseeno`, "warn");
   }
-  const k = await pool.query(
+  const claimSql =
     `UPDATE orders SET guest_mail_attempts = guest_mail_attempts + 1, guest_mail_claimed_at = NOW()
       WHERE id = $1 AND guest_email IS NOT NULL AND status = 'paid' AND guest_mail_sent_at IS NULL AND guest_mail_attempts < $2
         AND (guest_mail_claimed_at IS NULL OR guest_mail_claimed_at < NOW() - ($3::bigint[])[guest_mail_attempts + 1] * INTERVAL '1 millisecond')
-      RETURNING public_ref, guest_email, quantity, event_id, club_id, user_id, unit_price_cents, total_cents, currency, vat_rate, created_at, paid_at, guest_terms_version, guest_mail_attempts`,
-    [oid, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+      RETURNING public_ref, guest_email, quantity, event_id, club_id, user_id, unit_price_cents, total_cents, currency, vat_rate, created_at, paid_at, guest_terms_version, guest_mail_attempts`;
+  let k;
+  if (!brezplacno) k = await pool.query(claimSql, [oid, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+  else {
+    // Brezplacno: stetje in rezervacija poskusa pod skupnim advisory zaklepom (kratko: brez Resenda), da hkratna posiljanja ne prideta mimo meje oba.
+    // Steje poslane maile IN rezervirane (v teku) v zadnjih 24 h, drugih narocil za 0 EUR; vrstica pretekle ponovitve istega narocila se ne steje dvakrat.
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", ["gostposta:zastonj"]);
+      const st = (await c.query(
+        `SELECT COUNT(*)::int AS vse, COUNT(*) FILTER (WHERE kljuc = $2)::int AS naslov FROM (
+           SELECT ${sqlNaslovKljuc("guest_email")} AS kljuc FROM orders
+            WHERE id <> $1 AND guest_email IS NOT NULL AND total_cents = 0
+              AND (guest_mail_sent_at > NOW() - INTERVAL '24 hours'
+                   OR (guest_mail_sent_at IS NULL AND status = 'paid' AND guest_mail_claimed_at > NOW() - INTERVAL '24 hours'))) x`,
+        [oid, naslovKljuc(pre.guest_email)])).rows[0];
+      if (st.vse >= GOST_POSTA_ZASTONJ_DNEVNO || st.naslov >= GOST_POSTA_ZASTONJ_NA_NASLOV) {
+        await c.query("UPDATE orders SET guest_mail_attempts = $2 WHERE id = $1 AND guest_mail_sent_at IS NULL", [oid, GOST_POSTA_POSKUSOV]);   // izpuscen: pospravljalec ga ne ponavlja
+        await c.query("COMMIT");
+        if (st.vse >= GOST_POSTA_ZASTONJ_DNEVNO) gostPostaDnevnik("zastonj-dnevno", `[gost] dnevna meja mailov gostom za 0 EUR (${GOST_POSTA_ZASTONJ_DNEVNO}): mail izpuscen (narocilo ${pre.public_ref})`);
+        else gostPostaDnevnik("zastonj-naslov", `[gost] mail za 0 EUR: naslov je v 24 h ze dobil ${GOST_POSTA_ZASTONJ_NA_NASLOV} maile, izpuscen (narocilo ${pre.public_ref})`);
+        return false;
+      }
+      k = await c.query(claimSql, [oid, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+      await c.query("COMMIT");
+    } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
+    finally { c.release(); }
+  }
   if (!k.rows.length) return false;
   const o = k.rows[0];
   const ev = await pool.query(

@@ -57,7 +57,7 @@ const pocakaj = (ms) => new Promise(r => setTimeout(r, ms));
 async function cakaj(pogoj, ms = 8000) { const do_ = Date.now() + ms; while (Date.now() < do_) { if (await pogoj()) return true; await pocakaj(100); } return false; }
 
 // ---------- lazni Resend ----------
-const R = { poslano: [], napaka: false, zamik: 0 };
+const R = { poslano: [], napaka: false, zamik: 0, drzi: false, zadrzani: [] };   // drzi: zahtevki cakajo, dokler jih test ne spusti (sprosti())
 const resendServer = http.createServer((req, res) => {
   let d = ""; req.on("data", x => d += x);
   req.on("end", () => {
@@ -65,11 +65,13 @@ const resendServer = http.createServer((req, res) => {
       if (R.napaka) { res.writeHead(422, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "validation_error", message: "stub: zavrnjeno", statusCode: 422 })); }
       const m = JSON.parse(d);
       const koncaj = () => { R.poslano.push(m); res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "mail_" + R.poslano.length })); };
+      if (R.drzi) { R.zadrzani.push({ to: m.to, koncaj }); return; }
       return R.zamik ? setTimeout(koncaj, R.zamik) : koncaj();
     }
     res.writeHead(404, { "content-type": "application/json" }); res.end("{}");
   });
 });
+const sprosti = () => { R.drzi = false; for (const z of R.zadrzani.splice(0)) z.koncaj(); };
 const mailiNa = (email) => R.poslano.filter(m => m.to === email || (Array.isArray(m.to) && m.to.includes(email)));
 
 // ---------- lazni Stripe ----------
@@ -124,7 +126,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
   await new Promise(r => stripeServer.listen(STRIPE_PORT, r));
   await new Promise(r => resendServer.listen(RESEND_PORT, r));
   // A: hitri ponovni poskusi (rok Resenda 400 ms, brez rezerve, premor 100 ms ali spodnja meja 400 ms), pospravljalec na 200 ms
-  const A = zagon(PORT_A, { GOST_POSTA_PONOVI_MS: "200", GOST_POSTA_TIMEOUT_MS: "400", GOST_POSTA_REZERVA_MS: "0", GOST_POSTA_PREMOR_MS: "100", POTRDILO_BREZ_PLACILA_NA_DAN: "3" });
+  const A = zagon(PORT_A, { GOST_POSTA_PONOVI_MS: "200", GOST_POSTA_TIMEOUT_MS: "400", GOST_POSTA_REZERVA_MS: "0", GOST_POSTA_PREMOR_MS: "100", POTRDILO_BREZ_PLACILA_NA_DAN: "3", GOST_POSTA_ZASTONJ_DNEVNO: "5" });
   // B: rok Resenda 5 s (spodnja meja premora 5 s) in pospravljalec na 200 ms: pocasen Resend (1,5 s) se mora koncati z enim mailom
   const B = zagon(PORT_B, { GOST_POSTA_PONOVI_MS: "200", GOST_POSTA_TIMEOUT_MS: "5000", GOST_POSTA_REZERVA_MS: "0", GOST_POSTA_PREMOR_MS: "100" });
   const api = (m, p, t, b, g) => zahtevek(BA, m, p, t, b, g);
@@ -286,6 +288,40 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(await cakaj(() => mailiNa("gost.zastonj@example.com").length >= 2), "drugi mail z vstopnico NI izpuscen (ni testno narocilo)");
     assert(!/izpuscen|mail na isti naslov/.test(A.log) && mailiNa("gost.zastonj@example.com").every(m => /guest\/order#t=/.test(m.html) && m.attachments), "oba maila imata zeton in prilogo; v dnevniku ni izpusca");
 
+    // Meja mailov za 0 EUR (pregled PR 203, 2. krog): brez potrditve naslova bi napadalec z nakupi na tuje naslove posiljal mail z vstopnico. Najvec 3 na NORMALIZIRAN
+    // naslov na 24 h; nad mejo nakup uspe (guest_token je v odgovoru), mail se izpusti in ne ponavlja.
+    const gostVar = (ev, email) => zahtevek(BA, "POST", `/guest/events/${ev}/orders`, null, { email, quantity: 1, accept_terms: true, terms_version: "2026-10-01" });
+    const mailiVar = () => R.poslano.filter(m => /^gost\.zastonj(\+\w+)?@example\.com$/i.test(String(m.to)));
+    r = await gostVar(evFree, "Gost.Zastonj+x@Example.com");
+    assert(r.status === 201, "gost 0 EUR: tretji nakup istega nabiralnika (+oznaka, velike crke)", r.status);
+    assert(await cakaj(() => mailiVar().length >= 3), "tretji mail poslan (meja je 3 na naslov)", mailiVar().length);
+    r = await gostVar(evFree2, "gost.zastonj+y@example.com");
+    const oSkip = r.body.order.id;
+    assert(r.status === 201 && r.body.order.status === "paid" && r.body.guest_token, "4. nakup istega nabiralnika uspe in vrne guest_token (dostop do vstopnic je v odgovoru)", r.status);
+    assert(await cakaj(async () => (await vrstica(oSkip)).guest_mail_attempts >= 8), "4. mail: poskusi izcrpani (izpuscen, ne ponavlja)", (await vrstica(oSkip)).guest_mail_attempts);
+    await pocakaj(600);
+    v = await vrstica(oSkip);
+    assert(v.guest_mail_sent_at === null && mailiVar().length === 3, "4. mail NI poslan (3 na naslov na 24 h)", [mailiVar().length]);
+    assert(/naslov je v 24 h ze dobil 3 maile/.test(A.log) && !/gost\.zastonj/i.test(A.log), "dnevnik zapise izpust brez e-naslova");
+    // globalna dnevna meja za 0 EUR (instanca A: 5; trije mailu so ze poslani): drugi nov naslov je se OK, tretji izpuscen
+    for (const e of ["zastonj.a@example.com", "zastonj.b@example.com"]) {
+      r = await gostVar(evFree, e);
+      assert(r.status === 201 && await cakaj(() => mailiNa(e).length === 1), `globalna meja: mail na ${e} (do 5)`, r.status);
+    }
+    r = await gostVar(evFree, "zastonj.c@example.com");
+    const oC = r.body.order.id;
+    assert(r.status === 201 && await cakaj(async () => (await vrstica(oC)).guest_mail_attempts >= 8), "globalna meja: 6. brezplacni mail izpuscen (nakup uspe)");
+    await pocakaj(600);
+    assert(mailiNa("zastonj.c@example.com").length === 0 && /dnevna meja mailov gostom za 0 EUR \(5\)/.test(A.log), "globalna meja: mail ni poslan, dnevnik brez naslova");
+    // placano potrdilo (total > 0, ne-testno) NIKOLI ni izpuscen, tudi ko je meja za 0 EUR dosezena
+    r = await gostVar(evPaid[2], "placnik.gost@example.com");
+    const oPl = r.body.order.id, sPl = await sejaOd(oPl);
+    assert(r.status === 201 && sPl, "gost placnik: Stripe nakup (seja)", r.status);
+    S.seje[sPl] = placana(S.seje[sPl], "pi_potr_gost_pl");
+    const wPl = await webhook(BA, "checkout.session.completed", S.seje[sPl]);
+    assert(wPl.status === 200 && await cakaj(() => mailiNa("placnik.gost@example.com").length === 1), "placano potrdilo gosta pride kljub dosezeni meji za 0 EUR");
+    assert(await cakaj(async () => (await vrstica(oPl)).guest_mail_sent_at !== null) && (await vrstica(oPl)).guest_mail_attempts === 1, "placano: en poskus, poslano");
+
     // ================================================================
     console.log("\n# 6. Brez potrdila: guest lista, gost, stara narocila");
     r = await api("POST", "/admin/api/guest-lists", T.admin, { event_id: evLista, user_id: U.gina, spots: 2 });
@@ -345,7 +381,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     await cakaj(async () => (await vrstica(o7c)).receipt_mail_attempts >= 1);   // prvi (neuspeli) poskus je opravljen, preden spremenimo naslov
     await pool.query("UPDATE orders SET buyer_email = 'izbrisan-' || id || '@outly.invalid' WHERE id=$1", [o7c]);
     R.napaka = false;
-    await pocakaj(2500);
+    await cakaj(async () => (await vrstica(o7c)).receipt_mail_attempts >= 8, 10000);   // dogodek, ne cas: pospravljalec izcrpa poskuse (brez cakanja 2,5 s, ki je obcasno padlo)
     v = await vrstica(o7c);
     assert(v.receipt_mail_sent_at === null && v.receipt_mail_attempts === 8 && R.poslano.every(x => !/outly\.invalid/.test(String(x.to))), "izbrisan racun: potrdilo se ne poslje, poskusi izcrpani", [v.receipt_mail_attempts, A.log.slice(-600)]);
     // meja za narocila brez placila: 3 na uporabnika na 24 h
@@ -353,7 +389,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(mailiNa("kim@outly.si").length === 3, "3 testna narocila: 3 potrdila", mailiNa("kim@outly.si").length);
     r = await nakup(T.kim, evTest);
     const o7d = r.body.order.id;
-    await pocakaj(1800);
+    await cakaj(async () => (await vrstica(o7d)).receipt_mail_attempts >= 8, 10000);   // dogodek, ne cas
     v = await vrstica(o7d);
     assert(r.status === 201 && mailiNa("kim@outly.si").length === 3 && v.receipt_mail_attempts === 8 && v.receipt_mail_sent_at === null, "4. testno narocilo: nakup uspe, potrdilo izpuscen (meja)", [mailiNa("kim@outly.si").length, v.receipt_mail_attempts]);
     assert(/meja 3 potrdil na uporabnika/.test(A.log) && !/kim@outly\.si/.test(A.log), "meja zapisana v dnevnik brez e-naslova");
@@ -372,20 +408,23 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(mailiNa("lara@outly.si").length === 1, "natanko en mail (pospravljalec med posiljanjem ni prevzel narocila)", mailiNa("lara@outly.si").length);
     assert(v.receipt_mail_attempts === 1 && v.receipt_mail_sent_at, "baza: en sam poskus", [v.receipt_mail_attempts]);
 
-    // Potrdila kupcem imajo lasten semafor: mail z vstopnicami gostu ne caka za mnozico potrdil
+    // Potrdila kupcem imajo lasten semafor: mail z vstopnicami gostu ne caka za mnozico potrdil. Brez merjenja casa: stub Resenda ZADRZI zahtevke (R.drzi),
+    // dokler jih test ne spusti. Ob 9 potrdilih (semafor 2) in 1 gostu mora biti gostov zahtevek med zadrzanimi, medtem ko vrsta potrdil se ceka.
     await pool.query("TRUNCATE omejitve");
-    R.zamik = 1200;
+    R.drzi = true;
     const zacetek = R.poslano.length;
     const nakupi = [];
     for (let i = 1; i <= 9; i++) nakupi.push(await apiB("POST", `/events/${evTest}/orders`, T["r" + i], { quantity: 1 }));
     assert(nakupi.every(x => x.status === 201), "9 nakupov z racunom v hitrem zaporedju", nakupi.map(x => x.status));
     const g = await zahtevek(BB, "POST", `/guest/events/${evTest}/orders`, null, { email: "prednost@example.com", quantity: 1, accept_terms: true, terms_version: "2026-10-01" });
     assert(g.status === 201, "gost kupi za njimi", g.status);
+    const gostZadrzan = await cakaj(() => R.zadrzani.some(z => z.to === "prednost@example.com"), 4000);   // rok Resenda na B je 5 s: spustimo prej
+    const zadrzaniPotrdil = R.zadrzani.filter(z => z.to !== "prednost@example.com").length;
+    sprosti();
+    assert(gostZadrzan, "mail gostu je v Resendu, medtem ko potrdila se cakajo v vrsti (ne za 9 potrdili)", R.zadrzani.map(z => z.to));
+    assert(zadrzaniPotrdil <= 2, "hkrati najvec 2 potrdili v Resendu (lasten semafor)", zadrzaniPotrdil);
     assert(await cakaj(() => R.poslano.length - zacetek >= 10, 20000), "vseh 10 mailov poslanih", R.poslano.length - zacetek);
-    R.zamik = 0;
     const nov = R.poslano.slice(zacetek);
-    const polozaj = nov.findIndex(m => m.to === "prednost@example.com");
-    assert(polozaj >= 0 && polozaj < 4, "mail gostu pride med prvimi (ne za 9 potrdili): polozaj < 4", polozaj);
     assert(nov.filter(m => m.to !== "prednost@example.com").length === 9, "vseh 9 potrdil poslanih natanko enkrat", nov.length);
   } catch (e) {
     fail++; console.log("  ✗ IZJEMA v testu:", e && e.stack || e);

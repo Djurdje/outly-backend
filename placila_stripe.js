@@ -298,7 +298,19 @@ function ustvari({ pool, naPlacano }) {
       poPlacilu(placano);
     }
     else if (seja.status === "expired") await vTransakciji((c) => prekini(c, seja, "cancelled"));
-    else if (seja.status === "complete") await vTransakciji((c) => oznaciVObdelavi(c, seja));   // odlozeno placilo: pocakaj na async webhook
+    else if (seja.status === "complete") {
+      // Odlozeno placilo (seja opravljena, ni paid): navadno pocakamo na async webhook. Ce je ta izgubljen (Stripe jih po 3 dneh preneha ponavljati),
+      // bi narocilo drzalo zalogo neomejeno, zato preberemo PaymentIntent: `canceled` ali `requires_payment_method` = placilo je padlo -> failed (zaloga prosta).
+      // `processing` / `requires_action` ... = denar je se na poti, ostane v obdelavi.
+      const pi = typeof seja.payment_intent === "string" ? seja.payment_intent : (seja.payment_intent && seja.payment_intent.id) || null;
+      let padlo = false;
+      if (pi) {
+        const st = typeof seja.payment_intent === "object" && seja.payment_intent.status ? seja.payment_intent.status : (await s.paymentIntents.retrieve(pi)).status;
+        padlo = st === "canceled" || st === "requires_payment_method";
+      }
+      if (padlo) await vTransakciji((c) => prekini(c, seja, "failed"));
+      else await vTransakciji((c) => oznaciVObdelavi(c, seja));
+    }
   }
 
   // Narocila, ki cakajo predolgo (izgubljen webhook, padla seja): vprasaj Stripe, kaj je res.

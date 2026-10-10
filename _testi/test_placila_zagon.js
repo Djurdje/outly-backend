@@ -55,7 +55,7 @@ const pocakaj = (ms) => new Promise(r => setTimeout(r, ms));
 const sklop = (n) => !process.env.SKLOP || process.env.SKLOP.split(",").includes(String(n));
 
 // ---------- lazni Stripe ----------
-const S = { racuni: {}, seje: {}, stSej: 0, zahtevkiSej: [], potekle: [], zavrniBranje: false, zamikBranja: 0, branjPoSeji: {} };
+const S = { racuni: {}, seje: {}, stSej: 0, zahtevkiSej: [], potekle: [], zavrniBranje: false, zamikBranja: 0, branjPoSeji: {}, pi: {} };   // pi: id -> status PaymentIntenta (privzeto processing)
 const stripeServer = http.createServer((req, res) => {
   let d = ""; req.on("data", x => d += x);
   req.on("end", () => {
@@ -84,6 +84,7 @@ const stripeServer = http.createServer((req, res) => {
       if (S.seje[m[1]].status !== "open") return odg(400, { error: { type: "invalid_request_error", message: "Only open sessions can be expired" } });
       S.potekle.push(m[1]); S.seje[m[1]].status = "expired"; return odg(200, S.seje[m[1]]);
     }
+    if (req.method === "GET" && (m = u.match(/^\/v1\/payment_intents\/(pi_\w+)$/))) return odg(200, { id: m[1], object: "payment_intent", status: S.pi[m[1]] || "processing" });
     if (req.method === "GET" && (m = u.match(/^\/v1\/accounts\/(acct_\w+)$/))) return S.racuni[m[1]] ? odg(200, S.racuni[m[1]]) : odg(404, { error: { type: "invalid_request_error", message: "No such account" } });
     return odg(404, { error: { type: "invalid_request_error", message: "Lazni Stripe: neznana pot " + req.method + " " + u } });
   });
@@ -457,6 +458,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       assert(r.status === 201, "P gost: 2 od 3");
       r = await gost("gosttest+b@gmail.com", 2);
       assert(r.status === 409 && r.body.error === "free_limit", "P gost: isti nabiralnik z drugo +oznako in brez pike steje skupaj: 409 free_limit", r.body);
+      assert(/at most 3 free tickets/.test(r.body.message) && !/left|\d+ for you/.test(r.body.message), "P gost: sporocilo ne pove, koliko vstopnic ima naslov ze (brez »left for you«)", r.body.message);
       r = await gost("g.o.s.t.t.e.s.t@googlemail.com", 2);
       assert(r.status === 409 && r.body.error === "free_limit", "P gost: googlemail s pikami je isti nabiralnik: 409", r.body);
       r = await gost("gosttest@gmail.com", 1);
@@ -516,14 +518,21 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       assert(x && x.payment_processing === true && x.checkout_expired === false && (S.branjPoSeji[b1.sid] || 0) === prej && !S.potekle.includes(b1.sid), "po roku seje: se vedno v obdelavi, Stripa ne sprasujemo, expire() se ne klice", x);
       r = await api("POST", `/events/${b1.ev}/orders`, T.bor, { quantity: 1 }, { "idempotency-key": b1.k });
       assert(r.status === 409 && r.body.error === "request_in_progress", "ponovitev ključa za narocilo v obdelavi: 409 request_in_progress (ne potekla povezava)", [r.status, r.body]);
-      // I20: tri narocila v obdelavi ne blokirajo novega nakupa istega uporabnika
+      // I20: narocila v obdelavi ne stejejo med »nedokoncana placila« (kupec je svoje opravil), imajo pa lastno mejo 3 na uporabnika (pregled PR 203, 2. krog)
+      const prej409 = (await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE user_id=(SELECT id FROM users WHERE email='bor@outly.si')")).rows[0].n;
       r = await api("POST", `/events/${evProc[4]}/orders`, T.bor, { quantity: 1 });
-      assert(r.status === 201 && r.body.checkout_url, "3 odlozena placila ne stejejo med »nedokoncana placila«: nov nakup 201", [r.status, r.text.slice(0, 100)]);
+      assert(r.status === 409 && /too many payments still processing/.test(r.text), "3 placila v obdelavi: nov placan nakup 409 (lastna meja)", [r.status, r.text.slice(0, 120)]);
+      assert((await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE user_id=(SELECT id FROM users WHERE email='bor@outly.si')")).rows[0].n === prej409, "zavrnjen nakup ne ustvari narocila");
+      r = await api("POST", `/events/${evProc[4]}/orders`, T.ana, { quantity: 1 });
+      assert(r.status === 201 && r.body.checkout_url, "meja velja na uporabnika: drug uporabnik kupi", [r.status, r.text.slice(0, 100)]);
       await pool.query("UPDATE orders SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [r.body.order.id]);
       // async_payment_failed -> failed, async_payment_succeeded -> paid
       const b2 = obdelavi[1], b3 = obdelavi[2];
       let w = await webhook(BS, "checkout.session.async_payment_failed", S.seje[b2.sid]);
       assert(w.status === 200 && (await vrstica(b2.o)).status === "failed", "async_payment_failed: narocilo failed (zaloga prosta)");
+      r = await api("POST", `/events/${evProc[4]}/orders`, T.bor, { quantity: 1 });
+      assert(r.status === 201 && r.body.checkout_url, "2 placili v obdelavi ne blokirata nakupa (ne stejeta med nedokoncana): 201", [r.status, r.text.slice(0, 100)]);
+      await pool.query("UPDATE orders SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [r.body.order.id]);
       S.seje[b3.sid] = { ...S.seje[b3.sid], payment_status: "paid" };
       w = await webhook(BS, "checkout.session.async_payment_succeeded", S.seje[b3.sid]);
       const v3 = await vrstica(b3.o);
@@ -539,6 +548,20 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       assert(obdelan && vP.status === "pending" && !S.potekle.includes(sP), "pospravljalec: odlozeno placilo ostane pending v obdelavi, brez expire()", [vP.status, vP.checkout_url]);
       r = await apiP("GET", "/me/orders", T.cene);
       assert(r.body.find(y => y.id === oP).payment_processing === true, "GET /me/orders: payment_processing true");
+      // izgubljen async_payment_failed: seja complete + unpaid, PaymentIntent pa je padel -> pospravljalec zakljuci kot failed (zaloga prosta), ne drzi je neomejeno
+      for (const [stanje, pricakovano] of [["requires_payment_method", "failed"], ["canceled", "failed"], ["processing", "pending"], ["requires_action", "pending"]]) {
+        r = await apiP("POST", `/events/${evProc[1]}/orders`, T.dana, { quantity: 1 });
+        const oF = r.body.order.id, sF = await sejaOd(oF), piF = "pi_odl_" + stanje;
+        S.seje[sF] = { ...S.seje[sF], status: "complete", payment_status: "unpaid", payment_intent: piF };
+        S.pi[piF] = stanje;
+        await pool.query("UPDATE orders SET checkout_expires_at = NOW() - INTERVAL '10 minutes' WHERE id=$1", [oF]);
+        let konec = false;
+        for (let i = 0; i < 40 && !konec; i++) { await pocakaj(100); const v = await vrstica(oF); konec = v.status !== "pending" || v.checkout_url === null; }
+        const vF = await vrstica(oF);
+        assert(konec && vF.status === pricakovano, `pospravljalec: odlozeno placilo, PaymentIntent ${stanje} -> ${pricakovano}`, [vF.status, vF.checkout_url]);
+        if (pricakovano === "failed") assert(vF.cancelled_at !== null && !S.potekle.includes(sF) && (await pool.query("SELECT COUNT(*)::int AS n FROM tickets WHERE order_id=$1", [oF])).rows[0].n === 0, "failed: brez vstopnic, expire() ni klican");
+        else await pool.query("UPDATE orders SET status='cancelled', cancelled_at=NOW() WHERE id=$1", [oF]);
+      }
     }
   } catch (e) {
     fail++; console.log("  ✗ IZJEMA v testu:", e && e.stack || e);
