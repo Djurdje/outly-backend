@@ -14,8 +14,11 @@
 const http2 = require("http2");
 const crypto = require("crypto");
 
-// Razlogi 400, pri katerih zeton nikoli vec ne bo veljal (410 je neveljaven vedno).
-const NEVELJAVNI_RAZLOGI = new Set(["BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"]);
+// Razlogi 400, pri katerih zeton nikoli vec ne bo veljal (410 je neveljaven vedno). DeviceTokenNotForTopic NI med njimi: to je napaka
+// NASTAVITVE (APNS_TOPIC ne ustreza bundle ID-ju), ne zetona; oznacitev bi ob napacnem topicu pobila vse zetone (opozorilo v dnevnik).
+const NEVELJAVNI_RAZLOGI = new Set(["BadDeviceToken", "Unregistered"]);
+const TIMEOUTOV_ZA_NOVO_SEJO = 3;      // toliko zaporednih zahtevkov brez odgovora, preden se seja zavrze (en visec stream seje ne ubije)
+const VELJA_PRIVZETO_S = 24 * 3600;    // apns-expiration za vsa obvestila, razen kjer je izrecno drugace (strezba 1 h)
 const ZETON_VZOREC = /^[0-9a-fA-F]{64,200}$/;
 const JWT_OSVEZI_S = 50 * 60;          // Apple zavrne JWT starejsi od 60 min; osvezevanje pogosteje kot na 20 min tudi
 const JWT_NAJMANJ_OSVEZITEV_S = 20 * 60;
@@ -42,7 +45,7 @@ const b64u = (o) => Buffer.from(typeof o === "string" ? o : JSON.stringify(o)).t
 
 // Telo obvestila po dogovoru (DOGOVOR_push): loc-key je angleski niz (enak kljucu v iOS Localizable.xcstrings; brez prevoda iOS pokaze angleski niz),
 // outly.type + outly.id povesta aplikaciji, kam ob dotiku. Vsebina nikoli ne nosi e-naslova ali imena kupca/gosta (I27).
-function sestaviObvestilo({ tip, id, naslov, kljuc, argumenti = [], velja = null }) {
+function sestaviObvestilo({ tip, id, naslov, kljuc, argumenti = [], velja = VELJA_PRIVZETO_S }) {
   const telo = {
     aps: {
       alert: { "title-loc-key": naslov, "loc-key": kljuc, "loc-args": argumenti.map((a) => String(a ?? "").slice(0, LOC_ARG_NAJVEC)) },
@@ -115,6 +118,7 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
 
   // --- HTTP/2 seja ---
   let seja = null;
+  let zaporednihTimeoutov = 0;           // zahtevki brez odgovora zapored; vsak prejet odgovor ga ponastavi
   function pozabi(s) { if (seja === s) seja = null; }
   function dobiSejo() {
     if (seja && !seja.closed && !seja.destroyed) return seja;
@@ -131,13 +135,19 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
   // Ena zahteva; resolve vedno (nikoli reject). omrezna = napaka seje/povezave (vredno enega ponovnega poskusa), timeout = brez odgovora.
   function enaZahteva(zeton, obvestilo, sile) {
     return new Promise((resolve) => {
-      let konec = false, req = null, timer = null;
-      const koncaj = (r) => { if (konec) return; konec = true; clearTimeout(timer); resolve(r); };
+      let konec = false, req = null, timer = null, uporabljena = null;
+      // omrezna napaka nosi sejo, na kateri se je zgodila: ponovni poskus je ne sme dobiti nazaj (seja se lahko zapira, a se ni »closed«).
+      const koncaj = (r) => { if (konec) return; konec = true; clearTimeout(timer); if (r.omrezna) r.seja = uporabljena; resolve(r); };
       timer = setTimeout(() => {
         koncaj({ ok: false, status: 0, razlog: "timeout", timeout: true });
         try { if (req) req.close(http2.constants.NGHTTP2_CANCEL); } catch { /* ignoriraj */ }
-        // Brez odgovora je seja najverjetneje mrtva (polodprt TCP): zavrzemo jo, naslednji zahtevek odpre novo.
-        try { const s = seja; if (s) { pozabi(s); s.destroy(); } } catch { /* ignoriraj */ }
+        // Samo ta stream je obvisel: zapremo ga, seja (in do 19 drugih zdravih zahtevkov na njej) ostane. Seja je mrtva (polodprt TCP) sele,
+        // ko jih ni odgovorilo vec zaporednih: tedaj jo zavrzemo in naslednji zahtevek odpre novo.
+        zaporednihTimeoutov++;
+        if (zaporednihTimeoutov >= TIMEOUTOV_ZA_NOVO_SEJO) {
+          zaporednihTimeoutov = 0;
+          try { const s = seja; if (s) { pozabi(s); s.destroy(); } } catch { /* ignoriraj */ }
+        }
       }, timeoutMs);
       try {
         const glave = {
@@ -150,14 +160,17 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
           "content-type": "application/json",
         };
         if (obvestilo.velja) glave["apns-expiration"] = String(Math.floor(Date.now() / 1000) + obvestilo.velja);
-        req = dobiSejo().request(glave);
+        uporabljena = dobiSejo();
+        req = uporabljena.request(glave);
         let status = 0, telo = "";
         req.setEncoding("utf8");
-        req.on("response", (h) => { status = Number(h[":status"]) || 0; });
+        req.on("response", (h) => { status = Number(h[":status"]) || 0; zaporednihTimeoutov = 0; });
         req.on("data", (d) => { if (telo.length < 4096) telo += d; });
         req.on("end", () => {
           let razlog = null;
           if (telo) { try { razlog = JSON.parse(telo).reason || null; } catch { /* ni JSON */ } }
+          // Zaključek brez prejetega :status (seja zavrzena, stream zaprt med prenosom) je omrežna napaka: en ponovni poskus.
+          if (!status) return koncaj({ ok: false, status: 0, razlog: "brez_odgovora", omrezna: true });
           koncaj({ ok: status === 200, status, razlog });
         });
         req.on("error", (e) => koncaj({ ok: false, status: 0, razlog: e && (e.code || e.message) || "napaka", omrezna: true }));
@@ -185,13 +198,16 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
       if (!(await vstopi())) { opozori("vrsta", `[push] vrsta polna (${vrstaNajvec}): obvestila zavrzena`); return { ok: false, status: 0, razlog: "vrsta_polna", neveljaven: false }; }
       try {
         let r = await enaZahteva(zeton, obvestilo, false);
-        if (r.omrezna) r = await enaZahteva(zeton, obvestilo, false);   // prekinjena mirujoca seja: ponovni poskus na novi
+        if (r.omrezna) {                                                 // prekinjena seja: ponovni poskus VEDNO na novi (stara se zapre, drugi zahtevki na njej se dokoncajo)
+          if (r.seja) { pozabi(r.seja); try { r.seja.close(); } catch { /* ze zaprta */ } }
+          r = await enaZahteva(zeton, obvestilo, false);
+        }
         if (r.status === 403 && r.razlog === "ExpiredProviderToken") r = await enaZahteva(zeton, obvestilo, true);
         const neveljaven = r.status === 410 || (r.status === 400 && NEVELJAVNI_RAZLOGI.has(r.razlog));
         if (!r.ok && !neveljaven) {
-          const poSeji = r.status === 403 ? "kljuc" : "drugo";
-          opozori("zavrnitev:" + r.status + ":" + r.razlog, `[push] APNs: status ${r.status || "brez odgovora"} razlog ${r.razlog || "?"}` +
-            (poSeji === "kljuc" ? " (preveri APNS_KEY_ID, APNS_TEAM_ID in APNS_KEY_P8 na Renderju; ob preklicu kljuca je treba nov kljuc)" : ""));
+          const namig = r.status === 403 ? " (preveri APNS_KEY_ID, APNS_TEAM_ID in APNS_KEY_P8 na Renderju; ob preklicu kljuca je treba nov kljuc)"
+            : r.razlog === "DeviceTokenNotForTopic" ? ` (preveri APNS_TOPIC = bundle ID aplikacije, zdaj ${topic}; zetonov NE oznacujem kot neveljavnih)` : "";
+          opozori("zavrnitev:" + r.status + ":" + r.razlog, `[push] APNs: status ${r.status || "brez odgovora"} razlog ${r.razlog || "?"}${namig}`);
         }
         return { ok: r.ok, status: r.status, razlog: r.razlog || null, neveljaven };
       } finally { izstopi(); }

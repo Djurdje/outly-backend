@@ -94,9 +94,16 @@ apnsStreznik.on("stream", (stream, glave) => {
     if (v === "hang") { viseci.add(stream); return; }
     if (v === "reset") { seja.destroy(); return; }
     const odgovor = (status, razlog) => {
-      stream.respond({ ":status": status, "content-type": "application/json" });
-      stream.end(razlog ? JSON.stringify({ reason: razlog }) : "");
+      try {
+        stream.respond({ ":status": status, "content-type": "application/json" });
+        stream.end(razlog ? JSON.stringify({ reason: razlog }) : "");
+      } catch { /* stream je ze zaprt (seja zavrzena) */ }
     };
+    if (v.zakasni) return setTimeout(() => odgovor(200), v.zakasni);            // odgovor 200 po zakasnitvi (ms)
+    if (v.prekiniEnkrat) {                                                    // prvi tak zahtevek: seja se zapre po 300 ms; ponovni poskus uspe
+      if (!v.sprozeno) { v.sprozeno = true; setTimeout(() => { try { seja.destroy(); } catch { /* ze zaprta */ } }, 300); return; }
+      return odgovor(200);
+    }
     if (v === "ok") return odgovor(200);
     if (v === "500") return odgovor(500, "InternalServerError");
     return odgovor(v.status, v.reason);
@@ -124,6 +131,12 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
   });
   const brez = zazeni(PORT_BREZ, { APNS_HOST: `https://localhost:${APNS_PORT}`, NODE_EXTRA_CA_CERTS: path.join(mapa, "c.pem") });   // brez kljucev: push izklopljen
   for (const b of [BASE, BASE_BREZ]) for (let i = 0; i < 100; i++) { try { await fetch(b + "/"); break; } catch { await cakaj(100); } }
+  // Deterministicno cakanje: backend ob koncu VSAKEGA posiljanja zapise »[push] <vrsta>: N naprav, ...« (po vseh odgovorih APNs in po oznacitvi neveljavnih),
+  // ob zavrnitvi pred posiljanjem pa »[push] <vrsta>: preskoceno ...«. Test pocaka na vrstico namesto na fiksen cas in sele nato trdi »pusha ni«.
+  const stPush = (tip) => (srv.log.match(new RegExp("\\[push\\] " + tip + ": \\d+ naprav", "g")) || []).length;
+  const stPreskoceno = (tip) => (srv.log.match(new RegExp("\\[push\\] " + tip + ": preskoceno", "g")) || []).length;
+  const pocakajPush = (tip, prej, n = 1) => pocakaj(() => stPush(tip) >= prej + n, 12000);
+  const pocakajPreskok = (tip, prej, n = 1) => pocakaj(() => stPreskoceno(tip) >= prej + n, 12000);
 
   try {
     const imena = ["lastnik", "manager", "doorman", "natakar", "tujnatakar", "tujlastnik", "kupec", "kupec2", "prejemnik", "sledilec", "sledilec2", "nesledilec", "admin", "gostitelj", "povabljenec"];
@@ -184,7 +197,19 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     for (let i = 1; i <= 62; i++) { zadnji = await api("DELETE", `/me/devices/${zet("omejitev")}`, T.kupec, undefined, fiksen); if (zadnji.status === 429 && !prva429) prva429 = i; }
     assert(prva429 === 61 && zadnji.status === 429, "omejevalnik: 61. zahtevek z istega IP -> 429", [prva429, zadnji.status]);
     await pool.query("TRUNCATE omejitve");
-    // Izbris racuna pobrise naprave (kaskada): tecken v ločenem sklopu spodaj (uporabnik brez klubov).
+    // Najvec 10 zetonov na uporabnika: ob 11. in 12. registraciji se izbrisejo NAJSTAREJSI (po last_seen_at), tuji zetoni ostanejo.
+    r = await api("POST", "/me/devices", T.kupec, { token: zet("kupec-tuj") });
+    assert(r.status === 200, "kupec ima 1 zeton (tuj za preizkus meje)");
+    for (let i = 0; i < 12; i++) { r = await api("POST", "/me/devices", T.sledilec2, { token: zet("m" + i) }); assert(r.status === 200, `sledilec2 registrira zeton m${i}`, r.body); }
+    vrst = (await pool.query("SELECT token FROM device_tokens WHERE user_id=$1", [U.sledilec2])).rows.map(x => x.token).sort();
+    assert(vrst.length === 10 && JSON.stringify(vrst) === JSON.stringify(Array.from({ length: 10 }, (_, i) => zet("m" + (i + 2))).sort()), "najvec 10 zetonov na uporabnika: ostane 10 NAJNOVEJSIH (m2..m11), m0 in m1 pobrisana", vrst.map(t => t.slice(0, 6)));
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE user_id=$1", [U.kupec])).rows[0].n === 1, "meja 10 ne brise zetonov drugih uporabnikov");
+    r = await api("POST", "/me/devices", T.sledilec2, { token: zet("m5") });
+    assert(r.status === 200 && (await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE user_id=$1", [U.sledilec2])).rows[0].n === 10, "ponovna registracija obstojecega zetona ne brise nicesar (se vedno 10)");
+    r = await api("POST", "/me/devices", T.sledilec2, { token: zet("m12") });
+    vrst = (await pool.query("SELECT token FROM device_tokens WHERE user_id=$1", [U.sledilec2])).rows.map(x => x.token);
+    assert(vrst.length === 10 && !vrst.includes(zet("m2")) && vrst.includes(zet("m5")) && vrst.includes(zet("m12")), "po osvezenem m5 in novem m12 odpade najstarejsi (m2), osvezeni m5 ostane", vrst.map(t => t.slice(0, 6)));
+    await pool.query("DELETE FROM device_tokens WHERE user_id IN ($1, $2)", [U.sledilec2, U.kupec]);   // sledilec2 mora ostati brez naprav (objava dogodka), kupec brez tujega zetona
 
     // ------------------------------------------------------------------------------------------------------------------
     console.log("\n# Priprava: tloris, dogodek, kupci VIP miz, naprave");
@@ -230,13 +255,13 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     console.log("\n# (c) Strezba VIP mize: lastnik + manager + natakar, NE vratar / kupec / tuj natakar");
     zahteve.length = 0;
     const skeniraj = async (tok, qr) => { const t0 = Date.now(); const x = await api("POST", "/business/tickets/scan", tok, { qr }); x.ms = Date.now() - t0; return x; };
+    let p0 = stPush("table_service");
     r = await skeniraj(T.doorman, qrZa(O[0])[0].qr);
     assert(r.status === 200 && r.body.result === "ok" && r.body.table_service_created === true, "vratar skenira VIP vstopnico T1 -> ok, table_service_created", r.body);
     assert(!("table_service_id" in r.body) && !("table_service_id" in r.body.ticket), "odgovor skena ostane enak: brez novega polja table_service_id");
     const S1 = (await pool.query("SELECT id FROM table_service WHERE order_id=$1", [O[0]])).rows[0].id;
     const prvi = ["L1", "M1", "M2-410", "N1", "N2-bad", "N3-topic", "N4-badtopic", "N5-500"];
-    assert(await pocakaj(() => zahteve.length >= prvi.length), "APNs je prejel push", zahteve.length);
-    await cakaj(500);
+    assert(await pocakajPush("table_service", p0), "backend je koncal posiljanje (povzetek v dnevniku)");
     assert(JSON.stringify(zetoniPo(zahteve)) === JSON.stringify(pricakovani(...prvi)), "prejemniki: lastnik (1) + manager (2) + natakar (5 naprav); NIC vratar, kupca, tujega natakarja/lastnika", zahteve.map(z => z.zeton.slice(0, 6)));
     const z0 = zahteve.find(z => z.zeton === zet("L1"));
     assert(z0.json.outly.type === "table_service" && z0.json.outly.id === S1 && typeof z0.json.outly.id === "number", "payload: outly.type table_service, outly.id = id strezbe (stevilo)", z0.json);
@@ -248,7 +273,7 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     const g0 = z0.glave;
     assert(g0[":method"] === "POST" && g0[":path"] === `/3/device/${zet("L1")}` && g0["apns-topic"] === "si.outly.app" && g0["apns-push-type"] === "alert" && g0["apns-priority"] === "10",
       "(a) glave: POST /3/device/<zeton>, apns-topic si.outly.app, apns-push-type alert, apns-priority 10", g0);
-    assert(/^\d+$/.test(g0["apns-expiration"]) && Number(g0["apns-expiration"]) > Date.now() / 1000 && Number(g0["apns-expiration"]) <= Date.now() / 1000 + 3700, "(a) strezba ima apns-expiration (~1 h)", g0["apns-expiration"]);
+    assert(/^\d+$/.test(g0["apns-expiration"]) && Number(g0["apns-expiration"]) > Date.now() / 1000 + 3000 && Number(g0["apns-expiration"]) <= Date.now() / 1000 + 3700, "(a) strezba ima apns-expiration (~1 h)", g0["apns-expiration"]);
     const auth = String(g0.authorization);
     assert(auth.startsWith("bearer "), "(a) authorization: bearer <jwt>", auth.slice(0, 12));
     const [jh, jp, js] = auth.slice(7).split(".");
@@ -259,60 +284,81 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     assert(podpis.length === 64, "(a) podpis je 64 bajtov (ieee-p1363), NE DER", podpis.length);
     assert(crypto.verify("sha256", Buffer.from(jh + "." + jp), { key: apnsKljuc.publicKey, dsaEncoding: "ieee-p1363" }, podpis), "(a) podpis JWT se preveri z JAVNIM ključem APNs ključa");
     assert(zahteve.every(z => z.glave.authorization === auth), "(a) JWT je predpomnjen: vsi zahtevki isti zeton");
-    // druga vstopnica istega narocila: NIC
+    // (b) neveljavni so oznaceni ze, ko je v dnevniku povzetek 1. pusha (UPDATE je pred zapisom): 410 Unregistered in 400 BadDeviceToken
+    const neveljavni = (await pool.query("SELECT token FROM device_tokens WHERE invalid_at IS NOT NULL ORDER BY token")).rows.map(x => x.token);
+    assert(JSON.stringify(neveljavni) === JSON.stringify(pricakovani("M2-410", "N2-bad")), "(b) neveljavni: 410 Unregistered, 400 BadDeviceToken; NE DeviceTokenNotForTopic (napaka nastavitve), NE BadTopic, NE 500", neveljavni.map(t => t.slice(0, 6)));
+    // Druga vstopnica istega narocila: NIC. Negativna trditev je vezana na pozitiven push, ki gre za njim (sken T2): sele ko je njegov povzetek v dnevniku,
+    // preverimo, da so vsi zahtevki od T2 (push druge vstopnice bi imel oznako T1).
     zahteve.length = 0;
     r = await skeniraj(T.doorman, qrZa(O[0])[1].qr);
     assert(r.status === 200 && r.body.table_service_created === false, "druga vstopnica istega narocila: ok, table_service_created = false");
-    // (b) 410 in 400: invalid_at; naslednji push jim ne gre
-    assert(await pocakaj(async () => (await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE invalid_at IS NOT NULL")).rows[0].n >= 3, 4000), "(b) po 1. pushu so neveljavni oznaceni v bazi");
-    const neveljavni = (await pool.query("SELECT token FROM device_tokens WHERE invalid_at IS NOT NULL ORDER BY token")).rows.map(x => x.token);
-    assert(JSON.stringify(neveljavni) === JSON.stringify(pricakovani("M2-410", "N2-bad", "N3-topic")), "(b) neveljavni: 410 Unregistered, 400 BadDeviceToken, 400 DeviceTokenNotForTopic; NE BadTopic in NE 500", neveljavni.map(t => t.slice(0, 6)));
-    assert(zahteve.length === 0, "druga vstopnica istega narocila ni sprozila pusha", zahteve.length);
+    p0 = stPush("table_service");
     r = await skeniraj(T.doorman, qrZa(O[1])[0].qr);
     assert(r.status === 200 && r.body.table_service_created === true, "sken T2 (drugo narocilo) -> nova strezba");
-    const cakanih = ["L1", "M1", "N1", "N4-badtopic", "N5-500"];
-    assert(await pocakaj(() => zahteve.length >= cakanih.length), "(b) 2. push prispe", zahteve.length);
-    await cakaj(500);
-    assert(JSON.stringify(zetoniPo(zahteve)) === JSON.stringify(pricakovani(...cakanih)), "(b) 2. push NE gre na M2-410, N2-bad, N3-topic; gre na veljavne in na zacasno neuspele", zahteve.map(z => z.zeton.slice(0, 6)));
-    assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE invalid_at IS NOT NULL")).rows[0].n === 3, "(b) BadTopic in 500 zetona NE oznacita kot neveljavnega");
+    const cakanih = ["L1", "M1", "N1", "N3-topic", "N4-badtopic", "N5-500"];
+    assert(await pocakajPush("table_service", p0), "(b) 2. push: povzetek v dnevniku");
+    assert(JSON.stringify(zetoniPo(zahteve)) === JSON.stringify(pricakovani(...cakanih)), "(b) 2. push NE gre na M2-410 in N2-bad; gre na veljavne in na zacasno neuspele (tudi DeviceTokenNotForTopic)", zahteve.map(z => z.zeton.slice(0, 6)));
+    assert(zahteve.every(z => z.json.aps.alert["loc-args"][0] === "T2"), "druga vstopnica istega narocila ni sprozila pusha (vsi zahtevki so za T2)", zahteve.map(z => z.json.aps.alert["loc-args"][0]));
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE invalid_at IS NOT NULL")).rows[0].n === 2, "(b) DeviceTokenNotForTopic, BadTopic in 500 zetona NE oznacijo kot neveljavnega");
+    assert(/\[push\] APNs: status 400 razlog DeviceTokenNotForTopic \(preveri APNS_TOPIC/.test(srv.log), "DeviceTokenNotForTopic: opozorilo o nastavitvi topica v dnevniku");
     // ponovna registracija vrne M2-410
     r = await api("POST", "/me/devices", T.manager, { token: zet("M2-410") });
     assert(r.status === 200 && (await pool.query("SELECT invalid_at FROM device_tokens WHERE token=$1", [zet("M2-410")])).rows[0].invalid_at === null, "(b) ponovna registracija postavi invalid_at na NULL");
     zahteve.length = 0;
+    p0 = stPush("table_service");
     r = await skeniraj(T.doorman, qrZa(O[2])[0].qr);
     assert(r.body.table_service_created === true, "sken T3 -> nova strezba");
-    assert(await pocakaj(() => zahteve.length >= 6), "(b) push za T3 prispe (L1, M1, M2-410, N1, N4, N5)", zahteve.length);
-    await cakaj(500);
+    assert(await pocakajPush("table_service", p0), "(b) push za T3: povzetek v dnevniku");
     assert(urejeniZahtevki(zet("M2-410")).length === 1, "(b) po ponovni registraciji M2-410 spet dobi push (in ga 410 zopet oznaci)");
     // sken brez povezave
     zahteve.length = 0;
     let n = 0;
     const sken = (qr, minut) => ({ client_scan_id: `cs-push-${++n}`, qr, scanned_at: new Date(Date.now() - minut * 60000).toISOString(), device_id: "telefon-push-1" });
+    p0 = stPush("table_service");
     r = await api("POST", "/business/tickets/scan-batch", T.doorman, { scans: [sken(qrZa(O[3])[0].qr, 5), sken(qrZa(O[3])[1].qr, 5), sken(qrZa(O[4])[0].qr, 4)] });
     assert(r.status === 200 && r.body.results.every(x => x.result === "ok") && r.body.results[0].table_service_created === true && r.body.results[1].table_service_created === false, "scan-batch: 2 novi strezbi (T4, T5), druga vstopnica T4 ne", r.body.results);
     assert(!JSON.stringify(r.body).includes("table_service_id"), "odgovor scan-batch brez table_service_id");
-    assert(await pocakaj(() => zahteve.length >= 10, 6000), "scan-batch: push za vsako novo strezbo (T4, T5)", zahteve.length);
-    await cakaj(400);
+    assert(await pocakajPush("table_service", p0, 2), "scan-batch: push za vsako novo strezbo (T4, T5): 2 povzetka v dnevniku");
     const poOznaki = (oznaka) => zahteve.filter(z => z.json.aps.alert["loc-args"][0] === oznaka);
-    assert(poOznaki("T4").length >= 5 && poOznaki("T5").length >= 5 && zahteve.every(z => ["T4", "T5"].includes(z.json.aps.alert["loc-args"][0])), "scan-batch: obvestila za T4 in T5, ne za drugo vstopnico T4", zahteve.map(z => z.json.aps.alert["loc-args"][0]));
+    assert(poOznaki("T4").length === 6 && poOznaki("T5").length === 6 && zahteve.every(z => ["T4", "T5"].includes(z.json.aps.alert["loc-args"][0])), "scan-batch: obvestila za T4 in T5, ne za drugo vstopnico T4", zahteve.map(z => z.json.aps.alert["loc-args"][0]));
     // Star sken brez povezave (2 h): strezba nastane, push ne (zastarelo)
     await pool.query("UPDATE tickets SET created_at = NOW() - INTERVAL '5 hours' WHERE order_id = $1", [O[5]]);
     zahteve.length = 0;
+    let q0 = stPreskoceno("table_service");
     r = await api("POST", "/business/tickets/scan-batch", T.doorman, { scans: [sken(qrZa(O[5])[0].qr, 120)] });
     assert(r.status === 200 && r.body.results[0].result === "ok" && r.body.results[0].table_service_created === true, "star sken brez povezave (2 h): strezba nastane");
-    await cakaj(800);
+    assert(await pocakajPreskok("table_service", q0), "zastarela strezba: backend zapise »preskoceno«");
     assert(zahteve.length === 0, "zastarela strezba (sken star 2 h) pusha NE sprozi", zahteve.length);
     // Seznam ostane: strezba je v bazi
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM table_service")).rows[0].n === 6, "v bazi je 6 strezb (T1-T6)");
     // vloga iz baze ob posiljanju: odstranjen natakar ne dobi vec
     await pool.query("DELETE FROM club_members WHERE user_id = $1", [U.natakar]);
     zahteve.length = 0;
+    p0 = stPush("table_service");
     r = await skeniraj(T.doorman, qrZa(O[6])[0].qr);
     assert(r.body.table_service_created === true, "sken T7 -> nova strezba");
-    assert(await pocakaj(() => zahteve.length >= 2), "push po odstranitvi natakarja prispe");
-    await cakaj(400);
-    assert(zahteve.every(z => [zet("L1"), zet("M1"), zet("M2-410")].includes(z.zeton)), "odstranjen natakar (clanstvo v bazi) push NE dobi vec (vloga ob posiljanju, I5)", zahteve.map(z => z.zeton.slice(0, 6)));
+    assert(await pocakajPush("table_service", p0), "push po odstranitvi natakarja: povzetek v dnevniku");
+    assert(zahteve.length === 2 && zahteve.every(z => [zet("L1"), zet("M1")].includes(z.zeton)), "odstranjen natakar (clanstvo v bazi) push NE dobi vec (vloga ob posiljanju, I5)", zahteve.map(z => z.zeton.slice(0, 6)));
     await pool.query("INSERT INTO club_members (club_id, user_id, role) VALUES (1, $1, 'bartender')", [U.natakar]);
+    // Strezba, ki je v zvoncu se ne bi bilo (dogodek zacne cez 10 h; zvonec od 2 h pred zacetkom): push se ne poslje, seznam strezbe pa ostane enak kot doslej.
+    const E6 = (await pool.query(
+      `INSERT INTO events (club_id, title, poster_url, start_at, status, ticket_price_cents, capacity, vip_enabled)
+       VALUES (1, 'Push zgodnji', 'https://example.com/p.jpg', NOW() + INTERVAL '10 hours', 'published', 1500, 100, FALSE) RETURNING id`)).rows[0].id;
+    await api("PUT", `/business/events/${E6}/vip`, T.lastnik, { enabled: true });
+    r = await api("POST", `/events/${E6}/tables/${M[0]}/orders`, T.kupec, { package_id: P1 });
+    assert(r.status === 201, "nakup mize na dogodku, ki se zacne cez 10 h", r.body);
+    const O6 = r.body.order.id;
+    const qr6 = (await api("GET", "/me/tickets", T.kupec)).body.find(t => t.order_id === O6 && t.is_vip).qr;
+    zahteve.length = 0;
+    q0 = stPreskoceno("table_service");
+    r = await skeniraj(T.doorman, qr6);
+    assert(r.status === 200 && r.body.result === "ok" && r.body.table_service_created === true, "sken 10 h pred zacetkom: ok, strezba nastane", r.body);
+    assert(await pocakajPreskok("table_service", q0), "sken 10 h pred zacetkom: backend zapise »preskoceno« (strezba ni vidna v zvoncu)");
+    assert(zahteve.length === 0, "sken 10 h pred zacetkom: NOBEN push", zahteve.length);
+    r = await api("GET", "/me/table-service", T.natakar);
+    assert(r.status === 200 && r.body.items.every(x => x.event_id !== E6), "zvonec (GET /me/table-service) strezbe te dogodka se ne kaze, kot doslej", r.body.items.map(x => x.event_id));
+    r = await api("GET", `/business/events/${E6}/table-service`, T.natakar);
+    assert(r.status === 200 && r.body.items.length === 1, "seznam strezbe dogodka (ni vezan na okno) jo kaze, kot doslej", r.body);
 
     // ------------------------------------------------------------------------------------------------------------------
     console.log("\n# (d) Prenos vstopnice, objava dogodka, vabilo na guest listo");
@@ -321,15 +367,16 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     assert(r.status === 201, "kupec kupi 2 navadni vstopnici", r.body);
     const nav = (await api("GET", "/me/tickets", T.kupec)).body.filter(t => !t.is_vip && t.event_id === E1);
     zahteve.length = 0;
+    const veljaH = (z) => (Number(z.glave["apns-expiration"]) - Date.now() / 1000) / 3600;   // ure do izteka
+    p0 = stPush("ticket_received");
     r = await api("POST", `/tickets/${nav[0].id}/transfer`, T.kupec, { email: "prejemnik@outly.si" });
     assert(r.status === 200 && r.body.result === "ok", "prenos vstopnice prejemniku z racunom -> 200", r.body);
-    assert(await pocakaj(() => zahteve.length >= 1), "prenos: push prispe");
-    await cakaj(400);
+    assert(await pocakajPush("ticket_received", p0), "prenos: povzetek pusha v dnevniku");
     assert(zahteve.length === 1 && zahteve[0].zeton === zet("P1"), "prenos: push SAMO na napravo prejemnika (ne posiljatelj, ne tretji)", zahteve.map(z => z.zeton.slice(0, 6)));
     const pr = zahteve[0].json;
     assert(pr.outly.type === "ticket_received" && pr.outly.id === nav[0].id && pr.aps.alert["loc-key"] === "%@ sent you a ticket" && JSON.stringify(pr.aps.alert["loc-args"]) === JSON.stringify(["kupec"]) && pr.aps.alert["title-loc-key"] === "New ticket",
       "prenos: type ticket_received, id = vstopnica, loc-key, loc-args [uporabnisko ime posiljatelja]", pr);
-    assert(!zahteve[0].glave["apns-expiration"], "prenos: brez apns-expiration");
+    assert(veljaH(zahteve[0]) > 23.8 && veljaH(zahteve[0]) <= 24.01, "prenos: apns-expiration izrecno 24 h", veljaH(zahteve[0]));
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM ticket_transfers WHERE to_user_id=$1 AND seen_at IS NULL", [U.prejemnik])).rows[0].n === 1, "prenos: vrstica v zvoncu (ticket_transfers, seen_at NULL) je se vedno tu");
     // d2: objava dogodka sledilcem
     r = await api("PUT", "/clubs/1/follow", T.sledilec);
@@ -337,37 +384,43 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     await api("PUT", "/clubs/1/follow", T.sledilec2);
     zahteve.length = 0;
     const cezTeden = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+    p0 = stPush("club_event");
     r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Nov Dogodek", startAt: cezTeden, ticketPriceCents: 1000, capacity: 100, minAge: 0 });
     assert(r.status === 201, "klub objavi dogodek (published)", r.body);
     const E2 = r.body.id;
-    assert(await pocakaj(() => zahteve.length >= 1), "objava: push prispe");
-    await cakaj(400);
+    assert(await pocakajPush("club_event", p0), "objava: povzetek pusha v dnevniku");
     assert(zahteve.length === 1 && zahteve[0].zeton === zet("S1"), "objava: push SAMO na napravo sledilca (sledilec2 brez naprave, nesledilec ne)", zahteve.map(z => z.zeton.slice(0, 6)));
     const ob = zahteve[0].json;
     assert(ob.outly.type === "club_event" && ob.outly.id === E2 && ob.aps.alert["loc-key"] === "%@ posted a new event: %@" && JSON.stringify(ob.aps.alert["loc-args"]) === JSON.stringify(["Pure Club", "Nov Dogodek"]) && ob.aps.alert["title-loc-key"] === "New event",
       "objava: type club_event, id = dogodek, loc-args [klub, naslov]", ob);
+    assert(veljaH(zahteve[0]) > 23.8 && veljaH(zahteve[0]) <= 24.01, "objava: apns-expiration izrecno 24 h", veljaH(zahteve[0]));
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM club_event_notifications WHERE event_id=$1", [E2])).rows[0].n === 2, "objava: 2 vrstici v zvoncu (oba sledilca)");
     // osnutek -> objavljen (PATCH) = push; ponovna objava (draft -> published) ne podvoji
     r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Osnutek", startAt: cezTeden, ticketPriceCents: 1000, capacity: 100, minAge: 0, status: "draft" });
     assert(r.status === 201 && r.body.status === "draft", "osnutek", r.body);
     const E3 = r.body.id;
     zahteve.length = 0;
-    await cakaj(500);
-    assert(zahteve.length === 0, "osnutek pusha ne sprozi", zahteve.length);
+    // Osnutek pusha ne sprozi: trditev je vezana na pozitiven push, ki gre za njim (objava osnutka): v zahtevkih mora biti natanko 1.
+    p0 = stPush("club_event");
     r = await api("PATCH", `/events/${E3}`, T.lastnik, { status: "published" });
     assert(r.status === 200 && r.body.status === "published", "osnutek -> objavljen (PATCH)", r.body);
-    assert(await pocakaj(() => zahteve.length >= 1), "PATCH objava: push prispe");
-    await cakaj(300);
+    assert(await pocakajPush("club_event", p0), "PATCH objava: povzetek pusha v dnevniku");
     assert(zahteve.length === 1 && zahteve[0].json.outly.id === E3 && zahteve[0].json.aps.alert["loc-args"][1] === "Osnutek", "PATCH objava: 1 push z naslovom dogodka", zahteve.map(z => z.json));
     zahteve.length = 0;
     await api("PATCH", `/events/${E3}`, T.lastnik, { status: "draft" });
     await api("PATCH", `/events/${E3}`, T.lastnik, { status: "published" });
-    await cakaj(800);
-    assert(zahteve.length === 0, "ponovna objava (draft -> published): v zvoncu ni nove vrstice, zato tudi pusha ne", zahteve.length);
-    // skriti klub
+    // Ponovna objava: obvestiSledilce ne vstavi nove vrstice, zato push sploh ni poklican. Pozitivna zveza: naslednja prava objava; po njenem povzetku
+    // v zahtevkih ne sme biti nicesar od »Osnutek«.
+    p0 = stPush("club_event");
+    r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Zaporedje", startAt: cezTeden, ticketPriceCents: 1000, capacity: 100, minAge: 0 });
+    assert(await pocakajPush("club_event", p0), "naslednja objava: povzetek pusha v dnevniku");
+    assert(zahteve.length === 1 && zahteve[0].json.aps.alert["loc-args"][1] === "Zaporedje", "ponovna objava (draft -> published): v zvoncu ni nove vrstice, zato tudi pusha ne (v zahtevkih le »Zaporedje«)", zahteve.map(z => z.json.aps.alert["loc-args"]));
+    // skriti klub: backend zapise »preskoceno«
     await pool.query("UPDATE clubs SET hidden = TRUE WHERE id = 1");
+    zahteve.length = 0;
+    q0 = stPreskoceno("club_event");
     r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Skrit", startAt: cezTeden, ticketPriceCents: 1000, capacity: 100, minAge: 0 });
-    await cakaj(800);
+    assert(await pocakajPreskok("club_event", q0), "skriti klub: backend zapise »preskoceno«");
     assert(zahteve.length === 0, "skriti klub: objava pusha ne sprozi", zahteve.length);
     await pool.query("UPDATE clubs SET hidden = FALSE WHERE id = 1");
     // d3: guest lista
@@ -375,15 +428,16 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     assert(r.status === 201, "admin ustvari guest listo", r.body);
     const GL = r.body.guest_list.id;
     zahteve.length = 0;
+    p0 = stPush("guest_list_invite");
     r = await api("POST", `/me/guest-lists/${GL}/invites`, T.gostitelj, { user_ids: [U.povabljenec] });
     assert(r.status === 201, "gostitelj povabi prijatelja", r.body);
     const clan = (await pool.query("SELECT id, ticket_id FROM guest_list_members WHERE guest_list_id=$1 AND user_id=$2", [GL, U.povabljenec])).rows[0];
-    assert(await pocakaj(() => zahteve.length >= 1), "vabilo: push prispe");
-    await cakaj(400);
+    assert(await pocakajPush("guest_list_invite", p0), "vabilo: povzetek pusha v dnevniku");
     assert(zahteve.length === 1 && zahteve[0].zeton === zet("V1"), "vabilo: push SAMO na napravo povabljenca (ne gostitelj)", zahteve.map(z => z.zeton.slice(0, 6)));
     const gv = zahteve[0].json;
     assert(gv.outly.type === "guest_list_invite" && gv.outly.id === Number(clan.ticket_id) && gv.aps.alert["loc-key"] === "%@ added you to their guest list" && JSON.stringify(gv.aps.alert["loc-args"]) === JSON.stringify(["gostitelj"]) && gv.aps.alert["title-loc-key"] === "Guest list",
       "vabilo: type guest_list_invite, id = id VSTOPNICE povabljenca, loc-args [uporabnisko ime gostitelja]", gv);
+    assert(veljaH(zahteve[0]) > 23.8 && veljaH(zahteve[0]) <= 24.01, "vabilo: apns-expiration izrecno 24 h", veljaH(zahteve[0]));
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM guest_list_members WHERE user_id=$1 AND seen_at IS NULL AND removed_at IS NULL", [U.povabljenec])).rows[0].n === 1, "vabilo: vrstica v zvoncu (guest_list_members, seen_at NULL) je se vedno tu");
 
     // ------------------------------------------------------------------------------------------------------------------
@@ -400,6 +454,7 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     await pool.query("UPDATE device_tokens SET invalid_at = NULL");   // vsi zetoni spet veljavni
     // f1: APNs sprejme zahtevek, a ne odgovori
     rezim = "hang"; zahteve.length = 0;
+    p0 = stPush("table_service");
     r = await skeniraj(T.doorman, qr4(0));
     assert(r.status === 200 && r.body.result === "ok" && r.body.table_service_created === true, "(f) APNs visi: sken -> 200 ok, strezba nastane", r.body);
     assert(r.ms < APNS_TIMEOUT_MS - 800, `(f) sken NE caka na push (${r.ms} ms < ${APNS_TIMEOUT_MS - 800} ms; rok APNs je ${APNS_TIMEOUT_MS} ms)`, r.ms);
@@ -409,31 +464,129 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     r = await skeniraj(T.doorman, qr4(1));
     assert(m.status === 200 && Date.now() - t1 < 1500, "(f) med visecim APNs GET /me in drugi sken odgovorita takoj", Date.now() - t1);
     assert(r.status === 200 && r.body.table_service_created === true && r.ms < APNS_TIMEOUT_MS - 800, `(f) drugi sken med visecim APNs: 200 (${r.ms} ms)`, r.ms);
-    await cakaj(APNS_TIMEOUT_MS + 1500);
+    assert(await pocakajPush("table_service", p0, 2), "(f) po izteku roka APNs sta oba povzetka pusha v dnevniku (timeout je zakljucil posiljanje)");
     assert(zahteve.length > 0 && (await api("GET", "/me", T.lastnik)).status === 200, "(f) po izteku roka APNs je backend zdrav");
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE invalid_at IS NOT NULL")).rows[0].n === 0, "(f) timeout zetonov NE oznaci kot neveljavnih");
     for (const s of viseci) { try { s.close(); } catch { /* ze zaprt */ } }
     viseci.clear();
     // f2: APNs vrne 500
     rezim = "500"; zahteve.length = 0;
+    p0 = stPush("table_service");
     r = await skeniraj(T.doorman, qr4(2));
     assert(r.status === 200 && r.body.table_service_created === true && r.ms < 1500, `(f) APNs 500: sken 200 (${r.ms} ms)`, r.body);
-    assert(await pocakaj(() => zahteve.length >= 1), "(f) push poskusen, APNs je odgovoril 500");
-    await cakaj(500);
+    assert(await pocakajPush("table_service", p0) && zahteve.length >= 1, "(f) push poskusen, APNs je odgovoril 500 (povzetek v dnevniku)");
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE invalid_at IS NOT NULL")).rows[0].n === 0, "(f) 500 zetonov NE oznaci kot neveljavnih");
     // f3: APNs prekine povezavo
     rezim = "reset"; zahteve.length = 0;
+    p0 = stPush("table_service");
     r = await skeniraj(T.doorman, qr4(3));
     assert(r.status === 200 && r.body.table_service_created === true && r.ms < 1500, `(f) APNs prekine povezavo: sken 200 (${r.ms} ms)`, r.body);
-    assert(await pocakaj(() => zahteve.length >= 1), "(f) push poskusen, povezava prekinjena");
-    await cakaj(1500);
+    assert(await pocakajPush("table_service", p0) && zahteve.length >= 1, "(f) push poskusen, povezava prekinjena (povzetek v dnevniku)");
     assert((await api("GET", "/me", T.lastnik)).status === 200, "(f) backend po prekinjeni povezavi z APNs zdrav");
     // f4: okrevanje - nova seja
     rezim = "ok"; zahteve.length = 0;
+    p0 = stPush("table_service");
     const zadnja = qrZa(O[7])[0].qr;
     r = await skeniraj(T.doorman, zadnja);
     assert(r.status === 200 && r.body.table_service_created === true, "(f) APNs spet dela: sken T8");
-    assert(await pocakaj(() => zahteve.length >= 5), "(f) po okrevanju push spet gre (nova HTTP/2 seja)", zahteve.length);
+    assert(await pocakajPush("table_service", p0) && zahteve.length >= 5, "(f) po okrevanju push spet gre (nova HTTP/2 seja)", zahteve.length);
+
+    // ------------------------------------------------------------------------------------------------------------------
+    console.log("\n# (h) Timeout enega zahtevka ne uniči ostalih (seja se ne zavrže po enem timeoutu)");
+    // Neposredno modul push_apns.js v otroškem procesu (potrebuje NODE_EXTRA_CA_CERTS od zagona). 60 žetonov, 20 hkrati, vsak odgovori šele čez 1500 ms
+    // (rok 2000 ms), eden se nikoli ne odzove. Hitri zahtevki prvega kroga so gotovi do t0+1500, drugi krog je ob timeoutu viseče (t0+2000) ravno v teku:
+    // stara koda je ob timeoutu uničila CELO sejo in 19 zdravih zahtevkov se je končalo brez ponovnega poskusa.
+    const poModulu = (zetoni, okoljeDodatno = {}) => new Promise((resolve) => {
+      const skripta = `const { ustvariApns, sestaviObvestilo } = require("./push_apns"); const a = ustvariApns();
+        (async () => { const z = JSON.parse(process.env.TEST_ZETONI); const rez = await a.posljiVsem(z, sestaviObvestilo({ tip: "club_event", id: 1, naslov: "t", kljuc: "k" }));
+        console.log("REZ" + JSON.stringify(rez.map(r => ({ z: r.zeton, ok: r.ok, status: r.status, razlog: r.razlog })))); process.exit(0); })();`;
+      const c = spawn("node", ["-e", skripta], { env: { ...okoljeOsnova, TEST_ZETONI: JSON.stringify(zetoni), APNS_KEY_ID: "TESTKEYID1", APNS_TEAM_ID: "TESTTEAM12", APNS_KEY_P8: APNS_P8_B64,
+        APNS_HOST: `https://localhost:${APNS_PORT}`, APNS_TIMEOUT_MS: "2000", APNS_SOCASNO: "20", NODE_EXTRA_CA_CERTS: path.join(mapa, "c.pem"), ...okoljeDodatno }, stdio: ["ignore", "pipe", "pipe"] });
+      let izhod = ""; c.stdout.on("data", d => izhod += d); c.stderr.on("data", d => izhod += d);
+      c.on("close", () => { const m = /REZ(\[.*\])/.exec(izhod); resolve(m ? JSON.parse(m[1]) : null); });
+    });
+    const hZetoni = Array.from({ length: 60 }, (_, i) => zet("h" + i));
+    hZetoni.forEach((z, i) => vedenje.set(z, i === 0 ? "hang" : { zakasni: 1500 }));
+    zahteve.length = 0;
+    let hr = await poModulu(hZetoni);
+    assert(hr && hr.length === 60, "(h) modul vrne rezultat za vseh 60 zetonov", hr && hr.length);
+    assert(hr && hr.filter(x => x.ok).length === 59, "(h) VSI zdravi zahtevki (59) so ok kljub timeoutu enega (stara koda: 19 izgubljenih)", hr && hr.filter(x => !x.ok).map(x => [x.z.slice(0, 6), x.status, x.razlog]));
+    assert(hr && hr.find(x => x.z === hZetoni[0]).razlog === "timeout", "(h) visec zahtevek se konca s timeoutom");
+    assert(zahteve.length === 60, "(h) brez ponovnih poskusov zdravih zahtevkov (60 zahtevkov)", zahteve.length);
+    for (const st of viseci) { try { st.close(); } catch { /* ze zaprt */ } }
+    viseci.clear();
+    // seja se zavrze SELE po TIMEOUTOV_ZA_NOVO_SEJO (3) zaporednih timeoutih: 3 viseci + zdravi za njimi se po novi seji vseeno izvedejo
+    const h3 = Array.from({ length: 30 }, (_, i) => zet("h3-" + i));
+    h3.forEach((z, i) => vedenje.set(z, i < 3 ? "hang" : { zakasni: 1500 }));
+    zahteve.length = 0;
+    hr = await poModulu(h3);
+    assert(hr && hr.length === 30 && hr.filter(x => x.ok).length >= 27 - 0 && hr.slice(0, 3).every(x => x.razlog === "timeout"), "(h) 3 zaporedni timeouti zavrzejo sejo, zdravi zahtevki (27) se po ponovnem poskusu vseeno uspesno koncajo", hr && hr.filter(x => !x.ok).map(x => [x.status, x.razlog]));
+    for (const st of viseci) { try { st.close(); } catch { /* ze zaprt */ } }
+    viseci.clear();
+    // seja prekinjena na strani APNs (GOAWAY / zaprta povezava) sredi zahtevkov: konec brez statusa je omrezna napaka -> en ponovni poskus
+    const h2 = Array.from({ length: 10 }, (_, i) => zet("h2-" + i));
+    h2.forEach((z, i) => vedenje.set(z, i === 0 ? { prekiniEnkrat: true, sprozeno: false } : { zakasni: 1000 }));
+    zahteve.length = 0;
+    hr = await poModulu(h2);
+    assert(hr && hr.length === 10 && hr.every(x => x.ok), "(h) APNs zapre sejo sredi 10 zahtevkov: vsi uspejo po enem ponovnem poskusu", hr && hr.filter(x => !x.ok).map(x => [x.status, x.razlog]));
+
+    // ------------------------------------------------------------------------------------------------------------------
+    console.log("\n# Varovalo pred mnozicnim oznacevanjem (napacno okolje/kljuc) in DeviceTokenNotForTopic");
+    const E7 = (await pool.query(
+      `INSERT INTO events (club_id, title, poster_url, start_at, status, ticket_price_cents, capacity, vip_enabled)
+       VALUES (1, 'Push varovalo', 'https://example.com/p.jpg', NOW() + INTERVAL '2 hours', 'published', 1500, 100, FALSE) RETURNING id`)).rows[0].id;
+    await api("PUT", `/business/events/${E7}/vip`, T.lastnik, { enabled: true });
+    const O7 = [];
+    for (let i = 0; i < 4; i++) { const x = await api("POST", `/events/${E7}/tables/${M[i]}/orders`, i % 2 ? T.kupec2 : T.kupec, { package_id: P1 }); O7.push(x.body.order.id); }
+    const vsi7 = [...(await api("GET", "/me/tickets", T.kupec)).body, ...(await api("GET", "/me/tickets", T.kupec2)).body].filter(t => t.event_id === E7 && t.is_vip);
+    const qr7 = (i) => vsi7.filter(t => t.order_id === O7[i])[0].qr;
+    await pool.query("DELETE FROM device_tokens");   // samo lastnik, 10 naprav: natanko 10 zetonov v enem posiljanju
+    rezim = "ok";
+    const GR = Array.from({ length: 10 }, (_, i) => zet("GR" + i));
+    for (const z of GR) { vedenje.set(z, { status: 410, reason: "Unregistered" }); r = await api("POST", "/me/devices", T.lastnik, { token: z }); }
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens")).rows[0].n === 10, "10 zetonov lastnika (meja na uporabnika)");
+    // 1) vseh 10 »neveljavnih« (napacno okolje): NOBEN ne dobi invalid_at, alarm v dnevniku
+    zahteve.length = 0;
+    p0 = stPush("table_service");
+    r = await skeniraj(T.doorman, qr7(0));
+    assert(r.status === 200 && r.body.table_service_created === true, "sken: nova strezba (varovalo)");
+    assert(await pocakajPush("table_service", p0), "varovalo: povzetek pusha v dnevniku");
+    assert(zahteve.length === 10, "varovalo: 10 zahtevkov na APNs, vsi so dobili 410", zahteve.length);
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE invalid_at IS NOT NULL")).rows[0].n === 0, "varovalo: ≥10 zetonov, vec kot polovica neveljavnih -> NOBEN ni oznacen (invalid_at ostane NULL)");
+    assert(/\[push\] ALARM: 10 od 10 zetonov zavrnjenih kot neveljavnih v enem posiljanju \(table_service\), nobenega ne oznacim: verjetno napacno okolje\/kljuc/.test(srv.log), "varovalo: v dnevniku »[push] ALARM: ... verjetno napacno okolje/kljuc«");
+    assert(/neveljavnih 0,/.test(srv.log.split("\n").filter(l => l.includes("[push] table_service: 10 naprav")).pop() || ""), "varovalo: povzetek pove »neveljavnih 0«");
+    // 2) 4 od 10 neveljavnih (manj kot polovica): označeni so tisti 4
+    GR.forEach((z, i) => vedenje.set(z, i < 4 ? { status: 410, reason: "Unregistered" } : "ok"));
+    zahteve.length = 0;
+    p0 = stPush("table_service");
+    r = await skeniraj(T.doorman, qr7(1));
+    assert(await pocakajPush("table_service", p0), "4 od 10: povzetek pusha v dnevniku");
+    const oz = (await pool.query("SELECT token FROM device_tokens WHERE invalid_at IS NOT NULL")).rows.map(x => x.token).sort();
+    assert(JSON.stringify(oz) === JSON.stringify(GR.slice(0, 4).sort()), "4 od 10 neveljavnih (pod mejo): oznaceni natanko ti 4", oz.map(t => t.slice(0, 6)));
+    // 3) pushStrezba v zanki: zeton, ki ga prva strezba oznaci kot neveljaven, druga ne dobi vec
+    const sk7 = (qr) => ({ client_scan_id: `cs-gr-${++n}`, qr, scanned_at: new Date(Date.now() - 60000).toISOString(), device_id: "telefon-push-gr" });
+    vedenje.set(GR[4], { status: 410, reason: "Unregistered" });   // veljaven v bazi, a ga APNs zavrne
+    zahteve.length = 0;
+    p0 = stPush("table_service");
+    r = await api("POST", "/business/tickets/scan-batch", T.doorman, { scans: [sk7(qr7(2)), sk7(qr7(3))] });
+    assert(r.status === 200 && r.body.results.every(x => x.result === "ok" && x.table_service_created === true), "scan-batch: 2 novi strezbi (T3, T4)", r.body.results);
+    assert(await pocakajPush("table_service", p0, 2), "zanka: 2 povzetka pusha v dnevniku");
+    assert(urejeniZahtevki(GR[4]).length === 1, "zanka: zeton, ki ga je 1. strezba oznacila kot neveljavnega (410), 2. strezba NE dobi vec (1 zahtevek)", urejeniZahtevki(GR[4]).length);
+    assert(zahteve.length === 6 + 5, "zanka: 1. strezba 6 naprav (GR4..GR9), 2. strezba 5", zahteve.length);
+    // 4) DeviceTokenNotForTopic je napaka nastavitve: noben zeton ni oznacen (ze preverjeno zgoraj za N3-topic); tu se mnozicno
+    await pool.query("DELETE FROM device_tokens"); GR.forEach((z) => vedenje.set(z, { status: 400, reason: "DeviceTokenNotForTopic" }));
+    for (const z of GR.slice(0, 3)) await api("POST", "/me/devices", T.lastnik, { token: z });
+    p0 = stPush("table_service");
+    // (potrebujemo se eno strezbo: nov nakup na E7)
+    const x8 = await api("POST", `/events/${E7}/tables/${M[4]}/orders`, T.kupec, { package_id: P1 });
+    const qr8 = (await api("GET", "/me/tickets", T.kupec)).body.find(t => t.order_id === x8.body.order.id && t.is_vip).qr;
+    await skeniraj(T.doorman, qr8);
+    assert(await pocakajPush("table_service", p0), "DeviceTokenNotForTopic: povzetek pusha v dnevniku");
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM device_tokens WHERE invalid_at IS NOT NULL")).rows[0].n === 0, "DeviceTokenNotForTopic (topic ne ustreza): zetoni NISO oznaceni kot neveljavni");
+    // obnova stanja za naslednje sklope
+    await pool.query("DELETE FROM device_tokens");
+    for (const [uporabnik, z] of [["sledilec", zet("S1")], ["nesledilec", zet("X1")]]) await api("POST", "/me/devices", T[uporabnik], { token: z });
+    rezim = "ok";
 
     // ------------------------------------------------------------------------------------------------------------------
     console.log("\n# (e) Brez APNS_* spremenljivk: vse poti delajo enako, push se ne poslje");
@@ -462,8 +615,12 @@ const urejeniZahtevki = (zeton) => zahteve.filter(z => z.zeton === zeton);
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM club_event_notifications WHERE event_id=$1", [r.body.id])).rows[0].n === 2, "(e) vrstice v zvoncu (sledilca) so tu");
     r = await apiB("POST", "/me/devices", T.kupec, { token: zet("brez") });
     assert(r.status === 200, "(e) registracija naprave deluje tudi brez APNs");
-    await cakaj(800);
-    assert(zahteve.length === 0, "(e) APNs ni prejel NICESAR", zahteve.length);
+    // Negativna trditev je vezana na pozitiven push iz backenda S kljuci, ki gre za njim (objava dogodka sledilcu S1): sele ko je njegov povzetek v dnevniku,
+    // trdimo, da je bil edini zahtevek na APNs (backend brez kljucev ni poslal nicesar).
+    p0 = stPush("club_event");
+    r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Zapora (e)", startAt: cezTeden, ticketPriceCents: 1000, capacity: 100, minAge: 0 });
+    assert(await pocakajPush("club_event", p0), "(e) zapora: backend s kljuci je poslal svoj push");
+    assert(zahteve.length === 1 && zahteve[0].json.aps.alert["loc-args"][1] === "Zapora (e)", "(e) APNs ni prejel NICESAR od backenda brez APNS_* (edini zahtevek je zapora)", zahteve.map(z => z.json.aps.alert["loc-args"]));
 
     // ------------------------------------------------------------------------------------------------------------------
     console.log("\n# Izbris racuna pobrise naprave; zeton in kljuc nikoli v dnevniku");
