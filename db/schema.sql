@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–041, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–042, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict eWqM0o0zcTAGrdYkf9O2phn5BgBcJ95hBB7AuTtELkJWbdfiiTJ1tdPoLSjHnWQ
+\restrict p4aXa1jUVandYpYY33Ft3p0jHxeEobFE1ntwgIpWksPu6FfDiO0kUMH9KaOY3LE
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -896,6 +896,9 @@ CREATE TABLE public.orders (
     guest_mail_claimed_at timestamp with time zone,
     guest_mail_attempts smallint DEFAULT 0 NOT NULL,
     guest_list_id bigint,
+    receipt_mail_attempts smallint,
+    receipt_mail_claimed_at timestamp with time zone,
+    receipt_mail_sent_at timestamp with time zone,
     CONSTRAINT orders_fee_chk CHECK (((application_fee_cents >= 0) AND (application_fee_cents <= total_cents))),
     CONSTRAINT orders_guest_chk CHECK (((guest_email IS NULL) OR ((guest_email = lower(guest_email)) AND (char_length(guest_email) <= 254) AND (POSITION(('@'::text) IN (guest_email)) > 1) AND (table_id IS NULL) AND (guest_terms_version IS NOT NULL) AND (guest_terms_accepted_at IS NOT NULL)))),
     CONSTRAINT orders_guest_lista_chk CHECK (((guest_list_id IS NULL) OR ((status = 'paid'::text) AND (quantity = 1) AND (unit_price_cents = 0) AND (total_cents = 0) AND (application_fee_cents = 0) AND (refunded_cents = 0) AND (table_id IS NULL) AND (package_id IS NULL) AND (guest_email IS NULL) AND (stripe_payment_intent_id IS NULL) AND (stripe_charge_id IS NULL) AND (stripe_checkout_session_id IS NULL) AND (stripe_account_id IS NULL)))),
@@ -949,6 +952,27 @@ COMMENT ON COLUMN public.orders.guest_email IS 'E-naslov gosta, ki je kupil brez
 --
 
 COMMENT ON COLUMN public.orders.guest_list_id IS 'Narocilo guest liste (035, I24): total 0, status paid, brez Stripa. NI prodaja: izlocitev iz sold_count, tickets_sold, bruto, stevila narocil.';
+
+
+--
+-- Name: COLUMN orders.receipt_mail_attempts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.receipt_mail_attempts IS 'Potrdilo po e-posti kupcu z racunom (042, #95): NULL = ni dolgovano; 0..8 = dolgovano, porabljeni poskusi. Nastavi koda ob prehodu v paid.';
+
+
+--
+-- Name: COLUMN orders.receipt_mail_claimed_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.receipt_mail_claimed_at IS 'Cas zadnje rezervacije poskusa posiljanja potrdila (042). Premor do naslednjega poskusa narasca.';
+
+
+--
+-- Name: COLUMN orders.receipt_mail_sent_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.receipt_mail_sent_at IS 'Cas uspesno poslanega potrdila kupcu z racunom (042). Zapise se sele po uspehu Resenda.';
 
 
 --
@@ -2128,6 +2152,13 @@ CREATE UNIQUE INDEX orders_public_ref_key ON public.orders USING btree (public_r
 
 
 --
+-- Name: orders_receipt_mail_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_receipt_mail_idx ON public.orders USING btree (id) WHERE ((receipt_mail_attempts IS NOT NULL) AND (receipt_mail_sent_at IS NULL));
+
+
+--
 -- Name: orders_table_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2833,5 +2864,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict eWqM0o0zcTAGrdYkf9O2phn5BgBcJ95hBB7AuTtELkJWbdfiiTJ1tdPoLSjHnWQ
+\unrestrict p4aXa1jUVandYpYY33Ft3p0jHxeEobFE1ntwgIpWksPu6FfDiO0kUMH9KaOY3LE
 

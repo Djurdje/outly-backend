@@ -13,10 +13,14 @@
 //   5. Pospravljalec (vsakih 5 min) preveri pri Stripu narocila, ki cakajo predolgo (izgubljen webhook).
 //
 // Nacin placila (nacinPlacila):
-//   - brez STRIPE_SECRET_KEY ali TEST_PLACILA=true: testni nacin kot doslej (takoj `paid`, oznaka test_)
+//   - brez STRIPE_SECRET_KEY: testni nacin kot doslej (takoj `paid`, oznaka test_)
+//   - TEST_PLACILA=true: vsili testni nacin SAMO ob sandbox kljucu ali brez kljuca. Ob LIVE kljucu (sk_live_) se IGNORIRA (zagon izpise
+//     `[placila] POZOR ...`): ena napacna spremenljivka na Renderju sicer pomeni prave vstopnice brez placila (#191). Zagona NE zavrnemo: 503 v produkciji
+//     je slabsi od tega, da prodaja gre skozi pravi Stripe.
 //   - klub z dokoncanim Connect onboardingom (charges_enabled): Stripe
 //   - SANDBOX kljuc (sk_test_), klub brez Stripa: se vedno testni nacin, da demo klubi in TestFlight delajo naprej
 //   - LIVE kljuc (sk_live_), klub brez Stripa: nakup zavrnjen (409)
+//   - znesek 0 EUR: ne gre v Stripe (Checkout ima najmanjsi znesek), narocilo je takoj `paid` brez provizije (index.js, #191)
 "use strict";
 const Stripe = require("stripe");
 
@@ -40,17 +44,27 @@ function stripe() {
   return predpomnjen.s;
 }
 const jeSandbox = () => /^(sk|rk)_test_/.test(process.env.STRIPE_SECRET_KEY || "");
+// LIVE = kljuc obstaja in NI sandbox (tudi nepoznana oblika kljuca velja za live: varnejsa smer).
+const jeLive = () => !!process.env.STRIPE_SECRET_KEY && !jeSandbox();
+// TEST_PLACILA=true ima ucinek samo, ce kljuca ni ali je sandbox (#191); ob live kljucu je ignoriran.
+const testVsiljen = () => process.env.TEST_PLACILA === "true" && !jeLive();
+// Sistem je v testnem nacinu za vse klube (nic se ne zaracuna): ni kljuca ali je testni nacin vsiljen (dashboard `mode`).
+const testniNacin = () => testVsiljen() || !process.env.STRIPE_SECRET_KEY;
 const webhookSkrivnosti = () => [process.env.STRIPE_WEBHOOK_SECRET, process.env.STRIPE_CONNECT_WEBHOOK_SECRET].filter(Boolean);
 const osnovaSpleta = () => (process.env.APP_URL || "https://outly.si").replace(/\/+$/, "");
 
 // "test" | "stripe" | "nastavitve" (kljuc brez webhook skrivnosti -> 503) | "klub" (live, klub brez Stripa -> 409)
-function nacinPlacila(klub) {
-  if (process.env.TEST_PLACILA === "true") return "test";
+function nacinPlacilaZ(klubImaStripe) {
+  if (testVsiljen()) return "test";
   if (!process.env.STRIPE_SECRET_KEY) return "test";
   if (!process.env.STRIPE_WEBHOOK_SECRET) return "nastavitve";
-  if (klub && klub.stripe_account_id && klub.stripe_charges_enabled) return "stripe";
+  if (klubImaStripe) return "stripe";
   return jeSandbox() ? "test" : "klub";
 }
+const nacinPlacila = (klub) => nacinPlacilaZ(!!(klub && klub.stripe_account_id && klub.stripe_charges_enabled));
+// Vrednost za odjemalce (`payment_mode` v javnih odgovorih, #149): "test" (nic se ne zaracuna) | "stripe" (pravo placilo)
+// | "unavailable" (nakup bi vrnil 409 »klub ne sprejema spletnih placil« ali 503 »placila niso nastavljena«).
+const javniNacin = (nacin) => (nacin === "test" || nacin === "stripe" ? nacin : "unavailable");
 
 // Checkout seja za narocilo. Klicatelj narocilo ze ima (pending, v bazi). Vrne sejo ali vrze napako.
 // Povratni naslovi: splet (/app) ali iOS. iOS (glava X-Outly-Client: ios) odpre Checkout v ASWebAuthenticationSession,
@@ -129,12 +143,26 @@ async function zakljuci(c, seja) {
   const pi = typeof seja.payment_intent === "string" ? seja.payment_intent : (seja.payment_intent && seja.payment_intent.id) || null;
   await c.query(
     `UPDATE orders SET status = 'paid', paid_at = NOW(), stripe_payment_intent_id = $2,
-            stripe_checkout_session_id = COALESCE(stripe_checkout_session_id, $3)
+            stripe_checkout_session_id = COALESCE(stripe_checkout_session_id, $3),
+            -- Potrdilo kupcu z racunom (042, #95): naroceno ob prehodu v paid; gostujoce narocilo (user_id NULL) ima svoj mail (guest_mail_*).
+            receipt_mail_attempts = COALESCE(receipt_mail_attempts, CASE WHEN user_id IS NOT NULL AND guest_list_id IS NULL THEN 0 END)
       WHERE id = $1`, [o.id, pi, seja.id]);
   const stevilo = o.table_id ? o.table_seats : o.quantity;
   await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [o.id, o.event_id, stevilo]);
   console.log(`[stripe] placano: narocilo ${o.public_ref}, ${stevilo} vstopnic`);
   return o.id;
+}
+
+// Odlozeno placilo (SEPA ipd.): seja je `complete`, denar pa se ni `paid` (pride async_payment_succeeded ali _failed, lahko po dnevih).
+// Narocilo ostane `pending`, a povezava ni vec uporabna (kupec je ze opravil svoj del) in NI »potekla«: checkout_url postavimo na NULL
+// (seja je ustvarjena, zato NULL + stripe_checkout_session_id pomeni »placilo v obdelavi«, `payment_processing` v odgovorih; ne rabi nove migracije).
+async function oznaciVObdelavi(c, seja) {
+  const id = idNarocilaIzSeje(seja);
+  if (!id) return;
+  const r = await c.query(
+    `UPDATE orders SET checkout_url = NULL
+      WHERE id = $1 AND status = 'pending' AND stripe_checkout_session_id = $2 AND checkout_url IS NOT NULL RETURNING public_ref`, [id, seja.id]);
+  if (r.rows.length) console.log(`[stripe] narocilo ${r.rows[0].public_ref}: placilo v obdelavi (odlozeno placilo)`);
 }
 
 // Seja potekla ali placilo padlo: pending -> cancelled/failed (sprozilec sprosti zalogo, unikatni indeks mize jo spusti).
@@ -189,6 +217,7 @@ async function obdelajDogodek(c, d, o) {
   switch (d.type) {
     case "checkout.session.completed":
       if (o.payment_status === "paid") return zakljuci(c, o);   // "unpaid" = odlozeno placilo, pride async_payment_succeeded
+      if (o.status === "complete") await oznaciVObdelavi(c, o);
       break;
     case "checkout.session.async_payment_succeeded": return zakljuci(c, o);
     case "checkout.session.expired": await prekini(c, o, "cancelled"); break;
@@ -247,6 +276,43 @@ function ustvari({ pool, naPlacano }) {
     finally { c.release(); }
   }
 
+  // Eno cakajoce narocilo s sejo: vprasaj Stripe, kaj je res (pospravljalec in potekel checkout_url, #149). Brez seje -> failed.
+  // Idempotentno: zakljuci/prekini zaklenita vrstico in ponovni klic ne naredi nicesar. Napaka (Stripe nedosegljiv) se vrze klicatelju.
+  // smemIsteci: samo pospravljalec (5 min po roku) sme `expire()` na seji, ki je po Stripu se `open`; preverjanje ob branju (preveriPoteklo) ne:
+  // kupec je lahko sredi 3DS in expire() bi preklical njegovo placilo.
+  async function preveriEno(o, smemIsteci = true) {
+    const s = stripe();
+    if (!o.stripe_checkout_session_id) {
+      await pool.query("UPDATE orders SET status = 'failed', cancelled_at = NOW() WHERE id = $1 AND status = 'pending'", [o.id]);
+      console.log(`[stripe] pospravljeno: narocilo ${o.public_ref} brez seje -> failed`);
+      return;
+    }
+    let seja = await s.checkout.sessions.retrieve(o.stripe_checkout_session_id);
+    if (seja.status === "open") {
+      if (!smemIsteci) return;
+      seja = await s.checkout.sessions.expire(seja.id);
+    }
+    if (seja.status === "complete" && seja.payment_status === "paid") {
+      let placano = null;
+      await vTransakciji(async (c) => { placano = await zakljuci(c, seja); });
+      poPlacilu(placano);
+    }
+    else if (seja.status === "expired") await vTransakciji((c) => prekini(c, seja, "cancelled"));
+    else if (seja.status === "complete") {
+      // Odlozeno placilo (seja opravljena, ni paid): navadno pocakamo na async webhook. Ce je ta izgubljen (Stripe jih po 3 dneh preneha ponavljati),
+      // bi narocilo drzalo zalogo neomejeno, zato preberemo PaymentIntent: `canceled` ali `requires_payment_method` = placilo je padlo -> failed (zaloga prosta).
+      // `processing` / `requires_action` ... = denar je se na poti, ostane v obdelavi.
+      const pi = typeof seja.payment_intent === "string" ? seja.payment_intent : (seja.payment_intent && seja.payment_intent.id) || null;
+      let padlo = false;
+      if (pi) {
+        const st = typeof seja.payment_intent === "object" && seja.payment_intent.status ? seja.payment_intent.status : (await s.paymentIntents.retrieve(pi)).status;
+        padlo = st === "canceled" || st === "requires_payment_method";
+      }
+      if (padlo) await vTransakciji((c) => prekini(c, seja, "failed"));
+      else await vTransakciji((c) => oznaciVObdelavi(c, seja));
+    }
+  }
+
   // Narocila, ki cakajo predolgo (izgubljen webhook, padla seja): vprasaj Stripe, kaj je res.
   let tece = false;
   async function pospravi() {
@@ -259,37 +325,81 @@ function ustvari({ pool, naPlacano }) {
           WHERE status = 'pending' AND stripe_payment_intent_id IS NULL
             AND ((checkout_expires_at IS NOT NULL AND checkout_expires_at < NOW() - INTERVAL '5 minutes')
               OR (checkout_expires_at IS NULL AND created_at < NOW() - INTERVAL '15 minutes'))
-          ORDER BY created_at LIMIT 50`);
+          ORDER BY (checkout_url IS NULL AND stripe_checkout_session_id IS NOT NULL), created_at LIMIT 50`);   // odlozena placila (v obdelavi) zadnja: ne stradajo drugih
       for (const o of r.rows) {
-        try {
-          if (!o.stripe_checkout_session_id) {
-            await pool.query("UPDATE orders SET status = 'failed', cancelled_at = NOW() WHERE id = $1 AND status = 'pending'", [o.id]);
-            console.log(`[stripe] pospravljeno: narocilo ${o.public_ref} brez seje -> failed`);
-            continue;
-          }
-          let seja = await s.checkout.sessions.retrieve(o.stripe_checkout_session_id);
-          if (seja.status === "open") seja = await s.checkout.sessions.expire(seja.id);
-          if (seja.status === "complete" && seja.payment_status === "paid") {
-            let placano = null;
-            await vTransakciji(async (c) => { placano = await zakljuci(c, seja); });
-            poPlacilu(placano);
-          }
-          else if (seja.status === "expired") await vTransakciji((c) => prekini(c, seja, "cancelled"));
-          // complete + unpaid: odlozeno placilo, pocakaj na async webhook
-        } catch (e) { console.error(`[stripe] pospravljanje narocila ${o.public_ref}:`, e.message); }
+        try { await preveriEno(o); }
+        catch (e) { console.error(`[stripe] pospravljanje narocila ${o.public_ref}:`, e.message); }
       }
     } catch (e) { console.error("[stripe] pospravljanje:", e.message); }
     finally { tece = false; }
   }
 
+  // Potekel checkout_url (#149): seja ima rok (expires_at), cakajoce narocilo pa ostane `pending`, dokler ga ne pospravi pospravljalec
+  // (do ~10 min po roku). V tem oknu odgovori NE smejo vec vracati checkout_url (kupec bi odprl potekel obrazec). Namesto da cakamo na
+  // pospravljalca, narocilo preverimo takoj: Stripe pove, ali je bilo placano tik pred rokom (-> paid), ali je seja potekla (-> cancelled).
+  // Zascita Stripove omejitve branja: najvec en klic hkrati in najvec eden na PREVERI_OKNO_MS po narocilu (kot preklic gosta, GOST_PREKLIC_OKNO_MS);
+  // klicatelj po klicu ponovno prebere narocilo in presodi na SVEZEM stanju (ob zavrnjenem klicu je se vedno `pending`).
+  // Vrne true, ce je narocilo zdaj preverjeno (ali ga ni vec treba), false ob omejitvi, napaki Stripa ali ob preteku roka cakanja.
+  // Cakanje klicatelja je omejeno na PREVERI_ROK_MS (4 s): Stripov odjemalec ob zastoju caka do 3 x 15 s, GET /me/orders (zagon aplikacije) pa ne sme
+  // viseti tako dolgo. Preverjanje se v ozadju konca samo (ostane v mnozici v teku, zato ga ponovni klici ne podvojijo).
+  const preveriVObdelavi = new Set();
+  const preveriZadnji = new Map();   // order_id -> ms zadnjega klica; najvec 5000 vnosov
+  const razcleni = (ime, privzeto, najvec) => { const n = Number.parseInt(process.env[ime], 10); return Number.isInteger(n) && n >= 0 && n <= najvec ? n : privzeto; };
+  const PREVERI_OKNO_MS = razcleni("PREVERI_OKNO_MS", 5000, 600000);   // samo za teste (0 = brez razmika)
+  const PREVERI_ROK_MS = razcleni("PREVERI_ROK_MS", 4000, 60000);
+  // Odlog po roku seje: kupec je lahko sredi 3DS ali potrjevanja v banki; Stripe seje ob roku ne zapre takoj. Do takrat odgovor kaze
+  // checkout_expired, a Stripa ne sprasujemo (pospravljalec ima svojih 5 min).
+  const PREVERI_ODLOG_MS = razcleni("PREVERI_ODLOG_MS", 120000, 3600000);
+  async function preveriPotekloDelo(oid) {
+    const kljuc = String(oid);
+    if (preveriVObdelavi.has(kljuc)) return false;
+    const zdaj = Date.now(), zadnji = preveriZadnji.get(kljuc);
+    if (zadnji !== undefined && zdaj - zadnji < PREVERI_OKNO_MS) return false;
+    preveriVObdelavi.add(kljuc);
+    try {
+      const r = await pool.query(
+        `SELECT id, public_ref, stripe_checkout_session_id FROM orders
+          WHERE id = $1 AND status = 'pending' AND stripe_payment_intent_id IS NULL
+            AND checkout_expires_at IS NOT NULL AND checkout_expires_at <= NOW() - ($2::bigint * INTERVAL '1 millisecond')
+            AND checkout_url IS NOT NULL`, [oid, PREVERI_ODLOG_MS]);   // v obdelavi (url NULL) ni potekla
+      if (!r.rows.length) return true;   // ni (vec) cakajoce s poteklo sejo
+      try { await preveriEno(r.rows[0], false); return true; }
+      catch (e) { console.error(`[stripe] preverjanje potekle seje narocila ${r.rows[0].public_ref}:`, e && e.message); return false; }
+    } finally {
+      preveriVObdelavi.delete(kljuc);
+      preveriZadnji.delete(kljuc);
+      if (preveriZadnji.size >= 5000) {
+        const meja = Date.now() - PREVERI_OKNO_MS;
+        for (const [k, t] of preveriZadnji) if (t <= meja) preveriZadnji.delete(k);
+        while (preveriZadnji.size >= 5000) preveriZadnji.delete(preveriZadnji.keys().next().value);
+      }
+      preveriZadnji.set(kljuc, Date.now());
+    }
+  }
+  async function preveriPoteklo(oid) {
+    if (!stripe()) return false;
+    let t;
+    const delo = preveriPotekloDelo(oid).catch((e) => { console.error("[stripe] preverjanje potekle seje:", e && e.message); return false; });
+    try { return await Promise.race([delo, new Promise((r) => { t = setTimeout(() => r(false), PREVERI_ROK_MS); })]); }
+    finally { clearTimeout(t); }
+  }
+
   function zazeni() {
+    // Produkcija (Render nastavi RENDER) brez Stripe ključa ali s sandbox ključem ali z vsiljenim testnim nacinom: vstopnice se izdajajo BREZ placila
+    // (klubi brez Connecta). Danes je to namerno (TestFlight, demo klubi), zato samo glasno opozorilo, brez blokade (I31).
+    if ((process.env.RENDER || process.env.NODE_ENV === "production") && (!process.env.STRIPE_SECRET_KEY || jeSandbox() || testVsiljen())) {
+      console.error("[placila] POZOR: placila v TESTNEM nacinu — vstopnice brez placila (" + (!process.env.STRIPE_SECRET_KEY ? "brez STRIPE_SECRET_KEY" : jeSandbox() ? "sandbox kljuc sk_test_" : "TEST_PLACILA=true") + "). Pred prodajo nastavi zivi kljuc.");
+    }
     if (!process.env.STRIPE_SECRET_KEY) return;
+    if (process.env.TEST_PLACILA === "true" && jeLive()) {
+      console.error("[placila] POZOR: TEST_PLACILA=true je nastavljen ob ZIVEM Stripe kljucu (sk_live_). IGNORIRAN: nakupi gredo prek pravega Stripa, testni nacin se ne vklopi. Odstrani TEST_PLACILA iz okolja (Render).");
+    }
     if (!process.env.STRIPE_WEBHOOK_SECRET) console.error("OPOZORILO: STRIPE_SECRET_KEY je nastavljen, STRIPE_WEBHOOK_SECRET pa ne - Stripe nakupi vracajo 503.");
     console.log(`[stripe] vklopljen (${jeSandbox() ? "SANDBOX" : "LIVE"}), API ${API_VERZIJA}`);
     setInterval(() => { pospravi(); }, Number(process.env.STRIPE_POSPRAVI_MS) || POSPRAVI_MS).unref();
   }
 
-  return { webhook, pospravi, zazeni };
+  return { webhook, pospravi, zazeni, preveriPoteklo };
 }
 
-module.exports = { povratniNaslovi, ustvari, stripe, jeSandbox, nacinPlacila, ustvariCheckout, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };
+module.exports = { povratniNaslovi, ustvari, stripe, jeSandbox, jeLive, testniNacin, nacinPlacila, nacinPlacilaZ, javniNacin, ustvariCheckout, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };

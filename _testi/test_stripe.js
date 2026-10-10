@@ -122,8 +122,13 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
     nastavi({ STRIPE_SECRET_KEY: "sk_live_x", STRIPE_WEBHOOK_SECRET: "whsec" });
     assert(nacinPlacila(s) === "stripe", "live + klub s Stripom -> stripe");
     assert(nacinPlacila(brez) === "klub", "live + klub brez Stripa -> klub (409)");
+    // #191: TEST_PLACILA=true vsili test samo brez kljuca / ob sandbox kljucu; ob sk_live_ je IGNORIRAN (ena napacna spremenljivka ne sme pomeniti prave prodaje brez placila)
     nastavi({ STRIPE_SECRET_KEY: "sk_live_x", STRIPE_WEBHOOK_SECRET: "whsec", TEST_PLACILA: "true" });
-    assert(nacinPlacila(s) === "test", "TEST_PLACILA=true vsili test");
+    assert(nacinPlacila(s) === "stripe" && nacinPlacila(brez) === "klub", "TEST_PLACILA=true ob sk_live_ je ignoriran (stripe / klub 409)");
+    nastavi({ STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec", TEST_PLACILA: "true" });
+    assert(nacinPlacila(s) === "test", "TEST_PLACILA=true ob sandbox kljucu vsili test");
+    nastavi({ TEST_PLACILA: "true" });
+    assert(nacinPlacila(s) === "test", "TEST_PLACILA=true brez kljuca -> test");
     for (const k of Object.keys(process.env)) if (!(k in shrani)) delete process.env[k];
     Object.assign(process.env, shrani);
   }

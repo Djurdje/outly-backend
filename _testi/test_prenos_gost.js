@@ -213,6 +213,8 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
 
     // ============================================================
     console.log("\n# 3. E-naslov z racunom: enoten odgovor, brez maila");
+    // Od #95 kupec z racunom dobi potrdilo o nakupu (asinhrono): pred stetjem mailov pocakaj, da so vsa dolgovana potrdila poslana.
+    assert(await cakaj(async () => (await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE receipt_mail_attempts IS NOT NULL AND receipt_mail_sent_at IS NULL")).rows[0].n === 0), "potrdila o nakupih poslana pred stetjem mailov (#95)");
     const prejR = R.poslano.length;
     r = await apiB("POST", `/tickets/${t2.id}/transfer`, T.kupec, { email: " Racun@Outly.SI ", allow_guest: true, age_confirmed: false });
     assert(r.status === 200 && r.body.result === "ok" && r.body.message === "Ticket sent to racun@outly.si." && r.body.ticket.holder_username === null && r.body.ticket.holder_email === "racun@outly.si" && r.body.ticket.transferred === true, "racun: enoten odgovor (sporocilo z e-naslovom, holder_username null)", r.body);
@@ -462,6 +464,11 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     // sicer zamudnik pristane v R.poslano po zajemu prejHk in "natanko en mail" steje 2 (CI, 9. 10. 2026).
     for (const t of [cV[0], cV[1], cV[2]]) {
       assert(await cakaj(async () => (await poslanoOb(t.id)) !== null), "C: mail prejsnjega prenosa poslan pred testom hkratnosti");
+    }
+    // Od #95 kupec z racunom dobi tudi potrdilo o nakupu (asinhrono po odgovoru nakupa): pocakaj, da sta potrdili obeh nakupov (cV, hk) poslani, sicer pristaneta v R.poslano po zajemu prejHk.
+    for (const t of [cV[0], hk[0]]) {
+      assert(await cakaj(async () => (await pool.query("SELECT o.receipt_mail_sent_at FROM orders o JOIN tickets t ON t.order_id = o.id WHERE t.id = $1", [t.id])).rows[0].receipt_mail_sent_at !== null),
+        "potrdilo o nakupu poslano pred testom hkratnosti (#95)");
     }
     const prejHk = R.poslano.length;
     const [x1, x2] = await Promise.all([
