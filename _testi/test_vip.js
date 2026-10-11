@@ -312,7 +312,10 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
   assert(r.body.tables.length === 2 && !r.body.tables.some(t => t.id === M2), "izklopljena miza (M2) NI na seznamu", r.body.tables);
   assert(r.body.tables.find(t => t.id === M1).price_cents === 35000 && r.body.tables.every(t => t.available === true), "javna cena je cena po dogodku, vse proste", r.body.tables);
   assert(r.body.packages.length === 2 && Object.keys(r.body.packages[0]).sort().join() === "description,id,name", "paketi: id, name, description", r.body.packages);
-  assert(!/buyer|username|email|user_id/i.test(r.besedilo), "odgovor ne vsebuje podatkov o kupcu", r.besedilo.slice(0, 200));
+  // `seller` (043, #94) so podatki KLUBA (ima kljuc "email" = kontakt kluba), ne kupca: preverimo ga posebej in ga izlocimo iz iskanja podatkov o kupcu.
+  const brezProdajalca = (o) => { const { seller, ...ostalo } = o; return JSON.stringify(ostalo); };
+  assert(r.body.seller && r.body.seller.name === "Pure Club" && Object.keys(r.body.seller).sort().join() === "address,complete,email,name,phone,registration_number,tax_number,vat_payer", "seller: samo podatki kluba (name, address, ...)", r.body.seller);
+  assert(!/buyer|username|email|user_id/i.test(brezProdajalca(r.body)), "odgovor ne vsebuje podatkov o kupcu", brezProdajalca(r.body).slice(0, 200));
   r = await api("GET", `/events/${E1}`);
   assert(r.status === 200 && r.body.vip_enabled === true && r.body.vip_from_cents === 35000, "GET /events/:id: vip_enabled true, vip_from_cents 35000 (najnizja vklopljena)", [r.body.vip_enabled, r.body.vip_from_cents]);
   r = await api("GET", `/events/${ENOVIP}`);
@@ -378,7 +381,7 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
   assert(po.sold_count === prej.sold_count && po.capacity === prej.capacity, "VIP vstopnice NE stejejo v sold_count / capacity", [prej, po]);
   const avail = await api("GET", `/events/${E1}/vip`);
   assert(avail.body.tables.find(t => t.id === M1).available === false && avail.body.tables.find(t => t.id === M3novi).available === true, "kupljena miza je zasedena, druga prosta", avail.body.tables);
-  assert(!/ana/.test(avail.besedilo), "javni odgovor po nakupu ne razkrije kupca", avail.besedilo.slice(0, 120));
+  assert(!/ana/.test(brezProdajalca(avail.body)), "javni odgovor po nakupu ne razkrije kupca", avail.besedilo.slice(0, 120));   // brez sellerja: "Ljubljana" v naslovu kluba vsebuje "ana"
   r = await nakup(E1, M1, T.bor, { package_id: P2 });
   assert(r.status === 409 && /already booked/i.test(r.body), "ista miza drugic -> 409 This table is already booked", r.body);
   const stNar = (await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE table_id=$1", [M1])).rows[0].n;
