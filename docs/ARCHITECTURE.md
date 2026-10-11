@@ -217,7 +217,7 @@ Resend 3.5 posreduje telo neprepisano: priloga je BASE64 niz. Pošlje se največ
 ## Guest lista (migracija 035, 8. 10. 2026)
 
 Martin (pogovor 8. 10. 2026): guest lista je vezana na EN dogodek; admin v admin panelu določi dogodek + uporabnika (gostitelja) + število mest (koliko prijateljev sme povabiti). Gostitelj ima SVOJO kodo QR, vsak povabljeni prijatelj SVOJO (svoja vstopnica v Tickets, lahko pride ločen od gostitelja).
-Povabi lahko SAMO prijatelje na Outlyju (`GET /me/friends`), ne po e-naslovu. Pogodba med backendom in odjemalcema: DECISIONS 8. 10. 2026; odjemalca (iOS, splet) STATE.
+Povabi lahko SAMO prijatelje na Outlyju (`GET /me/friends`), ne po e-naslovu. Pogodba med backendom in odjemalcema: DECISIONS 8. 10. 2026; odjemalca (iOS, splet): ta razdelek (izvirna navodila: `docs/arhiv/STATE-do-2026-10-11.md`).
 
 **Model:** guest lista je posebno NAROČILO (`orders.guest_list_id`, UNIKATEN): `total_cents` 0, `quantity` 1 (NI število vstopnic), `status` stalno `paid`, brez Stripa, `user_id` = gostitelj, `buyer_email` = njegov e-naslov. Tabele: `guest_lists` (`event_id`, `host_user_id` ON DELETE SET NULL, `spots` 0–20, `note` ≤ 200, `created_by`, `revoked_at`; delni unikat `(event_id, host_user_id) WHERE revoked_at IS NULL`: ena aktivna lista na dogodek in gostitelja) in
 `guest_list_members` (`guest_list_id`, `user_id`, `ticket_id` UNIKATEN, `removed_at`; delni unikat `(guest_list_id, user_id) WHERE removed_at IS NULL`). Vstopnice so navadne vrstice `tickets` z izrecnim `holder_user_id` (gostitelj in povabljenec; gostiteljeva se NE zanaša na `COALESCE(holder, kupec)`), zato skener, `scan-list`, `GET /me/tickets` in QR delujejo brez sprememb.
@@ -250,7 +250,7 @@ Povabi lahko SAMO prijatelje na Outlyju (`GET /me/friends`), ne po e-naslovu. Po
 
 ## Organizatorji brez prizorišča (migracija 037, 9. 10. 2026)
 
-Martin (pogovor 9. 10. 2026): promotor ali podjetje Outly prireja dogodke v tujih klubih in nima lokala. Odločitve: DECISIONS 9. 10. 2026; polja za odjemalca: STATE.
+Martin (pogovor 9. 10. 2026): promotor ali podjetje Outly prireja dogodke v tujih klubih in nima lokala. Odločitve: DECISIONS 9. 10. 2026; polja za odjemalca: ta razdelek (izvirna navodila: `docs/arhiv/STATE-do-2026-10-11.md`).
 
 **Model:** organizator je ISTA vrstica v `clubs` kot klub (slideshow, video, ekipa, Stripe, dogodki) z `clubs.is_organizer = TRUE`; brez naslova in pina (`address`/`city`/`lat`/`lng` smejo biti prazni). `clubs.is_official = TRUE` ima samo uradni profil Outly (admin). Nova vloga ali tabela NI uvedena: vse je vezano na `club_id`.
 **Prizorišče dogodka** (`events`): `venue_club_id` (FK `clubs` ON DELETE SET NULL, CHECK `<> club_id`) ALI prosto `venue_name`, `venue_address`, `venue_city`, `venue_lat`, `venue_lng` (koordinati v paru, CHECK). Z `venue_club_id` so prosta polja prazna (ignorirajo se). Organizator MORA podati eno od obeh (`venue_name` + `venue_city`); navaden klub sme. Delni indeks `events_venue_club_idx (venue_club_id, start_at)`.
@@ -266,7 +266,7 @@ Martin (pogovor 9. 10. 2026): promotor ali podjetje Outly prireja dogodke v tuji
 
 ## Strežba VIP miz (migracija 038, 9. 10. 2026)
 
-Martin (issue #176): vratar skenira VIP vstopnico kot doslej; natakar (nova vloga `bartender`) dobi seznam miz, ki jih je treba postreči, in jih označi kot dostavljene. Odločitve: DECISIONS 9. 10. 2026 (vloga bartender); polja za odjemalca: STATE.
+Martin (issue #176): vratar skenira VIP vstopnico kot doslej; natakar (nova vloga `bartender`) dobi seznam miz, ki jih je treba postreči, in jih označi kot dostavljene. Odločitve: DECISIONS 9. 10. 2026 (vloga bartender); polja za odjemalca: ta razdelek (izvirna navodila: `docs/arhiv/STATE-do-2026-10-11.md`).
 
 **Model:** `club_members.role` / `club_invites.role` CHECK = `manager | doorman | bartender`. Tabela `table_service` (ena vrstica na naročilo: `order_id` UNIQUE): `event_id`, `club_id` (= `events.club_id`), posnetek `table_label`, `table_seats`, `package_name`, `package_description` iz naročila, `scanned_at` (= `used_at` prve skenirane vstopnice), `delivered_at`, `delivered_by_user_id` (zaposleni, ON DELETE SET NULL). **Kupca tabela ne hrani** (ni `user_id`, e-naslova, `public_ref`). Indeks `(club_id, event_id, delivered_at)`.
 **Nastanek:** samo iz skena. `POST /business/tickets/scan` in `scan-batch` zapišeta vstopnico in strežbo v ISTEM stavku (`WITH u AS (UPDATE tickets … RETURNING …), s AS (INSERT INTO table_service … SELECT … FROM u JOIN orders … WHERE o.table_id IS NOT NULL ON CONFLICT (order_id) DO NOTHING)`, konstanta `STREZBA_CTE`): sken, ki uspe, ne more izgubiti strežbe, drugi sken vstopnice istega naročila je ne podvoji, navadno naročilo (`table_id IS NULL`) je ne ustvari, rezervacija po telefonu (`table_holds`) je ne ustvari (ni skena). Sken brez povezave enako (`scanned_at` = ura na telefonu, če je razumna).
@@ -281,7 +281,7 @@ Martin (issue #176): vratar skenira VIP vstopnico kot doslej; natakar (nova vlog
 
 ## Razpored miz po dogodku (migracija 039, 9. 10. 2026)
 
-Martin (issue #175): organizator brez dvorane izbere pri dogodku vir razporeda VIP miz. Odločitve: DECISIONS 9. 10. 2026 (Razpored VIP miz po dogodku); polja za odjemalca: STATE.
+Martin (issue #175): organizator brez dvorane izbere pri dogodku vir razporeda VIP miz. Odločitve: DECISIONS 9. 10. 2026 (Razpored VIP miz po dogodku); polja za odjemalca: ta razdelek (izvirna navodila: `docs/arhiv/STATE-do-2026-10-11.md`).
 
 **Model:** `events.vip_layout_source` (`club` | `event`, CHECK, privzeto `club`), `events.floor_plan` (JSONB objekt, tloris dogodka; pomemben le pri `event`), `events.vip_layout_from_club_id` (izvor kopije, informativno, ON DELETE SET NULL).
 `club_tables.event_id` (NULL = klubska miza; sicer miza razporeda dogodka, `club_id = events.club_id`, ON DELETE CASCADE). Unikatna oznaka med aktivnimi: `club_tables_label_key (club_id, lower(label)) WHERE event_id IS NULL AND archived_at IS NULL` in `club_tables_event_label_key (event_id, lower(label)) WHERE event_id IS NOT NULL AND archived_at IS NULL`.
@@ -294,7 +294,7 @@ Vse v eni transakciji pod `FOR NO KEY UPDATE` na dogodku. Odstranjene mize: najp
 
 ## Potisna obvestila (APNs, migracija 040, 10. 10. 2026)
 
-Martin (issue #183, 9. 10. 2026: ključ in Render secrets nastavljeni): ob dogodkih, ki polnijo zvonec, aplikacija dobi še push. Odločitve: DECISIONS 10. 10. 2026; polja in pogodba z iOS (#184): STATE.
+Martin (issue #183, 9. 10. 2026: ključ in Render secrets nastavljeni): ob dogodkih, ki polnijo zvonec, aplikacija dobi še push. Odločitve: DECISIONS 10. 10. 2026; polja in pogodba z iOS (#184): ta razdelek (izvirna navodila: `docs/arhiv/STATE-do-2026-10-11.md`).
 
 **Model:** `device_tokens` (`user_id` FK `ON DELETE CASCADE`, `token` UNIQUE 64–200 znakov, `platform` = `ios`, `last_seen_at`, `invalid_at`). En žeton = ena vrstica = en uporabnik (isti žeton na drugem računu se prepiše). Registracija: `POST /me/devices { token, platform }` -> `{ ok: true }` (idempotentno, `invalid_at` -> NULL, 400 `invalid_token`/`invalid_platform`), odjava `DELETE /me/devices/:token` -> 204 (briše samo lasten žeton; tuj/neobstoječ tudi 204, neveljaven zapis 400); omejevalnik `naprave` 60/h/IP; **največ 10 žetonov na uporabnika** (v isti transakciji kot vpis se izbrišejo najstarejši po `last_seen_at`). `DELETE /me` naprave pobriše s kaskado.
 **Modul `push_apns.js`** (brez odvisnosti: `http2` + `crypto`): ena dolgoživa HTTP/2 seja do `APNS_HOST` (privzeto `https://api.push.apple.com`), ob napaki/GOAWAY/izteku roka se zavrže in odpre nova; JWT ES256 (`kid` = `APNS_KEY_ID`, `iss` = `APNS_TEAM_ID`, `iat`) predpomnjen, osvežen po 50 min (Apple: starejši od 60 min zavrnjen; osvežitev pogosteje kot na 20 min tudi); podpis **`ieee-p1363`** (r‖s, 64 B), ne DER; glave `apns-topic` (`APNS_TOPIC`, privzeto `si.outly.app`), `apns-push-type: alert`, `apns-priority: 10`, `authorization: bearer`, `apns-expiration` izrecno vedno (+24 h; strežba +1 h). `APNS_KEY_P8` = base64 cele .p8 (sprejme tudi surov PEM). **Brez vseh treh spremenljivk (`APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_KEY_P8`) je push izklopljen:** ena vrstica `[push] izklopljen` ob zagonu, vse funkcije so no-op. Rok zahtevka `APNS_TIMEOUT_MS` (10 s): **timeout zapre samo ta stream** (`NGHTTP2_CANCEL`), seja se zavrže šele po 3 zaporednih timeoutih; konec brez prejetega `:status` je omrežna napaka -> en ponovni poskus VEDNO na novi seji (stara se graceful zapre, drugi zahtevki na njej se dokončajo). Največ `APNS_SOCASNO` (20) zahtevkov hkrati v procesu, delavci po serijah (sledilci kluba so lahko tisoči), vrsta največ `APNS_VRSTA_NAJVEC` (20000, nad mejo se obvestila zavržejo; zvonec ostane). Nikoli ne vrže izjeme; ključa, JWT in žetonov ne zapiše v dnevnik (povzetek `[push] <vrsta>: N naprav, poslano, neveljavnih, napak`; isti razlog zavrnitve največ enkrat na minuto).
