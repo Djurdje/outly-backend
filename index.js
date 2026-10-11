@@ -4916,12 +4916,12 @@ const ljDatum = (d, jez = "en") => LJ_OBLIKE[jez].f.format(new Date(d)) + LJ_OBL
 function davekStavek(vat, vatPayer, jez = "en") {
   const sl = jez === "sl";
   if (vat === null || vat === undefined) {
-    if (vatPayer === true) return sl ? "Cene vključujejo DDV." : "The price includes VAT.";
-    if (vatPayer === false) return sl ? "Prodajalec ni zavezanec za DDV; DDV se ne zaračuna." : "The seller is not a VAT payer; no VAT is charged.";
+    if (vatPayer === true) return sl ? "Cena vključuje DDV." : "The price includes VAT.";
+    if (vatPayer === false) return sl ? "Prodajalec ni zavezanec za DDV, zato DDV ni obračunan." : "The seller is not a VAT payer; no VAT is charged.";
     return sl ? "DDV se obračuna v skladu s statusom prodajalca." : "VAT is charged according to the seller's VAT status.";
   }
   const p = Math.round(Number(vat) * 1000) / 10;
-  if (sl) return p > 0 ? `Cene vključujejo DDV (${String(p).replace(".", ",")} %).` : "Prodajalec pri tej ceni ne obračuna DDV.";
+  if (sl) return p > 0 ? `Cena vključuje DDV (${String(p).replace(".", ",")} %).` : "Prodajalec pri tej ceni ne obračuna DDV.";
   return p > 0 ? `The price includes VAT (${p}%).` : "The seller does not charge VAT on this price.";
 }
 // Razdelek »Seller« potrdila (gost in kupec z racunom): firma (nadomestek: ime kluba), sedez (nadomestek: naslov kluba), telefon, e-naslov,
@@ -5417,6 +5417,7 @@ function prenosPotrdilo(x, povezava, kode) {
       ? T(`VIP miza ${x.table_label}${x.package_name ? `, paket: ${x.package_name}` : ""}`, `VIP table ${x.table_label}${x.package_name ? `, package: ${x.package_name}` : ""}`)
       : T("Standardna vstopnica", "Standard ticket");
     const posiljatelj = x.from_username || T("Uporabnik Outly", "An Outly user");
+    const kdoSl = x.from_username ? `uporabnik Outly ${x.from_username}` : "uporabnik Outly";   // brez spola; ob manjkajocem imenu ne podvajamo »Outly«
     const razdelki = [
       { naslov: T("To je vaša vstopnica", "This is your ticket"), vrstice: [T(QR_STAVEK_SL, QR_STAVEK)], krepko: true },
       { naslov: T("Dogodek", "Event"), vrstice: [x.event_title, ljDatum(x.start_at, jez), prizoriscePodatki(x),
@@ -5433,8 +5434,8 @@ function prenosPotrdilo(x, povezava, kode) {
           "If you were not expecting this ticket, reply to this email and we will delete your email address.")] },
       { naslov: T("O vašem e-naslovu (GDPR, 14. člen)", "About your email address (GDPR, Article 14)"), vrstice: T([
           `Kdo smo: ${POSREDNIK_VRSTICA}.`,
-          `Zakaj: vaš e-naslov uporabljamo samo za dostavo te vstopnice in za omogočanje vstopa. Pravna podlaga: zakoniti interes (GDPR, člen 6(1)(f)): ${posiljatelj} vam je želel to vstopnico predati.`,
-          `Od kod podatek: ${posiljatelj}, uporabnik Outly, je vnesel vaš e-naslov.`,
+          `Zakaj: vaš e-naslov uporabljamo samo za dostavo te vstopnice in za omogočanje vstopa. Pravna podlaga: zakoniti interes (GDPR, člen 6(1)(f)): ${kdoSl} vam želi predati to vstopnico.`,
+          `Od kod podatek: vnesel ga je ${kdoSl}.`,
           `Podatki: vaš e-naslov, vstopnica in dogodek, potrditev pošiljatelja, da izpolnjujete starostno mejo (če obstaja), ter čas skeniranja vstopnice ob vstopu.`,
           `Prejemniki: Resend (dostava e-pošte). Organizator (${x.club_name}) vidi samo, da je bila vstopnica predana gostu, ne pa vašega e-naslova.`,
           `Prenos izven EGP: naš ponudnik e-pošte ima sedež v Združenih državah Amerike; prenos temelji na standardnih pogodbenih klavzulah EU ali na sklepu o ustreznosti, kot je opisano v naši politiki zasebnosti.`,

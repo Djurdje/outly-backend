@@ -5,7 +5,7 @@
  * Node privzeto zapre mirujoco vzdrzevano povezavo po 5 s (keepAliveTimeout). Renderjev proxy pa povezave do storitve
  * ponovno uporablja dlje: ce Node povezavo zapre prej, ko proxy mislil, da je se odprta, proxy ob naslednjem zahtevku
  * zadene zaprto povezavo (ECONNRESET -> 502) ali mora odpreti novo, ki ob navalu caka v vrsti za sprejem (do ~3 s;
- * za vratarjev sken to ni sprejemljivo). Render za Node priporoca keepAliveTimeout nad mirovalnim rokom proxyja (120 s).
+ * za vratarjev sken to ni sprejemljivo). Render za Node priporoca keepAliveTimeout nad mirovalnim rokom proxyja (120 s); vir: https://render.com/docs/troubleshooting-deploys, razdelek »502 Bad Gateway« (tudi v #139).
  *
  * Node zahteva headersTimeout > keepAliveTimeout (sicer se vzdrzevana povezava lahko zapre sredi prejemanja glav);
  * headersTimeout = keepAliveTimeout + 1 s. requestTimeout (privzeto 300 s) mora ostati NAD headersTimeout, zato je zgornja

@@ -263,7 +263,7 @@ let srv = null;
     assert(/SELLER\nThe ticket is sold by the club: Promotor X d\.o\.o\., Pisarna 5, 4000 Kranj, \+38631000111, promotor@x\.si\.\n/.test(t), "gost: firma, sedez, telefon, e-naslov (organizator)", t.split("SELLER")[1]);
     assert(t.includes("Company registration number: 7654321. Tax number: 12345678."), "gost: maticna in davcna stevilka", t);
     assert(t.includes("VAT status: the seller is not a VAT payer.") && t.includes("The seller is not a VAT payer; no VAT is charged."), "gost: vat_payer false -> stavek v Tickets in DDV status", t);
-    assert(t.includes("Status DDV: prodajalec ni zavezanec za DDV.") && t.includes("Prodajalec ni zavezanec za DDV; DDV se ne zaračuna.") && t.indexOf("Status DDV") < t.indexOf("VAT status:"), "gost (sl, pred en): vat_payer false -> »Prodajalec ni zavezanec za DDV«", t);
+    assert(t.includes("Status DDV: prodajalec ni zavezanec za DDV.") && t.includes("Prodajalec ni zavezanec za DDV, zato DDV ni obračunan.") && t.indexOf("Status DDV") < t.indexOf("VAT status:"), "gost (sl, pred en): vat_payer false -> »Prodajalec ni zavezanec za DDV«", t);
     assert(/PRODAJALEC\nVstopnico prodaja klub: Promotor X d\.o\.o\., Pisarna 5, 4000 Kranj, \+38631000111, promotor@x\.si\.\nMatična številka: 7654321\. Davčna številka: 12345678\./.test(t), "gost (sl): firma, sedez, kontakt, maticna in davcna stevilka", t.split("PRODAJALEC")[1]);
     assert(/EVENT\n[^]*Gostitelj Klub, Gostiteljeva 1, Celje[^]*SELLER/.test(t), "gost: prizorisce (gostitelj) je v razdelku Event", t.split("SELLER")[0]);
     assert(!/SELLER[^]*Gostitelj[^]*NO RIGHT/.test(t), "gost: gostitelj NI v razdelku Seller", t.split("SELLER")[1]);
@@ -275,7 +275,7 @@ let srv = null;
     assert(m.length === 1 && /SELLER\nThe ticket is sold by the club: Stolpni Klub d\.o\.o\., Slovenska cesta 1, 1000 Ljubljana, \+38640111222, info@stolpni\.si\.\n/.test(t), "kupec: firma, sedez, kontakt", t.split("SELLER")[1]);
     assert(t.includes("Company registration number: 1234567000. Tax number: SI12345678."), "kupec: maticna in davcna stevilka");
     assert(t.includes("1 x 15.00 EUR = 15.00 EUR. The price includes VAT.") && t.includes("VAT status: the seller is a VAT payer.") && !t.includes("VAT is charged according"), "kupec: vat_payer true -> »The price includes VAT.«", t);
-    assert(t.includes("1 x 15,00 EUR = 15,00 EUR. Cene vključujejo DDV.") && t.includes("Status DDV: prodajalec je zavezanec za DDV.") && !t.includes("DDV se obračuna v skladu"), "kupec (sl): vat_payer true -> »Cene vključujejo DDV.«", t);
+    assert(t.includes("1 x 15,00 EUR = 15,00 EUR. Cena vključuje DDV.") && t.includes("Status DDV: prodajalec je zavezanec za DDV.") && !t.includes("DDV se obračuna v skladu"), "kupec (sl): vat_payer true -> »Cena vključuje DDV.«", t);
     // kupec: vat_payer null, brez matične
     await pool.query("UPDATE clubs SET vat_payer = NULL, registration_number = '', tax_number = '' WHERE id=$1", [klub]);
     r = await nakup(T.ana, evVat);
@@ -291,7 +291,7 @@ let srv = null;
     await cakaj(() => poslanoNa("ana@outly.si").length >= 3); await pocakaj(300);
     t = (poslanoNa("ana@outly.si")[2] || {}).text || "";
     assert(t.includes("The seller is not a VAT payer; no VAT is charged.") && t.includes("VAT status: the seller is not a VAT payer."), "kupec: vat_payer false -> »The seller is not a VAT payer; no VAT is charged.«", t.split("SELLER")[1]);
-    assert(t.includes("Prodajalec ni zavezanec za DDV; DDV se ne zaračuna.") && t.includes("Status DDV: prodajalec ni zavezanec za DDV."), "kupec (sl): vat_payer false -> »Prodajalec ni zavezanec za DDV«", t.split("PRODAJALEC")[1]);
+    assert(t.includes("Prodajalec ni zavezanec za DDV, zato DDV ni obračunan.") && t.includes("Status DDV: prodajalec ni zavezanec za DDV."), "kupec (sl): vat_payer false -> »Prodajalec ni zavezanec za DDV«", t.split("PRODAJALEC")[1]);
     // vat_rate ima prednost (stopnja, zamrznjena na narocilu)
     await pool.query("UPDATE events SET vat_rate = 0.22 WHERE id=$1", [ev1]);
     await pool.query("UPDATE clubs SET vat_payer = TRUE WHERE id=$1", [klub]);
@@ -299,7 +299,7 @@ let srv = null;
     assert(r.status === 201, "nakup (bor, vat_rate 0.22)");
     m = await mail("bor@outly.si"); t = (m[0] && m[0].text) || "";
     assert(t.includes("The price includes VAT (22%).") && !t.includes("The price includes VAT.\n"), "vat_rate 22 % ima prednost pred vat_payer", t.split("TICKETS")[1]);
-    assert(t.includes("Cene vključujejo DDV (22 %).") && !t.includes("Cene vključujejo DDV.\n"), "vat_rate 22 % ima prednost pred vat_payer (sl)", t.split("VSTOPNICE")[1]);
+    assert(t.includes("Cena vključuje DDV (22 %).") && !t.includes("Cena vključuje DDV.\n"), "vat_rate 22 % ima prednost pred vat_payer (sl)", t.split("VSTOPNICE")[1]);
     // gost: vat_payer null -> obstojeci stavek; klub brez firme -> ime kluba
     await pool.query("UPDATE clubs SET vat_payer = NULL, legal_name = '', legal_address = '' WHERE id=$1", [klub]);
     await pool.query("UPDATE events SET vat_rate = NULL WHERE id=$1", [ev1]);
