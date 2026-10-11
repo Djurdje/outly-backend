@@ -4034,6 +4034,15 @@ function vsebinaNakupaMize(req) {
   }
   return { event_id: id, quantity: 1, table_id: mizaId, package_id: paketId };
 }
+// Razlicica pogojev ob nakupu Z RACUNOM (044, #215): neobvezno polje telesa `terms_version`. Ni del vsebine nakupa (odtis idempotence se ne spremeni).
+// Vrne { verzija: string|null } ali { napaka }. Manjka ali null = NULL v bazi (star odjemalec); isti regex kot pri gostu in v CHECK-u migracije 044.
+const TERMS_VERZIJA_RE = /^[A-Za-z0-9._:-]{1,40}$/;
+function pogojiIzTela(b) {
+  const v = b ? b.terms_version : undefined;
+  if (v === undefined || v === null) return { verzija: null };
+  if (typeof v !== "string" || !TERMS_VERZIJA_RE.test(v)) return { napaka: "terms_version is invalid." };
+  return { verzija: v };
+}
 function idemIstaVsebina(a, b) {
   return a.event_id === b.event_id && a.quantity === b.quantity
     && (a.table_id ?? null) === (b.table_id ?? null) && (a.package_id ?? null) === (b.package_id ?? null);
@@ -4211,6 +4220,8 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
   if (!Number.isInteger(q) || q < 1 || q > NAJVEC_NA_NAROCILO) {
     return res.status(400).send(`quantity must be an integer between 1 and ${NAJVEC_NA_NAROCILO}.`);
   }
+  const pogoji = pogojiIzTela(req.body);
+  if (pogoji.napaka) return res.status(400).send(pogoji.napaka);
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
@@ -4270,10 +4281,10 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     const or = await c.query(
       `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency,
                            application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at, idempotency_key,
-                           stripe_account_id, receipt_mail_attempts)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $11 = 'paid' THEN NOW() END,$14,$15,CASE WHEN $11 = 'paid' THEN 0 END) RETURNING id`,
+                           stripe_account_id, receipt_mail_attempts, terms_version, terms_accepted_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $11 = 'paid' THEN NOW() END,$14,$15,CASE WHEN $11 = 'paid' THEN 0 END,$16::text,CASE WHEN $16::text IS NOT NULL THEN NOW() END) RETURNING id`,
       [ref, req.user.userId, e.id, e.club_id, q, e.ticket_price_cents, skupaj, e.currency, provizija, e.vat_rate,
-       placanoTakoj ? "paid" : "pending", pi, u.email, req.idemKljuc || null, placanoTakoj ? null : e.stripe_account_id]
+       placanoTakoj ? "paid" : "pending", pi, u.email, req.idemKljuc || null, placanoTakoj ? null : e.stripe_account_id, pogoji.verzija]
     );
     const oid = or.rows[0].id;
     if (placanoTakoj) {
@@ -5227,7 +5238,9 @@ function kupecPotrdilo(o, povezava) {
       { naslov: T("Brez pravice do odstopa", "No right of withdrawal"), vrstice: [T(
         "Pri vstopnicah za dogodek na določen datum pravice do odstopa od pogodbe ni (Zakon o varstvu potrošnikov ZVPot-1, 135. člen, 12. točka). Če je dogodek odpovedan ali prestavljen, veljajo pravila iz pogojev.",
         "There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply.")] },
-      { naslov: T("Pogoji", "Terms"), vrstice: [T("Pogoji uporabe Outly: https://outly.si/terms", "Outly terms of use: https://outly.si/terms")] },
+      { naslov: T("Pogoji", "Terms"), vrstice: [o.terms_version
+        ? T(`Sprejeli ste pogoje uporabe Outly, različica ${o.terms_version}: https://outly.si/terms`, `You accepted the Outly terms, version ${o.terms_version}: https://outly.si/terms`)
+        : T("Pogoji uporabe Outly: https://outly.si/terms", "Outly terms of use: https://outly.si/terms")] },
       { naslov: T("Vaše vstopnice", "Your tickets"), vrstice: [T(`Vaše vstopnice so v aplikaciji Outly (Profil → Vstopnice) in na spletu: ${povezava}`, `Your tickets are in the Outly app (Profile, My tickets) and online: ${povezava}`),
         T("Kode QR niso v tem sporočilu. Odprite jih v aplikaciji in pri vhodu pokažite eno kodo na osebo.", "The QR codes are not in this email. Open them in the app and show one code per person at the door.")] },
       { naslov: T("Pritožbe", "Complaints"), vrstice: [T(`Glede dogodka: obrnite se na klub (podatki zgoraj). Glede nakupa ali plačila: obrnite se na Outly na ${POSTA_ODGOVOR}.`,
@@ -5277,7 +5290,7 @@ async function potrdiloPosljiEno(oid) {
         AND receipt_mail_attempts IS NOT NULL AND receipt_mail_attempts < $2
         AND (receipt_mail_claimed_at IS NULL OR receipt_mail_claimed_at < NOW() - ($3::bigint[])[receipt_mail_attempts + 1] * INTERVAL '1 millisecond')
       RETURNING public_ref, buyer_email, quantity, event_id, unit_price_cents, total_cents, currency, vat_rate, created_at, paid_at,
-                table_label, table_seats, package_name, receipt_mail_attempts, COALESCE(stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test`,
+                table_label, table_seats, package_name, receipt_mail_attempts, terms_version, COALESCE(stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test`,
     [oid, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
   if (!k.rows.length) return false;
   const o = k.rows[0];
@@ -7370,6 +7383,8 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     if (!Number.isInteger(b.expected_price_cents) || b.expected_price_cents < 0) return res.status(400).send("expected_price_cents must be a non-negative integer (cents).");
     pricakovana = b.expected_price_cents;
   }
+  const pogoji = pogojiIzTela(b);
+  if (pogoji.napaka) return res.status(400).send(pogoji.napaka);
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
@@ -7458,11 +7473,11 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
       `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency,
                            application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at,
                            table_id, table_label, table_seats, package_id, package_name, package_description, idempotency_key,
-                           stripe_account_id, receipt_mail_attempts)
-       VALUES ($1,$2,$3,$4,1,$5,$5,$6,$7,$8,$18,$9,$10,CASE WHEN $18 = 'paid' THEN NOW() END,$11,$12,$13,$14,$15,$16,$17,$19,CASE WHEN $18 = 'paid' THEN 0 END) RETURNING id`,
+                           stripe_account_id, receipt_mail_attempts, terms_version, terms_accepted_at)
+       VALUES ($1,$2,$3,$4,1,$5,$5,$6,$7,$8,$18,$9,$10,CASE WHEN $18 = 'paid' THEN NOW() END,$11,$12,$13,$14,$15,$16,$17,$19,CASE WHEN $18 = 'paid' THEN 0 END,$20::text,CASE WHEN $20::text IS NOT NULL THEN NOW() END) RETURNING id`,
       [ref, req.user.userId, e.id, e.club_id, cena, e.currency, provizija, e.vat_rate, pi, starost.email,
        miza.id, miza.label, miza.seats, paket ? paket.id : null, paket ? paket.name : null, paket ? paket.description : null,
-       req.idemKljuc || null, placanoTakoj ? "paid" : "pending", placanoTakoj ? null : e.stripe_account_id]
+       req.idemKljuc || null, placanoTakoj ? "paid" : "pending", placanoTakoj ? null : e.stripe_account_id, pogoji.verzija]
     );
     const oid = or.rows[0].id;
     if (placanoTakoj) await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, miza.seats]);

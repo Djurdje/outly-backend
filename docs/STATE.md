@@ -128,7 +128,7 @@ Pogodba polj in poti za odjemalca (`ios-dev` #184, `web-dev`) je opravljena in v
 
 - **Prijatelji (20. 9., backend #45; čaka Martina v [#47](https://github.com/Djurdje/outly-backend/issues/47)):** iskanje po uporabniškem imenu (`GET /users/search`, predpona, samo potrjeni, največ 10, 120/h); `users.share_plans_with_friends` privzeto VKLOPLJENO; »Invite more« deli `https://outly.si` brez `?ref=`. Drugačna odločitev = tri majhne spremembe + popravek politike.
 - **Več ekip na osebo (018):** brez glave `X-Outly-Club` poslovni klici dobijo **prvo (najstarejše) članstvo** — dve ekipi in manjkajoča glava = tiho urejanje napačnega kluba (iOS nastavi `APIClient.currentClubId` ob vstopu v klub). `DELETE /business/team/me` brez glave zapusti VSE ekipe.
-- **Pogoji/politika:** sprememba pogojev = dvigni `TERMS_VERSION` v `outly_webpage/auth.js` (zdaj 1.1); iOS registracija `terms_version` ne zapiše. Nova funkcija, ki zbira ali kaže osebne podatke, = popravek politike zasebnosti.
+- **Pogoji/politika:** sprememba pogojev = dvigni `TERMS_VERSION` v `outly_webpage/auth.js` (zdaj 1.1); iOS registracija `terms_version` ne zapiše. Nakup z računom (vstopnice, VIP) od migracije 044 (#215) shrani `orders.terms_version`/`terms_accepted_at`, ČE jo odjemalec pošlje; star iOS/splet polja ne pošljeta → NULL (ni dokaza sprejema), nakup še vedno uspe. Nova funkcija, ki zbira ali kaže osebne podatke, = popravek politike zasebnosti.
 - **iOS »My preferences« in filtri domačega zaslona so samo na napravi** (@AppStorage); strežniško = nova pot/stolpec na `/me` (samo dodajanje). Histogram razdalje je brez dovoljenja za lokacijo prazen — ni hrošč.
 - **`event_favorites`**: pot v backendu ostane, iOS je od outly-app #23 ne kliče več — kandidat za odstranitev (API samo dodajanje).
 

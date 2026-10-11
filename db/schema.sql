@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–043, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–044, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 9khFavUitGjeBX6YQrraST9sLpZP5TUsVygdgrbAhEgMbP5XhOOqbTjpgVg68eS
+\restrict A7al3tQW9l7EfcQhS71545JOurLdkA7v9lkxA143MA5Ie7W4TquBenUVPVgWpYJ
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -943,6 +943,8 @@ CREATE TABLE public.orders (
     receipt_mail_attempts smallint,
     receipt_mail_claimed_at timestamp with time zone,
     receipt_mail_sent_at timestamp with time zone,
+    terms_version text,
+    terms_accepted_at timestamp with time zone,
     CONSTRAINT orders_fee_chk CHECK (((application_fee_cents >= 0) AND (application_fee_cents <= total_cents))),
     CONSTRAINT orders_guest_chk CHECK (((guest_email IS NULL) OR ((guest_email = lower(guest_email)) AND (char_length(guest_email) <= 254) AND (POSITION(('@'::text) IN (guest_email)) > 1) AND (table_id IS NULL) AND (guest_terms_version IS NOT NULL) AND (guest_terms_accepted_at IS NOT NULL)))),
     CONSTRAINT orders_guest_lista_chk CHECK (((guest_list_id IS NULL) OR ((status = 'paid'::text) AND (quantity = 1) AND (unit_price_cents = 0) AND (total_cents = 0) AND (application_fee_cents = 0) AND (refunded_cents = 0) AND (table_id IS NULL) AND (package_id IS NULL) AND (guest_email IS NULL) AND (stripe_payment_intent_id IS NULL) AND (stripe_charge_id IS NULL) AND (stripe_checkout_session_id IS NULL) AND (stripe_account_id IS NULL)))),
@@ -952,6 +954,8 @@ CREATE TABLE public.orders (
     CONSTRAINT orders_refund_chk CHECK (((refunded_cents >= 0) AND (refunded_cents <= total_cents))),
     CONSTRAINT orders_status_chk CHECK ((status = ANY (ARRAY['pending'::text, 'paid'::text, 'failed'::text, 'cancelled'::text, 'refunded'::text, 'partially_refunded'::text]))),
     CONSTRAINT orders_table_chk CHECK (((table_id IS NULL) OR ((quantity = 1) AND (table_label IS NOT NULL) AND ((table_seats >= 1) AND (table_seats <= 20))))),
+    CONSTRAINT orders_terms_par_chk CHECK (((terms_version IS NULL) = (terms_accepted_at IS NULL))),
+    CONSTRAINT orders_terms_version_chk CHECK (((terms_version IS NULL) OR (terms_version ~ '^[A-Za-z0-9._:-]{1,40}$'::text))),
     CONSTRAINT orders_total_chk CHECK ((total_cents = (unit_price_cents * quantity)))
 );
 
@@ -1017,6 +1021,20 @@ COMMENT ON COLUMN public.orders.receipt_mail_claimed_at IS 'Cas zadnje rezervaci
 --
 
 COMMENT ON COLUMN public.orders.receipt_mail_sent_at IS 'Cas uspesno poslanega potrdila kupcu z racunom (042). Zapise se sele po uspehu Resenda.';
+
+
+--
+-- Name: COLUMN orders.terms_version; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.terms_version IS 'Razlicica pogojev uporabe, sprejeta ob nakupu z racunom (044, #215). NULL = odjemalec je ni poslal. Gost: guest_terms_version.';
+
+
+--
+-- Name: COLUMN orders.terms_accepted_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.terms_accepted_at IS 'Cas sprejema pogojev ob nakupu z racunom (044, #215): NOT NULL natanko takrat, ko je terms_version NOT NULL.';
 
 
 --
@@ -2908,5 +2926,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 9khFavUitGjeBX6YQrraST9sLpZP5TUsVygdgrbAhEgMbP5XhOOqbTjpgVg68eS
+\unrestrict A7al3tQW9l7EfcQhS71545JOurLdkA7v9lkxA143MA5Ie7W4TquBenUVPVgWpYJ
 
