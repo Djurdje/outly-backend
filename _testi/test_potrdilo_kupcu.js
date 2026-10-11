@@ -194,6 +194,18 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(!m[0].attachments && !/cid:|<img/i.test(html), "brez priloge, QR slike in sledilnika");
     assert(html.includes("Noc &amp; &lt;b&gt;Test&lt;/b&gt;") && !html.includes("<b>Test</b>"), "HTML: ime dogodka ubezeno");
     assert(html.includes('<a href="https://outly.test/app/tickets">'), "HTML: povezava je klikljiva");
+    // #100: dvojezicno (slovenski blok PRED angleskim), enaki podatki, vse iz baze ubezeno v obeh blokih
+    assert(m[0].subject === `Vaše naročilo / Your order: Noc & <b>Test</b> (${r.body.order.public_ref})`, "zadeva (dvojezicna)", m[0].subject);
+    const deli = besedilo.split("\n\n----------------------------------------\n\n");
+    assert(deli.length === 2 && deli[0].startsWith(`Vaše naročilo Outly ${r.body.order.public_ref}\n`) && deli[1].startsWith(`Your Outly order ${r.body.order.public_ref}\n`), "besedilo: slovenski blok, locilo, angleski blok", deli.map(d => d.slice(0, 50)));
+    const [sl, en] = deli;
+    assert(sl.includes(`NAROČILO\nNaročilo ${r.body.order.public_ref}. Čas naročila: `) && /\(ljubljanski čas\)/.test(sl) && !/Ljubljana time/.test(sl), "sl: stevilka narocila in cas po sl-SI", sl.slice(0, 200));
+    assert(sl.includes("2 x 15,00 EUR = 30,00 EUR") && sl.includes("Cena vključuje DDV (22 %).") && !sl.includes("15.00") && en.includes("2 x 15.00 EUR = 30.00 EUR") && !en.includes("15,00"), "sl: znesek z decimalno vejico in stopnja DDV; en nespremenjen");
+    assert(sl.includes("Noc & <b>Test</b>") && sl.includes("Plain Club") && sl.includes("Glavni trg 5, Maribor") && sl.includes("+38641333444") && sl.includes("hello@plain-club.si"), "sl: dogodek in prodajalec (isti podatki kot en)");
+    assert(sl.includes("Outly je samo posrednik: NEXT DIMENSIONS") && sl.includes("135. člen, 12. točka") && sl.includes("https://outly.si/terms") && sl.includes("https://outly.test/app/tickets"), "sl: posrednik, odstop (ZVPot-1 135/12), pogoji, povezava");
+    assert(sl.includes("To je bil testni nakup: nič ni bilo zaračunano.") && /PRODAJALEC\nVstopnico prodaja klub: Plain Club/.test(sl) && /VAŠE VSTOPNICE\n/.test(sl), "sl: testno narocilo, razdelka Prodajalec in Vaše vstopnice");
+    assert((html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="sl">,<div lang="en">' && html.indexOf('lang="sl"') < html.indexOf('lang="en"'), "HTML: bloka sl in en, sl prvi");
+    assert((html.match(/Noc &amp; &lt;b&gt;Test&lt;\/b&gt;/g) || []).length >= 2 && (html.match(/<a href="https:\/\/outly\.test\/app\/tickets">/g) || []).length === 2, "HTML: ubezen naslov in klikljiva povezava v OBEH blokih");
     let v = await vrstica(o1);
     assert(v.receipt_mail_attempts === 1 && v.receipt_mail_sent_at && v.receipt_mail_claimed_at, "baza: 1 poskus, poslano", [v.receipt_mail_attempts, v.receipt_mail_sent_at]);
     r = await nakup(T.ana, evTest, 2, K1);
@@ -214,6 +226,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     m = mailiNa("bor@outly.si");
     assert(m.length === 1 && m[0].text.includes("VIP table T1 (3 seats), package: Magnum: 300.00 EUR."), "VIP: miza, sedezi, paket, cena", m[0] && m[0].text);
     assert(m[0].text.includes("Age limit: 18+ (table with a drinks package)"), "VIP: starost za paket pijace 18+");
+    assert(m[0].text.includes("VIP miza T1 (3 sedeži), paket: Magnum: 300,00 EUR.") && m[0].text.includes("Starostna meja: 18+ (miza s paketom pijače)") && /MIZA\n/.test(m[0].text), "VIP (sl): miza, sedeži, paket, cena z vejico, starost za paket");
     assert(m[0].text.includes("TABLE") && !/\d x \d/.test(m[0].text.split("TABLE")[1].split("\n")[1] || ""), "VIP: razdelek Table brez stevila vstopnic");
 
     // ================================================================

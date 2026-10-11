@@ -6,7 +6,8 @@
  * Vzorec kot test_vabila.js: lokalni JWKS (3990); backend A (TTL 60 s, torej v testu nikoli ne poteče - vse se zanasa na
  * razveljavitev, test ni obcutljiv na pocasen CI; 20 kljucev) na 3150; backend B (predpomnilnik izklopljen,
  * JAVNI_PREDPOMNILNIK_MS=0) na 3151 = kontrola, da meritve niso prazne; backend C (TTL 2 s, casovna meja single-flight
- * 0,5 s) na 3152 za teste, ki potrebujejo potek casa.
+ * 0,5 s) na 3152 za teste, ki potrebujejo potek casa; backend D (TTL 60 s, 50 kljucev = 5 prostih) na 3153 za GET /clubs/map
+ * in GET /search (#165). Razveljavitev je lokalna za proces, zato vse pisanje in branje v tem razdelku gre prek D.
  *
  * Pokrito: (a) osebna polja ne uhajajo med uporabniki/gosta, (b) sprememba je takoj vidna v istem procesu,
  * (c) ETag + 304, (d) 200 hkratnih zahtevkov = 1 poizvedba v bazo (merjeno z zaklepom tabele in pg_stat_activity),
@@ -21,8 +22,8 @@ const { ustvariPredpomnilnik } = require("../javni_predpomnilnik");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const PORT_A = 3150, PORT_B = 3151, PORT_C = 3152, JWKS_PORT = 3990;
-const A = `http://127.0.0.1:${PORT_A}`, B = `http://127.0.0.1:${PORT_B}`, C = `http://127.0.0.1:${PORT_C}`;
+const PORT_A = 3150, PORT_B = 3151, PORT_C = 3152, PORT_D = 3153, JWKS_PORT = 3990;
+const A = `http://127.0.0.1:${PORT_A}`, B = `http://127.0.0.1:${PORT_B}`, C = `http://127.0.0.1:${PORT_C}`, D = `http://127.0.0.1:${PORT_D}`;
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
 const jwk = publicKey.export({ format: "jwk" });
@@ -202,7 +203,8 @@ async function enotski() {
   const sA = zazeni(PORT_A, { JAVNI_PREDPOMNILNIK_MS: "60000", JAVNI_PREDPOMNILNIK_KLJUCEV: "20" });
   const sB = zazeni(PORT_B, { JAVNI_PREDPOMNILNIK_MS: "0" });
   const sC = zazeni(PORT_C, { JAVNI_PREDPOMNILNIK_MS: "2000", JAVNI_PREDPOMNILNIK_CAKANJE_MS: "500" });
-  await pocakaj(A); await pocakaj(B); await pocakaj(C);
+  const sD = zazeni(PORT_D, { JAVNI_PREDPOMNILNIK_MS: "60000", JAVNI_PREDPOMNILNIK_KLJUCEV: "50" });
+  await pocakaj(A); await pocakaj(B); await pocakaj(C); await pocakaj(D);
   const c = (method, pot, token, body) => req(C, method, pot, { token, body });
 
   try {
@@ -601,11 +603,133 @@ async function enotski() {
     r = await a("GET", "/events/" + "1".repeat(40));
     assert(r.status === (await b("GET", "/events/" + "1".repeat(40))).status && r.stanje !== "zadetek", "predolg id gre mimo predpomnilnika (isti odziv kot brez njega)", [r.status, r.stanje]);
 
+    console.log("\n# GET /clubs/map in GET /search (#165): isto telo za vse, razveljavitev ob zapisu, prosto besedilo ima loceni proracun (backend D)");
+    {
+      const d = (method, pot, token, body) => req(D, method, pot, { token, body });
+      await pool.query("UPDATE clubs SET lat = 46.05, lng = 14.5 WHERE id = 1");
+      r = await d("PATCH", "/business/clubs/me", T.lastnik, { description: "mapa" });   // zapis prek D: izprazni D
+      assert(r.status === 200, "D: PATCH kluba (razveljavitev D po neposredni spremembi koordinat)", r.status);
+
+      // --- /clubs/map
+      const mGost = await d("GET", "/clubs/map");
+      assert(mGost.status === 200 && mGost.stanje === "zgresitev" && mGost.body.length === 1 && mGost.body[0].id === 1, "map: gost prvi = zgresitev, en klub s koordinatami", [mGost.status, mGost.stanje, mGost.body]);
+      const mAna = await d("GET", "/clubs/map", T.ana);
+      assert(mAna.stanje === "zadetek" && mAna.text === mGost.text, "map: prijavljena ana zadene isti vnos, telo bajt za bajtom enako", mAna.stanje);
+      assert(!/my_plan|friends_|is_following|email|account_id|legal_|tax_number/.test(mGost.text), "map: v telesu ni osebnih ali notranjih polj");
+      assert(mGost.text === (await b("GET", "/clubs/map")).text, "map: telo enako kot brez predpomnilnika (B)");
+      assert((await d("GET", "/clubs/map", null, null)).headers.get("cache-control") === null, "map: Cache-Control nespremenjen (ni ga bilo)");
+      r = await surovGet(D, "/clubs/map", { "If-None-Match": mGost.headers.get("etag") });
+      assert(r.status === 304, "map: If-None-Match -> 304", r.status);
+      r = await d("PATCH", "/business/clubs/me", T.lastnik, { name: "Pure Map" });
+      r = await d("GET", "/clubs/map");
+      assert(r.stanje === "zgresitev" && r.body[0].name === "Pure Map", "map: novo ime kluba je takoj na zemljevidu (razveljavitev ob PATCH)", [r.stanje, r.body[0] && r.body[0].name]);
+      await d("PATCH", "/business/clubs/me", T.lastnik, { name: "Pure Club 2" });
+      await d("GET", "/clubs/map");
+      r = await d("POST", "/views", null, { club_id: 1 });
+      r = await d("GET", "/clubs/map");
+      assert(r.stanje === "zadetek", "map: POST /views je ne izprazni (izjema)", r.stanje);
+
+      // bbox
+      const bboxV = "45,13,47,16", bboxNe = "0,0,1,1";
+      r = await d("GET", `/clubs/map?bbox=${bboxV}`);
+      const bboxPrvi = r;
+      assert(r.status === 200 && r.stanje === "zgresitev" && r.body.length === 1, "map: bbox okoli kluba = 1 klub (zgresitev)", [r.status, r.body.length]);
+      r = await d("GET", `/clubs/map?bbox=${bboxV}`, T.ana);
+      assert(r.stanje === "zadetek" && r.text === bboxPrvi.text, "map: bbox ponovno (ana) = zadetek, enako telo");
+      r = await d("GET", `/clubs/map?bbox=${bboxNe}`);
+      assert(r.status === 200 && r.body.length === 0 && r.stanje === "zgresitev", "map: bbox mimo kluba = prazen seznam, svoj kljuc (ne vnos brez okvira)", [r.body.length, r.stanje]);
+      assert((await d("GET", "/clubs/map")).body.length === 1, "map: brez okvira se vedno 1 klub (kljuci se ne mesajo)");
+      assert(bboxPrvi.text === (await b("GET", `/clubs/map?bbox=${bboxV}`)).text && (await d("GET", `/clubs/map?bbox=${bboxNe}`)).text === (await b("GET", `/clubs/map?bbox=${bboxNe}`)).text, "map: bbox telo enako kot brez predpomnilnika (B)");
+      // +/-Infinity: JSON.stringify(Infinity) je null in bi zlil razlicna okvira v isti kljuc
+      const vseInf = "-Infinity,-Infinity,Infinity,Infinity", nicInf = "Infinity,Infinity,-Infinity,-Infinity";
+      const i1 = await d("GET", `/clubs/map?bbox=${vseInf}`), i2 = await d("GET", `/clubs/map?bbox=${nicInf}`);
+      const j1 = await b("GET", `/clubs/map?bbox=${vseInf}`), j2 = await b("GET", `/clubs/map?bbox=${nicInf}`);
+      assert(i1.text === j1.text && i2.text === j2.text && i1.text !== i2.text, "map: okvira z +/-Infinity imata RAZLICNA kljuca in enak odgovor kot brez predpomnilnika", [i1.text.length, i2.text.length]);
+      for (const slab of ["a,b", "1,2,3", "1,2,3,x"]) {
+        r = await d("GET", `/clubs/map?bbox=${slab}`);
+        assert(r.status === 400 && (await d("GET", `/clubs/map?bbox=${slab}`)).stanje !== "zadetek", `map: bbox=${slab} -> 400, ni predpomnjen`);
+      }
+      r = await d("GET", `/clubs/map?bbox=${bboxV}&bbox=${bboxNe}`);
+      assert(r.status === 400 || r.stanje === "izklopljen", "map: ponovljen bbox gre mimo predpomnilnika (ali 400)", [r.status, r.stanje]);
+      r = await d("GET", "/clubs/map?bbox=" + encodeURIComponent("45,13,47,16" + " ".repeat(150)));
+      assert(r.status === 200 && r.stanje === "izklopljen", "map: predolg bbox gre mimo predpomnilnika", [r.status, r.stanje]);
+      r = await d("GET", "/clubs/map?bbox=");
+      assert(r.status === 200 && r.stanje === "zadetek", "map: prazen bbox = brez okvira (isti vnos kot /clubs/map)", r.stanje);
+      // Poplava okvirov (premikanje zemljevida): 60 razlicnih kljucev ne izpodrine vrocega kljuca
+      for (let i = 0; i < 60; i++) await d("GET", `/clubs/map?bbox=${45 + i / 100},13,47,16`);
+      r = await d("GET", "/clubs/map");
+      assert(r.stanje === "zadetek", "map: vroc kljuc preziv poplavo 60 razlicnih okvirov (loceni proracun)", r.stanje);
+      r = await d("GET", `/clubs/map?bbox=${45 + 59 / 100},13,47,16`);
+      assert(r.stanje === "zadetek", "map: zadnji okvir je se v predpomnilniku");
+      r = await d("GET", `/clubs/map?bbox=${45},13,47,16`);
+      assert(r.stanje === "zgresitev", "map: prvi (najstarejsi) okvir je izpodrinjen (50 kljucev = 5 prostih)", r.stanje);
+
+      // --- /search
+      await d("PATCH", `/events/${ev}`, T.lastnik, { title: "Luna X" });
+      const iskGost = await d("GET", "/search?q=kozmos");
+      assert(iskGost.status === 200 && iskGost.stanje === "zgresitev" && iskGost.body.events.length === 0 && iskGost.body.query === "kozmos", "search: gost, brez zadetkov (zgresitev)", iskGost.body);
+      r = await d("PATCH", `/events/${ev}`, T.lastnik, { title: "Kozmos X" });
+      assert(r.status === 200, "D: PATCH dogodka", r.status);
+      r = await d("GET", "/search?q=kozmos");
+      assert(r.stanje === "zgresitev" && r.body.events.some((e) => e.id === ev) && r.body.total === 1, "search: nov naslov dogodka je takoj med zadetki (razveljavitev ob PATCH)", [r.stanje, r.body.total]);
+      const iskTelo = r.text;
+      r = await d("GET", "/search?q=kozmos", T.ana);
+      assert(r.stanje === "zadetek" && r.text === iskTelo, "search: ana zadene isti vnos, telo bajt za bajtom enako", r.stanje);
+      assert(!/my_plan|friends_|is_following|email|account_id|legal_|tax_number|hidden/.test(iskTelo), "search: v telesu ni osebnih ali notranjih polj");
+      assert(iskTelo === (await b("GET", "/search?q=kozmos")).text, "search: telo enako kot brez predpomnilnika (B)");
+      r = await surovGet(D, "/search?q=kozmos", { "If-None-Match": (await d("GET", "/search?q=kozmos")).headers.get("etag") });
+      assert(r.status === 304, "search: If-None-Match -> 304", r.status);
+      r = await d("GET", "/search?q=" + encodeURIComponent("  kozmos "));
+      assert(r.stanje === "zadetek" && r.text === iskTelo, "search: obrezan niz zadene isti kljuc (telo ima query = kozmos)", r.stanje);
+      r = await d("GET", "/search?q=KOZMOS");
+      assert(r.stanje === "zgresitev" && r.body.query === "KOZMOS" && r.body.events.length === 1, "search: velike crke imajo svoj kljuc (query se vrne natanko kot poslan)", [r.stanje, r.body.query]);
+      r = await d("GET", "/search?q=kozmos&limit=abc");
+      assert(r.status === 200 && r.stanje === "zadetek" && r.text === iskTelo, "search: neveljaven limit = privzeti (isti kljuc, enako telo)", r.stanje);
+      r = await d("GET", "/search?q=kozmos&limit=1");
+      assert(r.stanje === "zgresitev" && r.body.events.length === 1, "search: limit je del kljuca", r.stanje);
+      r = await d("GET", "/search?q=kozmos&limit=999");
+      assert(r.stanje === "zgresitev" && (await d("GET", "/search?q=kozmos&limit=50")).stanje === "zadetek", "search: limit 999 se strne na 50 (kanonicni kljuc)");
+      // Napake in nenavadni parametri
+      for (const q of ["", "a", "%20a%20"]) {
+        r = await d("GET", "/search?q=" + q);
+        assert(r.status === 400 && (await b("GET", "/search?q=" + q)).status === 400, `search: q='${decodeURIComponent(q)}' -> 400 (kot brez predpomnilnika)`);
+      }
+      r = await d("GET", "/search");
+      assert(r.status === 400, "search: brez q -> 400");
+      r = await d("GET", "/search?q=" + "k".repeat(41));
+      assert(r.status === 200 && r.stanje === "izklopljen", "search: niz > 40 znakov gre mimo predpomnilnika", r.stanje);
+      r = await d("GET", "/search?q=ko&q=zm");
+      assert(r.status === 200 && r.stanje === "izklopljen", "search: ponovljen q (seznam) gre mimo predpomnilnika", r.stanje);
+      r = await d("GET", "/search?q[x]=zz");
+      assert(r.status < 500 && r.stanje !== "zadetek", "search: objekt v q ne zadene predpomnilnika", [r.status, r.stanje]);
+      r = await d("GET", "/search?q=kozmos&limit=" + "9".repeat(11));
+      assert(r.status === 200 && r.stanje === "izklopljen", "search: predolg limit gre mimo predpomnilnika", r.stanje);
+      // Skrit klub izgine iz iskanja takoj (admin PATCH je zapis prek D)
+      await pool.query("UPDATE users SET role='admin' WHERE email='an_x@outly.si'");
+      await d("GET", "/search?q=pure"); await d("GET", "/clubs/map");
+      r = await d("PATCH", "/admin/api/clubs/1", T.an_x, { hidden: true });
+      assert(r.status === 200, "D: admin skrije klub", r.status);
+      r = await d("GET", "/search?q=pure"); const zem = await d("GET", "/clubs/map");
+      assert(r.body.clubs.length === 0 && r.body.events.length === 0 && zem.body.length === 0, "skrit klub takoj izgine iz /search in /clubs/map", [r.body.total, zem.body.length]);
+      await d("PATCH", "/admin/api/clubs/1", T.an_x, { hidden: false });
+      await pool.query("UPDATE users SET role='user' WHERE email='an_x@outly.si'");
+      r = await d("GET", "/search?q=pure");
+      assert(r.body.clubs.length === 1, "ponovno viden klub je takoj spet v iskanju", r.body.total);
+      // Poplava iskalnih nizov: vroc kljuc (/clubs/map brez okvira, /events) prezivi, prosti kljuci imajo mejo 5
+      await d("GET", "/events?upcoming=true"); await d("GET", "/clubs/map");
+      for (let i = 0; i < 100; i++) await d("GET", `/search?q=iskanje${i}`);
+      assert((await d("GET", "/events?upcoming=true")).stanje === "zadetek" && (await d("GET", "/clubs/map")).stanje === "zadetek", "search: poplava 100 razlicnih nizov ne izpodrine vrocih kljucev");
+      let ostali = 0;
+      for (let i = 99; i >= 90; i--) if ((await d("GET", `/search?q=iskanje${i}`)).stanje === "zadetek") ostali++;
+      assert(ostali === 5, "search: od prostih kljucev je ostalo natanko zadnjih 5 (10 % od 50)", ostali);
+      assert(!/Unhandled|TypeError|ReferenceError/.test(sD.log), "dnevnik D brez neujetih napak", sD.log.slice(-400));
+    }
+
     console.log("\n# Brez neujetih napak v dnevniku");
     assert(!/Unhandled|TypeError|ReferenceError/.test(sA.log), "dnevnik A brez neujetih napak", sA.log.slice(-400));
     assert(!/Unhandled|TypeError|ReferenceError/.test(sB.log) && !/Unhandled|TypeError|ReferenceError/.test(sC.log), "dnevnika B in C brez neujetih napak");
   } finally {
-    sA.kill(); sB.kill(); sC.kill(); jwksServer.close();
+    sA.kill(); sB.kill(); sC.kill(); sD.kill(); jwksServer.close();
     await pool.end().catch(() => {});
   }
   console.log(`\n${ok} ok, ${fail} napak`);

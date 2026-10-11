@@ -267,7 +267,7 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     assert(z6 && /^[A-Za-z0-9_-]{43}$/.test(z6), "mail: povezava /app/guest/ticket#t=<zeton> (fragment)", (m0.html || "").slice(0, 80));
     assert(/^https:\/\/outly\.test\/app\/guest\/ticket#t=/.test((/https:\/\/[^\s"<]+guest\/ticket#t=[A-Za-z0-9_-]+/.exec(m0.text || "") || [""])[0]) && !(m0.text || "").includes("?t="), "mail: povezava v besedilu z osnovo APP_URL, zeton v fragmentu");
     assert(m0.reply_to === "luka@outly.si" && /^Outly <test@outly\.test>$/.test(m0.from), "mail: reply-to luka@outly.si, posiljatelj EMAIL_FROM", [m0.reply_to, m0.from]);
-    assert(/^kupec sent you a ticket for Prenos Noc$/.test(m0.subject), "zadeva: uporabnisko ime posiljatelja + dogodek", m0.subject);
+    assert(m0.subject === "kupec vam je poslal(-a) vstopnico / sent you a ticket: Prenos Noc", "zadeva (dvojezicna, #100): uporabnisko ime posiljatelja + dogodek", m0.subject);
     const vse = (m0.html || "") + (m0.text || "");
     assert(!vse.includes("kupec@outly.si") && !vse.includes("prijatelj@example.com"), "mail: brez e-naslova posiljatelja in prejemnika v vsebini");
     assert(!/<script|pixel|track/i.test(m0.html || "") && !/<img[^>]+src="(?!cid:)/i.test(m0.html || ""), "mail: brez sledilnikov in zunanjih slik");
@@ -297,6 +297,17 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     ob(/Age limit|No age limit\./, "starostna meja");
     ob(/Pure Club, Trs?g 1|Pure Club, Trg 1, Ljubljana/, "kraj");
     ob(/\(Ljubljana time\)/, "datum in ura");
+    // #100: mail je dvojezicen - slovenski blok PRED angleskim (locilo), enaki podatki, vse iz baze ubezeno v HTML
+    const deli = bes.split("\n\n----------------------------------------\n\n");
+    assert(deli.length === 2 && deli[0].startsWith("kupec vam je poslal(-a) vstopnico za Prenos Noc\n") && deli[1].startsWith("kupec sent you a ticket for Prenos Noc\n"), "mail (besedilo): slovenski blok, locilo, angleski blok", deli.map(d => d.slice(0, 60)));
+    const [sl, en] = deli;
+    assert(/TO JE VAŠA VSTOPNICA\nTo sporočilo in priloženi PDF sta vaša vstopnica\. Koda QR velja za en vstop/.test(sl) && /THIS IS YOUR TICKET/.test(en) && !/THIS IS YOUR TICKET/.test(sl), "mail: varnostno besedilo v obeh jezikih");
+    assert(/O VAŠEM E-NASLOVU \(GDPR, 14\. ČLEN\)\nKdo smo: NEXT DIMENSIONS, družba za marketing, d\.o\.o\., Trebče 81, 3256 Bistrica ob Sotli, luka@outly\.si\./.test(sl), "mail (sl): obvestilo GDPR 14, upravljavec");
+    assert(/zakoniti interes \(GDPR, člen 6\(1\)\(f\)\): uporabnik Outly kupec vam želi predati to vstopnico/.test(sl) && /Od kod podatek: vnesel ga je uporabnik Outly kupec\./.test(sl), "mail (sl): namen, pravna podlaga in vir z uporabniskim imenom posiljatelja");
+    assert(/Prejemniki: Resend \(dostava e-pošte\)\. Organizator \(Pure Club\) vidi samo/.test(sl) && /Hramba: vaš e-naslov izbrišemo 30 dni po koncu dogodka/.test(sl) && /Informacijskem pooblaščencu/.test(sl), "mail (sl): prejemniki, hramba, pritozba");
+    assert(/PRAVICA DO UGOVORA\nNe želite, da obdelujemo vaš e-naslov\?/.test(sl) && /Organizator: Pure Club \(info@pure\.test\)/.test(sl) && /\(ljubljanski čas\)/.test(sl), "mail (sl): pravica do ugovora, organizator, cas");
+    assert((m0.html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="sl">,<div lang="en">' && (m0.html.match(/cid:ticket-qr-1/g) || []).length === 2, "mail (HTML): bloka sl in en, koda QR v obeh (isti CID)");
+
     ob(/Organiser: Pure Club \(info@pure\.test\)/, "organizator + kontakt");
     ob(/One entry per code\.[\s\S]*house rules or the law[\s\S]*Reselling[\s\S]*refund goes to the person who bought the ticket/, "pravila vstopnice");
     ob(/NOT FOR YOU\?\nIf you were not expecting this ticket, reply to this email/, "»Ni zate?«");
