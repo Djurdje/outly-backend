@@ -8293,5 +8293,9 @@ const port = process.env.PORT || 3000;
 // novih povezav jedro zavrglo 1100-1400 povezav na zagon; odjemalec (tudi vratarjev sken) jo je ponovil sele po ~1-3 s.
 // Jedro omeji na net.core.somaxconn (4096 na sodobnem Linuxu, tudi GitHub Actions).
 const streznik = app.listen({ port, backlog: 4096 }, () => console.log("Server running on port", port));
+// Casovne meje povezav (#139, korak 2): keepAliveTimeout nad mirovalnim rokom Renderjevega proxyja (KEEPALIVE_MS, privzeto 120000),
+// headersTimeout = keepAlive + 1 s. Brez tega Node po 5 s zapre vzdrzevano povezavo, ki jo proxy se uporablja.
+const meje = require("./nastavitve_povezav").nastaviMejePovezav(streznik, process.env.KEEPALIVE_MS);
+console.log(`[meje-povezav] keepAliveTimeout ${meje.keepAliveMs} ms, headersTimeout ${meje.headersMs} ms, requestTimeout ${meje.requestMs} ms`);
 // Dnevnik povezav (#139): enkrat na DNEVNIK_POVEZAV_MS (privzeto 60000, 0 = izklop) vrstica `[povezave] ...`, samo ob prometu.
 require("./dnevnik_povezav").zagoniDnevnikPovezav(streznik, stevilkaIzOkolja("DNEVNIK_POVEZAV_MS", 60000, 3600000));
