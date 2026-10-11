@@ -1,56 +1,28 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-10 (varovala pred živo prodajo, payment_mode, potrdilo kupcu, migracija 042; prej 2026-10-10: potisna obvestila APNs, migracija 040; prej 2026-10-09: vloga bartender in strežba VIP miz, migracija 038; prej 2026-10-09: organizatorji brez prizorišča, migracija 037; prej 2026-10-08: obvestilo o vabilu na guest listo, migracija 036; guest lista, migracija 035; prej 2026-10-05: nakup brez računa; prej 2026-10-02: prenesena vstopnica brez seriala v kupčevem pogledu #124; neujet await v ročnikih #129; idempotentni ključ nakupa #112; zgodovina do 2. 10. premaknjena v arhiv; meja 200 vrstic, outly-hq pravilo 5).
+Zadnja posodobitev: 2026-10-11 (STATE skrajšan pod 200 vrstic: pogodbe polj za odjemalce so v ARCHITECTURE, zgodovina v `docs/arhiv/`; prej 2026-10-10: varovala pred živo prodajo, payment_mode, potrdilo kupcu, migracija 042).
 
-Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje**. Kar je drugje, je tam merodajno:
+Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje** (pasti, predpostavke agenta, kar nobeno orodje ne ve). Drugje: odprte naloge → GitHub Issues (`agent` / `martin`); testi → Actions `Testi`; produkcija → `Nadzor produkcije` + `/clubs`;
+kaj se je spremenilo → PR-ji; zakaj → `DECISIONS.md`; kaj se ne sme zgoditi → `ARCHITECTURE.md` »Poslovne invariante«; kaj je že padlo → `INCIDENTI.md`. Tega ne prepisuj sem.
 
-| Vprašanje | Kje piše | Ne v STATE.md |
-|---|---|---|
-| Kaj je še odprto, kdo mora kaj narediti | **GitHub Issues** (`agent` = agent, `martin` = Martin) | ne prepisuj seznama nalog |
-| Ali testi tečejo | **Actions → `Testi`** ob vsakem PR-ju | ne prepisuj števila testov |
-| Ali produkcija dela | **Actions → `Nadzor produkcije`** (vsakih 15 min) + `https://outly-backend-roy3.onrender.com/clubs` | ne prepisuj »dela/ne dela« |
-| Kaj se je spremenilo | **zgodovina PR-jev in commitov** | ne piši dnevnika po gradnjah |
-| Zakaj je nekaj tako | `docs/DECISIONS.md` | |
-| Kaj se ne sme zgoditi in kaj to preprečuje | `docs/ARCHITECTURE.md`, »Poslovne invariante« | |
-| Kaj je že enkrat padlo | `docs/INCIDENTI.md` | |
-
-Ostane torej: pasti (grabljice, na katere je nekdo že stopil), predpostavke, ki jih je agent sprejel sam,
-in stvari, ki jih nobeno orodje ne ve.
-
-**Zgodovina** (zaključeni sklopi, dnevniki sej, stari načrti in daljše prvotno besedilo pasti do 2. 10. 2026) je v
-[`docs/arhiv/STATE-do-2026-10-02.md`](arhiv/STATE-do-2026-10-02.md) — ni merodajna. Ta datoteka ima **največ 200 vrstic**;
-kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md` (zadnji: [`STATE-do-2026-10-02d.md`](arhiv/STATE-do-2026-10-02d.md)).
-
-## Odprte naloge
-
-**Seznam je v GitHub Issues**, ne tukaj: <https://github.com/Djurdje/outly-backend/issues>
-
-**Zagon (komercialna uporaba): glavni seznam je [#198](https://github.com/Djurdje/outly-backend/issues/198)** (oznaka `zagon`) — kaj manjka do prave prodaje in App Store
-in kaj je že narejeno. Preberi ga pred vsako nalogo, povezano s plačili, pravom, App Store ali zanesljivostjo; ob zaključku točko odkljukaj.
+**Zgodovina** (zaključeni sklopi, dnevniki sej, stari načrti, pogodbe polj, ki jih odjemalca že imata) je v `docs/arhiv/` (`STATE-do-2026-10-02*.md`, `STATE-do-2026-10-11.md`) — ni merodajna. Ta datoteka ima **največ 200 vrstic** (outly-hq pravilo 5);
+kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte naloge so v [GitHub Issues](https://github.com/Djurdje/outly-backend/issues); zagon (komercialna uporaba): glavni seznam [#198](https://github.com/Djurdje/outly-backend/issues/198)** — preberi ga pred vsako nalogo, povezano s plačili, pravom, App Store ali zanesljivostjo.
 
 ## Spremljanje napak
 
-- **Backend:** Render logi (`list_logs` na `srv-d5fuiovgi27c73e4boq0`, filter `*rror*`), brez Sentryja. Request logov (500)
-  Render za to storitev ne vrne — vidno je samo, kar koda izpiše. **iOS:** sesutja zbira TestFlight.
-- **Spletna aplikacija:** Sentry `outly-hd` (EU) / `outly-webapp`, `webapp/porocilo.js` brez SDK, največ 5 dogodkov na nalaganje,
-  DSN 100/uro, IP se ne hrani (politika zasebnosti 2.4). Ob dvigu `RAZLICICA` v `webapp/sw.js` uskladi `RAZLICICA` v `porocilo.js`.
-- **Brevo (Supabase Auth SMTP: potrditve, kode za prijavo) je na paketu Free = 300 mailov/dan.** Ob več prijavah na dan kode
-  ne pridejo in prijava ne dela. Pred javnim zagonom odloči Martin (plačljiv paket ali drug ponudnik).
+- **Backend:** Render logi (`list_logs` na `srv-d5fuiovgi27c73e4boq0`, filter `*rror*`), brez Sentryja; request logov (500) Render ne vrne, vidno je samo, kar koda izpiše. **iOS:** sesutja zbira TestFlight.
+- **Spletna aplikacija:** Sentry `outly-hd` (EU) / `outly-webapp`, `webapp/porocilo.js` brez SDK, največ 5 dogodkov na nalaganje, DSN 100/uro, IP se ne hrani (politika zasebnosti 2.4). Ob dvigu `RAZLICICA` v `webapp/sw.js` uskladi `RAZLICICA` v `porocilo.js`.
+- **Brevo (Supabase Auth SMTP) je na paketu Free = 300 mailov/dan**: ob več prijavah na dan kode ne pridejo in prijava ne dela. Odloča Martin ([#193](https://github.com/Djurdje/outly-backend/issues/193)).
 
 ## Render (od 30. 9. 2026; paketa v ARCHITECTURE, Produkcija)
 
-- **Zmogljivost (lokalno, ne napoved produkcije):** `orodja/obremenitev.mjs` + `_testi/test_obremenitev.js`; z bazo 0,1 CPU je streha javnih poti ~90 req/s (ozko grlo je baza); proti produkciji ni merjeno (#89, I16). **#139 (2. 10.):** med navalo 300 nakupov + 1000 bralcev NOVA TCP povezava skena čaka 0,4-3,2 s (CI), vzdrževana ne (p95 < 0,41 s); jedro ni zavrglo povezav; mehanizem je DELOVNA HIPOTEZA (komentar v #139). Test skenira prek vzdrževane povezave. **Korak 1 (meritev):** Render logi, iskanje `[povezave]` (vrstica na 60 s samo ob prometu: `novih N, zahtevkov M, odprtih K, zamik zanke`; `dnevnik_povezav.js`, izklop `DNEVNIK_POVEZAV_MS=0`); beri samo okna z bistveno več zahtevki kot health checki; 9. 10. 23:13 UTC `novih 26, zahtevkov 42` = proxy delno ponovno uporablja povezave. **Korak 2 (11. 10., v PR):** `KEEPALIVE_MS` (privzeto 120000) + `headersTimeout` +1 s (`nastavitve_povezav.js`, ARCHITECTURE »Časovne meje povezav«); po deployu v Render logu poišči `[meje-povezav]` in primerjaj `novih`/`zahtevkov` v `[povezave]` (pričakuj manj novih pri enakem prometu); #139 zapri šele po taki meritvi.
-- **Zunanji dostop do baze je zaprt** (Inbound IP Rules `outly-db` prazne; backend gre po notranjem omrežju, `10.x`). psql /
-  pgAdmin z External Database URL ne dela: dodaj svoj IP (in ga odstrani) ali Render Shell. Pravili `0.0.0.0/0` na ravni
-  workspacea in okolja ostaneta (veljata tudi za web servis) — ne zapiraj.
-- **Health Check Path = `/healthz`** (200 / 503 ob nedosegljivi bazi, `_testi/test_zdravje.js`; lasten pool `zdraviPool`; 503 tudi ob >60 s zastoju glavnega poola ali skenPool (nobena povezava se ne vrne), I10); Render novo kodo spusti v promet
-  šele, ko odgovori. Interni klici health checka niso v request logih (prazni logi so pričakovani).
+- **Zmogljivost (lokalno, ne napoved produkcije):** `orodja/obremenitev.mjs` + `_testi/test_obremenitev.js`; z bazo 0,1 CPU je streha javnih poti ~90 req/s (ozko grlo je baza; #89, #164, I16). **#139:** med navalo NOVA TCP povezava skena čaka 0,4–3,2 s (CI), vzdrževana ne; mehanizem je DELOVNA HIPOTEZA. Meritev: Render logi `[povezave]` (vrstica na 60 s ob prometu: `novih N, zahtevkov M, odprtih K`; izklop `DNEVNIK_POVEZAV_MS=0`) in `[meje-povezav]` (keep-alive 120 s od 11. 10., ARCHITECTURE »Časovne meje povezav«): primerjaj `novih`/`zahtevkov` pred/po (pričakuj manj novih); #139 zapri šele po taki meritvi.
+- **Zunanji dostop do baze je zaprt** (Inbound IP Rules `outly-db` prazne; backend gre po notranjem omrežju `10.x`): psql / pgAdmin z External Database URL ne dela (dodaj svoj IP in ga odstrani, ali Render Shell). Pravili `0.0.0.0/0` na ravni workspacea in okolja ostaneta (veljata tudi za web servis) — ne zapiraj.
+- **Health Check Path = `/healthz`** (200 / 503 ob nedosegljivi bazi ali >60 s zastoju poola, I10, `_testi/test_zdravje.js`); Render novo kodo spusti v promet šele, ko odgovori. Interni klici health checka niso v request logih (prazni logi so pričakovani).
 
 ## Cloudflare Browser Cache TTL = 4 h (29. 9. 2026)
 
-- Vse statične datoteke outly.si dobijo `max-age=14400`; `Cache-Control: no-cache` iz `_headers` NE velja (HTML ima `max-age=0`).
-  Spletna aplikacija se brani sama (`outly_webpage/CLAUDE.md`), **landing ne**: `script.js`, `auth.js` ... so lahko do 4 h stari.
-  Priporočilo Martinu (nastavitev računa): Caching → Browser Cache TTL = »Respect Existing Headers«.
+- Vse statične datoteke outly.si dobijo `max-age=14400`; `Cache-Control: no-cache` iz `_headers` NE velja (HTML ima `max-age=0`). Spletna aplikacija se brani sama (`outly_webpage/CLAUDE.md`), **landing ne**: `script.js`, `auth.js` ... so lahko do 4 h stari. Priporočilo Martinu (nastavitev računa): Caching → Browser Cache TTL = »Respect Existing Headers«.
 
 ## Sken brez povezave (QR v2; ARCHITECTURE »Sken brez povezave«, invarianta I14)
 
@@ -62,16 +34,11 @@ in kaj je že narejeno. Preberi ga pred vsako nalogo, povezano s plačili, pravo
   (3) `used_at` s telefona velja le v oknu [največ(nastanek vstopnice, začetek dogodka − 12 h), zdaj], `scanned_at` 2020 … zdaj + 1 dan.
 - **`QR_SECRET` na Renderju ni nastavljen**: kode podpisuje rezervna `JWT_SECRET` (>= 32 znakov; INCIDENTI 2026-10-01). Ob kratki
   ali prazni skrivnosti backend ob zagonu samo opozori (`console.error`). Nastavitev/zamenjava razveljavi vse QR kode — odloči Martin.
-- **Okno skena na strežniku (8. 10. 2026, I25):** nova vrednost `result: "not_today"` v `POST /business/tickets/scan` (409, `message` »This ticket is not for today's event.«, `ticket` kot pri drugih zavrnitvah) in kot element `scan-batch` (`used_at: null`, vstopnica ostane `valid`).
-  Odjemalca: splet (#42) `not_today` pozna (`naslovRezultata`); iOS #68 ima lokalno sodbo `nijeZaDanes`, strežniški `not_today` pa v `SkenPrikaz.iz(streznik:)` je padel v `default` (rdeče »INVALID CODE«) – popravljeno v outly-app #69 (`case "not_today"` -> »NOT TODAY'S EVENT«, tudi v `razlogKonflikta`). Starejše gradnje: rdeče »REFUSED« / konflikt, brez sesutja.
-  Past (ura): `scan-batch` okno presoja po `scanned_at`, zato telefon s krivo uro (> 12 h) dobi `not_today` za vse skene brez povezave. Že nekajurna napaka ure
-  ob skenu blizu nastanka vstopnice (`scanned_at` pred `created_at` -> velja zdaj) ali v zadnjih urah okna lahko da `not_today`, če se telefon sinhronizira po zaprtju okna.
-  Past (večdnevni dogodek): brez vpisanega `end_at` je okno `start − 12 h … start + 18 h`; večdnevni dogodek mora imeti `end_at`, sicer vrata drugi dan vrnejo `not_today`.
+- **Okno skena (I25):** `result: "not_today"` (409) v `scan` in kot element `scan-batch` (`used_at: null`, vstopnica ostane `valid`); odjemalca ga poznata (splet #42, iOS #69). **Past (ura):** `scan-batch` presoja okno po `scanned_at`: telefon s krivo uro (> 12 h) dobi `not_today` za vse skene brez povezave; že nekajurna napaka ure blizu nastanka vstopnice ali v zadnjih urah okna da `not_today`, če se telefon sinhronizira po zaprtju okna. **Past (večdnevni dogodek):** brez vpisanega `end_at` je okno `start − 12 h … start + 18 h`; večdnevni dogodek mora imeti `end_at`, sicer vrata drugi dan vrnejo `not_today`.
 - Dostop: `scan-key` in `scan-list` vidijo vse vloge v klubu (tudi vratar) — vratar tako dobi seznam imen imetnikov vstopnic; e-naslovov ni.
 
 ## VIP mize (od 1. 10. 2026; ARCHITECTURE »VIP mize«, I13; VIP 18+ od 2. 10., I8, DECISIONS)
 
-- Backend (#84), iOS (outly-app #43) in splet (outly_webpage #22) so združeni; urejevalnik tlorisa je samo na spletu.
 - **Past:** `GET /events/:id` `vip_enabled` je `true` samo, ce je VIP vklopljen IN ima dogodek vsaj eno vklopljeno aktivno mizo
   (`GET /business/events/:id/vip` `enabled` pa je surova stikalna vrednost dogodka). Nakup mize in nakup vstopnic delita
   omejevalnik "nakup" (20/uro na IP). `PUT /business/vip` zaklene vrstico kluba z `FOR NO KEY UPDATE` (ne `FOR UPDATE`): nakup mize
@@ -79,61 +46,48 @@ in kaj je že narejeno. Preberi ga pred vsako nalogo, povezano s plačili, pravo
 - `PUT /business/events/:id/vip` id arhivirane mize TEGA kluba tiho preskoči (400 samo za tuje); javni `GET /events/:id/vip` obdrži
   prodano mizo tudi po izklopu/arhivu (`available: false`); `POST .../orders` sprejme `expected_price_cents` (409 ob spremembi cene).
 - **Vračil miz ni** (poti ni; `DELETE /events/:id` z naročili dogodek odpove, mize ostanejo pri kupcih); nakup mize gre skozi isti `nacinPlacila` kot vstopnice (Stripe Checkout). Vračila: #190.
-- **Past:** vsak paket velja za alkohol; brezalkoholnih paketov ni mogoce oznaciti, dokler ne pride stolpec (DECISIONS 2. 10.).
 - **VIP 18+ na odjemalcih še ni:** iOS in splet polja `package_min_age` (lahko `undefined` na starem backendu — privzeto 18) še ne
   kažeta. 403 sta navadno besedilo (kot pri `min_age`); odjemalec starosti ne preverja sam.
-- **Rezervacija mize po telefonu (4. 10., migracija 032; ARCHITECTURE »VIP mize«, I13, DECISIONS 4. 10.):** novo polje `hold` pri mizi v `GET /business/events/:id/vip` (ios-dev/web-dev: gumba Rezerviraj/Sprosti). **Past:** po `DELETE` na drugi instanci nakup do 3 s dobi 409.
+- **Past (rezervacija mize po telefonu, migracija 032, I13):** po `DELETE` rezervacije na drugi instanci nakup do 3 s dobi 409.
 
 ## Javni predpomnilnik (#114, ARCHITECTURE »Javni predpomnilnik«, I17; odločitev agenta, Martin je ni potrdil)
 
-- `/events`, `/clubs`, `/events/:id`, `/clubs/:id` so 3 s v pomnilniku; zapis ga izprazni, mimo API-ja (SQL, migracija, druga instanca) zaostane do 3 s.
-  Dnevnik `[predpomnilnik] 60 s: …` kaže zadetke/razveljavitve; izklop: `JAVNI_PREDPOMNILNIK_MS=0`. Nov javni GET, odvisen od uporabnika, NE sme vanj.
-- Od 11. 10. (#165) sta v njem tudi `GET /clubs/map` in `GET /search` (odgovor nespremenjen; ključ iskanja = točen obrezan `q`, `prosto` proračun). Iskanje dogodkov je `ILIKE '%q%'` brez indeksa (lokalno 6 ms pri 1500 dogodkih, raste linearno): predlog `pg_trgm` GIN je migracija, NI narejen.
-- Za iOS/splet (neobvezno): `GET /events?lite=true` brez `description` (ključ manjka; model naj ga ima neobveznega), `ETag`/304.
+- `/events`, `/clubs`, `/events/:id`, `/clubs/:id`, `/clubs/map` in `/search` so 3 s v pomnilniku; zapis ga izprazni, mimo API-ja (SQL, migracija, druga instanca) zaostane do 3 s. Dnevnik `[predpomnilnik] 60 s: …`; izklop `JAVNI_PREDPOMNILNIK_MS=0`. Nov javni GET, odvisen od uporabnika, NE sme vanj.
+- Iskanje dogodkov je `ILIKE '%q%'` brez indeksa (lokalno 6 ms pri 1500 dogodkih, raste linearno): predlog `pg_trgm` GIN je migracija, NI narejen. Proračun `prosto`: Issue #210.
 
 ## Spletna aplikacija (outly.si/app; podrobnosti v `outly_webpage/CLAUDE.md`)
 
 - **Ni javna** (Martin 29. 9.: »da lahko jaz prvo vse preverim«): dosegljiva samo z neposrednim URL-jem, `noindex`.
   **Gumba na outly.si ne dodajaj, dokler Martin ne reče** — to je hkrati javna objava.
-- **Osnutek politike zasebnosti** za spletno aplikacijo (`docs/osnutki/zasebnost-spletna-aplikacija.md`, tudi kamera za skener)
-  NI objavljen, čaka Martinov DA; popravi netočno alinejo §11 (žeton v brskalniku ni v »varni shrambi sistema«).
-- Kontrast: bel napis na modrem gumbu (#4C76FF) 3,35–3,93 (WCAG AA 4,5); barva znamke — samo Martin. Modro besedilo na spletu #6A8CFF.
+- **Osnutek politike zasebnosti** za spletno aplikacijo (`docs/osnutki/zasebnost-spletna-aplikacija.md`, tudi kamera) NI objavljen, čaka Martinov DA; popravi netočno alinejo §11.
 - `GET /business/events/:id/tickets` vrne podpisan `qr` vseh vstopnic vsem vlogam v klubu (iOS enako); splet ga hrani samo v pomnilniku.
 - **Past (backend, obstojeca):** `klubUporabnika(uid, zeljeni)` za lastnika z VEC klubi vrne samo prvega (`ORDER BY id LIMIT 1`);
   lastnik z drugim klubom v glavi `X-Outly-Club` dobi 404. Danes ima vsak lastnik en klub - ob drugem klubu to popraviti.
 - **Past (splet):** `PATCH /me` vrne samo `POLJA_UPORABNIKA` (brez `clubs`, `pending_*`) - odjemalec mora zdruziti s
   trenutnim profilom ali znova poklicati `GET /me` (iOS po avatarju klice `GET /me`).
-- MapLibre 5 nima več `maplibregl.supported()`; MapLibrov CSS (naložen pozneje) prepiše `position` platna — pravila zemljevida
-  imajo zato višjo specifičnost (`.karta.maplibregl-map`).
 - **Odprte najdbe pregleda faze 1** (29. 9., še brez Issueja): CSP velja samo za `/app` (seja v localStorage je skupna z vsem
   outly.si); `img-src https:` (poljuben https plakat/logo); `ticket_url`, `website`/`logo_url` brez preverbe `^https://` na strežniku
   (splet filtrira z `varenUrl`, iOS ne).
 
 ## Stripe plačila (od 3. 10. 2026; issue #19, `placila_stripe.js`, DECISIONS 3. 10., I19)
 
-- Sandbox račun »Outly sandbox« (Martinov Stripe), Connect vklopljen kot marketplace. Ključi na Renderju: `STRIPE_SECRET_KEY`
-  (`sk_test_…`), `STRIPE_WEBHOOK_SECRET` (`whsec_…`) — nastavi Martin. Brez webhook skrivnosti Stripe nakupi vrnejo 503.
+- Sandbox račun »Outly sandbox« (Martinov Stripe), Connect kot marketplace; ključa na Renderju `STRIPE_SECRET_KEY` (`sk_test_…`) in `STRIPE_WEBHOOK_SECRET` (`whsec_…`) nastavi Martin. Brez webhook skrivnosti Stripe nakupi vrnejo 503.
 - Webhook endpoint `https://outly-backend-roy3.onrender.com/stripe/webhook`, dogodki: `checkout.session.completed`,
   `checkout.session.expired`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`,
   `charge.refunded`, `account.updated`. Če je `account.updated` za povezane račune na ločenem endpointu: `STRIPE_CONNECT_WEBHOOK_SECRET`.
-- Poti: `POST /business/stripe/onboard` (lastnik → `{url}` Stripovega obrazca), `GET /business/stripe/status` (lastnik/manager),
-  `POST /business/stripe/dashboard` (lastnik → Express pregled). Nakup v Stripe načinu vrne `mode:"stripe"`, `checkout_url`, `tickets: []`.
-- Odjemalca `checkout_url` znata (iOS `StripeSeja.swift` v ASWebAuthenticationSession, splet `placilo.html`); klub brez dokončanega onboardinga v sandboxu kupuje testno, z `sk_live_` dobi 409.
+- Poti `/business/stripe/*` in `mode:"stripe"` + `checkout_url`: ARCHITECTURE, DECISIONS 3. 10.; odjemalca `checkout_url` znata. Klub brez dokončanega onboardinga v sandboxu kupuje testno, z `sk_live_` dobi 409.
 - **Vračil prek API-ja ni** (poti ni; #190 — brez `reverse_transfer` vračilo plača platforma): vračilo se naredi v Stripovi nadzorni plošči, webhook `charge.refunded` ga zapiše (`refunded_cents`, stanje, vstopnice).
 - **Potrdilo po e-pošti za kupca z računom (10. 10., #95, migracija 042, I32):** `receipt_mail_attempts` NULL = ni dolgovano (stara naročila, gost, guest lista dobijo nič); brez QR; podatki prodajalca so od 11. 10. v razdelku »Seller« (#94, migracija 043), a so pri klubih PRAZNI, dokler jih Martin/lastnik ne vpiše — do takrat potrdilo ni popolno po ZVPot-1. Premor ponovnega prevzema v bazi je odvisen od nastavitev VSAKEGA procesa (`GOST_POSTA_*`): dve instanci z različnimi nastavitvami lahko pošljeta dvakrat.
 - **Brezplačne vstopnice (10. 10.):** meja `ZASTONJ_NA_OSEBO` (10) je na osebo/naslov, ne na IP; drug račun ali drug e-naslov jo obide (zavestno). **Mail gosta za 0 €:** največ 3 na normaliziran naslov in 300 na dan (izpuščen, nakup uspe, vstopnice prek `guest_token`); plačano potrdilo nikoli izpuščeno. **Odloženo plačilo:** največ 3 v obdelavi na uporabnika (409 »too many payments still processing«, navadno besedilo kot pri drugih 409 nakupa: `message` pokaži); izgubljen `async_payment_failed` zaključi pospravljalec prek PaymentIntenta. **Odloženo plačilo** je `checkout_url` NULL ob obstoječi seji (brez migracije): ne dodajaj kode, ki bi tak NULL razlagala kot »seja se ustvarja«. Produkcija na `sk_test_` izdaja vstopnice brez plačila (le POZOR v dnevniku).
-- **Varovala (10. 10., I31):** `TEST_PLACILA` ob `sk_live_` je ignoriran (iščite `[placila] POZOR` v dnevniku). 0 € gre mimo Stripa; **cena 1–49 c** v Stripe načinu še vedno pade v Stripu (502); klub brez Stripa ob `sk_live_` zavrne tudi 0 €. `payment_mode`, `order.checkout_expired`, `order.payment_processing` in 409 `free_limit` so nova: odjemalca jih še ne bereta (nalogi `ios-dev`/`web-dev`, pogodba v ARCHITECTURE).
+- **Varovala (10. 10., I31):** `TEST_PLACILA` ob `sk_live_` je ignoriran (iščite `[placila] POZOR` v dnevniku). 0 € gre mimo Stripa; **cena 1–49 c** v Stripe načinu še vedno pade v Stripu (502); klub brez Stripa ob `sk_live_` zavrne tudi 0 €.
 - **Past:** plačilo za že preklicano naročilo (seja potekla, nato vseeno plačana — redko) se NE vknjiži samodejno: dnevnik izpiše
   `POZOR: placilo za neaktivno narocilo …`, vrni ga ročno v Stripu.
-- Klic Stripa (ustvarjanje seje, ~0,5–1,5 s) teče znotraj nakupnega mesta (`NAKUP_VZPOREDNO`, I16) — pod navalom manjša prepustnost.
-- **Stripe politika »Accounts v1 support« je vklopljena v sandboxu** (3. 10., Martin): Stripe sicer zavrne `accounts.create` (Express v1).
-  Pred live jo vklopi tudi v živem računu ali preklopi na Accounts v2 (`/v2/core/accounts`). Ustvarjanje računa kluba je brez
-  Stripovega idempotentnega ključa (zapomni si tudi zavrnitev 24 h), hkratne klike serializira `pg_advisory_xact_lock` na klub.
+- **Stripe politika »Accounts v1 support« je vklopljena v sandboxu** (3. 10., Martin); pred live jo vklopi tudi v živem računu ali preklopi na Accounts v2 (`/v2/core/accounts`). Ustvarjanje računa kluba je brez Stripovega idempotentnega ključa, hkratne klike serializira `pg_advisory_xact_lock` na klub.
 - Pospravljalec vsakih 5 min (`STRIPE_POSPRAVI_MS`) preveri `pending` naročila s preteklim rokom pri Stripu (zaključi, preklice ali vknjiži).
 
 ## Nakup brez računa (od 5. 10. 2026; ARCHITECTURE »Nakup brez računa«, I22, DECISIONS 5. 10.)
 
-- **Odjemalec (web-dev):** `POST /guest/events/:id/orders`, `GET /guest/order`, `POST /guest/order/cancel` (glava `X-Guest-Token`; povezave imajo žeton v `#t=`). **iOS ni** (Martin). **Stikalo `GOST_NAKUP_LIVE=1`** za pravi denar (Martin). Po vrnitvi s Stripa je naročilo lahko še `pending`: stran naj poizveduje, dokler ni `paid`.
+- **Stikalo `GOST_NAKUP_LIVE=1`** za pravi denar vklopi Martin; iOS nakupa brez računa nima (Martin). Po vrnitvi s Stripa je naročilo lahko še `pending` (stran poizveduje do `paid`). Poti in žeton v `#t=`: ARCHITECTURE »Nakup brez računa«.
   **Past:** če je kupec prijavljen z istim e-naslovom, `GET /me` (zagon aplikacije) naročilo prevzame in PRESEKA žeton: `GET /guest/order` da 404 — stran naj ob 404 s sejo odpre My tickets.
 - **Past:** gost, ki izgubi stran med plačilom, ne dobi `checkout_url` nazaj (409 »unfinished payment« do ~35 min) razen s ponovitvijo z istim `Idempotency-Key`; mail pride šele po plačilu.
 - **Past:** v vseh poslovnih pogledih je gost »Guest« (`is_guest`), lastnik/manager vidita `buyer_email` kot pri vseh; vratar ga ne vidi nikjer, tudi ne v `POST /business/tickets/scan` (8. 10. 2026: `buyer_email`/`holder_email` se pri vlogi `doorman` zbrišeta na vrstici pred vsemi vejami odgovora; nova veja skena z `ticket: t` je pokrita sama; iOS `ScanTicketInfo` in splet `posel-skener.js` e-naslovov ne berejo).
@@ -142,8 +96,7 @@ in kaj je že narejeno. Preberi ga pred vsako nalogo, povezano s plačili, pravo
 
 ## Prenos vstopnice prijatelju brez računa (od 5. 10. 2026; ARCHITECTURE »Prenos vstopnice prijatelju brez računa«, I23, DECISIONS 5. 10.)
 
-- **Odjemalca (ios-dev, web-dev):** `POST /tickets/:id/transfer` dobi `allow_guest`, `age_confirmed`; `GET /me` (in `PATCH /me`) `can_transfer_to_guest`; nova `GET /guest/ticket` (glava `X-Guest-Token`, splet `/app/guest/ticket#t=`). Poslovni pogledi: `is_guest_holder`, imetnik `Guest`. Podrobnosti API-ja v ARCHITECTURE.
-  **Stikalo `PRENOS_BREZ_RACUNA=vsi`** vklopi Martin po objavi pogojev 1.2 in politike 2.5; do takrat samo vloga `admin`.
+- **Stikalo `PRENOS_BREZ_RACUNA=vsi`** vklopi Martin po objavi pogojev 1.2 in politike 2.5; do takrat samo vloga `admin`. API: ARCHITECTURE »Prenos vstopnice prijatelju brez računa«.
 - **Past:** ob uspešnem prenosu gostu je pošiljateljeva vstopnica POSLANA; če mail ne gre (napačen naslov, 8 poskusov ~42 h izčrpanih), vstopnice ne dobi nihče (v dnevniku `[gost] POZOR: mail s prenesene vstopnice …`, brez e-naslova). Razveljavitve ni.
 - **Past:** Resend (SDK 3.5) sledenja odpiranju/klikom ne izklaplja na mailu, ampak na domeni (Resend → Domains); pravna presoja zahteva brez sledenja, zato to nastavitev preveri Luka/Martin. Inline slika (`content_id`) in priloga PDF sta preverjeni samo proti lažnemu strežniku.
 - **Past:** PDF vstopnice uporablja osnovno pisavo (Helvetica, WinAnsi): č, ć, đ se v PDF izpišejo kot c, c, d (š, ž ostanejo); koda QR je enaka.
@@ -153,77 +106,30 @@ in kaj je že narejeno. Preberi ga pred vsako nalogo, povezano s plačili, pravo
 
 ## Guest lista (od 8. 10. 2026; ARCHITECTURE »Guest lista«, I24, DECISIONS 8. 10.)
 
-- **Odjemalca (ios-dev, web-dev):** nove poti `GET /me/guest-lists` (404 na starem backendu: razdelek skrij), `POST /me/guest-lists/:id/invites { user_ids, age_confirmed? }`, `DELETE /me/guest-lists/:id/invites/:userId`; nova polja `is_guest_list` (privzeto false) in `guest_list_host_username` (privzeto null) v `GET /me/tickets`, odgovoru skena,
-  `scan-list` in poslovnih vstopnicah; `transferable` je pri guest listi false, prenos 409 `Guest list tickets can't be transferred.`. Napake: besedilo (403/409, `userMessage`) in JSON 400 `age_confirmation_required` + `min_age` (kot prenos). **Dodatno k pogodbi:** 409 `This guest list has reached its limit of changes. Contact Outly.` (meja 60 vrstic povabljencev na listi, tudi odstranjenih).
-  Povabljenec dobi vstopnico (obvestilo: spodaj, migracija 036; NI v `/me/tickets/received`); razveljavljene (`void`) vstopnice guest liste `GET /me/tickets` ne vrača; `GET /me/orders` guest liste ne vrača (ni nakup). VIP razdelitev po nakupu (točka 1 pogodbe) je samo odjemalca: backend nespremenjen. Admin panel (zavihek »Guest lists«) je že v `admin/index.html`.
-- **Obvestilo o vabilu (8. 10., migracija 036; ARCHITECTURE »Guest lista«, DECISIONS 8. 10.):** **Odjemalca (ios-dev, web-dev):** `GET /me` novo polje `pending_guest_list_invites` (int, privzeto 0), nova `GET /me/guest-list-invites/received` → `{ invites: [{ id, guest_list_id, ticket_id, host_username, host_avatar_url, created_at, event: { id, title, start_at, poster_url, club_name } }] }` (404 na starem backendu: brez vrstic, brez napake) in `POST /me/guest-list-invites/received/:id/seen` → `{ ok: true }` (pozor: za razliko od `/me/tickets/received/:id/seen`, ki vrača `{ result: "ok" }`).
-  Zvonec: značka = `pending_received_tickets + pending_club_events + pending_guest_list_invites`; vrstica »@host added you to their guest list« + dogodek · klub · datum; dotik: `seen`, nato odpri vstopnico (`ticket_id`). Nizi: `%@ added you to their guest list` / sl `%@ te je dodal na svojo guest listo`. Brez maila in pusha (Martin 8. 10.; push ne obstaja).
-  **Past:** števec in seznam delita pogoje (`GUEST_LISTA_NEPREBRANA_IZ/_KJE` v `index.js`); novega pogoja ne dodajaj samo v enega (značka brez vrstice).
+- **Pogodba za odjemalca** (`/me/guest-lists*`, `/me/guest-list-invites/received*`, polja `is_guest_list`, `guest_list_host_username`, `pending_guest_list_invites`): ARCHITECTURE »Guest lista«; odjemalca jo imata. `POST /me/guest-list-invites/received/:id/seen` vrne `{ ok: true }`, `/me/tickets/received/:id/seen` pa `{ result: "ok" }`.
+- **Past (obvestilo o vabilu, migracija 036):** števec in seznam delita pogoje (`GUEST_LISTA_NEPREBRANA_IZ/_KJE` v `index.js`); novega pogoja ne dodajaj samo v enega (značka brez vrstice).
 - **Past (vsak, ki piše poizvedbo po `orders`/`tickets`):** narocilo guest liste JE vrstica `orders` (total 0, `paid`): vsaka nova agregacija PRODAJE mora imeti `o.guest_list_id IS NULL`, sicer guest lista napihne število naročil, kupcev in vstopnic. Test I24 ujame samo obstoječe poti.
 - **Past:** `checked_in` (prodajni pregled, finance) šteje tudi vstope z guest liste, zato je lahko večji od `tickets_sold`. Dogodek z guest listo se ne da izbrisati (`DELETE /events/:id` ga odpove, FK); lastnik kluba, katerega dogodek ima guest listo, računa ne more izbrisati (`club_has_orders` šteje tudi naročila liste).
 - **Predpostavke agenta (Martin jih ni potrdil):** guest lista ne šteje v kapaciteto (skupaj s prodajo lahko preseže `capacity`); lista samo za objavljen dogodek; ena aktivna lista na (dogodek, gostitelj). Postavljeno z migracijo 035 (samo dodajanje); PR je pod `odobril-martin` (migracija + `orders`/`tickets`).
 
-## Organizatorji brez prizorišča (od 9. 10. 2026; ARCHITECTURE »Organizatorji brez prizorišča«, I26, DECISIONS 9. 10.)
+## Organizatorji (037), bartender (038), razpored miz (039), push APNs (040): pasti
 
-Za **ios-dev** in **web-dev** (backend po migraciji 037; vse polja so DODANA, stari odjemalci jih spregledajo; v modelih privzete vrednosti, ker stari backend polj nima):
-- Klub: `is_organizer`, `is_official` (bool, privzeto false) v `GET /clubs`, `/clubs/:id`, `/business/clubs/me`, `/me/clubs/following`; `GET /me` `clubs[]` ima `is_organizer`. Vhod: `isOrganizer` v `POST /clubs` in `PATCH /business/clubs/me` (mesto neobvezno); `is_official` ni vhod.
-- Dogodek (vsi odgovori z dogodkom + `/me/tickets`, `/guest/order`, `/search`): `venue_club_id`, `venue_club_name`, `venue_club_logo_url` (null brez gostitelja), `venue_name`, `venue_address`, `venue_city` (prazen niz), `venue_lat`, `venue_lng` (null). »Kje je dogodek« = `venue_club_name` ?? (`venue_name` neprazno ? venue_* : naslov kluba). V pogledih vstopnic (`/me/tickets`, `/guest/order`, `/guest/ticket`) sta `address` in `city` že prizorišče (gostitelj ali venue_*), ne organizatorjev naslov.
-  `GET /events` ima novo `club_name` (organizator). **`GET /events?clubId=X` vrne tudi gostovane dogodke z `hosted: true`** (lastni `hosted: false`); brez `clubId` `hosted` ni. Poti `GET /clubs/:id/events` NI.
-- Vhod dogodka (`POST /events`, `PATCH /events/:id`): `venueClubId` ali `venueName`+`venueCity` (+`venueAddress`, `venueLat`+`venueLng`); organizator brez prizorišča = 400 »Organizer events need a venue.«; lastni klub 400, neobstoječ/skrit gostitelj 404. Urejevalnik naj pošlje celo prizorišče (gostitelj ali prosto); `venueClubId: null` izbriše gostitelja.
-- **Stari backend (pred 037)**: polj ni, `?clubId=` brez `hosted`, `isOrganizer` se prezre; odjemalec ne sme pasti (privzete vrednosti). Razdelek »Organized by Outly«: `GET /clubs` (`is_official`) + `GET /events?clubId=&upcoming=true` (strežnik nima posebne poti).
+Pogodba polj in poti za odjemalca (`ios-dev` #184, `web-dev`) je opravljena in v ARCHITECTURE (»Organizatorji brez prizorišča«, »Strežba VIP miz«, »Razpored miz po dogodku«, »Potisna obvestila«, I26–I29); odjemalca polja imata. Izvirna navodila: `docs/arhiv/STATE-do-2026-10-11.md`.
 - Past: `is_official` nastavi samo admin (`/admin/api/clubs`); prvi uradni profil mora Martin/admin ustvariti ročno (lastnik = račun Outly), brez njega razdelka ni.
-
-## Vloga bartender in strežba VIP miz (od 9. 10. 2026; ARCHITECTURE »Strežba VIP miz (migracija 038)«, I27, DECISIONS 9. 10.)
-
-Za **ios-dev** in **web-dev** (backend po migraciji 038; vse DODANO, stari odjemalci spregledajo; v modelih privzete vrednosti, ker stari backend polj in poti nima: **na starem backendu so nove poti 404**, `pending_table_service` manjka -> 0):
-- Vloga `bartender` (prikaz »Bartender« / sl »Natakar«): `POST /business/team` `role: "bartender"` (lastnik in manager), `club_role` / `clubs[].role` / `my_role` / `members[].role` / `invites[].role` / `GET /me/invites` `role` jo lahko vrnejo; neznane vloge odjemalec ne sme zrušiti. Natakar NIMA dostopa do skenerja, vstopnic dogodka, VIP rezervacij, prodaje, ekipe (vse 403): prikaži mu samo »Table service«.
-- `GET /me`: `pending_table_service` (int, privzeto 0). Značka zvonca = `pending_received_tickets` + `pending_club_events` + `pending_guest_list_invites` + `pending_table_service`.
-- `GET /me/table-service` -> `{ items: [{ id, club_id, club_name, event_id, event_title, table_label, package_name (lahko null), scanned_at }] }` (zvonec; za druge vloge prazen seznam, 200). Vrstica »Table <label> · <paket> — ready to serve«, odpre Table service tega dogodka (`club_id` za `X-Outly-Club`).
-- `GET /business/events/:id/table-service` (X-Outly-Club; owner, manager, bartender; vratar 403; tuj dogodek 404) -> `{ items: [{ id, order_id, table_label, table_seats, package_name|null, package_description|null, scanned_at, delivered_at|null, delivered_by_username|null }] }`, nedostavljene najprej. Brez podatkov kupca (po dogovoru).
-- `PUT /business/table-service/:id` `{ delivered: true|false }` (owner, manager, bartender) -> **sam element** (isti kot v `items`, brez ovojnice); true je idempotenten, false razveljavi (Undo); tuja strežba 404; `delivered` ni boolean 400.
-- `POST /business/tickets/scan` ob `ok` ima `table_service_created` (bool); `scan-batch` ga ima v rezultatu elementa, ki je ravnokar unovčil vstopnico (pri ponovitvi paketa ga ni). Neobvezno za odjemalca.
 - Past: strežba nastane SAMO iz skena VIP vstopnice (vratar); sken brez povezave jo ustvari šele ob sinhronizaciji (`scanned_at` = ura skena na telefonu, če je razumna). Kdor VIP vstopnic ne skenira, strežbe nima. Rezervacija po telefonu strežbe ne sproži.
 - Past: `GET /business/events/:id/vip`, vstopnice dogodka in skener so zdaj za `owner | manager | doorman` (natakar 403, prej bi bil katerakoli vloga); manager sme vabiti in odstraniti vratarja IN natakarja.
-- Postavljeno z migracijo 038 (CHECK vlog + nova tabela); PR je pod `odobril-martin` (migracija + `requireClub`).
-
-## Razpored VIP miz po dogodku (od 9. 10. 2026; ARCHITECTURE »Razpored miz po dogodku (migracija 039)«, I28, DECISIONS 9. 10.)
-
-Za **ios-dev** in **web-dev** (backend po migraciji 039; vse DODANO, na starem backendu je `vip-layout` 404 -> razdelek skrij; v modelih privzete vrednosti):
-- `GET /events/:id` in seznami: `vip_layout_source` (`"club"` | `"event"`, privzeto `"club"`). **`GET /events/:id/vip` (javno) in `GET /business/events/:id/vip` imata NESPREMENJENO obliko** (`plan`, `tables`, `packages`); pri `event` viru kažeta tloris in mize dogodka. Nakup mize, `hold`, izjeme: iste poti.
-- `GET /business/events/:id/vip-layout` (X-Outly-Club; owner, manager; vratar/natakar 403; tuj dogodek 404) -> `{ source, floor_plan, tables, from_club_id, from_club_name, venue_club_id, venue_club_name, venue_has_layout }`.
-  `floor_plan` = `{ width, height, elements }` (isto kot `plan` pri `/business/vip`; `null` brez tlorisa), `tables` = `{ id, label, x, y, w, h, shape, seats, price_cents, archived }` (osnovna cena brez izjem po dogodku; `archived: true` = odstranjena miza z naročilom, odjemalec jo filtrira). `venue_*` so gostitelj (skrit gostitelj = null), `venue_has_layout` = gostitelj ima tloris.
-- `PUT /business/events/:id/vip-layout`: `{ source: "club" }` (nazaj; mize dogodka se arhivirajo ali izbrišejo) | `{ source: "event", copy_from_venue: true }` (400 brez gostitelja na Outlyju ali brez njegovega tlorisa) | `{ source: "event", floor_plan, tables }` (validacija kot `PUT /business/vip`; `floor_plan: null` + `tables: []` je veljaven začetek;
-  mize z `id` se posodobijo, manjkajoče odstranijo, nove dodajo; arhivirane `id` se prezrejo). Odgovor = GET + **`released_holds`** (število izbrisanih telefonskih rezervacij odstranjenih miz). Po kopiji odpri urejevalnik (isti kot za klub).
-- Izjeme (`PUT /business/events/:id/vip` `tables[].table_id`) veljajo tudi za mize dogodka; miza drugega dogodka istega kluba 404, tuj klub / neobstoječa 400 (kot doslej).
 - Past: preklop vira ali odstranitev mize **izbriše telefonsko rezervacijo** te mize (opozori uporabnika). Miza z naročilom ostane (arhivirana, `booking` v poslovnem pogledu); javno ostane »Booked«.
 - Past: `PUT /business/vip` (klubski tloris) mize dogodkov NE vidi in jih ne spreminja (`event_id IS NULL`).
-
-## Potisna obvestila APNs (od 10. 10. 2026; ARCHITECTURE »Potisna obvestila (APNs, migracija 040)«, I29, DECISIONS 10. 10.)
-
-Za **ios-dev** (#184); splet push ne dobi. Backend po migraciji 040; vse DODANO (na starem backendu sta poti 404: napako ignoriraj):
-- `POST /me/devices` `{ token (hex 64–200), platform: "ios" }` -> 200 `{ ok: true }` (idempotentno; isti žeton na drugem računu se prepiše; 400 `{ error, message }`; 429 po 60/h/IP; **največ 10 žetonov na uporabnika**, najstarejši odpadejo). `DELETE /me/devices/:token` -> 204 (tuj/neobstoječ tudi 204): **pokliči PRED brisanjem seje ob odjavi**. Registriraj ob spremembi žetona ali največ enkrat na dan. Samo produkcijski žeton (Xcode Debug/sandbox ni podprt).
-- Payload `{ aps: { alert: { "title-loc-key", "loc-key", "loc-args" }, sound }, outly: { type, id } }`, angleški ključi kot v `Localizable.xcstrings` (dodaj prevode): `ticket_received` (`New ticket`, `%@ sent you a ticket`; `id` = vstopnica -> denarnica), `club_event` (`New event`, `%@ posted a new event: %@`; `id` = dogodek),
-  `guest_list_invite` (`Guest list`, `%@ added you to their guest list`; `id` = **vstopnica** povabljenca), `table_service` (`VIP table`, `VIP table %@ is ready to be served`; `id` = strežba; lastnik, manager, bartender). `outly.id` je število; neznane `type` ignoriraj. `apns-expiration`: 24 h, strežba 1 h.
 - Brez `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_KEY_P8` na Renderju push ne teče (`[push] izklopljen`); registracija deluje. Strežba: push samo če bi bila vidna v zvoncu (od 2 h pred začetkom) in sken ≤ 30 min star.
 - Pasti: JWT podpis `ieee-p1363` (DER = tih 403 `InvalidProviderToken`); preklic `.p8` = nov ključ v Render secrets (`[push] APNs: status 403 ...`, največ 1/min); `DeviceTokenNotForTopic` = napačen `APNS_TOPIC` (žetona ne označi); ≥ 10 žetonov in > polovica `BadDeviceToken` v enem pošiljanju = `[push] ALARM` (največ 1/min; verjetno napačno okolje/ključ), teh ne označi (410 se označi vedno).
   Žeton je skrivnost (ni v dnevniku/odgovoru; backup ga vsebuje). **Znana omejitev:** stari `invalid_at` žetoni se ne pospravljajo.
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 
-- **Stripe v sandboxu (3. 10.):** klub brez dokončanega Connect onboardinga v sandboxu še vedno prodaja v testnem načinu (da demo klubi
-  in TestFlight ne obstanejo). Z `sk_live_` takega nakupa ni (409). Povratni naslovi Checkouta in onboardinga vodijo na `outly.si/app`
-  (`/app/tickets`, `/app/event/:id`, `/app/business/:klub/settings?stripe=vrnitev|osvezi`) — splet jih še ne obravnava posebej.
-
-- **Prijatelji (20. 9., backend #45; čaka Martina v #47):** (1) iskanje po uporabniškem imenu (`GET /users/search`, predpona,
-  samo potrjeni, največ 10, 120/h); (2) `users.share_plans_with_friends` privzeto VKLOPLJENO; (3) »Invite more« deli
-  `https://outly.si` brez `?ref=` (točke živijo v Supabase). Drugačna odločitev = tri majhne spremembe + popravek politike.
-- **Več ekip na osebo (018):** brez glave `X-Outly-Club` poslovni klici dobijo **prvo (najstarejše) članstvo** — dve ekipi in
-  manjkajoča glava = tiho urejanje napačnega kluba. iOS nastavi `APIClient.currentClubId` ob vstopu v klub in ga ob izhodu pobriše.
-  `DELETE /business/team/me` brez glave zapusti VSE ekipe.
-- **Pogoji/politika (outly_webpage):** sprememba pogojev = dvigni `TERMS_VERSION` v `auth.js` (zdaj 1.1); registracija v iOS
-  aplikaciji `terms_version` ne zapiše. Nova funkcija, ki zbira ali kaže osebne podatke, = popravek politike zasebnosti.
-- **iOS »My preferences« in filtri domačega zaslona so samo na napravi** (@AppStorage); backend jih ne pozna. Strežniško = nova
-  pot/stolpec na `/me` (samo dodajanje). Histogram razdalje je brez dovoljenja za lokacijo prazen — ni hrošč.
+- **Prijatelji (20. 9., backend #45; čaka Martina v [#47](https://github.com/Djurdje/outly-backend/issues/47)):** iskanje po uporabniškem imenu (`GET /users/search`, predpona, samo potrjeni, največ 10, 120/h); `users.share_plans_with_friends` privzeto VKLOPLJENO; »Invite more« deli `https://outly.si` brez `?ref=`. Drugačna odločitev = tri majhne spremembe + popravek politike.
+- **Več ekip na osebo (018):** brez glave `X-Outly-Club` poslovni klici dobijo **prvo (najstarejše) članstvo** — dve ekipi in manjkajoča glava = tiho urejanje napačnega kluba (iOS nastavi `APIClient.currentClubId` ob vstopu v klub). `DELETE /business/team/me` brez glave zapusti VSE ekipe.
+- **Pogoji/politika:** sprememba pogojev = dvigni `TERMS_VERSION` v `outly_webpage/auth.js` (zdaj 1.1); iOS registracija `terms_version` ne zapiše. Nova funkcija, ki zbira ali kaže osebne podatke, = popravek politike zasebnosti.
+- **iOS »My preferences« in filtri domačega zaslona so samo na napravi** (@AppStorage); strežniško = nova pot/stolpec na `/me` (samo dodajanje). Histogram razdalje je brez dovoljenja za lokacijo prazen — ni hrošč.
 - **`event_favorites`**: pot v backendu ostane, iOS je od outly-app #23 ne kliče več — kandidat za odstranitev (API samo dodajanje).
 
 ## Znane pasti (aktivne)
@@ -231,86 +137,32 @@ Za **ios-dev** (#184); splet push ne dobi. Backend po migraciji 040; vse DODANO 
 - **Omejevalnik poskusov je v bazi (`omejitve`, #24, I15) in šteje po IP** (IPv6 po /64; prošnji ustvarjalca in prijateljev imata od #110 ločena ključa): meje preživijo deploy, blokada traja do konca okna (največ 1 h);
   sprostitev = oštevilčena migracija `TRUNCATE omejitve` + restart servisa (proces si blokado zapomni do konca okna). CGNAT ali skupni Wi-Fi kluba lahko zadene 20 nakupov/h na IP.
 - **Izvoz baze je tok; ne vračaj ga v `res.json`** (#23; ARCHITECTURE »Varnostne kopije«). Panel odgovor še prebere v celoti (`res.json()`): pri zelo velikih bazah prenos shrani neposredno.
-- **Migracija brez zaklepa pade, deploy pade, stara različica ostane živa** (#115, `db/migrate.js`, test `test_migracija_zaklep.js`): vsaka
-  migracija teče v transakciji z `lock_timeout` 2 s (kratko: čakajoči ALTER blokira nove poizvedbe, tudi sken), `statement_timeout` 120 s (na stavek) in 4
-  ponovnimi poskusi po 10 s ob zaklepu; advisory lock čaka največ 60 s (env `MIGRACIJA_*`, `.env.example`). Nato izhod 1: `npm start` se ne zažene, Render obdrži
-  staro različico, v `schema_migrations` ni vnosa → poskus znova ob naslednjem deployu. **Stara različica vrača 200, zato `Nadzor`
-  tega ne vidi** (alarma za to ni): po merge-u preveri `list_deploys` (zadnji deploy za commit = live) ali da `/healthz` vrne `commit`
-  z `main` (prvih 12 znakov). Ukrep: poišči dolgo transakcijo (`pg_stat_activity`), počakaj, ponovno sproži deploy. Migracija
-  ne sme sama klicati `COMMIT`/`SET lock_timeout`.
+- **Migracija brez zaklepa pade, deploy pade, stara različica ostane živa** (#115, `db/migrate.js`, `test_migracija_zaklep.js`): migracija teče v transakciji z `lock_timeout` 2 s, `statement_timeout` 120 s in 4 ponovnimi poskusi po 10 s ob zaklepu; advisory lock čaka največ 60 s (env `MIGRACIJA_*`). Nato izhod 1: `npm start` se ne zažene, Render obdrži staro različico, v `schema_migrations` ni vnosa → poskus znova ob naslednjem deployu.
+  **Stara različica vrača 200, zato `Nadzor` tega ne vidi:** po merge-u preveri `list_deploys` (zadnji deploy za commit = live) ali da `/healthz` vrne `commit` z `main` (prvih 12 znakov). Ukrep: poišči dolgo transakcijo (`pg_stat_activity`), počakaj, ponovno sproži deploy. Migracija ne sme sama klicati `COMMIT`/`SET lock_timeout`.
 - **Vsak `pool.connect()` z dolgo transakcijo** rabi `c.on("error")`, odklop počasnega bralca in `idle_in_transaction_session_timeout` (kot izvoz); mirujoče povezave ujame `pool.on("error")` (#106, `test_pool_napaka.js`).
 - **Express 4 ne ujame zavrnjene obljube ročnika** (#129): neujet `await` (npr. `pool.connect()` pred `try`) je sesul cel proces. Varuje `asinhroni_rocniki.js` (503/500, I10); nov `Router`/`app` ga podeduje, ne dodajaj `process.on("unhandledRejection")`.
 - **Vloga `backup` (#116, migracija 029) sme SAMO `GET /admin/api/export`**: `requireAuthNa` jo povsod drugje zavrne (403), `neobveznaPrijava` jo šteje za neprijavljeno, izvoz je na `app` (ne na routerju `admin`).
   Drugim je skrita (`/users/search`, prošnje za prijateljstvo → 404 `no_account`). **Izvoz: največ 1 hkraten na proces** (drugi dobi 429 + `Retry-After: 30`, `izvoz.sh` ponovi); števec sprosti `finally` ali zgodnji izhod, če je odjemalec že odšel (`res.destroyed`; past: `close` je že oddan, ne čakaj nanj). Nova pot je zanjo varna brez dela.
-  Račun za kopije je do Martinovega preklopa (skill `obnova-baze`) še `agent@outly.si`. Vrstica `users` nastane ob prvem klicu z žetonom z `user_metadata.email_verified=true` (sicer 403 »Email not verified.« brez vrstice); šele nato admin nastavi `backup`.
-- **Obnova izvoza zahteva POPOLNOMA prazno ciljno bazo**, migracija 007 pa vstavi `agent@outly.si` → pred obnovo na cilju
-  `DELETE FROM users;` (ARCHITECTURE, postopek obnove). Past odpade, ko servisni račun ne bo več v migracijah.
-- **iOS `OutlyAsyncImage`** (29. 9., outly-app #33) pomanjša na 1200 px in predpomni po URL-ju: slika z novo vsebino na istem URL-ju bi
-  ostala stara. Cloudinary da vsakemu nalaganju nov `public_id`; če se to spremeni, dodaj URL-ju različico.
-- **iOS, izrisovanje** (29. 9., #31/#32): vrednosti po frameu v majhen `ObservableObject`, ki ga opazuje samo podpogled (`DrsenjeHome` ->
-  `HomeOzadje`) ali referenco brez opazovanja (`IzvoriRazkritja`). `MainTabView` ne sme opazovati `SessionStore`; `refreshMe`
-  objavi `me` samo ob spremembi (`Me: Equatable`). `DateFormatter` ne ustvarjaj v računani lastnosti — `DateParsing.oblikovalnik("…")`.
+  Račun za kopije je do Martinovega preklopa (skill `obnova-baze`) še `agent@outly.si`; vrstica `users` nastane ob prvem klicu z žetonom z `email_verified=true`, šele nato admin nastavi `backup`.
+- **Obnova izvoza zahteva POPOLNOMA prazno ciljno bazo**, migracija 007 vstavi `agent@outly.si` → pred obnovo na cilju `DELETE FROM users;` (ARCHITECTURE, postopek obnove). Past odpade, ko servisni račun ne bo več v migracijah.
+- **iOS `OutlyAsyncImage`** (outly-app #33) pomanjša na 1200 px in predpomni po URL-ju: slika z novo vsebino na istem URL-ju ostane stara (Cloudinary da vsakemu nalaganju nov `public_id`; če se to spremeni, dodaj URL-ju različico).
 - **iOS prehod Home -> Search/Profile** (29. 9.; #34–#38, vrnjeno z #39): posnetek zaslona vsebuje zamegljeno ozadje (raste »kartica«),
   izločanje ozadja (#38) je na napravi odstranilo vso vsebino. Deluje: živa vsebina raste s `scaleEffect` (`VstopZavihka`),
   `prosojnost: 1`, oster posnetek Home pojema nad vsem (`ZabrisSloj`). Brez posnetka zaslona animacij ne spreminjaj.
-- **iOS:** nov zaslon v zavihkih Search/Profile (tudi potisnjen) rabi `.outlyOzadje()`, ne `.background(Color.black…)`.
-  `.refreshable` vedno `await Task { await load() }.value` (sicer »Connection problem«). Nova datoteka z `ObservableObject` rabi
-  `import Combine`. Ključ v `Localizable.xcstrings` ne sme trčiti z drugim po veliki/mali črki ali ločilih (Xcode 26 generira
-  simbole; `STRING_CATALOG_GENERATE_SYMBOLS = NO` to izklopi — preveri, da ostane).
-- **macOS minute** se štejejo ×10: iOS gradnja z uploadom ~8–10 min = 80–100 od 2000 brezplačnih minut/mesec; PR ~4 min.
-- **TestFlight certifikat** »Outly CI« (`IOS_DEV_CERT_P12` + geslo v secrets) velja do ~20. 9. 2027; preklic/potek = korak
-  »Podpisan arhiv« pade, PR-ji ostanejo zeleni. Postopek v outly-app `CLAUDE.md`.
+- **iOS, izrisovanje in zasloni** (29. 9., #31/#32): vrednosti po frameu v majhen `ObservableObject` ali referenco brez opazovanja; `MainTabView` ne opazuje `SessionStore`; `DateFormatter` ne v računani lastnosti (`DateParsing.oblikovalnik("…")`). Nov zaslon v Search/Profile rabi `.outlyOzadje()`; `.refreshable` vedno `await Task { await load() }.value`; datoteka z `ObservableObject` rabi `import Combine`; ključ v `Localizable.xcstrings` ne sme trčiti po veliki/mali črki ali ločilih (`STRING_CATALOG_GENERATE_SYMBOLS = NO` mora ostati).
+- **TestFlight certifikat** »Outly CI« (`IOS_DEV_CERT_P12` + geslo v secrets) velja do ~20. 9. 2027; preklic/potek = korak »Podpisan arhiv« pade, PR-ji ostanejo zeleni. Postopek: outly-app `CLAUDE.md`.
 - **Oznaka »skip ci« na backend PR-ju blokira merge** (`Testi` se preskoči, `Zascita` teče, PR ostane »Expected — waiting«).
   GitHub jo išče v **celem** sporočilu commita, zato jo v sporočilih omenjaj samo opisno, brez oglatih oklepajev.
-- **GitHub »Budgets and alerts«**: Actions 20 $/mesec s »Stop usage: Yes« (privzeto 0 $ — ob porabljeni kvoti bi stalo vse, tudi
-  `Testi` in `Nadzor`). Šteje se po obračunskem ciklu (1. v mesecu). Codespaces, Packages, Git LFS, AI Credit namerno 0 $.
+- **GitHub »Budgets and alerts«**: Actions 20 $/mesec s »Stop usage: Yes« (privzeto 0 $ — ob porabljeni kvoti bi stalo vse, tudi `Testi` in `Nadzor`); šteje se po obračunskem ciklu (1. v mesecu). Codespaces, Packages, Git LFS, AI Credit namerno 0 $.
 - **GitHub cron `*/15` teče na 4–5 ur, ne na 15 min** (17.–18. 9.: sedem zagonov v 24 h). Izpad je lahko neviden do 5 ur, zato je
   hiter alarm UptimeRobot (ARCHITECTURE, Nadzor), Healthchecks ima Period 6 h / Grace 3 h. »Vsakih 15 min« opisuje cron.
-- **Agent na GitHubu JE lastnik.** Vsa dejanja iz sej Claude Code gredo prek računa `Djurdje` (API `get_me` 18. 9. 2026),
-  ki je edini sodelavec repa z vlogo `admin`. Zato so oznaka `odobril-martin`, ruleset za `main` in »agent si oznake ne sme
-  dodati sam« **dogovor, ne varovalo**: isti račun lahko oznako doda, ruleset izklopi ali potisne mimo. Trdo postane šele,
-  ko seje tečejo prek ločenega računa z vlogo `write` (brez admin) in je ruleset brez izjem za bypass — glej #15.
-- **`Zascita`** je obvezna tu (#15) in dodana v `outly_webpage` (#23) in `outly-app` (#44); v `outly-app` (zasebni repo, brezplačni
-  GitHub) ne more biti obvezna.
-- **`jq` in `^`**: v `jq` je `^` zasidran na cel niz, ne na vrstico — vzorec čez vrstice diffa rabi `(?m)`.
-  Brez tega filter tiho ne ujame ničesar in preverba je videti zelena. (Ujeto pri pisanju `zascita.yml`.)
-- **Oblačne seje nimajo izhoda** do `onrender.com`, `outly.si`, `*.pages.dev`, `supabase.co`, `ntfy.sh`, `download.swift.org` in
-  GitHub *releases* (403 prek agent proxyja). iOS prevod preveri `Gradnja iOS` na PR-ju (+ `type-checker`); backend ročni zagon
-  **`Nadzor produkcije`** (`workflow_dispatch` na `main`, `test=false`, korak »Preveri produkcijo« izpiše `OK <ime> (<status>)`).
-  Zelen Nadzor ne dokaže, da teče nova koda (Render ob neuspelem deployu pusti staro) — ob dvomu preveri novo polje v odgovoru.
-- **Headless preverjanje outly.si:** stubati je treba samo Supabase (`*.supabase.co`; supabase-js in Inter sta v `vendor/`,
-  `assets/fonts/`). Playwright: `npm i playwright` v scratchpadu + `executablePath` `/opt/pw-browsers/chromium-*/chrome-linux/chrome`.
-- `owner_user_id` ni več v javnih odgovorih klubov (#113, I4; arhiv `STATE-do-2026-10-02c.md`). **ios-dev** (neurgentno): odstrani `APIClub.ownerUserId`.
-- **Idempotentni ključ nakupa (#112, I18).** Glava `Idempotency-Key: <UUID>` na obeh `POST …/orders` (brez nje vse kot prej): en UUID na pritisk »Kupi«, isti ob
-  ponovitvi ISTEGA nakupa, nov ob spremembi nakupa. Ponovitev = 201 + `Idempotent-Replayed: true` s TRENUTNIM stanjem; neaktivno 409, drug nakup 422. iOS (#53) in splet (#29) ga pošiljata.
-- **Prenesena vstopnica v kupčevem pogledu naročil (#124, I7; od 2. 10. 2026):** `serial` je `null` (ključ ostane), `holder_email` ni (`GET /me/orders`, odgovor nakupa in ponovitev); nadomestilo
-  `holder_username` + `transferred`. Prejemnik (`GET /me/tickets`) in klub (poslovne poti) serial še imata. iOS: `serial` opcijski (outly-app #54); splet `/me/orders` ne kliče. **Isto za odgovor `POST /tickets/:id/transfer` (#140, od 2. 10. 2026):** pri prenosu po `user_id` je `ticket.holder_email` `null` (ključ ostane; pri prenosu po e-naslovu je vpisani naslov); odjemalci polja ne berejo (grep iOS `Outly/`, splet `webapp/`: 2. 10.).
-- Ostale pasti (AsyncImage brez okvirja, gnezden NavigationStack, pg BIGINT, Resend `{error}`, JSONB vs ARRAY)
-  so v `CLAUDE.md` tega repa in iOS repa.
-
+- **Agent na GitHubu JE lastnik.** Vsa dejanja iz sej Claude Code gredo prek računa `Djurdje` (edini sodelavec z vlogo `admin`; `get_me` 18. 9. 2026). Zato so oznaka `odobril-martin`, ruleset za `main` in »agent si oznake ne sme dodati sam« **dogovor, ne varovalo**; trdo postane šele z ločenim računom z vlogo `write` in rulesetom brez bypass — glej #15.
 - **Podatki prodajalca (11. 10., #94/#101, migracija 043, I33):** `events.vat_rate` NE nastavi nobena pot (vedno NULL) — DDV besedilo odjemalcev in maila je po `clubs.vat_payer`. `seller.complete=false` nakupa NE ustavi (predlog Martinu za živi ključ, DECISIONS 11. 10.). Pri s.p. je `legal_address` lahko domači naslov in je javen.
 - **`outly-app` je JAVEN od 11. 10.** (kvota Actions zasebnega repa porabljena; INCIDENTI 11. 10.): v iOS repo nikoli skrivnosti ali osebnih podatkov — vidna je tudi zgodovina. Rdeč check brez korakov: najprej annotations check runa (`/check-runs/<id>/annotations`), dnevnik joba vrne 404.
 
 ## Kar nobeno orodje ne ve
 
-- **Video s telefona:** Martin naloži posnetek na Drive `bozicmartin7@gmail.com`, nastavi »Anyone with the link«; agent prenese s
-  `curl "https://drive.usercontent.google.com/download?id=<ID>&export=download&confirm=t"` (domeni dovoljeni v omrežju okolja;
-  Drive konektor sam vrne le ~100 KB). ffmpeg: `pip download imageio-ffmpeg`. iOS sliko zapiše samo ob spremembi zaslona — luknje
-  v `pts_time` so zastoji. Po analizi video pobriši in Martina spomni, naj povezavo vrne na »Restricted«.
+- **Video s telefona:** Martin naloži posnetek na Drive `bozicmartin7@gmail.com` (»Anyone with the link«); prenos s `curl "https://drive.usercontent.google.com/download?id=<ID>&export=download&confirm=t"` (Drive konektor vrne le ~100 KB), ffmpeg `pip download imageio-ffmpeg`; po analizi video pobriši in Martina spomni na »Restricted«. (Kandidat za skill.)
 - **Slike klubov v produkciji so ZA DEMO** (vzete s spletnih strani klubov). Pred pravim zagonom jih morajo
   zamenjati slike, ki jih dajo klubi sami — z dovoljenjem. Tega ne pove noben test.
-- **Demo podatki:** 5 klubov z izmišljenimi imeni (Velvet, Nexus, Mirage, Mansion, Olie; migracija 022), lažni telefoni
-  `+386 1 620 41 x0` in `@example.com`, izmišljeni naslovi v centru LJ. Logotipi lastni (023, `outly_webpage/assets/clubs/` —
-  **najprej objava slik, nato migracija**). Velvet ima tri dogodke s Martinovimi plakati (024: 12. 10. 2026, 26. 4. 2027, 21. 6. 2027;
-  na plakatih piše »sobota«, datumi so ponedeljki). **Galerije in ostali plakati so še slike pravih klubov** — zamenjati prek »Edit
-  your page«. Računi: kupec `gost@outly.si`, admin `martin…`, servisni `agent@outly.si`.
-- **»Dela« pomeni: zelen Actions IN Martin preveril na napravi.** Dokler drugega ni, se piše
-  »preverjeno s parse + pregledom tipov, na napravi ne«. Kaj čaka na napravo, je v #18.
-
-## Način dela
-
-- **Varčevanje z macOS minutami** (od 21. 9., dokler ni Xcode Cloud): en merge v `master` na delovni dan oz. zaključen sklop; push na
-  PR vejo šele po `type-checker`; vmesni iOS pushi z oznako »skip ci«, zadnji brez. Na backendu te oznake ne uporabljaj (Linux, ×1).
-  Ne zbiraj več kot en dan ali nepovezanih stvari v en PR. 29. 9. je bilo 5 merge-ov (Martin je sproti preverjal) — ob ponovitvi
-  vprašaj Martina, ali naj se vmesni koraki zbirajo na veji.
-- **Luka ima MacBook z Xcodom** (od 20. 9.): lokalna gradnja je dodatna preverba, ne nadomestilo za veja + PR + zelen Actions.
+- **Demo podatki:** 5 klubov z izmišljenimi imeni (Velvet, Nexus, Mirage, Mansion, Olie; migracija 022), lažni telefoni `+386 1 620 41 x0`, `@example.com`, izmišljeni naslovi v centru LJ. Logotipi lastni (023, `outly_webpage/assets/clubs/` — **najprej objava slik, nato migracija**). Velvet ima tri dogodke s Martinovimi plakati (024: 12. 10. 2026, 26. 4. 2027, 21. 6. 2027; na plakatih piše »sobota«, datumi so ponedeljki); galerije in ostali plakati so še slike pravih klubov (zamenjati prek »Edit your page«). Računi: kupec `gost@outly.si`, admin `martin…`, servisni `agent@outly.si`.
