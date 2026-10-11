@@ -3741,6 +3741,8 @@ app.post("/business/stripe/dashboard", requireAuth, requireClub("owner"), async 
 // Vrne true, ce je seja ustvarjena; sicer je odgovor 502 ze poslan.
 // odjemalec: "ios" (glava X-Outly-Client: ios) ali splet - doloci povratna naslova Checkouta (placila_stripe.js povratniNaslovi).
 const odjemalecNakupa = (req) => (String(req.get("x-outly-client") || "").toLowerCase() === "ios" ? "ios" : "splet");
+// Jezik Checkouta: neobvezno polje telesa `locale` ("sl" | "en", glej placilaStripe.normalizirajLocale); neveljavno = ni polja = Stripov auto, nikoli 400.
+const localeNakupa = (req) => placilaStripe.normalizirajLocale(req.body && typeof req.body === "object" ? req.body.locale : undefined);
 // Omejitev cakajocih (neplacanih) narocil (pregled 5. 10. 2026): cakajoce Stripe narocilo drzi zalogo ali mizo do ~35 min.
 // Brez omejitve bi en racun z nekaj kliki zasedel razprodan dogodek ali vse VIP mize, ne da bi kaj placal.
 // Pravilo: najvec 1 cakajoce narocilo na dogodek in najvec CAKAJOCA_NAJVEC skupaj na uporabnika. Kupec nedokoncano
@@ -3799,10 +3801,10 @@ async function omejitevBrezplacnih(c, { userId = null, gostEmail = null, eventId
   return { error: "free_limit", message: `You can get at most ${ZASTONJ_NA_OSEBO} free tickets for this event${userId !== null && ostane > 0 ? ` (${ostane} left for you)` : ""}.` };
 }
 
-async function nakupStripeSeja(res, c, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna }) {
+async function nakupStripeSeja(res, c, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale }) {
   try {
     const nr = await c.query("SELECT id, public_ref, currency, application_fee_cents FROM orders WHERE id=$1", [oid]);
-    const seja = await placilaStripe.ustvariCheckout({ narocilo: nr.rows[0], opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna });
+    const seja = await placilaStripe.ustvariCheckout({ narocilo: nr.rows[0], opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale });
     await c.query(
       "UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4) WHERE id=$1",
       [oid, seja.id, seja.url, seja.expires_at]);
@@ -4282,7 +4284,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     await c.query("COMMIT");
 
     if (!placanoTakoj && !(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – ${q === 1 ? "1 ticket" : q + " tickets"}`,
-      kolicina: q, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: u.email, eventId: e.id, odjemalec: odjemalecNakupa(req) }))) return;
+      kolicina: q, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: u.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) }))) return;
 
     // POZOR: tu še držimo odjemalca c. Branje po COMMIT-u gre prek c, NE prek
     // pool: pri 10+ hkratnih nakupih (pool ima privzeto 10 povezav) bi vsak
@@ -4703,7 +4705,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
         const povratna = { success_url: gostPovezava(zeton), cancel_url: gostPovezava(zeton) };   // stran naroclia: »Complete payment« / »Cancel order«
       if (!(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – ${g.quantity === 1 ? "1 ticket" : g.quantity + " tickets"}`,
         kolicina: g.quantity, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: g.email, eventId: e.id,
-        odjemalec: "splet", povratna }))) return;
+        odjemalec: "splet", povratna, locale: localeNakupa(req) }))) return;
     }
 
     const telo = await odgovorNarocila(c, oid);   // prek c (ne pool): glej opombo pri POST /events/:id/orders
@@ -7467,7 +7469,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     await c.query("COMMIT");
 
     if (!placanoTakoj && !(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – VIP ${miza.label}${paket ? " + " + paket.name : ""}`,
-      kolicina: 1, cenaEnoteCents: cena, racunKluba: e.stripe_account_id, email: starost.email, eventId: e.id, odjemalec: odjemalecNakupa(req) }))) return;
+      kolicina: 1, cenaEnoteCents: cena, racunKluba: e.stripe_account_id, email: starost.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) }))) return;
 
     // Branje po COMMIT-u prek odjemalca c, NE prek pool (glej opombo pri POST /events/:id/orders).
     const telo = await odgovorNarocila(c, oid);

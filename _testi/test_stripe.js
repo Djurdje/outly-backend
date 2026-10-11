@@ -367,6 +367,50 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
       assert(Pw && Pw.success_url.startsWith("https://outly.test/app/tickets?placilo=uspeh"), "splet brez glave: success_url ostane /app/tickets", Pw && Pw.success_url);
     }
 
+    console.log("\n# Checkout v jeziku aplikacije (`locale` v telesu nakupa)");
+    {
+      const { normalizirajLocale } = require("../placila_stripe");
+      const norm = [["sl", "sl"], ["en", "en"], ["sl-SI", "sl"], ["EN", "en"], ["en_GB", "en"], ["en-GB", "en"], ["de", undefined], ["", undefined], ["slo", undefined],
+        [123, undefined], [null, undefined], [undefined, undefined], [{ a: 1 }, undefined], [["sl"], undefined], ["sl".padEnd(21, "-"), undefined], ["auto", undefined]];
+      for (const [vhod, pricakovano] of norm) assert(normalizirajLocale(vhod) === pricakovano, `normalizirajLocale(${JSON.stringify(vhod)}) = ${pricakovano}`, normalizirajLocale(vhod));
+
+      r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Locale Noc", startAt: cezDan, ticketPriceCents: 1000, capacity: 100, minAge: 0 });
+      const evLoc = r.body.id;
+      await pool.query("UPDATE events SET vip_enabled = TRUE WHERE id=$1", [evLoc]);
+      const sprosti = () => pool.query("UPDATE orders SET status='cancelled', cancelled_at=NOW() WHERE event_id=$1 AND status='pending'", [evLoc]);
+      // vhod telesa -> kaj dobi Stripe (undefined = polja `locale` ni); nakup mora uspeti v vsakem primeru
+      const primeri = [["sl", "sl"], ["en-GB", "en"], ["SL_si", "sl"], ["de", undefined], [123, undefined], [null, undefined], [undefined, undefined],
+        ["sl".padEnd(25, "-"), undefined], [["sl"], undefined], [{ locale: "sl" }, undefined]];
+      let ipL = 0;   // omejevalnik nakupov je po IP (20 na uro): vsak klic dobi svoj naslov prek X-Forwarded-For
+      const ip = () => ({ "x-forwarded-for": `10.7.0.${++ipL}` });
+      for (const [vhod, pricakovano] of primeri) {
+        const pred = S.zahtevkiSej.length;
+        const telo = { quantity: 1 }; if (vhod !== undefined) telo.locale = vhod;
+        r = await api("POST", `/events/${evLoc}/orders`, T.ana, telo, ip());
+        const par = S.zahtevkiSej[pred] && S.zahtevkiSej[pred].params;
+        assert(r.status === 201 && r.body.mode === "stripe" && r.body.checkout_url && par, `vstopnice: locale ${JSON.stringify(vhod)} -> nakup 201 s sejo`, [r.status, r.body]);
+        assert(par && par.locale === pricakovano && (pricakovano !== undefined || !("locale" in par)), `vstopnice: locale ${JSON.stringify(vhod)} -> Stripe dobi ${pricakovano === undefined ? "brez polja locale" : pricakovano}`, par && par.locale);
+        assert(!("locale" in r.body) && !("locale" in r.body.order), "odgovor nakupa je nespremenjen (brez locale)");
+        await sprosti();
+      }
+      // VIP miza (racun)
+      for (const [vhod, pricakovano] of [["sl", "sl"], ["en", "en"], ["fr", undefined], [undefined, undefined]]) {
+        const pred = S.zahtevkiSej.length;
+        r = await api("POST", `/events/${evLoc}/tables/1/orders`, T.bor, vhod === undefined ? {} : { locale: vhod }, ip());
+        const par = S.zahtevkiSej[pred] && S.zahtevkiSej[pred].params;
+        assert(r.status === 201 && r.body.mode === "stripe" && par, `VIP: locale ${JSON.stringify(vhod)} -> nakup 201 s sejo`, [r.status, r.body]);
+        assert(par && par.locale === pricakovano && (pricakovano !== undefined || !("locale" in par)), `VIP: locale ${JSON.stringify(vhod)} -> Stripe dobi ${pricakovano === undefined ? "brez polja locale" : pricakovano}`, par && par.locale);
+        await sprosti();
+      }
+      // idempotentna ponovitev: obstojeca seja, jezik prvega poskusa (Stripe se ne klice znova s spremenjenim jezikom)
+      const kljucL = crypto.randomUUID(), predL = S.zahtevkiSej.length;
+      r = await api("POST", `/events/${evLoc}/orders`, T.ana, { quantity: 1, locale: "sl" }, { "idempotency-key": kljucL, ...ip() });
+      const url1 = r.body.checkout_url;
+      r = await api("POST", `/events/${evLoc}/orders`, T.ana, { quantity: 1, locale: "en" }, { "idempotency-key": kljucL, ...ip() });
+      assert(r.status === 201 && r.body.checkout_url === url1 && S.zahtevkiSej.length === predL + 1 && S.zahtevkiSej[predL].params.locale === "sl", "ponovitev kljuca z drugim jezikom: ista seja (jezik prvega poskusa)", [r.status, S.zahtevkiSej.length - predL]);
+      await sprosti();
+    }
+
     console.log("\n# Provizija po klubu (migracija 031, admin panel)");
     const Tadmin = zeton("admin@outly.si", uuid(9));
     await api("GET", "/me", Tadmin);
