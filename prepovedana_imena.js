@@ -52,8 +52,8 @@ const SPREJETO = [
   "scunthorpe", "penistone", "badminton", "padmini", "outlying", "pussycat", "slutsky", "niggard", "shiitake",
   // koren »porn« v slovenskih besedah: upornik, naporno, sporno, oporni (porn, porno, pornhub, xporn ostanejo prepovedani)
   "uporn", "naporn", "sporn", "oporn",
-  // »kurba« v »Kurban Bajram«; »slut« v »slutnja«, »slutim«; »nigger« v »snigger«
-  "kurban", "slutn", "slutim", "snigger",
+  // »kurba« v »Kurban Bajram«; »slut« v »slutnja«, »slutim«
+  "kurban", "slutn", "slutim",
   // »shit« v tujih imenih in besedah: Kshitij, Yoshitaka, Ashita, mishit, push it, this hit
   "kshitij", "yoshitaka", "ashita", "mishit", "pushit", "thishit",
 ];

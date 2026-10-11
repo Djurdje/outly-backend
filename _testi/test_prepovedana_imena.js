@@ -71,8 +71,8 @@ const ZAVRNJENA = [
   "niggger", "nigggga", "pusssy", "asssshole", "assss", "fagggot", "pisss", "fuuuck", "bitchhh", "shhhit", "n1ggger",
   // N3: dodani koreni
   "kurc", "kurec", "Kurec", "fuk", "phuck", "fvck", "fcuk", "peder", "buzerant", "buzerant_99",
-  // N4: zavajajoce kot administrator; N1: odlocitev menedzerja (Ciganovic ostane zavrnjen)
-  "Administracija", "Ciganovic",
+  // N4: zavajajoce kot administrator; N1: odlocitev menedzerja (Ciganovic ostane zavrnjen; Snigger zavrnjen, ker izjema odpre obid s_nigger)
+  "Administracija", "Ciganovic", "s_nigger", "Snigger",
 ];
 const SPREJETA = [
   // vsakdanja imena
@@ -86,7 +86,7 @@ const SPREJETA = [
   // S1: slovenske besede s korenom »porn«
   "upornik", "uporni_jan", "naporno", "naporna", "sporno", "sporna", "oporni", "opornik",
   // N1: lazni zadetki
-  "Kurban", "kurban_bajram", "Slutnja", "slutim", "Snigger", "Kshitij", "Yoshitaka", "Ashita", "mishit", "push_it", "this_hit", "Tit",
+  "Kurban", "kurban_bajram", "Slutnja", "slutim", "Kshitij", "Yoshitaka", "Ashita", "mishit", "push_it", "this_hit", "Tit",
   // S2: navadna imena z dvojno crko
   "Anna", "Matteo", "Ziggy", "Jessica", "Grassi", "Nigeria", "Hannah", "Bobbi",
   // N3: ne zadene obicajnih imen
