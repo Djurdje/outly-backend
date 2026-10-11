@@ -31,7 +31,7 @@ const ura = { napake: { zacetek: 0, stevec: 0 }, opozorila: { zacetek: 0, stevec
 // ---------------------------------------------------------------------------------------------------------------------------
 // Vsa besedila gredo skozi ociscenje SAMO ob omejeni dolzini: pg 22P02 ponovi vrednost odjemalca (lahko 15 KB), regexi pa so nad dolgim nizom
 // kvadraticni (230 ms CPU na zahtevek, K1). Zato: (1) odreži na 1000 znakov, (2) pg vrednosti v narekovajih odstrani prve (linearno),
-// (3) ostali regexi imajo omejene kvantifikatorje, (4) rezultat ima najvec 300 znakov.
+// (3) regexi za zetone nimajo zgornjih mej (dolg zeton se zamenja v celoti), a so linearni ali omejeni z vhodom 1000 znakov, (4) rezultat ima najvec 300 znakov.
 const OCISCENJE_VHOD = 1000;
 const OCISCENJE_IZHOD = 300;
 function ociscenje(besedilo) {
@@ -42,17 +42,17 @@ function ociscenje(besedilo) {
     .replace(/(invalid input (?:syntax|value) for [^:\n]{0,80}):[\s\S]*/g, "$1: [x]")                      // pg 22P02 ponovi vrednost odjemalca
     .replace(/\b(value|zone|syntax|input|name|string|identifier)\s+"[^"]*(?:"|$)/gi, '$1 "[x]"')            // 22003, 22008, »time zone«: vrednost v narekovajih (tudi nezakljucena)
     .replace(/[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,24}/g, "[email]")                      // e-naslovi
-    .replace(/eyJ[A-Za-z0-9_-]{5,500}\.[A-Za-z0-9_-]{5,500}\.[A-Za-z0-9_-]{0,500}/g, "[jwt]")                 // JWT
-    .replace(/\b(Bearer|Basic)\s+\S{1,300}/gi, "$1 [x]")                                                   // Authorization
-    .replace(/\b(?:cs|pi|ch|evt|acct|re|cus|sub|in|po|tr|ba|card|whsec|sk|pk|rk)_[A-Za-z0-9_]{6,200}/g, "[id]")   // identifikatorji tretjih
+    .replace(/eyJ[A-Za-z0-9_.-]{5,}/g, "[jwt]")                                                              // JWT (cel, brez zgornje meje: vhod je ze omejen)
+    .replace(/\b(Bearer|Basic)\s+\S+/gi, "$1 [x]")                                                   // Authorization
+    .replace(/\b(?:cs|pi|ch|evt|acct|re|cus|sub|in|po|tr|ba|card|whsec|sk|pk|rk)_[A-Za-z0-9_]{6,}/g, "[id]")   // identifikatorji tretjih
     .replace(/\b(?:OUT|test)[-_][A-Za-z0-9]{6,12}\b/g, "[ref]")                                             // public_ref narocila
-    .replace(/\b(?=[A-Za-z0-9_-]{0,200}\d)[A-Za-z0-9_-]{24,200}\b/g, "[id]");                                // dolgi zetoni, kode (s stevko; imena omejitev brez stevk ostanejo)
+    .replace(/\b(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{24,}\b/g, "[id]");                                // dolgi zetoni, kode (s stevko; imena omejitev brez stevk ostanejo)
   return b.length > OCISCENJE_IZHOD ? b.slice(0, OCISCENJE_IZHOD) + "…" : (odrezano ? b + "…" : b);
 }
 
 // Ključ omejitve: BREZ uporabniske vsebine (vrednosti v narekovajih, stevila): isti vzrok = isti kljuc, tuja vsebina ga ne more razmnoziti.
 function normaliziraj(besedilo) {
-  return String(besedilo).slice(0, 200).replace(/"[^"]*"?/g, '"?"').replace(/\d+/g, "#").slice(0, 60);
+  return String(besedilo === undefined || besedilo === null ? "" : besedilo).slice(0, 200).replace(/"[^"]*"?/g, '"?"').replace(/\d+/g, "#").slice(0, 60);
 }
 
 // beforeSend: odstrani vse, kar je lahko osebno ali skrivnost. Vrne dogodek (spremenjen) ali null.
@@ -138,8 +138,11 @@ function porociNapako(e, kontekst, req, res) {
     oznaci(req, res);
     const napaka = e instanceof Error ? e : new Error(typeof e === "string" ? e : "neznana napaka");
     const metoda = metodaZ(req), pot = vzorecPoti(req);
-    if (prepocasi(`n|${kontekst || ""}|${metoda}|${pot}|${napaka.code || ""}|${normaliziraj(napaka.message)}`)) return;
-    Sentry.captureException(napaka, { level: "error", tags: { kontekst: kontekst || "", metoda, pot } });
+    if (prepocasi(`n|${kontekst || ""}|${metoda}|${pot}|${napaka.code || ""}|${normaliziraj(napaka.constraint)}|${normaliziraj(napaka.column)}|${normaliziraj(napaka.message)}`)) return;
+    const ctx = { level: "error", tags: { kontekst: kontekst || "", metoda, pot } };
+    // constraint/column (identifikatorja sheme, ne vrednosti): razlicne omejitve iste poti so loceni problemi (tudi za dedupe in grupiranje v Sentryju)
+    if (napaka.constraint || napaka.column) ctx.fingerprint = ["{{ default }}", String(napaka.constraint || "").slice(0, 80), String(napaka.column || "").slice(0, 80)];
+    Sentry.captureException(napaka, ctx);
   } catch (_) { /* porocanje nikoli ne sme podreti zahtevka */ }
 }
 
@@ -225,6 +228,7 @@ function zagon() {
         console.error("[sentry] neujeta zavrnitev:", (razlog && razlog.stack) || razlog);
       } catch (_) { /* izstop se vedno zgodi */ }
       const izstop = () => process.exit(1);
+      setTimeout(izstop, 3000);   // varnostna mreza, ce obljuba close nikoli ne razresi (brez unref: proces mora izstopiti)
       try { S.close(2000).then(izstop, izstop); } catch (_) { izstop(); }
     });
     const izvirni = console.error;

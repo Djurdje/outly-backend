@@ -189,6 +189,17 @@ function otrok(koda, dodatno) {
       const ms = Number(process.hrtime.bigint() - t0) / 1e6;
       assert(ms < 20 && o1.length <= 301 && o2.length <= 301, `ociscenje ${N} x "${enota}" (sporocilo + golo besedilo) < 20 ms in <= 300 znakov`, [ms.toFixed(1), o1.length, o2.length]);
     }
+    // R1: napadalni vzorci (vsi pod 20 ms) in dolgi zetoni brez ostanka
+    for (const [ime, enota, pred] of [["a@", "a@", ""], ["a.@", "a.@", ""], ["eyJ", "eyJ", ""], ["eyJ.", "eyJ.", ""], ["Bearer", "x1", "Bearer "], ["cs_", "a1", "cs_"], ["presledki", " a", ""], ["a_1", "a_1-", ""]]) {
+      const t0 = process.hrtime.bigint(); sentry.ociscenje(pred + enota.repeat(16000)); sentry.ociscenje(pred + enota.repeat(500));
+      const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+      assert(ms < 20, `ociscenje napadalni vzorec »${ime}« (16000 in 500 ponovitev) < 20 ms`, ms.toFixed(1));
+    }
+    const jwt900 = "eyJhbGciOiJFUzI1NiJ9." + "eyJzdWIiOiJhYmMifQ".padEnd(900, "x") + ".podpis123";
+    assert(sentry.ociscenje("napaka " + jwt900 + " konec") === "napaka [jwt] konec", "JWT s payloadom 900 znakov -> [jwt] brez ostanka", sentry.ociscenje("napaka " + jwt900 + " konec"));
+    assert(sentry.ociscenje("Authorization: Bearer " + "x1".repeat(250) + " konec") === "Authorization: Bearer [x] konec", "Bearer + 500 znakov -> brez ostanka");
+    assert(sentry.ociscenje("id cs_live_" + "a1".repeat(300) + " konec") === "id [id] konec", "dolg Stripe id -> [id] brez ostanka");
+    assert(sentry.ociscenje("zeton " + "a1b2".repeat(100) + " konec") === "zeton [id] konec", "dolg zeton (400 znakov) -> [id] brez ostanka");
     assert(sentry.ociscenje("POZOR: narocilo OUT-ABCD2345 NI mogoce; test_Ab12Cd34") === "POZOR: narocilo [ref] NI mogoce; [ref]", "public_ref (OUT-XXXXXXXX, test_…) skrit", sentry.ociscenje("POZOR: narocilo OUT-ABCD2345 NI mogoce; test_Ab12Cd34"));
     assert(sentry.ociscenje('value "99999999999" is out of range for type integer') === 'value "[x]" is out of range for type integer', "22003: vrednost v narekovajih skrita");
     assert(sentry.ociscenje('time zone "ana@tajna.si" not recognized') === 'time zone "[x]" not recognized', "time zone: vrednost v narekovajih skrita");
@@ -201,6 +212,16 @@ function otrok(koda, dodatno) {
     await pocakaj(800);
     const s2 = dogodki.slice(predS2).filter((d) => d.tags && d.tags.kontekst === "odgovor-500");
     assert(s2.length === 0, "30 razlicnih clubId (isti vzrok kot prej poslani 500) ne naredi novih dogodkov (kljuc brez uporabniske vsebine)", s2.length);
+    // N9: razlicni constraint/column iste poti = razlicen ključ (vsak se poroca), isti constraint = en dogodek
+    const pred9 = dogodki.length;
+    const rq9 = { method: "POST", path: "/p", route: { path: "/p" } };
+    for (const [c, k] of [["a_fkey", ""], ["b_fkey", ""], ["a_fkey", ""], ["", "kolona_x"]]) {
+      const e9 = Object.assign(new Error('duplicate key value violates unique constraint'), { code: "23505", constraint: c, column: k });
+      sentry.porociNapako(e9, "n9", rq9);
+    }
+    sentry.porociNapako(new Error("sentinela9"), "sentinela9");
+    await cakaj(() => dogodki.some((x) => x.tags && x.tags.kontekst === "sentinela9"));
+    assert(dogodki.slice(pred9).filter((x) => x.tags && x.tags.kontekst === "n9").length === 3, "N9: a_fkey, b_fkey, kolona_x = 3 dogodki (ponovljen a_fkey ne)", dogodki.slice(pred9).map((x) => x.tags && x.tags.kontekst));
     // Loceni proracun: 12 opozoril (meja 10/h) ne porabi proracuna za napake
     const opoz = []; for (let i = 0; i < 12; i++) opoz.push(sentry.ocisti({ level: "warning", message: "POZOR " + i }));
     assert(opoz.filter(Boolean).length <= 10, "opozorila POZOR: najvec 10/h", opoz.filter(Boolean).length);
