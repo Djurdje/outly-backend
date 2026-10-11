@@ -615,7 +615,7 @@ async function enotski() {
       assert(mGost.status === 200 && mGost.stanje === "zgresitev" && mGost.body.length === 1 && mGost.body[0].id === 1, "map: gost prvi = zgresitev, en klub s koordinatami", [mGost.status, mGost.stanje, mGost.body]);
       const mAna = await d("GET", "/clubs/map", T.ana);
       assert(mAna.stanje === "zadetek" && mAna.text === mGost.text, "map: prijavljena ana zadene isti vnos, telo bajt za bajtom enako", mAna.stanje);
-      assert(!/my_plan|friends_|is_following|email|stripe|legal_|tax_number/.test(mGost.text), "map: v telesu ni osebnih ali notranjih polj");
+      assert(!/my_plan|friends_|is_following|email|account_id|legal_|tax_number/.test(mGost.text), "map: v telesu ni osebnih ali notranjih polj");
       assert(mGost.text === (await b("GET", "/clubs/map")).text, "map: telo enako kot brez predpomnilnika (B)");
       assert((await d("GET", "/clubs/map", null, null)).headers.get("cache-control") === null, "map: Cache-Control nespremenjen (ni ga bilo)");
       r = await surovGet(D, "/clubs/map", { "If-None-Match": mGost.headers.get("etag") });
@@ -675,7 +675,7 @@ async function enotski() {
       const iskTelo = r.text;
       r = await d("GET", "/search?q=kozmos", T.ana);
       assert(r.stanje === "zadetek" && r.text === iskTelo, "search: ana zadene isti vnos, telo bajt za bajtom enako", r.stanje);
-      assert(!/my_plan|friends_|is_following|email|stripe|legal_|tax_number|hidden/.test(iskTelo), "search: v telesu ni osebnih ali notranjih polj");
+      assert(!/my_plan|friends_|is_following|email|account_id|legal_|tax_number|hidden/.test(iskTelo), "search: v telesu ni osebnih ali notranjih polj");
       assert(iskTelo === (await b("GET", "/search?q=kozmos")).text, "search: telo enako kot brez predpomnilnika (B)");
       r = await surovGet(D, "/search?q=kozmos", { "If-None-Match": (await d("GET", "/search?q=kozmos")).headers.get("etag") });
       assert(r.status === 304, "search: If-None-Match -> 304", r.status);

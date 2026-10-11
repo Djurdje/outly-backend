@@ -44,7 +44,7 @@ function enotski() {
 }
 
 function zazeni(port, okolje) {
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, REZERVACIJE_CISCENJE_MS: "0", DNEVNIK_POVEZAV_MS: "0", PORT: String(port), DATABASE_URL: DB, SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, REZERVACIJE_CISCENJE_MS: "0", DNEVNIK_POVEZAV_MS: "0", PORT: String(port), DATABASE_URL: DB, SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
   const st = { srv, log: "" };
   srv.stdout.on("data", (d) => st.log += d); srv.stderr.on("data", (d) => st.log += d);
   return st;
