@@ -7,6 +7,7 @@ const { Pool } = require("pg");
 const crypto = require("crypto");
 const net = require("net");
 const { Resend } = require("resend");
+const { jePrepovedanoIme } = require("./prepovedana_imena");   // filter neprimernih uporabniskih imen (#216 N9)
 const { qrPng, pdfVstopnice } = require("./vstopnica_priloge");   // QR (PNG, vgrajen v mail) in PDF vstopnice (priloga); migracija 034
 const path = require("path");
 // Express 4 ne ujame zavrnjenih obljub asinhronih rocnikov: neujet `await pool.connect()` je sesul CEL proces (issue #129).
@@ -522,13 +523,21 @@ const POLJA_SEJE = "id, email, username, role";
 
 // Uporabniško ime za novo vrstico: iz user_metadata.username (aplikacija ga
 // pošlje ob registraciji), sicer iz dela e-naslova pred @. Pravila kot pri
-// PATCH /me: 3–20 znakov, črke/številke/podčrtaj.
+// PATCH /me: 3–20 znakov, črke/številke/podčrtaj, in ne na seznamu prepovedanih imen
+// (prepovedana_imena.js). Tu ne moremo vrniti 400 (vrstica nastane med overitvijo seje,
+// uporabnik bi ostal brez računa), zato prepovedano ime iz metapodatkov tiho nadomesti »user«
+// (NE del e-naslova: ta bi postal javno ime, ki si ga uporabnik ni izbral); uporabnik ga zamenja
+// prek PATCH /me. Manjkajoče ali neveljavno ime: del e-naslova; isti filter velja tudi zanj
+// (»admin@…« ne postane »admin«), sicer »user«.
 function predlogImena(p) {
   const meta = p.user_metadata || {};
   const zeljeno = typeof meta.username === "string" ? meta.username.trim() : "";
-  if (/^[a-zA-Z0-9_]{3,20}$/.test(zeljeno)) return zeljeno;
+  if (/^[a-zA-Z0-9_]{3,20}$/.test(zeljeno)) {
+    if (!jePrepovedanoIme(zeljeno)) return zeljeno;
+    return "user";   // izbrano ime je prepovedano: del e-naslova bi postal javno ime brez obvestila
+  }
   const osnova = String(p.email).split("@")[0].replace(/[^a-zA-Z0-9_]/g, "").slice(0, 16);
-  return (osnova.length >= 3 ? osnova : "user") ;
+  return (osnova.length >= 3 && !jePrepovedanoIme(osnova) ? osnova : "user") ;
 }
 
 // Lokalna vrstica za Supabasov račun:
@@ -1068,6 +1077,14 @@ app.patch("/me", requireAuth, async (req, res) => {
       if (ime.length > 20) return res.status(400).send("Username too long.");
       if (!/^[a-zA-Z0-9_]+$/.test(ime)) {
         return res.status(400).send("Username invalid. Use letters, numbers, underscore.");
+      }
+      // Filter neprimernih imen (#216 N9): samo za NOVO ime. Obstoječe ime (iz časov pred filtrom) se sme ponovno
+      // shraniti, tudi če bi ga filter danes zavrnil; branje iz baze je samo na redki poti zadetka.
+      if (jePrepovedanoIme(ime)) {
+        const sedanje = await pool.query("SELECT 1 FROM users WHERE id=$1 AND LOWER(username)=LOWER($2)", [req.user.userId, ime]);
+        if (sedanje.rows.length === 0) {
+          return res.status(400).json({ error: "username_not_allowed", message: "Username not allowed. Choose a different name." });
+        }
       }
       // Primerjava brez upostevanja velikosti crk: "Martin" in "martin" sta
       // isto ime. Registracija tega doslej ni preverjala.
