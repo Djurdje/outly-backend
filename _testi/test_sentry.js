@@ -11,7 +11,12 @@
  *      NI Authorization/Cookie/X-Guest-Token/e-naslova/query niza; isti 500 ponovno = ni novega dogodka (omejitev); vrstica »POZOR« ob zagonu = warning
  *   d  napakaRocnik in odgovoriNaNapako porocata, napaka povezave (503) ne
  *   e  ocisti(): odstrani request.*, user, IP, extra, breadcrumbe; ociscenje besedil
- *   f  neujeta izjema in neujeta zavrnitev IZVEN Expressa: dogodek pride do ingesta IN proces izstopi s kodo != 0 (kot brez Sentryja, I10)
+ *   f  neujeta izjema in neujeta zavrnitev IZVEN Expressa (tudi AbortError): dogodek pride do ingesta IN proces izstopi s kodo != 0 (kot brez Sentryja, I10)
+ *   g  ociscenje je hitro (K1) in skrije public_ref ter vrednosti v narekovajih; ključ omejitve nima uporabniske vsebine (S2); loceni urni proracun POZOR / 500
+ *
+ * Opombe: (1) test c je odvisen od tega, da GET /events?clubId=abc vrne 500 (pg 22P02); ce kdo clubId validira (400), mora izbrati drugo pot s 500.
+ * (2) Otroci te skripte dobijo okolje brez SENTRY_DSN (okolje()); drugi testi, ki dvignejo otroke, ga ne brisejo - ce kdo v lupini izvozi SENTRY_DSN,
+ * ga podedujejo (sentry.js bi se vklopil in poskusil poslati na ta naslov). V CI in v `npm test` DSN ni nastavljen.
  */
 const http = require("http");
 const zlib = require("zlib");
@@ -97,7 +102,7 @@ function otrok(koda, dodatno) {
     rez = JSON.parse((r.stdout.match(/RES=(.*)/) || [, "{}"])[1] || "{}");
     assert(rez.vklopljen === true, "z DSN je Sentry vklopljen", [rez, r.stderr.slice(-300)]);
     assert(rez.zakrpano && Object.values(rez.zakrpano).every((x) => x === false), "Module.require, http, https, fetch, ServerResponse NISO zakrpani", rez.zakrpano);
-    assert(JSON.stringify(rez.integracije) === JSON.stringify(["Dedupe", "LinkedErrors", "OnUncaughtException", "OnUnhandledRejection"]), "samo 4 izrecne integracije (brez http/pg/express/console)", rez.integracije);
+    assert(JSON.stringify(rez.integracije) === JSON.stringify(["Dedupe", "LinkedErrors", "OnUncaughtException"]), "samo 3 izrecne integracije (brez http/pg/express/console; zavrnitve ureja lasten poslusalec)", rez.integracije);
     assert(rez.traces === true && rez.pii === false && rez.breadcrumbi === 0, "brez sledenja, sendDefaultPii=false, brez breadcrumbov", [rez.traces, rez.pii, rez.breadcrumbi]);
     assert(rez.ponudnik === "NoopTracerProvider" && rez.sdkTrace === false, "OpenTelemetry brez ponudnika (noop), brez SDK sledenja", [rez.ponudnik, rez.sdkTrace]);
     assert(rez.env === "production" && rez.release === "abc123def", "environment=production (RENDER), release=RENDER_GIT_COMMIT", [rez.env, rez.release]);
@@ -176,10 +181,37 @@ function otrok(koda, dodatno) {
     assert(!/a\.b@c\.si|abc123|eyJ|cs_live|a@b\.si|tajno|x@y\.si/.test(JSON.stringify(c)), "besedila ociscena (e-naslov, Bearer, JWT, ids, vars)", c);
     assert(sentry.ociscenje('violates "club_members_user_id_fkey"') === 'violates "club_members_user_id_fkey"', "imena omejitev brez stevk ostanejo berljiva");
 
+    console.log("\n# g  ociscenje: hitrost, public_ref, vrednosti v narekovajih, ključ omejitve, loceni proracuni");
+    for (const N of [16000, 32000]) for (const enota of ["a", "a-", "a1-"]) {
+      const sporocilo = `invalid input syntax for type integer: "${enota.repeat(N)}"`;
+      const drugo = enota.repeat(N);
+      const t0 = process.hrtime.bigint(); const o1 = sentry.ociscenje(sporocilo); const o2 = sentry.ociscenje(drugo);
+      const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+      assert(ms < 20 && o1.length <= 301 && o2.length <= 301, `ociscenje ${N} x "${enota}" (sporocilo + golo besedilo) < 20 ms in <= 300 znakov`, [ms.toFixed(1), o1.length, o2.length]);
+    }
+    assert(sentry.ociscenje("POZOR: narocilo OUT-ABCD2345 NI mogoce; test_Ab12Cd34") === "POZOR: narocilo [ref] NI mogoce; [ref]", "public_ref (OUT-XXXXXXXX, test_…) skrit", sentry.ociscenje("POZOR: narocilo OUT-ABCD2345 NI mogoce; test_Ab12Cd34"));
+    assert(sentry.ociscenje('value "99999999999" is out of range for type integer') === 'value "[x]" is out of range for type integer', "22003: vrednost v narekovajih skrita");
+    assert(sentry.ociscenje('time zone "ana@tajna.si" not recognized') === 'time zone "[x]" not recognized', "time zone: vrednost v narekovajih skrita");
+    assert(sentry.ociscenje('invalid input syntax for type timestamp with time zone: "x\nvrstica2"') === "invalid input syntax for type timestamp with time zone: [x]", "22P02 z novo vrstico skrit v celoti");
+    assert(sentry.ociscenje('violates "club_members_user_id_fkey" constraint') === 'violates "club_members_user_id_fkey" constraint', "ime omejitve ostane berljivo");
+    // S2: 30 razlicnih uporabniskih vrednosti = en vzrok = en dogodek
+    const predS2 = dogodki.length;
+    for (let i = 0; i < 30; i++) await fetch(BASE + `/events?clubId=zzz${i}vrednost${i * 7}`);
+    await fetch(BASE + "/clubs?limit=1&city=" + "x".repeat(10));   // nic za Sentry
+    await pocakaj(800);
+    const s2 = dogodki.slice(predS2).filter((d) => d.tags && d.tags.kontekst === "odgovor-500");
+    assert(s2.length === 0, "30 razlicnih clubId (isti vzrok kot prej poslani 500) ne naredi novih dogodkov (kljuc brez uporabniske vsebine)", s2.length);
+    // Loceni proracun: 12 opozoril (meja 10/h) ne porabi proracuna za napake
+    const opoz = []; for (let i = 0; i < 12; i++) opoz.push(sentry.ocisti({ level: "warning", message: "POZOR " + i }));
+    assert(opoz.filter(Boolean).length <= 10, "opozorila POZOR: najvec 10/h", opoz.filter(Boolean).length);
+    assert(sentry.ocisti({ level: "error", message: "napaka" }) !== null, "proracun za napake je locen od opozoril");
+    assert(sentry.ocisti({ level: "fatal", message: "x", exception: { values: [{ mechanism: { handled: false } }] } }) !== null, "fatalne gredo vedno skozi");
+
     console.log("\n# f  neujeta izjema / zavrnitev izven Expressa: dogodek + izstop s kodo != 0");
     for (const [ime, koda, kontekstBesedila] of [
       ["uncaughtException", `setTimeout(()=>{throw new Error("boom-izjema ana.tajna@primer.si")},50)`, "boom-izjema"],
       ["unhandledRejection", `setTimeout(()=>{Promise.reject(new Error("boom-zavrnitev ana.tajna@primer.si"))},50)`, "boom-zavrnitev"],
+      ["unhandledRejection (AbortError)", `setTimeout(()=>{const e=new Error("boom-abort ana.tajna@primer.si");e.name="AbortError";Promise.reject(e)},50)`, "boom-abort"],
     ]) {
       const pred = dogodki.length;
       const rr = spawnSync("node", ["-e", `require("./sentry").zagon();${koda};setInterval(()=>{},1000)`], { cwd: KOREN, env: okolje({ SENTRY_DSN: DSN }), encoding: "utf8", timeout: 20000 });
@@ -190,7 +222,7 @@ function otrok(koda, dodatno) {
     }
     // Isto brez DSN: proces izstopi s kodo != 0 (Node privzeto), brez dogodka
     const pred = dogodki.length;
-    for (const koda of [`setTimeout(()=>{throw new Error("brez-sentryja")},50)`, `setTimeout(()=>{Promise.reject(new Error("brez-sentryja"))},50)`]) {
+    for (const koda of [`setTimeout(()=>{throw new Error("brez-sentryja")},50)`, `setTimeout(()=>{Promise.reject(new Error("brez-sentryja"))},50)`, `setTimeout(()=>{const e=new Error("brez-sentryja");e.name="AbortError";Promise.reject(e)},50)`]) {
       const rr = spawnSync("node", ["-e", `require("./sentry").zagon();${koda};setInterval(()=>{},1000)`], { cwd: KOREN, env: okolje({}), encoding: "utf8", timeout: 20000 });
       assert(rr.status !== null && rr.status !== 0, "brez DSN: proces izstopi s kodo != 0 (vedenje nespremenjeno)", [rr.status, rr.signal]);
     }

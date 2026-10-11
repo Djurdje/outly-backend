@@ -4,7 +4,7 @@
 // console.error ostane nedotaknjen, v Express se ne doda noben vmesni program - testi, CI in lokalni zagon so enaki kot prej.
 // DSN je samo v okolju, nikoli v kodi. Paket se naloži znotraj try: ce nalaganje pade, aplikacija vseeno deluje (samo brez Sentryja).
 //
-// Kaj se poslje: neujete izjeme (po flushu proces konca kot prej), unhandledRejection (nacin "strict" = proces konca kot privzeto v Node 22),
+// Kaj se poslje: neujete izjeme (po flushu proces konca kot prej), unhandledRejection (lastni poslusalec: flush, nato exit(1) = proces konca kot privzeto v Node 22),
 // napake v asinhronih rocnikih (napakaRocnik), skenske poti (odgovoriNaNapako), iskanje kluba pri vlogah, in VSAK odgovor 500 ne glede na pot
 // (vmesni program ovije res.status; sklad napake vzamemo iz console.error(e), ki ga poti ze kličejo tik pred 500, sicer samo sporocilo
 // »500 METODA /pot/:vzorec«). Opozorila »POZOR« iz dnevnika gredo kot sporocilo stopnje warning.
@@ -24,21 +24,35 @@ let Sentry = null;            // naloženi paket (samo ob DSN)
 let zagnan = false;
 let zadnjaNapaka = null;      // zadnji Error iz console.error v TEM sinhronem koraku (glej opazi)
 const zadnjiPoKljucu = new Map();
-let uraZacetek = 0;
-let uraStevec = 0;
+const ura = { napake: { zacetek: 0, stevec: 0 }, opozorila: { zacetek: 0, stevec: 0 } };   // loceni urni proracun: 500/izjeme in POZOR
 
 // ---------------------------------------------------------------------------------------------------------------------------
 // Ciscenje besedil (brez osebnih podatkov). Izvozeno za test.
 // ---------------------------------------------------------------------------------------------------------------------------
+// Vsa besedila gredo skozi ociscenje SAMO ob omejeni dolzini: pg 22P02 ponovi vrednost odjemalca (lahko 15 KB), regexi pa so nad dolgim nizom
+// kvadraticni (230 ms CPU na zahtevek, K1). Zato: (1) odreži na 1000 znakov, (2) pg vrednosti v narekovajih odstrani prve (linearno),
+// (3) ostali regexi imajo omejene kvantifikatorje, (4) rezultat ima najvec 300 znakov.
+const OCISCENJE_VHOD = 1000;
+const OCISCENJE_IZHOD = 300;
 function ociscenje(besedilo) {
   if (typeof besedilo !== "string") return besedilo;
-  return besedilo
-    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")                       // e-naslovi
-    .replace(/eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g, "[jwt]")               // JWT
-    .replace(/\b(Bearer|Basic)\s+\S+/gi, "$1 [x]")                                               // Authorization
-    .replace(/\b(?:cs|pi|ch|evt|acct|re|cus|sub|in|po|tr|ba|card|whsec|sk|pk|rk)_[A-Za-z0-9_]{6,}/g, "[id]")   // identifikatorji tretjih
-    .replace(/\b(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{24,}\b/g, "[id]")                               // dolgi zetoni, kode, ref (s stevko; imena omejitev brez stevk ostanejo)
-    .replace(/(invalid input (?:syntax|value) for [^:]+): .*/g, "$1: [x]");                       // pg 22P02 ponovi vrednost, ki jo je poslal odjemalec
+  const odrezano = besedilo.length > OCISCENJE_VHOD;
+  let b = odrezano ? besedilo.slice(0, OCISCENJE_VHOD) : besedilo;
+  b = b
+    .replace(/(invalid input (?:syntax|value) for [^:\n]{0,80}):[\s\S]*/g, "$1: [x]")                      // pg 22P02 ponovi vrednost odjemalca
+    .replace(/\b(value|zone|syntax|input|name|string|identifier)\s+"[^"]*(?:"|$)/gi, '$1 "[x]"')            // 22003, 22008, »time zone«: vrednost v narekovajih (tudi nezakljucena)
+    .replace(/[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,24}/g, "[email]")                      // e-naslovi
+    .replace(/eyJ[A-Za-z0-9_-]{5,500}\.[A-Za-z0-9_-]{5,500}\.[A-Za-z0-9_-]{0,500}/g, "[jwt]")                 // JWT
+    .replace(/\b(Bearer|Basic)\s+\S{1,300}/gi, "$1 [x]")                                                   // Authorization
+    .replace(/\b(?:cs|pi|ch|evt|acct|re|cus|sub|in|po|tr|ba|card|whsec|sk|pk|rk)_[A-Za-z0-9_]{6,200}/g, "[id]")   // identifikatorji tretjih
+    .replace(/\b(?:OUT|test)[-_][A-Za-z0-9]{6,12}\b/g, "[ref]")                                             // public_ref narocila
+    .replace(/\b(?=[A-Za-z0-9_-]{0,200}\d)[A-Za-z0-9_-]{24,200}\b/g, "[id]");                                // dolgi zetoni, kode (s stevko; imena omejitev brez stevk ostanejo)
+  return b.length > OCISCENJE_IZHOD ? b.slice(0, OCISCENJE_IZHOD) + "…" : (odrezano ? b + "…" : b);
+}
+
+// Ključ omejitve: BREZ uporabniske vsebine (vrednosti v narekovajih, stevila): isti vzrok = isti kljuc, tuja vsebina ga ne more razmnoziti.
+function normaliziraj(besedilo) {
+  return String(besedilo).slice(0, 200).replace(/"[^"]*"?/g, '"?"').replace(/\d+/g, "#").slice(0, 60);
 }
 
 // beforeSend: odstrani vse, kar je lahko osebno ali skrivnost. Vrne dogodek (spremenjen) ali null.
@@ -66,18 +80,19 @@ function ocisti(dogodek) {
   if (dogodek.tags) for (const k of Object.keys(dogodek.tags)) dogodek.tags[k] = ociscenje(String(dogodek.tags[k])).slice(0, 120);
   // Skupna ura omejitev: neujete izjeme/zavrnitve (handled === false) gredo vedno skozi.
   const neujeta = vrednosti.some((v) => v.mechanism && v.mechanism.handled === false) || dogodek.level === "fatal";
-  if (!neujeta && !znotrajUrnegaProracuna()) return null;
+  if (!neujeta && !znotrajUrnegaProracuna(dogodek.level === "warning" ? "opozorila" : "napake")) return null;
   return dogodek;
 }
 
-function znotrajUrnegaProracuna() {
+function znotrajUrnegaProracuna(razred) {
+  const p = ura[razred];
   const zdaj = Date.now();
-  if (zdaj - uraZacetek > URA_MS) { uraZacetek = zdaj; uraStevec = 0; }
-  const surova = process.env.SENTRY_NAJVEC_NA_URO;
+  if (zdaj - p.zacetek > URA_MS) { p.zacetek = zdaj; p.stevec = 0; }
+  const surova = razred === "napake" ? process.env.SENTRY_NAJVEC_NA_URO : undefined;
   const najvec = surova === undefined || surova === "" ? NaN : Number(surova);
-  const meja = Number.isFinite(najvec) && najvec >= 0 ? najvec : 30;
-  if (uraStevec >= meja) return false;
-  uraStevec++;
+  const meja = Number.isFinite(najvec) && najvec >= 0 ? najvec : (razred === "napake" ? 30 : 10);
+  if (p.stevec >= meja) return false;
+  p.stevec++;
   return true;
 }
 
@@ -123,7 +138,7 @@ function porociNapako(e, kontekst, req, res) {
     oznaci(req, res);
     const napaka = e instanceof Error ? e : new Error(typeof e === "string" ? e : "neznana napaka");
     const metoda = metodaZ(req), pot = vzorecPoti(req);
-    if (prepocasi(`n|${kontekst || ""}|${metoda}|${pot}|${ociscenje(String(napaka.message)).slice(0, 80)}`)) return;
+    if (prepocasi(`n|${kontekst || ""}|${metoda}|${pot}|${napaka.code || ""}|${normaliziraj(napaka.message)}`)) return;
     Sentry.captureException(napaka, { level: "error", tags: { kontekst: kontekst || "", metoda, pot } });
   } catch (_) { /* porocanje nikoli ne sme podreti zahtevka */ }
 }
@@ -132,8 +147,8 @@ function porociNapako(e, kontekst, req, res) {
 function porociOpozorilo(besedilo, kontekst) {
   if (!Sentry) return;
   try {
-    const b = ociscenje(String(besedilo)).slice(0, 300);
-    if (prepocasi(`o|${kontekst || ""}|${b.slice(0, 60)}`)) return;
+    const b = ociscenje(String(besedilo));
+    if (prepocasi(`o|${kontekst || ""}|${normaliziraj(b)}`)) return;
     Sentry.captureMessage(b, { level: "warning", tags: { kontekst: kontekst || "" } });
   } catch (_) { /* nikoli ne podre zahtevka */ }
 }
@@ -195,11 +210,23 @@ function zagon() {
         S.linkedErrorsIntegration(),
         S.dedupeIntegration(),
         S.onUncaughtExceptionIntegration({ exitEvenIfOtherHandlersAreRegistered: true }),   // flush (najvec 2 s), nato exit(1) - kot brez Sentryja
-        S.onUnhandledRejectionIntegration({ mode: "strict" }),    // strict = proces konca kot privzeti Node 22 (warn bi ga pustil pri zivljenju)
       ],
       beforeSend: ocisti,
     });
     Sentry = S;
+    // Lastni poslusalec namesto S.onUnhandledRejectionIntegration: ta ima vgrajen seznam prezrtih napak (AbortError ...), ki ga ni mogoce izklopiti
+    // (`ignore: []` jih ohrani), proces pa bi ob taksni zavrnitvi ostal zivi, kar Node 22 brez Sentryja ne naredi (I10). Tu: zabelezi, flush (najvec 2 s), exit(1).
+    let koncujem = false;
+    process.on("unhandledRejection", (razlog) => {
+      if (koncujem) return;
+      koncujem = true;
+      try {
+        S.captureException(razlog, { level: "fatal", mechanism: { handled: false, type: "onunhandledrejection" } });
+        console.error("[sentry] neujeta zavrnitev:", (razlog && razlog.stack) || razlog);
+      } catch (_) { /* izstop se vedno zgodi */ }
+      const izstop = () => process.exit(1);
+      try { S.close(2000).then(izstop, izstop); } catch (_) { izstop(); }
+    });
     const izvirni = console.error;
     console.error = function (...args) {
       izvirni.apply(console, args);
