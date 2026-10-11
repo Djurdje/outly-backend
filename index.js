@@ -1342,8 +1342,78 @@ function preveriCenik(vhod) {
   return { postavke };
 }
 
-// Lastnik vidi še stanje vidnosti in Stripa, ne pa stripe_account_id.
-const STOLPCI_KLUBA_LASTNIKA = `${JAVNI_STOLPCI_KLUBA}, hidden, stripe_charges_enabled, stripe_payouts_enabled`;
+// Podatki prodajalca (migracija 043, #94, #101, invarianta I33): kupec mora pred nakupom izvedeti, kdo je prodajalec (ZVPot-1 18/1-2, 130/1-1).
+// Prodajalec je VEDNO klub `events.club_id` (pri gostovanem dogodku organizator, ne prizorisce). Surova polja vidi samo lastnik
+// (GET /business/clubs/me) in admin; javnost dobi objekt `seller` (spodaj), ki ne vsebuje nicesar, kar ni ze javno ali zakonsko obvezno.
+const STOLPCI_PRODAJALCA = "legal_name, legal_address, registration_number, tax_number, vat_payer";
+const PRODAJALEC_NAJVEC = { legal_name: 200, legal_address: 300, registration_number: 20, tax_number: 20 };
+// Stolpec -> ime v zahtevku (camelCase; sprejmemo tudi snake_case). Pri PATCH /business/clubs/me jih sme spremeniti samo lastnik (403 owner_only).
+const PRODAJALEC_POLJA = [["legal_name", "legalName"], ["legal_address", "legalAddress"], ["registration_number", "registrationNumber"], ["tax_number", "taxNumber"], ["vat_payer", "vatPayer"]];
+const jeNepraznNiz = (s) => typeof s === "string" && s.trim() !== "";
+// Ali so podatki prodajalca popolni: firma, sedez, maticna, davcna NISO prazni (surova polja, ne nadomestki) IN je DDV status vpisan IN je vsaj en kontakt.
+function prodajalecPopoln(k) {
+  return jeNepraznNiz(k.legal_name) && jeNepraznNiz(k.legal_address) && jeNepraznNiz(k.registration_number) && jeNepraznNiz(k.tax_number)
+    && (k.vat_payer === true || k.vat_payer === false) && (jeNepraznNiz(k.contact_phone) || jeNepraznNiz(k.contact_email));
+}
+// Javni objekt `seller` iz vrstice kluba (name, legal_*, registration_number, tax_number, vat_payer, address, city, contact_phone, contact_email).
+// Ime/naslov imata nadomestek (clubs.name; "address, city"), zato je `seller` uporaben tudi, ko klub podatkov se ni vpisal (`complete: false`).
+function prodajalec(k) {
+  const niz = (s) => (typeof s === "string" ? s.trim() : "");
+  const naslov = [niz(k.address), niz(k.city)].filter(Boolean).join(", ");
+  return {
+    name: niz(k.legal_name) || niz(k.name),
+    address: niz(k.legal_address) || naslov,
+    registration_number: niz(k.registration_number),
+    tax_number: niz(k.tax_number),
+    vat_payer: k.vat_payer === true || k.vat_payer === false ? k.vat_payer : null,
+    phone: niz(k.contact_phone),
+    email: niz(k.contact_email),
+    complete: prodajalecPopoln(k),
+  };
+}
+// Surova polja za `prodajalec()` kot JSON (pomozni stolpec `seller_raw`, ga koda odstrani). `a` je vzdevek tabele clubs.
+const sqlProdajalecSurov = (a) => `jsonb_build_object('name', ${a}.name, 'legal_name', ${a}.legal_name, 'legal_address', ${a}.legal_address,
+  'registration_number', ${a}.registration_number, 'tax_number', ${a}.tax_number, 'vat_payer', ${a}.vat_payer,
+  'address', ${a}.address, 'city', ${a}.city, 'contact_phone', ${a}.contact_phone, 'contact_email', ${a}.contact_email)`;
+// Vrstice dogodka: `seller` iz pomoznega stolpca `seller_raw` (SQL_PRODAJALEC_DOGODKA); odvisen je samo od kluba, zato sme v javni predpomnilnik (I17).
+const SQL_PRODAJALEC_DOGODKA = `(SELECT ${sqlProdajalecSurov("cp")} FROM clubs cp WHERE cp.id = events.club_id) AS seller_raw`;
+function dodajProdajalca(vrstice) {
+  for (const r of vrstice) {
+    r.seller = r.seller_raw ? prodajalec(r.seller_raw) : null;
+    delete r.seller_raw;
+  }
+  return vrstice;
+}
+// Lastnik/admin: surova polja ostanejo, zraven pride `seller_complete` (isto pravilo kot `seller.complete`).
+function dodajSellerComplete(vrstica) {
+  if (vrstica) vrstica.seller_complete = prodajalecPopoln(vrstica);
+  return vrstica;
+}
+// Vrednost polja iz telesa: camelCase ali snake_case; `null` je veljavna vrednost (zato ne `??`). undefined = polja ni.
+function poljeTelesa(b, camel, snake) {
+  return b[camel] !== undefined ? b[camel] : b[snake];
+}
+// Preveri polja prodajalca iz telesa. Vrne { polja } (samo poslana; nizi trim, null -> "", vat_payer true|false|null) ali { napaka }.
+function preveriPodatkeProdajalca(b) {
+  const polja = {};
+  for (const [stolpec, camel] of PRODAJALEC_POLJA) {
+    const v = poljeTelesa(b, camel, stolpec);
+    if (v === undefined) continue;
+    if (stolpec === "vat_payer") {
+      if (v !== null && typeof v !== "boolean") return { napaka: "vatPayer must be true, false or null." };
+      polja.vat_payer = v;
+      continue;
+    }
+    if (v !== null && typeof v !== "string") return { napaka: `${camel} must be a string.` };
+    const t = v === null ? "" : v.trim();
+    if (t.length > PRODAJALEC_NAJVEC[stolpec]) return { napaka: `${camel}: at most ${PRODAJALEC_NAJVEC[stolpec]} characters.` };
+    polja[stolpec] = t;
+  }
+  return { polja };
+}
+
+// Lastnik vidi še stanje vidnosti in Stripa, ne pa stripe_account_id. Podatki prodajalca (043) so surovi, `seller_complete` doda koda.
+const STOLPCI_KLUBA_LASTNIKA = `${JAVNI_STOLPCI_KLUBA}, hidden, stripe_charges_enabled, stripe_payouts_enabled, ${STOLPCI_PRODAJALCA}`;
 
 function stevilo(vrednost, privzeto, najvec) {
   const n = parseInt(vrednost, 10);
@@ -1450,10 +1520,13 @@ app.get("/clubs/:id", neobveznaPrijava, async (req, res) => {
     // Predpomnimo samo javni del (vrstica kluba); is_following je osebno polje in se doda po branju (I17).
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucId("club", req.params.id), async () => {
       const r = await pool.query(
-        `SELECT ${JAVNI_STOLPCI_KLUBA} FROM clubs WHERE id=$1 AND hidden = FALSE`, [req.params.id]
+        `SELECT ${JAVNI_STOLPCI_KLUBA}, ${STOLPCI_PRODAJALCA} FROM clubs WHERE id=$1 AND hidden = FALSE`, [req.params.id]
       );
       if (r.rows.length === 0) return { status: 404, besedilo: "Club not found." };
-      return { status: 200, json: { ...r.rows[0], is_following: false }, podatki: r.rows[0], glave: { Vary: "Authorization" } };
+      // Surova polja prodajalca ostanejo na strezniku; javnost dobi `seller` (043, #94). Odvisen je samo od kluba (I17).
+      const { legal_name, legal_address, registration_number, tax_number, vat_payer, ...javno } = r.rows[0];
+      javno.seller = prodajalec(r.rows[0]);
+      return { status: 200, json: { ...javno, is_following: false }, podatki: javno, glave: { Vary: "Authorization" } };
     });
     if (vnos.status !== 200 || !req.user) return javniPredpomnilnik.poslji(req, res, vnos, stanje);
 
@@ -1523,7 +1596,7 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
       ]
     );
 
-    res.status(201).json(r.rows[0]);
+    res.status(201).json(dodajSellerComplete(r.rows[0]));
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
@@ -1706,7 +1779,7 @@ app.get("/business/clubs/me", requireAuth, requireClub(), async (req, res) => {
     );
 
     if (r.rows.length === 0) return res.status(404).send("Club not found.");
-    return res.status(200).json({ ...r.rows[0], my_role: req.klub.role });
+    return res.status(200).json({ ...dodajSellerComplete(r.rows[0]), my_role: req.klub.role });
   } catch (e) {
     console.error(e);
     return res.status(500).send("Server error.");
@@ -1721,7 +1794,17 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
     // whitelist fields (snake_case) + allow camelCase inputs too
     const body = req.body || {};
 
+    // Podatki prodajalca (043, #94): spremeni jih lahko SAMO lastnik. Manager, ki posle katerokoli od teh polj (tudi null ali isto vrednost),
+    // dobi 403 owner_only PRED vsako drugo spremembo (nic se ne zapise); ostala polja managerju delajo kot doslej. Admin (role "admin") sme.
+    const prodajalecVTelesu = PRODAJALEC_POLJA.some(([stolpec, camel]) => poljeTelesa(body, camel, stolpec) !== undefined);
+    if (prodajalecVTelesu && req.klub.role !== "owner" && req.klub.role !== "admin") {
+      return res.status(403).json({ error: "owner_only", message: "Only the club owner can change seller details." });
+    }
+    const pp = preveriPodatkeProdajalca(body);
+    if (pp.napaka) return res.status(400).send(pp.napaka);
+
     const incoming = {
+      ...pp.polja,
       name: body.name,
       description: body.description,
       logo_url: body.logo_url ?? body.logoUrl,
@@ -1798,7 +1881,7 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
     if (sets.length === 0) {
       // nothing to update -> return current club
       const cur = await pool.query(`SELECT ${STOLPCI_KLUBA_LASTNIKA} FROM clubs WHERE id=$1`, [clubId]);
-      return res.status(200).json(cur.rows[0]);
+      return res.status(200).json(dodajSellerComplete(cur.rows[0]));
     }
 
     if (incoming.name !== undefined && String(incoming.name).trim().length === 0) {
@@ -1813,7 +1896,7 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
     const sql = `UPDATE clubs SET ${sets.join(", ")} WHERE id = $${idx} RETURNING ${STOLPCI_KLUBA_LASTNIKA}`;
 
     const updated = await pool.query(sql, values);
-    return res.status(200).json(updated.rows[0]);
+    return res.status(200).json(dodajSellerComplete(updated.rows[0]));
   } catch (e) {
     // Omejitev v bazi (prazno ime, koordinate izven obsega, min_age ...) -> 400, ne 500.
     if (e && e.code === "23514") return res.status(400).send("Invalid club data: " + (e.constraint || "constraint"));
@@ -2073,13 +2156,14 @@ app.get("/events/:id", neobveznaPrijava, async (req, res) => {
     if (!/^\d+$/.test(req.params.id)) return res.status(400).send("Invalid event id.");
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucId("event", req.params.id), async () => {
       const r = await pool.query(
-        `SELECT ${STOLPCI_DOGODKA}, ${SQL_KLUB_STRIPE_PRIPRAVLJEN} FROM events
+        `SELECT ${STOLPCI_DOGODKA}, ${SQL_KLUB_STRIPE_PRIPRAVLJEN}, ${SQL_PRODAJALEC_DOGODKA} FROM events
          WHERE id=$1 AND status='published'
            AND club_id NOT IN (SELECT id FROM clubs WHERE hidden)`,
         [req.params.id]
       );
       if (r.rows.length === 0) return { status: 404, besedilo: "Event not found." };
       dodajNacinPlacila(r.rows);
+      dodajProdajalca(r.rows);   // seller (043, #94): prodajalec = events.club_id, odvisen samo od kluba -> sme v javni predpomnilnik (I17)
       return { status: 200, json: { ...r.rows[0], my_plan: null, friends_going: [], friends_interested: [] }, podatki: r.rows[0], glave: { Vary: "Authorization" } };
     });
     if (vnos.status !== 200 || !req.user) return javniPredpomnilnik.poslji(req, res, vnos, stanje);
@@ -2663,6 +2747,7 @@ const ADMIN_STOLPCI_KLUBA = `c.id, c.owner_user_id, c.name, c.logo_url, c.banner
   c.contact_email, c.contact_phone, c.instagram, c.website, c.address, c.city, c.country,
   c.lat, c.lng, c.min_age, c.genres, c.hidden, c.stripe_charges_enabled, c.commission_bps, c.created_at,
   c.is_organizer, c.is_official,
+  c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer,
   u.email AS owner_email, u.username AS owner_username`;
 
 const VELJAVEN_EMAIL = /^[^@\s]+@[^@\s.]+\.[^@\s]+$/;
@@ -2947,7 +3032,7 @@ admin.get("/clubs", async (req, res) => {
        FROM clubs c LEFT JOIN users u ON u.id = c.owner_user_id
        ${kje} ORDER BY c.created_at DESC LIMIT 500`, p
     );
-    return res.json(r.rows);
+    return res.json(r.rows.map(dodajSellerComplete));   // seller_complete: oznaka »podatki prodajalca manjkajo« v panelu (043)
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
@@ -3024,6 +3109,10 @@ function poljaKluba(b, zaVstavljanje) {
     if (typeof b[ime] !== "boolean") return { napaka: `${imena[0]} must be true or false.` };
     out[kljuc] = b[ime];
   }
+  // Podatki prodajalca (043, #94): admin sme vedno; isti pravili kot PATCH /business/clubs/me.
+  const pp = preveriPodatkeProdajalca(b);
+  if (pp.napaka) return { napaka: pp.napaka };
+  Object.assign(out, pp.polja);
   if (zaVstavljanje && out.name === undefined) return { napaka: "name is required." };
   return { polja: out };
 }
@@ -3071,7 +3160,7 @@ admin.post("/clubs", async (req, res) => {
       [r.rows[0].id]
     );
     await c.query("COMMIT");
-    return res.status(201).json(nov.rows[0]);
+    return res.status(201).json(dodajSellerComplete(nov.rows[0]));
   } catch (e) {
     await c.query("ROLLBACK").catch(() => {});
     if (e && e.code === "23514") return res.status(400).send("Invalid club data: " + (e.constraint || "constraint"));
@@ -3123,7 +3212,7 @@ admin.patch("/clubs/:id", async (req, res) => {
        FROM clubs c LEFT JOIN users u ON u.id=c.owner_user_id WHERE c.id=$1`, [id]
     );
     await c.query("COMMIT");
-    return res.status(200).json(r.rows[0]);
+    return res.status(200).json(dodajSellerComplete(r.rows[0]));
   } catch (e) {
     await c.query("ROLLBACK").catch(() => {});
     if (e && e.code === "23514") return res.status(400).send("Invalid club data: " + (e.constraint || "constraint"));
@@ -4616,7 +4705,8 @@ async function gostNarociloOdgovor(db, oid) {
             COALESCE(o.stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test, o.created_at, o.paid_at,
             ${SQL_CHECKOUT_URL},
             e.id AS event_id, e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
-            cl.id AS club_id, cl.name AS club_name, ${PRIZORISCE_NASLOV}, cl.logo_url, ${PRIZORISCE_E}
+            cl.id AS club_id, cl.name AS club_name, ${PRIZORISCE_NASLOV}, cl.logo_url, ${PRIZORISCE_E},
+            ${sqlProdajalecSurov("cl")} AS seller_raw
        FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id ${PRIZORISCE_JOIN} WHERE o.id = $1`, [oid]);
   if (!nr.rows.length) return null;
   const x = nr.rows[0];
@@ -4627,6 +4717,7 @@ async function gostNarociloOdgovor(db, oid) {
     event_id: x.event_id, club_id: x.club_id, event_title: x.event_title, start_at: x.start_at, poster_url: x.poster_url, club_name: x.club_name,
     event: { id: x.event_id, title: x.event_title, start_at: x.start_at, end_at: x.end_at, poster_url: x.poster_url, min_age: x.min_age,
              club_id: x.club_id, club_name: x.club_name, address: x.address, city: x.city, logo_url: x.logo_url, ...prizoriscePolja(x) },
+    seller: prodajalec(x.seller_raw),   // prodajalec = organizator/klub dogodka, ne prizorisce (043, #94)
   };
 }
 
@@ -4675,7 +4766,7 @@ app.get("/guest/order", async (req, res) => {
       const r = await pool.query(`${SQL_VSTOPNICE_POGLED} WHERE t.order_id = $1 ORDER BY t.id`, [oid]);
       vstopnice = r.rows.map((t) => ({ ...t, qr: qrVstopnice(t), transferable: false }));   // prenos zahteva racun
     }
-    return res.json({ order, tickets: vstopnice });
+    return res.json({ order, tickets: vstopnice, seller: order.seller });   // seller tudi na vrhu (043, #94); isti objekt kot order.seller
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
@@ -4781,25 +4872,43 @@ async function prevzemiGostujocaNarocila(userId, zVmesnimSpominom = false) {
 // GOST_POSTA_ZASTONJ_DNEVNO (300) na 24 h; nad mejo se mail IZPUSTI (ne ponavlja), nakup in guest_token v odgovoru ostaneta (pregled PR #203, 2. krog).
 // Placano (total > 0, ne-testno) potrdilo ostane zakonska obveznost (ZVPot-1): nikoli izpuscen.
 // Napaka maila NE sme podreti placila ali webhooka (klicatelji ne cakajo in ne vidijo izjem). Vrne true, ce je mail poslan.
+const SQL_PRODAJALEC_MAIL = "cl.legal_name, cl.legal_address, cl.registration_number, cl.tax_number, cl.vat_payer";   // za sellerVrstice (043)
 const POSREDNIK_VRSTICA = "NEXT DIMENSIONS, družba za marketing, d.o.o., Trebče 81, 3256 Bistrica ob Sotli, luka@outly.si";
 const POSTA_ODGOVOR = "luka@outly.si";
 const znesek = (centi, valuta) => `${(centi / 100).toFixed(2)} ${String(valuta).trim()}`;
 const ljDatum = (d) => new Intl.DateTimeFormat("en-GB", { dateStyle: "full", timeStyle: "short", timeZone: "Europe/Ljubljana" }).format(new Date(d)) + " (Ljubljana time)";
 // Stavek o DDV glede na stopnjo, zamrznjeno na narocilu (events.vat_rate; NULL = klub ni dolocil): ne trdimo, da je DDV vkljucen, ce ne vemo.
-function davekStavek(vat) {
-  if (vat === null || vat === undefined) return "VAT is charged according to the seller's VAT status.";
+// #101: ko stopnje ni, odloca DDV status prodajalca (clubs.vat_payer, 043): true -> cena vkljucuje DDV, false -> prodajalec ni zavezanec, null -> splosni stavek.
+function davekStavek(vat, vatPayer) {
+  if (vat === null || vat === undefined) {
+    if (vatPayer === true) return "The price includes VAT.";
+    if (vatPayer === false) return "The seller is not a VAT payer; no VAT is charged.";
+    return "VAT is charged according to the seller's VAT status.";
+  }
   const p = Math.round(Number(vat) * 1000) / 10;
   return p > 0 ? `The price includes VAT (${p}%).` : "The seller does not charge VAT on this price.";
 }
+// Razdelek »Seller« potrdila (gost in kupec z racunom): firma (nadomestek: ime kluba), sedez (nadomestek: naslov kluba), telefon, e-naslov,
+// maticna in davcna stevilka ter DDV status (#94, #101). `o` nosi stolpce kluba iz SQL_PRODAJALEC_MAIL. Prodajalec je klub dogodka (pri gostovanem dogodku organizator).
+function sellerVrstice(o) {
+  const s = prodajalec({ name: o.club_name, legal_name: o.legal_name, legal_address: o.legal_address, address: o.club_address, city: o.club_city,
+    registration_number: o.registration_number, tax_number: o.tax_number, vat_payer: o.vat_payer, contact_phone: o.club_phone, contact_email: o.club_email });
+  const vrstice = [`The ticket is sold by the club: ${[s.name, s.address, s.phone, s.email].filter(Boolean).join(", ")}.`];
+  const ident = [s.registration_number ? `Company registration number: ${s.registration_number}` : "", s.tax_number ? `Tax number: ${s.tax_number}` : ""].filter(Boolean);
+  if (ident.length) vrstice.push(`${ident.join(". ")}.`);
+  if (s.vat_payer === true) vrstice.push("VAT status: the seller is a VAT payer.");
+  else if (s.vat_payer === false) vrstice.push("VAT status: the seller is not a VAT payer.");
+  vrstice.push(`Outly is only the intermediary: ${POSREDNIK_VRSTICA}.`);
+  return vrstice;
+}
 // Vsebina potrdila kot razdelki { naslov, vrstice[] }; iz njih nastaneta besedilo in HTML (isto besedilo, brez oglasov).
 function gostPotrdilo(o, povezava, prevzeto, kode = []) {
-  const klubKontakt = [o.club_address && o.club_city ? `${o.club_address}, ${o.club_city}` : (o.club_address || o.club_city), o.club_phone, o.club_email].filter(Boolean);
   const starost = o.min_age > 0 ? `Age limit: ${o.min_age}+. Every visitor must meet the age limit. ID is checked at the door; the club may refuse entry if you don't meet it.` : "No age limit.";
   const razdelki = [
     { naslov: "Order", vrstice: [`Order ${o.public_ref}, placed on ${ljDatum(o.paid_at || o.created_at)}.`] },
     { naslov: "Event", vrstice: [o.event_title, ljDatum(o.start_at), prizoriscePodatki(o), starost] },
-    { naslov: "Tickets", vrstice: [`${o.quantity} x ${znesek(o.unit_price_cents, o.currency)} = ${znesek(o.total_cents, o.currency)}. ${davekStavek(o.vat_rate)}`] },
-    { naslov: "Seller", vrstice: [`The ticket is sold by the club: ${[o.club_name, ...klubKontakt].join(", ")}.`, `Outly is only the intermediary: ${POSREDNIK_VRSTICA}.`] },
+    { naslov: "Tickets", vrstice: [`${o.quantity} x ${znesek(o.unit_price_cents, o.currency)} = ${znesek(o.total_cents, o.currency)}. ${davekStavek(o.vat_rate, o.vat_payer)}`] },
+    { naslov: "Seller", vrstice: sellerVrstice(o) },
     { naslov: "No right of withdrawal", vrstice: ["There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply."] },
     { naslov: "Terms", vrstice: [`You accepted the Outly terms, version ${o.guest_terms_version}: https://outly.si/terms`] },
     { naslov: "Your tickets", vrstice: (prevzeto
@@ -4936,7 +5045,7 @@ async function gostPosljiEnoPosto(oid) {
   const o = k.rows[0];
   const ev = await pool.query(
     `SELECT e.title AS event_title, e.start_at, e.min_age, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
-            cl.contact_phone AS club_phone, cl.contact_email AS club_email, ${PRIZORISCE_MAIL_STOLPCI}
+            cl.contact_phone AS club_phone, cl.contact_email AS club_email, ${SQL_PRODAJALEC_MAIL}, ${PRIZORISCE_MAIL_STOLPCI}
        FROM events e JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN} WHERE e.id = $1`, [o.event_id]);
   if (!ev.rows.length) return false;
   const x = { ...o, ...ev.rows[0] };
@@ -5006,10 +5115,9 @@ async function potrdiloPostaVstopi() {
 function potrdiloPostaIzstopi() { const n = potrdiloPosta.cakajoci.shift(); if (n) n(); else potrdiloPosta.aktivnih--; }
 const potrdiloIzcrpaj = (oid) => pool.query("UPDATE orders SET receipt_mail_attempts = $2 WHERE id = $1 AND receipt_mail_sent_at IS NULL", [oid, GOST_POSTA_POSKUSOV]);
 
-// Vsebina potrdila kupcu (angleško kot ostali maili; brez sledilnikov in oglasov). #94: ko `clubs` dobi firmo, sedež, matično in davčno številko ter DDV status,
-// se izpolnijo v razdelku »Seller« (zdaj samo ime, naslov, telefon in e-naslov kluba).
+// Vsebina potrdila kupcu (angleško kot ostali maili; brez sledilnikov in oglasov). Razdelek »Seller« (sellerVrstice, #94): firma, sedež, telefon, e-naslov,
+// matična in davčna številka ter DDV status kluba (043); stavek o DDV po davekStavek(vat_rate, vat_payer) (#101).
 function kupecPotrdilo(o, povezava) {
-  const klubKontakt = [o.club_address && o.club_city ? `${o.club_address}, ${o.club_city}` : (o.club_address || o.club_city), o.club_phone, o.club_email].filter(Boolean);
   const meja = starostZaPaket(o.min_age, !!o.package_name);
   const starost = meja > 0 ? `Age limit: ${meja}+${meja > o.min_age ? " (table with a drinks package)" : ""}. Every visitor must meet the age limit. ID is checked at the door; the club may refuse entry if you don't meet it.` : "No age limit.";
   const jeMiza = !!o.table_label;
@@ -5020,8 +5128,8 @@ function kupecPotrdilo(o, povezava) {
   const razdelki = [
     { naslov: "Order", vrstice: [`Order ${o.public_ref}, placed on ${ljDatum(o.paid_at || o.created_at)}.`, ...(brezPlacila ? [brezPlacila] : [])] },
     { naslov: "Event", vrstice: [o.event_title, ljDatum(o.start_at), prizoriscePodatki(o), starost] },
-    { naslov: jeMiza ? "Table" : "Tickets", vrstice: [`${kaj} ${davekStavek(o.vat_rate)}`] },
-    { naslov: "Seller", vrstice: [`The ticket is sold by the club: ${[o.club_name, ...klubKontakt].join(", ")}.`, `Outly is only the intermediary: ${POSREDNIK_VRSTICA}.`] },
+    { naslov: jeMiza ? "Table" : "Tickets", vrstice: [`${kaj} ${davekStavek(o.vat_rate, o.vat_payer)}`] },
+    { naslov: "Seller", vrstice: sellerVrstice(o) },
     { naslov: "No right of withdrawal", vrstice: ["There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply."] },
     { naslov: "Terms", vrstice: ["Outly terms of use: https://outly.si/terms"] },
     { naslov: "Your tickets", vrstice: [`Your tickets are in the Outly app (Profile, My tickets) and online: ${povezava}`, "The QR codes are not in this email. Open them in the app and show one code per person at the door."] },
@@ -5082,7 +5190,7 @@ async function potrdiloPosljiEno(oid) {
   const o = k.rows[0];
   const ev = await pool.query(
     `SELECT e.title AS event_title, e.start_at, e.min_age, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
-            cl.contact_phone AS club_phone, cl.contact_email AS club_email, ${PRIZORISCE_MAIL_STOLPCI}
+            cl.contact_phone AS club_phone, cl.contact_email AS club_email, ${SQL_PRODAJALEC_MAIL}, ${PRIZORISCE_MAIL_STOLPCI}
        FROM events e JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN} WHERE e.id = $1`, [o.event_id]);
   if (!ev.rows.length) return false;
   const x = { ...o, ...ev.rows[0] };
@@ -7077,7 +7185,8 @@ app.get("/events/:id/vip", async (req, res) => {
     if (!id) return res.status(400).send("Invalid event id.");
     const er = await pool.query(
       `SELECT e.id, e.club_id, e.vip_enabled, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.min_age,
-              e.vip_layout_source, e.floor_plan, (c.stripe_account_id IS NOT NULL AND c.stripe_charges_enabled) AS club_stripe_ready
+              e.vip_layout_source, e.floor_plan, (c.stripe_account_id IS NOT NULL AND c.stripe_charges_enabled) AS club_stripe_ready,
+              ${sqlProdajalecSurov("c")} AS seller_raw
          FROM events e JOIN clubs c ON c.id = e.club_id
         WHERE e.id = $1 AND e.status = 'published' AND NOT c.hidden`, [id]);
     if (er.rows.length === 0) return res.status(404).send("Event not found.");
@@ -7121,6 +7230,7 @@ app.get("/events/:id/vip", async (req, res) => {
       enabled,
       on_sale: napakaProdaje({ ...e, hidden: false }, { zahtevajCeno: false }) === null,
       payment_mode: placilaStripe.javniNacin(placilaStripe.nacinPlacilaZ(e.club_stripe_ready === true)),   // kot pri dogodku (#149)
+      seller: prodajalec(e.seller_raw),   // prodajalec = events.club_id (043, #94)
       currency: e.currency,
       plan,
       tables: enabled ? mize : [],

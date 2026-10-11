@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–042, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–043, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict p4aXa1jUVandYpYY33Ft3p0jHxeEobFE1ntwgIpWksPu6FfDiO0kUMH9KaOY3LE
+\restrict 9khFavUitGjeBX6YQrraST9sLpZP5TUsVygdgrbAhEgMbP5XhOOqbTjpgVg68eS
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -360,14 +360,23 @@ CREATE TABLE public.clubs (
     commission_bps integer,
     is_organizer boolean DEFAULT false NOT NULL,
     is_official boolean DEFAULT false NOT NULL,
+    legal_name text DEFAULT ''::text NOT NULL,
+    legal_address text DEFAULT ''::text NOT NULL,
+    registration_number text DEFAULT ''::text NOT NULL,
+    tax_number text DEFAULT ''::text NOT NULL,
+    vat_payer boolean,
     CONSTRAINT clubs_bar_prices_chk CHECK ((jsonb_typeof(bar_prices) = 'array'::text)),
     CONSTRAINT clubs_commission_bps_chk CHECK (((commission_bps IS NULL) OR ((commission_bps >= 0) AND (commission_bps <= 5000)))),
     CONSTRAINT clubs_coords_chk CHECK (((lat IS NULL) = (lng IS NULL))),
     CONSTRAINT clubs_gallery_chk CHECK ((cardinality(gallery_urls) <= 3)),
     CONSTRAINT clubs_lat_chk CHECK (((lat IS NULL) OR ((lat >= ('-90'::integer)::double precision) AND (lat <= (90)::double precision)))),
+    CONSTRAINT clubs_legal_address_chk CHECK ((char_length(legal_address) <= 300)),
+    CONSTRAINT clubs_legal_name_chk CHECK ((char_length(legal_name) <= 200)),
     CONSTRAINT clubs_lng_chk CHECK (((lng IS NULL) OR ((lng >= ('-180'::integer)::double precision) AND (lng <= (180)::double precision)))),
     CONSTRAINT clubs_min_age_chk CHECK (((min_age >= 0) AND (min_age <= 99))),
-    CONSTRAINT clubs_name_chk CHECK ((length(TRIM(BOTH FROM name)) > 0))
+    CONSTRAINT clubs_name_chk CHECK ((length(TRIM(BOTH FROM name)) > 0)),
+    CONSTRAINT clubs_registration_number_chk CHECK ((char_length(registration_number) <= 20)),
+    CONSTRAINT clubs_tax_number_chk CHECK ((char_length(tax_number) <= 20))
 );
 
 
@@ -390,6 +399,41 @@ COMMENT ON COLUMN public.clubs.is_organizer IS 'Organizator dogodkov brez lastne
 --
 
 COMMENT ON COLUMN public.clubs.is_official IS 'Uradni profil Outly (037): njegovi prihajajoci dogodki so v razdelku »Organized by Outly« na Home. Nastavi SAMO admin (admin panel).';
+
+
+--
+-- Name: COLUMN clubs.legal_name; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.clubs.legal_name IS 'Firma prodajalca (043, #94). Prazno = javni odgovor uporabi clubs.name. Urejata lastnik in admin.';
+
+
+--
+-- Name: COLUMN clubs.legal_address; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.clubs.legal_address IS 'Sedez prodajalca (043, #94). Prazno = javni odgovor uporabi address, city kluba.';
+
+
+--
+-- Name: COLUMN clubs.registration_number; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.clubs.registration_number IS 'Maticna stevilka prodajalca (043, #94).';
+
+
+--
+-- Name: COLUMN clubs.tax_number; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.clubs.tax_number IS 'Davcna stevilka / ID za DDV prodajalca (043, #94).';
+
+
+--
+-- Name: COLUMN clubs.vat_payer; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.clubs.vat_payer IS 'DDV status prodajalca (043, #94, #101): NULL = ni vpisano, TRUE = zavezanec, FALSE = ni zavezanec. Doloca besedilo o DDV pri odjemalcih in v potrdilu.';
 
 
 --
@@ -2864,5 +2908,5 @@ ALTER TABLE ONLY public.view_counts
 -- PostgreSQL database dump complete
 --
 
-\unrestrict p4aXa1jUVandYpYY33Ft3p0jHxeEobFE1ntwgIpWksPu6FfDiO0kUMH9KaOY3LE
+\unrestrict 9khFavUitGjeBX6YQrraST9sLpZP5TUsVygdgrbAhEgMbP5XhOOqbTjpgVg68eS
 
