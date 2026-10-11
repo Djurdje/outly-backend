@@ -83,8 +83,18 @@ function povratniNaslovi(odjemalec, ref, eventId) {
   };
 }
 
+// Jezik Checkouta iz telesa nakupa (`locale`, neobvezno): "sl" ali "en" (tudi "sl-SI", "EN", "en_GB" -> primarna oznaka, male crke).
+// Vse drugo (manjka, null, stevilo, "de", niz nad 20 znakov) -> undefined: polje se Stripu ne poslje (= Stripov `auto`). Nikoli napaka.
+const CHECKOUT_JEZIKI = ["sl", "en"];
+function normalizirajLocale(v) {
+  if (typeof v !== "string" || v.length > 20) return undefined;
+  const primarna = v.toLowerCase().split(/[-_]/)[0];
+  return CHECKOUT_JEZIKI.includes(primarna) ? primarna : undefined;
+}
+
 // povratna: neobvezen { success_url, cancel_url } namesto privzetih (nakup brez racuna: success_url nosi zeton gosta, index.js).
-async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna }) {
+// locale: ze normaliziran (normalizirajLocale) ali undefined; ponovitev z istim idempotentnim kljucem vrne obstojeco sejo (jezik prvega poskusa).
+async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale }) {
   const s = stripe();
   const ref = encodeURIComponent(narocilo.public_ref);
   const meta = { order_id: String(narocilo.id), public_ref: narocilo.public_ref };
@@ -105,6 +115,7 @@ async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racun
     },
     metadata: meta,
     expires_at: Math.floor(Date.now() / 1000) + CHECKOUT_MINUT * 60,
+    ...(locale ? { locale } : {}),
     ...(povratna || povratniNaslovi(odjemalec, ref, eventId)),
   }, { idempotencyKey: `outly-narocilo-${narocilo.id}` });
 }
@@ -402,4 +413,4 @@ function ustvari({ pool, naPlacano }) {
   return { webhook, pospravi, zazeni, preveriPoteklo };
 }
 
-module.exports = { povratniNaslovi, ustvari, stripe, jeSandbox, jeLive, testniNacin, nacinPlacila, nacinPlacilaZ, javniNacin, ustvariCheckout, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };
+module.exports = { povratniNaslovi, ustvari, stripe, jeSandbox, jeLive, testniNacin, nacinPlacila, nacinPlacilaZ, javniNacin, ustvariCheckout, normalizirajLocale, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };

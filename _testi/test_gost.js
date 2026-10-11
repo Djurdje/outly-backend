@@ -390,6 +390,17 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(r.status === 200 && r.body.order.status === "pending" && r.body.tickets.length === 0 && r.body.order.checkout_url, "GET /guest/order pending: tickets [], checkout_url", r.body);
     await pocakaj(800);
     assert(poslanoNa("plac@example.com").length === 0, "pending: mail se NI poslan");
+    {   // `locale` v telesu nakupa gosta: Checkout v jeziku strani; neveljavno = brez polja (Stripov auto), nakup nikoli ne pade
+      const evLoc = await dogodek("lastnik2", 2, "Locale Noc", 20);
+      const primeri = [["sl", "sl"], ["en-GB", "en"], ["EN", "en"], ["de", undefined], [123, undefined], [null, undefined], [undefined, undefined]];
+      for (const [i, [vhod, pricakovano]] of primeri.entries()) {
+        const pred = S.zahtevki.length;
+        r = await nakup(evLoc, `locale${i}@example.com`, vhod === undefined ? {} : { locale: vhod });
+        const par = S.zahtevki[pred] && S.zahtevki[pred].params;
+        assert(r.status === 201 && r.body.mode === "stripe" && par, `gost: locale ${JSON.stringify(vhod)} -> nakup 201 s sejo`, [r.status, r.body]);
+        assert(par && par.locale === pricakovano && (pricakovano !== undefined || !("locale" in par)), `gost: locale ${JSON.stringify(vhod)} -> Stripe dobi ${pricakovano === undefined ? "brez polja locale" : pricakovano}`, par && par.locale);
+      }
+    }
     const sP = S.seje.cs_test_1;
     Object.assign(sP, placana(sP, "pi_gost_1"));
     let w = await webhook("checkout.session.completed", { id: sP.id, object: "checkout.session" }, "evt_gost_placilo_1");
