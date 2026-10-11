@@ -1444,9 +1444,11 @@ function kljucKlubov(q) {
   return JSON.stringify(["clubs", stevilo(limit, 100, 200), stevilo(offset, 0, 100000), city || null, withCoords === "true"]);
 }
 
-// #210: kljuc z `offset` > 0 je zaporedna vrednost (do 100000 ključev) -> loceni proracun `prosto`. `offset=0` je isti kljuc kot brez offseta in ostane vroc.
+// #210: kljuc z `offset` > 0 (do 100000 vrednosti) ali z `limit`, ki ni privzeti 100 (1..200, krat withCoords = do 400 ključev), je zaporedna vrednost ->
+// loceni proracun `prosto`. Vroci ostanejo: brez parametrov, `offset=0`, `limit=100` (tudi neveljaven limit = privzeti) in `withCoords=true` s privzetim limitom.
+// Odjemalca (iOS APIClient.swift, splet podatki.js) kliceta `GET /clubs` brez parametrov; zemljevid uporablja `/clubs/map`.
 function prostKljucKlubov(q) {
-  return !!q.city || stevilo(q.offset, 0, 100000) > 0;
+  return !!q.city || stevilo(q.offset, 0, 100000) > 0 || stevilo(q.limit, 100, 200) !== 100;
 }
 
 // /clubs/map (I17): brez okvira en kljuc; z okvirom stevila kot nizi (JSON.stringify(Infinity) = null bi zlil +/-Infinity), nenavaden bbox mimo.
