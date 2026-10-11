@@ -4899,61 +4899,103 @@ async function prevzemiGostujocaNarocila(userId, zVmesnimSpominom = false) {
 const SQL_PRODAJALEC_MAIL = "cl.legal_name, cl.legal_address, cl.registration_number, cl.tax_number, cl.vat_payer";   // za sellerVrstice (043)
 const POSREDNIK_VRSTICA = "NEXT DIMENSIONS, družba za marketing, d.o.o., Trebče 81, 3256 Bistrica ob Sotli, luka@outly.si";
 const POSTA_ODGOVOR = "luka@outly.si";
-const znesek = (centi, valuta) => `${(centi / 100).toFixed(2)} ${String(valuta).trim()}`;
-const ljDatum = (d) => new Intl.DateTimeFormat("en-GB", { dateStyle: "full", timeStyle: "short", timeZone: "Europe/Ljubljana" }).format(new Date(d)) + " (Ljubljana time)";
+// Maili, ki so del nakupa (potrdilo kupcu, vstopnice gostu, prejeta vstopnica), so DVOJEZICNI: slovenski blok, locilo, angleski blok (#100, ZVPot-1 7/1: informacije pred
+// sklenitvijo pogodbe v slovenscini). Podatki so eni, razdelke za vsak jezik gradi ista funkcija z `jez` ("sl" | "en") in jih izrise izrisiDvojezicno.
+// Angleski blok je BESEDA ZA BESEDO enak kot pred #100 (testi ga preverjajo). Slovenski blok: vikanje, znesek z decimalno vejico, datum po sl-SI.
+const JEZIKI_MAILA = ["sl", "en"];
+const LOCILO_MAILA = "----------------------------------------";
+const znesek = (centi, valuta, jez = "en") => {
+  const niz = `${(centi / 100).toFixed(2)} ${String(valuta).trim()}`;
+  return jez === "sl" ? niz.replace(".", ",") : niz;
+};
+const LJ_OBLIKE = Object.fromEntries([["sl", "sl-SI", " (ljubljanski čas)"], ["en", "en-GB", " (Ljubljana time)"]].map(([j, loc, pripis]) =>
+  [j, { f: new Intl.DateTimeFormat(loc, { dateStyle: "full", timeStyle: "short", timeZone: "Europe/Ljubljana" }), pripis }]));
+const ljDatum = (d, jez = "en") => LJ_OBLIKE[jez].f.format(new Date(d)) + LJ_OBLIKE[jez].pripis;
 // Stavek o DDV glede na stopnjo, zamrznjeno na narocilu (events.vat_rate; NULL = klub ni dolocil): ne trdimo, da je DDV vkljucen, ce ne vemo.
 // #101: ko stopnje ni, odloca DDV status prodajalca (clubs.vat_payer, 043): true -> cena vkljucuje DDV, false -> prodajalec ni zavezanec, null -> splosni stavek.
-function davekStavek(vat, vatPayer) {
+function davekStavek(vat, vatPayer, jez = "en") {
+  const sl = jez === "sl";
   if (vat === null || vat === undefined) {
-    if (vatPayer === true) return "The price includes VAT.";
-    if (vatPayer === false) return "The seller is not a VAT payer; no VAT is charged.";
-    return "VAT is charged according to the seller's VAT status.";
+    if (vatPayer === true) return sl ? "Cene vključujejo DDV." : "The price includes VAT.";
+    if (vatPayer === false) return sl ? "Prodajalec ni zavezanec za DDV; DDV se ne zaračuna." : "The seller is not a VAT payer; no VAT is charged.";
+    return sl ? "DDV se obračuna v skladu s statusom prodajalca." : "VAT is charged according to the seller's VAT status.";
   }
   const p = Math.round(Number(vat) * 1000) / 10;
+  if (sl) return p > 0 ? `Cene vključujejo DDV (${String(p).replace(".", ",")} %).` : "Prodajalec pri tej ceni ne obračuna DDV.";
   return p > 0 ? `The price includes VAT (${p}%).` : "The seller does not charge VAT on this price.";
 }
 // Razdelek »Seller« potrdila (gost in kupec z racunom): firma (nadomestek: ime kluba), sedez (nadomestek: naslov kluba), telefon, e-naslov,
 // maticna in davcna stevilka ter DDV status (#94, #101). `o` nosi stolpce kluba iz SQL_PRODAJALEC_MAIL. Prodajalec je klub dogodka (pri gostovanem dogodku organizator).
-function sellerVrstice(o) {
+function sellerVrstice(o, jez = "en") {
+  const sl = jez === "sl";
   const s = prodajalec({ name: o.club_name, legal_name: o.legal_name, legal_address: o.legal_address, address: o.club_address, city: o.club_city,
     registration_number: o.registration_number, tax_number: o.tax_number, vat_payer: o.vat_payer, contact_phone: o.club_phone, contact_email: o.club_email });
-  const vrstice = [`The ticket is sold by the club: ${[s.name, s.address, s.phone, s.email].filter(Boolean).join(", ")}.`];
-  const ident = [s.registration_number ? `Company registration number: ${s.registration_number}` : "", s.tax_number ? `Tax number: ${s.tax_number}` : ""].filter(Boolean);
+  const vrstice = [`${sl ? "Vstopnico prodaja klub" : "The ticket is sold by the club"}: ${[s.name, s.address, s.phone, s.email].filter(Boolean).join(", ")}.`];
+  const ident = [s.registration_number ? `${sl ? "Matična številka" : "Company registration number"}: ${s.registration_number}` : "", s.tax_number ? `${sl ? "Davčna številka" : "Tax number"}: ${s.tax_number}` : ""].filter(Boolean);
   if (ident.length) vrstice.push(`${ident.join(". ")}.`);
-  if (s.vat_payer === true) vrstice.push("VAT status: the seller is a VAT payer.");
-  else if (s.vat_payer === false) vrstice.push("VAT status: the seller is not a VAT payer.");
-  vrstice.push(`Outly is only the intermediary: ${POSREDNIK_VRSTICA}.`);
+  if (s.vat_payer === true) vrstice.push(sl ? "Status DDV: prodajalec je zavezanec za DDV." : "VAT status: the seller is a VAT payer.");
+  else if (s.vat_payer === false) vrstice.push(sl ? "Status DDV: prodajalec ni zavezanec za DDV." : "VAT status: the seller is not a VAT payer.");
+  vrstice.push(sl ? `Outly je samo posrednik: ${POSREDNIK_VRSTICA}.` : `Outly is only the intermediary: ${POSREDNIK_VRSTICA}.`);
   return vrstice;
 }
-// Vsebina potrdila kot razdelki { naslov, vrstice[] }; iz njih nastaneta besedilo in HTML (isto besedilo, brez oglasov).
-function gostPotrdilo(o, povezava, prevzeto, kode = []) {
-  const starost = o.min_age > 0 ? `Age limit: ${o.min_age}+. Every visitor must meet the age limit. ID is checked at the door; the club may refuse entry if you don't meet it.` : "No age limit.";
-  const razdelki = [
-    { naslov: "Order", vrstice: [`Order ${o.public_ref}, placed on ${ljDatum(o.paid_at || o.created_at)}.`] },
-    { naslov: "Event", vrstice: [o.event_title, ljDatum(o.start_at), prizoriscePodatki(o), starost] },
-    { naslov: "Tickets", vrstice: [`${o.quantity} x ${znesek(o.unit_price_cents, o.currency)} = ${znesek(o.total_cents, o.currency)}. ${davekStavek(o.vat_rate, o.vat_payer)}`] },
-    { naslov: "Seller", vrstice: sellerVrstice(o) },
-    { naslov: "No right of withdrawal", vrstice: ["There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply."] },
-    { naslov: "Terms", vrstice: [`You accepted the Outly terms, version ${o.guest_terms_version}: https://outly.si/terms`] },
-    { naslov: "Your tickets", vrstice: (prevzeto
-      ? [`Open your tickets in your Outly account: ${povezava}`]
-      : [`Open your tickets (show the QR code at the door): ${povezava}`, "This link is your ticket. Don't share it except with people coming with you.", "If you create an Outly account with this email, your tickets will appear there."])
-      .concat(kode.length > 1 ? ["The first QR code is below; all your QR codes (one per page) are in the attached PDF (outly-tickets.pdf). Show one code per person at the door."]
-        : kode.length ? ["The QR code is below and in the attached PDF (outly-tickets.pdf). Show it at the door."] : []) },
-    { naslov: "Complaints", vrstice: [`About the event: contact the club (details above). About the purchase or the payment: contact Outly at ${POSTA_ODGOVOR}.`] },
-    { naslov: "Questions", vrstice: [`Reply to this email or write to ${POSTA_ODGOVOR}.`] },
-  ];
-  const besedilo = `Your Outly tickets - order ${o.public_ref}\n\n` + razdelki.map(r => `${r.naslov.toUpperCase()}\n${r.vrstice.join("\n")}`).join("\n\n") + "\n";
-  const html = `<div style="font-family: Arial, sans-serif; line-height:1.5"><h2>Your Outly tickets</h2>` + razdelki.map(r =>
-    `<h3>${GOST_POSTA_NIZ(r.naslov)}</h3>` + r.vrstice.map(v => {
-      const e = GOST_POSTA_NIZ(v);
-      return `<p>${povezava && v.includes(povezava) ? e.replace(GOST_POSTA_NIZ(povezava), `<a href="${GOST_POSTA_NIZ(povezava)}">${GOST_POSTA_NIZ(povezava)}</a>`) : e}</p>`;
-    }).join("") + (r.naslov === "Your tickets" ? kode.slice(0, 1).map(k => qrSlikaHtml(k.cid, k.oznaka)).join("") : "")).join("") + `</div>`;
+// Slovnicno stevilo za »sedez« (1 sedez, 2 sedeza, 3-4 sedezi, 5+ sedezev; 101 = sedez, 102 = sedeza ...).
+const sedezSl = (n) => (n % 100 === 1 ? "sedež" : n % 100 === 2 ? "sedeža" : n % 100 === 3 || n % 100 === 4 ? "sedeži" : "sedežev");
+// Izris dvojezicnega maila. zgradi(jez) -> { naslovBesedila, naslovHtml, razdelki: [{ naslov, vrstice[], krepko?, slika?: [{cid, oznaka, alt}] }] }.
+// Besedilo: blok sl, locilo, blok en. HTML: vsak blok v svojem <div lang>, vse prek GOST_POSTA_NIZ (podatki iz baze so escapani); povezava se zavije v <a>.
+// Koda QR (slika) je v obeh blokih (ista priloga CID, dve sklicevanji), da jo bralec vsakega jezika vidi tam, kjer jo besedilo omenja.
+function izrisiDvojezicno(zgradi, povezava) {
+  const bloki = JEZIKI_MAILA.map((j) => zgradi(j));
+  const besedilo = bloki.map((b) => `${b.naslovBesedila}\n\n` + b.razdelki.map((r) => `${r.naslov.toUpperCase()}\n${r.vrstice.join("\n")}`).join("\n\n")).join(`\n\n${LOCILO_MAILA}\n\n`) + "\n";
+  const html = `<div style="font-family: Arial, sans-serif; line-height:1.5">` + bloki.map((b, i) =>
+    (i ? `<hr style="margin:24px 0;border:0;border-top:1px solid #ccc">` : "") + `<div lang="${JEZIKI_MAILA[i]}"><h2>${GOST_POSTA_NIZ(b.naslovHtml)}</h2>` + b.razdelki.map((r) =>
+      `<h3>${GOST_POSTA_NIZ(r.naslov)}</h3>` + r.vrstice.map((v) => {
+        const e = GOST_POSTA_NIZ(v);
+        const z = povezava && v.includes(povezava) ? e.replace(GOST_POSTA_NIZ(povezava), () => `<a href="${GOST_POSTA_NIZ(povezava)}">${GOST_POSTA_NIZ(povezava)}</a>`) : e;
+        return `<p>${r.krepko ? `<strong>${z}</strong>` : z}</p>`;
+      }).join("") + (r.slika || []).map((k) => qrSlikaHtml(k.cid, k.oznaka, k.alt)).join("")).join("") + `</div>`).join("") + `</div>`;
   return { besedilo, html };
 }
+// Vsebina potrdila kot razdelki { naslov, vrstice[] } za EN jezik `jez`; iz njih nastaneta besedilo in HTML (isto besedilo, brez oglasov).
+function gostPotrdilo(o, povezava, prevzeto, kode = []) {
+  return izrisiDvojezicno((jez) => {
+    const T = (sl, en) => (jez === "sl" ? sl : en);
+    const starost = o.min_age > 0
+      ? T(`Starostna meja: ${o.min_age}+. Vsak obiskovalec mora izpolnjevati starostno mejo. Pri vhodu se preverja osebni dokument; klub vam lahko zavrne vstop, če je ne izpolnjujete.`,
+          `Age limit: ${o.min_age}+. Every visitor must meet the age limit. ID is checked at the door; the club may refuse entry if you don't meet it.`)
+      : T("Brez starostne omejitve.", "No age limit.");
+    const kodeVrstice = kode.length > 1
+      ? [T("Prva koda QR je spodaj, vse vaše kode QR (ena na stran) so v priloženem PDF (outly-tickets.pdf). Pri vhodu pokažite eno kodo na osebo.",
+           "The first QR code is below; all your QR codes (one per page) are in the attached PDF (outly-tickets.pdf). Show one code per person at the door.")]
+      : kode.length ? [T("Koda QR je spodaj in v priloženem PDF (outly-tickets.pdf). Pokažite jo pri vhodu.", "The QR code is below and in the attached PDF (outly-tickets.pdf). Show it at the door.")] : [];
+    const razdelki = [
+      { naslov: T("Naročilo", "Order"), vrstice: [T(`Naročilo ${o.public_ref}. Čas naročila: ${ljDatum(o.paid_at || o.created_at, jez)}.`, `Order ${o.public_ref}, placed on ${ljDatum(o.paid_at || o.created_at, jez)}.`)] },
+      { naslov: T("Dogodek", "Event"), vrstice: [o.event_title, ljDatum(o.start_at, jez), prizoriscePodatki(o), starost] },
+      { naslov: T("Vstopnice", "Tickets"), vrstice: [`${o.quantity} x ${znesek(o.unit_price_cents, o.currency, jez)} = ${znesek(o.total_cents, o.currency, jez)}. ${davekStavek(o.vat_rate, o.vat_payer, jez)}`] },
+      { naslov: T("Prodajalec", "Seller"), vrstice: sellerVrstice(o, jez) },
+      { naslov: T("Brez pravice do odstopa", "No right of withdrawal"), vrstice: [T(
+        "Pri vstopnicah za dogodek na določen datum pravice do odstopa od pogodbe ni (Zakon o varstvu potrošnikov ZVPot-1, 135. člen, 12. točka). Če je dogodek odpovedan ali prestavljen, veljajo pravila iz pogojev.",
+        "There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply.")] },
+      { naslov: T("Pogoji", "Terms"), vrstice: [T(`Sprejeli ste pogoje uporabe Outly, različica ${o.guest_terms_version}: https://outly.si/terms`, `You accepted the Outly terms, version ${o.guest_terms_version}: https://outly.si/terms`)] },
+      { naslov: T("Vaše vstopnice", "Your tickets"), vrstice: (prevzeto
+        ? [T(`Vstopnice odprite v svojem računu Outly: ${povezava}`, `Open your tickets in your Outly account: ${povezava}`)]
+        : [T(`Odprite vstopnice (kodo QR pokažite pri vhodu): ${povezava}`, `Open your tickets (show the QR code at the door): ${povezava}`),
+           T("Ta povezava je vaša vstopnica. Ne delite je z nikomer, razen z osebami, ki pridejo z vami.", "This link is your ticket. Don't share it except with people coming with you."),
+           T("Če z istim e-naslovom ustvarite račun Outly, se bodo vstopnice pojavile tam.", "If you create an Outly account with this email, your tickets will appear there.")])
+        .concat(kodeVrstice),
+        slika: kode.slice(0, 1).map((k) => ({ cid: k.cid, oznaka: oznakaKode(k, jez), alt: T("Koda QR vstopnice", "Ticket QR code") })) },
+      { naslov: T("Pritožbe", "Complaints"), vrstice: [T(`Glede dogodka: obrnite se na klub (podatki zgoraj). Glede nakupa ali plačila: obrnite se na Outly na ${POSTA_ODGOVOR}.`,
+        `About the event: contact the club (details above). About the purchase or the payment: contact Outly at ${POSTA_ODGOVOR}.`)] },
+      { naslov: T("Vprašanja", "Questions"), vrstice: [T(`Odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`, `Reply to this email or write to ${POSTA_ODGOVOR}.`)] },
+    ];
+    return { naslovBesedila: T(`Vaše vstopnice Outly - naročilo ${o.public_ref}`, `Your Outly tickets - order ${o.public_ref}`), naslovHtml: T("Vaše vstopnice Outly", "Your Outly tickets"), razdelki };
+  }, povezava);
+}
+// Oznaka kode QR v mailu (»Ticket 2 of 3«) po jeziku; k.n / k.skupaj postavi klicalec. PDF ima angleski k.oznaka.
+const oznakaKode = (k, jez) => (k.skupaj > 1 ? (jez === "sl" ? `Vstopnica ${k.n} od ${k.skupaj}` : `Ticket ${k.n} of ${k.skupaj}`) : "");
 // --- priloge: QR kot vgrajena slika (CID) + PDF (migracija 034, vstopnica_priloge.js) ---
 const QR_STAVEK = "This email and the attached PDF are your ticket. The QR code is valid for one entry: whoever shows it first gets in. Don't forward this email, post the code or share the link.";
-const qrSlikaHtml = (cid, oznaka) => `<div style="margin:12px 0">${oznaka ? `<p style="margin:0 0 4px">${GOST_POSTA_NIZ(oznaka)}</p>` : ""}<img src="cid:${cid}" width="228" height="228" alt="Ticket QR code" style="display:block;width:228px;height:228px;border:1px solid #ccc"></div>`;
+const QR_STAVEK_SL = "To sporočilo in priloženi PDF sta vaša vstopnica. Koda QR velja za en vstop: vstopi tisti, ki jo pokaže prvi. Sporočila ne posredujte naprej, kode ne objavljajte in povezave ne delite z drugimi.";
+const qrSlikaHtml = (cid, oznaka, alt = "Ticket QR code") => `<div style="margin:12px 0">${oznaka ? `<p style="margin:0 0 4px">${GOST_POSTA_NIZ(oznaka)}</p>` : ""}<img src="cid:${cid}" width="228" height="228" alt="${GOST_POSTA_NIZ(alt)}" style="display:block;width:228px;height:228px;border:1px solid #ccc"></div>`;
 // Resend 3.5 posreduje telo strezniku neprepisano (JSON, kljuci snake_case: content_type, content_id): vsebina priloge je BASE64 niz (Buffer bi se serializiral
 // napacno), `content_id` vgradi sliko (cid:). SDK tega NE tipizira in ne preverja (verzija 3.5.0): PREVERI ob vsaki nadgradnji SDK (npr. 4.x je prepisal polja v camelCase).
 // Inline slika SAMO za prvo kodo (zanesljivost: sestavljanje je CPU na glavni niti; ostale kode so v PDF, ena na stran); sestavljanje je asinhrono in prepusca zanko (vstopnica_priloge.js).
@@ -5080,11 +5122,11 @@ async function gostPosljiEnoPosto(oid) {
   // medtem delno preneseno: stara koda ne velja vec in je v mailu ne kazemo).
   const kv = (await pool.query(
     `SELECT t.serial, t.event_id, t.created_at FROM tickets t WHERE t.order_id = $1 AND t.status = 'valid' AND t.holder_user_id IS NULL AND NOT t.holder_is_guest ORDER BY t.id`, [oid])).rows;
-  const kode = kv.map((t, i) => ({ cid: `ticket-qr-${i + 1}`, oznaka: kv.length > 1 ? `Ticket ${i + 1} of ${kv.length}` : "", koda: qrVstopnice(t) }));
+  const kode = kv.map((t, i) => ({ cid: `ticket-qr-${i + 1}`, oznaka: kv.length > 1 ? `Ticket ${i + 1} of ${kv.length}` : "", n: i + 1, skupaj: kv.length, koda: qrVstopnice(t) }));
   const { besedilo, html } = gostPotrdilo(x, povezava, prevzeto, kode);
   const priloge = await prilogeVstopnic(x, kode.map(k => ({ ...k, vrsta: "Standard ticket" })), "outly-tickets.pdf");
   const r = await gostResendPosli({
-    to: o.guest_email, subject: `Your tickets: ${x.event_title} (order ${o.public_ref})`.slice(0, 200), html, text: besedilo, attachments: priloge,
+    to: o.guest_email, subject: `Vaše vstopnice / Your tickets: ${x.event_title} (order ${o.public_ref})`.slice(0, 200), html, text: besedilo, attachments: priloge,
   });
   if (r && r.error) {
     console.error(`Resend napaka (gost, vstopnice, ${o.public_ref}, poskus ${o.guest_mail_attempts}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
@@ -5139,34 +5181,41 @@ async function potrdiloPostaVstopi() {
 function potrdiloPostaIzstopi() { const n = potrdiloPosta.cakajoci.shift(); if (n) n(); else potrdiloPosta.aktivnih--; }
 const potrdiloIzcrpaj = (oid) => pool.query("UPDATE orders SET receipt_mail_attempts = $2 WHERE id = $1 AND receipt_mail_sent_at IS NULL", [oid, GOST_POSTA_POSKUSOV]);
 
-// Vsebina potrdila kupcu (angleško kot ostali maili; brez sledilnikov in oglasov). Razdelek »Seller« (sellerVrstice, #94): firma, sedež, telefon, e-naslov,
+// Vsebina potrdila kupcu (dvojezicno, glej izrisiDvojezicno; brez sledilnikov in oglasov). Razdelek »Seller« (sellerVrstice, #94): firma, sedež, telefon, e-naslov,
 // matična in davčna številka ter DDV status kluba (043); stavek o DDV po davekStavek(vat_rate, vat_payer) (#101).
 function kupecPotrdilo(o, povezava) {
-  const meja = starostZaPaket(o.min_age, !!o.package_name);
-  const starost = meja > 0 ? `Age limit: ${meja}+${meja > o.min_age ? " (table with a drinks package)" : ""}. Every visitor must meet the age limit. ID is checked at the door; the club may refuse entry if you don't meet it.` : "No age limit.";
-  const jeMiza = !!o.table_label;
-  const kaj = jeMiza
-    ? `VIP table ${o.table_label} (${o.table_seats} ${o.table_seats === 1 ? "seat" : "seats"})${o.package_name ? `, package: ${o.package_name}` : ""}: ${znesek(o.total_cents, o.currency)}.`
-    : `${o.quantity} x ${znesek(o.unit_price_cents, o.currency)} = ${znesek(o.total_cents, o.currency)}.`;
-  const brezPlacila = o.is_test ? "This was a test purchase: nothing was charged." : (o.total_cents === 0 ? "This order is free: nothing was charged." : null);
-  const razdelki = [
-    { naslov: "Order", vrstice: [`Order ${o.public_ref}, placed on ${ljDatum(o.paid_at || o.created_at)}.`, ...(brezPlacila ? [brezPlacila] : [])] },
-    { naslov: "Event", vrstice: [o.event_title, ljDatum(o.start_at), prizoriscePodatki(o), starost] },
-    { naslov: jeMiza ? "Table" : "Tickets", vrstice: [`${kaj} ${davekStavek(o.vat_rate, o.vat_payer)}`] },
-    { naslov: "Seller", vrstice: sellerVrstice(o) },
-    { naslov: "No right of withdrawal", vrstice: ["There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply."] },
-    { naslov: "Terms", vrstice: ["Outly terms of use: https://outly.si/terms"] },
-    { naslov: "Your tickets", vrstice: [`Your tickets are in the Outly app (Profile, My tickets) and online: ${povezava}`, "The QR codes are not in this email. Open them in the app and show one code per person at the door."] },
-    { naslov: "Complaints", vrstice: [`About the event: contact the club (details above). About the purchase or the payment: contact Outly at ${POSTA_ODGOVOR}.`] },
-    { naslov: "Questions", vrstice: [`Reply to this email or write to ${POSTA_ODGOVOR}.`] },
-  ];
-  const besedilo = `Your Outly order ${o.public_ref}\n\n` + razdelki.map(r => `${r.naslov.toUpperCase()}\n${r.vrstice.join("\n")}`).join("\n\n") + "\n";
-  const html = `<div style="font-family: Arial, sans-serif; line-height:1.5"><h2>Your Outly order</h2>` + razdelki.map(r =>
-    `<h3>${GOST_POSTA_NIZ(r.naslov)}</h3>` + r.vrstice.map(v => {
-      const e = GOST_POSTA_NIZ(v);
-      return `<p>${v.includes(povezava) ? e.replace(GOST_POSTA_NIZ(povezava), `<a href="${GOST_POSTA_NIZ(povezava)}">${GOST_POSTA_NIZ(povezava)}</a>`) : e}</p>`;
-    }).join("")).join("") + `</div>`;
-  return { besedilo, html };
+  return izrisiDvojezicno((jez) => {
+    const T = (sl, en) => (jez === "sl" ? sl : en);
+    const meja = starostZaPaket(o.min_age, !!o.package_name);
+    const pretvorbaMeje = meja > o.min_age;
+    const starost = meja > 0
+      ? T(`Starostna meja: ${meja}+${pretvorbaMeje ? " (miza s paketom pijače)" : ""}. Vsak obiskovalec mora izpolnjevati starostno mejo. Pri vhodu se preverja osebni dokument; klub vam lahko zavrne vstop, če je ne izpolnjujete.`,
+          `Age limit: ${meja}+${pretvorbaMeje ? " (table with a drinks package)" : ""}. Every visitor must meet the age limit. ID is checked at the door; the club may refuse entry if you don't meet it.`)
+      : T("Brez starostne omejitve.", "No age limit.");
+    const jeMiza = !!o.table_label;
+    const kaj = jeMiza
+      ? T(`VIP miza ${o.table_label} (${o.table_seats} ${sedezSl(o.table_seats)})${o.package_name ? `, paket: ${o.package_name}` : ""}: ${znesek(o.total_cents, o.currency, jez)}.`,
+          `VIP table ${o.table_label} (${o.table_seats} ${o.table_seats === 1 ? "seat" : "seats"})${o.package_name ? `, package: ${o.package_name}` : ""}: ${znesek(o.total_cents, o.currency, jez)}.`)
+      : `${o.quantity} x ${znesek(o.unit_price_cents, o.currency, jez)} = ${znesek(o.total_cents, o.currency, jez)}.`;
+    const brezPlacila = o.is_test ? T("To je bil testni nakup: nič ni bilo zaračunano.", "This was a test purchase: nothing was charged.")
+      : (o.total_cents === 0 ? T("To naročilo je brezplačno: nič ni bilo zaračunano.", "This order is free: nothing was charged.") : null);
+    const razdelki = [
+      { naslov: T("Naročilo", "Order"), vrstice: [T(`Naročilo ${o.public_ref}. Čas naročila: ${ljDatum(o.paid_at || o.created_at, jez)}.`, `Order ${o.public_ref}, placed on ${ljDatum(o.paid_at || o.created_at, jez)}.`), ...(brezPlacila ? [brezPlacila] : [])] },
+      { naslov: T("Dogodek", "Event"), vrstice: [o.event_title, ljDatum(o.start_at, jez), prizoriscePodatki(o), starost] },
+      { naslov: jeMiza ? T("Miza", "Table") : T("Vstopnice", "Tickets"), vrstice: [`${kaj} ${davekStavek(o.vat_rate, o.vat_payer, jez)}`] },
+      { naslov: T("Prodajalec", "Seller"), vrstice: sellerVrstice(o, jez) },
+      { naslov: T("Brez pravice do odstopa", "No right of withdrawal"), vrstice: [T(
+        "Pri vstopnicah za dogodek na določen datum pravice do odstopa od pogodbe ni (Zakon o varstvu potrošnikov ZVPot-1, 135. člen, 12. točka). Če je dogodek odpovedan ali prestavljen, veljajo pravila iz pogojev.",
+        "There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply.")] },
+      { naslov: T("Pogoji", "Terms"), vrstice: [T("Pogoji uporabe Outly: https://outly.si/terms", "Outly terms of use: https://outly.si/terms")] },
+      { naslov: T("Vaše vstopnice", "Your tickets"), vrstice: [T(`Vaše vstopnice so v aplikaciji Outly (Profil → Vstopnice) in na spletu: ${povezava}`, `Your tickets are in the Outly app (Profile, My tickets) and online: ${povezava}`),
+        T("Kode QR niso v tem sporočilu. Odprite jih v aplikaciji in pri vhodu pokažite eno kodo na osebo.", "The QR codes are not in this email. Open them in the app and show one code per person at the door.")] },
+      { naslov: T("Pritožbe", "Complaints"), vrstice: [T(`Glede dogodka: obrnite se na klub (podatki zgoraj). Glede nakupa ali plačila: obrnite se na Outly na ${POSTA_ODGOVOR}.`,
+        `About the event: contact the club (details above). About the purchase or the payment: contact Outly at ${POSTA_ODGOVOR}.`)] },
+      { naslov: T("Vprašanja", "Questions"), vrstice: [T(`Odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`, `Reply to this email or write to ${POSTA_ODGOVOR}.`)] },
+    ];
+    return { naslovBesedila: T(`Vaše naročilo Outly ${o.public_ref}`, `Your Outly order ${o.public_ref}`), naslovHtml: T("Vaše naročilo Outly", "Your Outly order"), razdelki };
+  }, povezava);
 }
 
 async function posljiPotrdiloKupcu(oid) {
@@ -5219,7 +5268,7 @@ async function potrdiloPosljiEno(oid) {
   if (!ev.rows.length) return false;
   const x = { ...o, ...ev.rows[0] };
   const { besedilo, html } = kupecPotrdilo(x, `${placilaStripe.osnovaSpleta()}/app/tickets`);
-  const r = await gostResendPosli({ to: o.buyer_email, subject: `Your order: ${x.event_title} (${o.public_ref})`.slice(0, 200), html, text: besedilo });
+  const r = await gostResendPosli({ to: o.buyer_email, subject: `Vaše naročilo / Your order: ${x.event_title} (${o.public_ref})`.slice(0, 200), html, text: besedilo });
   if (r && r.error) {
     console.error(`Resend napaka (potrdilo kupcu, ${o.public_ref}, poskus ${o.receipt_mail_attempts}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
     if (o.receipt_mail_attempts >= GOST_POSTA_POSKUSOV) console.error(`[potrdilo] POZOR: potrdilo za narocilo ${o.public_ref} NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov); kupec ima vstopnice v aplikaciji, potrdila po e-posti pa ne`);
@@ -5355,43 +5404,57 @@ app.get("/guest/ticket", async (req, res) => {
 // ne opisuje), pravica do ugovora (21(4)) v LOCENEM odstavku, varnostno besedilo, en nevtralen stavek o prevzemu v racun (ne trzenje, ZEKom-2 226), brez oglasov.
 // Pošiljatelj = uporabniško ime (nikoli e-naslov). Brez sledenja (to nastavlja Resend na domeni). E-naslova prejemnika ni v PDF.
 function prenosPotrdilo(x, povezava, kode) {
-  const klubKontakt = [x.club_phone, x.club_email].filter(Boolean).join(", ");
-  const meja = starostZaPaket(x.min_age, x.package_id !== null && x.package_id !== undefined);
-  const starost = meja > 0
-    ? `Age limit: ${meja}+${meja > x.min_age ? " (table with a drinks package)" : ""}. Show a valid photo ID at the door; if you are under ${meja}, the club will refuse entry.`
-    : "No age limit.";
-  const vrsta = x.table_label ? `VIP table ${x.table_label}${x.package_name ? `, package: ${x.package_name}` : ""}` : "Standard ticket";
-  const posiljatelj = x.from_username || "An Outly user";
-  const razdelki = [
-    { naslov: "This is your ticket", vrstice: [QR_STAVEK] },
-    { naslov: "Event", vrstice: [x.event_title, ljDatum(x.start_at), prizoriscePodatki(x),
-        `Organiser: ${x.club_name}${klubKontakt ? ` (${klubKontakt})` : ""}. Contact the organiser about the event itself.`, starost] },
-    { naslov: "Your ticket", vrstice: [vrsta, `Show this QR code at the door (it is also in the attached PDF, outly-ticket.pdf): ${povezava}`], slika: true },
-    { naslov: "Ticket rules", vrstice: ["One entry per code.", "The organiser may refuse entry under its house rules or the law.", "Reselling the ticket is not allowed.",
-        "If the event is cancelled, a refund goes to the person who bought the ticket, not to you.", "If you create an Outly account with this email, the ticket will appear there."] },
-    { naslov: "Not for you?", vrstice: [`If you were not expecting this ticket, reply to this email and we will delete your email address.`] },
-    { naslov: "About your email address (GDPR, Article 14)", vrstice: [
-        `Who we are: ${POSREDNIK_VRSTICA}.`,
-        `Why: we use your email address only to deliver this ticket and to allow entry. Legal basis: legitimate interest (GDPR Article 6(1)(f)): ${posiljatelj} wanted to pass this ticket on to you.`,
-        `Where we got it: ${posiljatelj}, an Outly user, entered your email address.`,
-        `Data: your email address, the ticket and event, the sender's confirmation that you meet the age limit (if there is one), and the time the ticket is scanned at entry.`,
-        `Recipients: Resend (email delivery). The organiser (${x.club_name}) only sees that the ticket was passed on to a guest, not your email address.`,
-        `Transfer outside the EEA: our email provider is based in the United States; the transfer relies on the EU standard contractual clauses or an adequacy decision, as described in our privacy policy.`,
-        `Retention: we delete your email address 30 days after the event ends, unless you create an Outly account with it.`,
-        `Your rights: access, rectification, erasure, restriction, and a complaint to the Information Commissioner of Slovenia (www.ip-rs.si). Privacy policy: https://outly.si/privacy` ] },
-    { naslov: "Right to object", vrstice: [`Don't want us to process your email address? You have the right to object at any time: reply to this email and we will delete your address.`] },
-    { naslov: "Questions", vrstice: [`Reply to this email or write to ${POSTA_ODGOVOR}.`] },
-  ];
-  const besedilo = `${posiljatelj} sent you a ticket for ${x.event_title}\n\n` + razdelki.map(r => `${r.naslov.toUpperCase()}\n${r.vrstice.join("\n")}`).join("\n\n") + "\n";
-  const html = `<div style="font-family: Arial, sans-serif; line-height:1.5"><h2>${GOST_POSTA_NIZ(posiljatelj)} sent you a ticket</h2>` + razdelki.map(r => {
-    const jeVarnost = r.naslov === "This is your ticket";
-    return `<h3>${GOST_POSTA_NIZ(r.naslov)}</h3>` + r.vrstice.map(v => {
-      const e = GOST_POSTA_NIZ(v);
-      const z = povezava && v.includes(povezava) ? e.replace(GOST_POSTA_NIZ(povezava), `<a href="${GOST_POSTA_NIZ(povezava)}">${GOST_POSTA_NIZ(povezava)}</a>`) : e;
-      return `<p>${jeVarnost ? `<strong>${z}</strong>` : z}</p>`;
-    }).join("") + (r.slika ? kode.map(k => qrSlikaHtml(k.cid, k.oznaka)).join("") : "");
-  }).join("") + `</div>`;
-  return { besedilo, html };
+  return izrisiDvojezicno((jez) => {
+    const T = (sl, en) => (jez === "sl" ? sl : en);
+    const klubKontakt = [x.club_phone, x.club_email].filter(Boolean).join(", ");
+    const meja = starostZaPaket(x.min_age, x.package_id !== null && x.package_id !== undefined);
+    const pretvorbaMeje = meja > x.min_age;
+    const starost = meja > 0
+      ? T(`Starostna meja: ${meja}+${pretvorbaMeje ? " (miza s paketom pijače)" : ""}. Pri vhodu pokažite veljaven osebni dokument s fotografijo; če ste mlajši od ${meja} let, vam bo klub zavrnil vstop.`,
+          `Age limit: ${meja}+${pretvorbaMeje ? " (table with a drinks package)" : ""}. Show a valid photo ID at the door; if you are under ${meja}, the club will refuse entry.`)
+      : T("Brez starostne omejitve.", "No age limit.");
+    const vrsta = x.table_label
+      ? T(`VIP miza ${x.table_label}${x.package_name ? `, paket: ${x.package_name}` : ""}`, `VIP table ${x.table_label}${x.package_name ? `, package: ${x.package_name}` : ""}`)
+      : T("Standardna vstopnica", "Standard ticket");
+    const posiljatelj = x.from_username || T("Uporabnik Outly", "An Outly user");
+    const razdelki = [
+      { naslov: T("To je vaša vstopnica", "This is your ticket"), vrstice: [T(QR_STAVEK_SL, QR_STAVEK)], krepko: true },
+      { naslov: T("Dogodek", "Event"), vrstice: [x.event_title, ljDatum(x.start_at, jez), prizoriscePodatki(x),
+          T(`Organizator: ${x.club_name}${klubKontakt ? ` (${klubKontakt})` : ""}. Glede samega dogodka se obrnite na organizatorja.`,
+            `Organiser: ${x.club_name}${klubKontakt ? ` (${klubKontakt})` : ""}. Contact the organiser about the event itself.`), starost] },
+      { naslov: T("Vaša vstopnica", "Your ticket"), vrstice: [vrsta, T(`Kodo QR pokažite pri vhodu (je tudi v priloženem PDF, outly-ticket.pdf): ${povezava}`, `Show this QR code at the door (it is also in the attached PDF, outly-ticket.pdf): ${povezava}`)],
+        slika: kode.map((k) => ({ cid: k.cid, oznaka: oznakaKode(k, jez), alt: T("Koda QR vstopnice", "Ticket QR code") })) },
+      { naslov: T("Pravila vstopnice", "Ticket rules"), vrstice: T(
+          ["En vstop na kodo.", "Organizator vam lahko zavrne vstop na podlagi hišnega reda ali zakona.", "Preprodaja vstopnice ni dovoljena.",
+           "Če je dogodek odpovedan, se vračilo izplača osebi, ki je vstopnico kupila, ne vam.", "Če z istim e-naslovom ustvarite račun Outly, se bo vstopnica pojavila tam."],
+          ["One entry per code.", "The organiser may refuse entry under its house rules or the law.", "Reselling the ticket is not allowed.",
+           "If the event is cancelled, a refund goes to the person who bought the ticket, not to you.", "If you create an Outly account with this email, the ticket will appear there."]) },
+      { naslov: T("Vstopnice niste pričakovali?", "Not for you?"), vrstice: [T("Če te vstopnice niste pričakovali, odgovorite na to sporočilo in vaš e-naslov bomo izbrisali.",
+          "If you were not expecting this ticket, reply to this email and we will delete your email address.")] },
+      { naslov: T("O vašem e-naslovu (GDPR, 14. člen)", "About your email address (GDPR, Article 14)"), vrstice: T([
+          `Kdo smo: ${POSREDNIK_VRSTICA}.`,
+          `Zakaj: vaš e-naslov uporabljamo samo za dostavo te vstopnice in za omogočanje vstopa. Pravna podlaga: zakoniti interes (GDPR, člen 6(1)(f)): ${posiljatelj} vam je želel to vstopnico predati.`,
+          `Od kod podatek: ${posiljatelj}, uporabnik Outly, je vnesel vaš e-naslov.`,
+          `Podatki: vaš e-naslov, vstopnica in dogodek, potrditev pošiljatelja, da izpolnjujete starostno mejo (če obstaja), ter čas skeniranja vstopnice ob vstopu.`,
+          `Prejemniki: Resend (dostava e-pošte). Organizator (${x.club_name}) vidi samo, da je bila vstopnica predana gostu, ne pa vašega e-naslova.`,
+          `Prenos izven EGP: naš ponudnik e-pošte ima sedež v Združenih državah Amerike; prenos temelji na standardnih pogodbenih klavzulah EU ali na sklepu o ustreznosti, kot je opisano v naši politiki zasebnosti.`,
+          `Hramba: vaš e-naslov izbrišemo 30 dni po koncu dogodka, razen če z njim ustvarite račun Outly.`,
+          `Vaše pravice: dostop, popravek, izbris, omejitev obdelave in pritožba pri Informacijskem pooblaščencu Republike Slovenije (www.ip-rs.si). Politika zasebnosti: https://outly.si/privacy` ], [
+          `Who we are: ${POSREDNIK_VRSTICA}.`,
+          `Why: we use your email address only to deliver this ticket and to allow entry. Legal basis: legitimate interest (GDPR Article 6(1)(f)): ${posiljatelj} wanted to pass this ticket on to you.`,
+          `Where we got it: ${posiljatelj}, an Outly user, entered your email address.`,
+          `Data: your email address, the ticket and event, the sender's confirmation that you meet the age limit (if there is one), and the time the ticket is scanned at entry.`,
+          `Recipients: Resend (email delivery). The organiser (${x.club_name}) only sees that the ticket was passed on to a guest, not your email address.`,
+          `Transfer outside the EEA: our email provider is based in the United States; the transfer relies on the EU standard contractual clauses or an adequacy decision, as described in our privacy policy.`,
+          `Retention: we delete your email address 30 days after the event ends, unless you create an Outly account with it.`,
+          `Your rights: access, rectification, erasure, restriction, and a complaint to the Information Commissioner of Slovenia (www.ip-rs.si). Privacy policy: https://outly.si/privacy` ]) },
+      { naslov: T("Pravica do ugovora", "Right to object"), vrstice: [T("Ne želite, da obdelujemo vaš e-naslov? Pravico do ugovora imate kadar koli: odgovorite na to sporočilo in vaš naslov bomo izbrisali.",
+          "Don't want us to process your email address? You have the right to object at any time: reply to this email and we will delete your address.")] },
+      { naslov: T("Vprašanja", "Questions"), vrstice: [T(`Odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`, `Reply to this email or write to ${POSTA_ODGOVOR}.`)] },
+    ];
+    return { naslovBesedila: T(`${posiljatelj} vam je poslal(-a) vstopnico za ${x.event_title}`, `${posiljatelj} sent you a ticket for ${x.event_title}`),
+      naslovHtml: T(`${posiljatelj} vam je poslal(-a) vstopnico`, `${posiljatelj} sent you a ticket`), razdelki };
+  }, povezava);
 }
 
 // Meje maila (zloraba: mail na tuj naslov) so v transakciji prenosa (POST /tickets/:id/transfer): GOST_PRENOS_NA_DAN na posiljatelja, GOST_PRENOS_NA_NASLOV na naslov.
@@ -5431,7 +5494,7 @@ async function prenosPosljiEnoPosto(tid) {
   const povezava = gostVstopnicaPovezava(zeton);
   const { besedilo, html } = prenosPotrdilo(x, povezava, kode);
   const priloge = await prilogeVstopnic({ ...x, starostPdf: meja > 0 ? `Age ${meja}+ - bring a valid photo ID` : "" }, kode.map(c => ({ ...c, vrsta })), "outly-ticket.pdf");
-  const r = await gostResendPosli({ to: t.holder_guest_email, subject: `${x.from_username || "An Outly user"} sent you a ticket for ${x.event_title}`.slice(0, 200), html, text: besedilo, attachments: priloge });
+  const r = await gostResendPosli({ to: t.holder_guest_email, subject: `${x.from_username || "An Outly user"} vam je poslal(-a) vstopnico / sent you a ticket: ${x.event_title}`.slice(0, 200), html, text: besedilo, attachments: priloge });
   if (r && r.error) {
     console.error(`Resend napaka (prenos gostu, vstopnica ${tid}, poskus ${t.holder_guest_mail_attempts}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
     if (t.holder_guest_mail_attempts >= GOST_POSTA_POSKUSOV) console.error(`[gost] POZOR: mail s prenesene vstopnice ${tid} NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov); prejemnik vstopnice ni dobil`);
