@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-11 (STATE skrajšan pod 200 vrstic: pogodbe polj za odjemalce so v ARCHITECTURE, zgodovina v `docs/arhiv/`; prej 2026-10-10: varovala pred živo prodajo, payment_mode, potrdilo kupcu, migracija 042).
+Zadnja posodobitev: 2026-10-11 (#210 proračun prosto, Sentry backend izklopljen do DSN; STATE skrajšan pod 200 vrstic: pogodbe polj za odjemalce so v ARCHITECTURE, zgodovina v `docs/arhiv/`; prej 2026-10-10: varovala pred živo prodajo, payment_mode, potrdilo kupcu, migracija 042).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje** (pasti, predpostavke agenta, kar nobeno orodje ne ve). Drugje: odprte naloge → GitHub Issues (`agent` / `martin`); testi → Actions `Testi`; produkcija → `Nadzor produkcije` + `/clubs`;
 kaj se je spremenilo → PR-ji; zakaj → `DECISIONS.md`; kaj se ne sme zgoditi → `ARCHITECTURE.md` »Poslovne invariante«; kaj je že padlo → `INCIDENTI.md`. Tega ne prepisuj sem.
@@ -10,7 +10,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte nal
 
 ## Spremljanje napak
 
-- **Backend:** Render logi (`list_logs` na `srv-d5fuiovgi27c73e4boq0`, filter `*rror*`), brez Sentryja; request logov (500) Render ne vrne, vidno je samo, kar koda izpiše. **iOS:** sesutja zbira TestFlight.
+- **Backend:** Render logi (`list_logs` na `srv-d5fuiovgi27c73e4boq0`, filter `*rror*`); request logov (500) Render ne vrne, vidno je samo, kar koda izpiše. **Sentry (`sentry.js`, #87) je v kodi, a IZKLOPLJEN, dokler Martin na Render ne vpiše `SENTRY_DSN` (projekt `outly-backend`, 100/uro) — šele po dopolnitvi politike zasebnosti.** Brez DSN se `@sentry/node` ne naloži; z DSN +~36 MB RSS, 500 iz vseh poti, vrstice `POZOR` (tudi zagonska »placila v TESTNEM nacinu« ob vsakem deployu), neujete izjeme/zavrnitve (`strict`: proces izstopi kot prej, I10). `sentry.js` ne sme postati odvisen od `index.js`. **iOS:** sesutja zbira TestFlight; Sentry Cocoa (`outly-ios`) čaka outly-app#83.
 - **Spletna aplikacija:** Sentry `outly-hd` (EU) / `outly-webapp`, `webapp/porocilo.js` brez SDK, največ 5 dogodkov na nalaganje, DSN 100/uro, IP se ne hrani (politika zasebnosti 2.4). Ob dvigu `RAZLICICA` v `webapp/sw.js` uskladi `RAZLICICA` v `porocilo.js`.
 - **Brevo (Supabase Auth SMTP) je na paketu Free = 300 mailov/dan**: ob več prijavah na dan kode ne pridejo in prijava ne dela. Odloča Martin ([#193](https://github.com/Djurdje/outly-backend/issues/193)).
 
@@ -53,7 +53,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte nal
 ## Javni predpomnilnik (#114, ARCHITECTURE »Javni predpomnilnik«, I17; odločitev agenta, Martin je ni potrdil)
 
 - `/events`, `/clubs`, `/events/:id`, `/clubs/:id`, `/clubs/map` in `/search` so 3 s v pomnilniku; zapis ga izprazni, mimo API-ja (SQL, migracija, druga instanca) zaostane do 3 s. Dnevnik `[predpomnilnik] 60 s: …`; izklop `JAVNI_PREDPOMNILNIK_MS=0`. Nov javni GET, odvisen od uporabnika, NE sme vanj.
-- Iskanje dogodkov je `ILIKE '%q%'` brez indeksa (lokalno 6 ms pri 1500 dogodkih, raste linearno): predlog `pg_trgm` GIN je migracija, NI narejen. Proračun `prosto`: Issue #210.
+- Iskanje dogodkov je `ILIKE '%q%'` brez indeksa (lokalno 6 ms pri 1500 dogodkih, raste linearno): predlog `pg_trgm` GIN je migracija, NI narejen. Proračun `prosto` (30 od 300 ključev, LRU): `/search`, `/clubs/map?bbox=`, `/clubs` s `city`, `offset` > 0 ali `limit` ≠ 100, `/events?clubId=` (#210). Stran kluba je zato v majhnem proračunu: pri > ~10 klubih hkrati več poizvedb gre v bazo. Nov parameter v `kljucKlubov`/`kljucDogodkov` = odloči, ali gre v `prosto`.
 
 ## Spletna aplikacija (outly.si/app; podrobnosti v `outly_webpage/CLAUDE.md`)
 
