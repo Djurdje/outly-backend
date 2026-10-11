@@ -15,8 +15,10 @@ BEGIN;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS terms_version TEXT
     CONSTRAINT orders_terms_version_chk CHECK (terms_version IS NULL OR terms_version ~ '^[A-Za-z0-9._:-]{1,40}$');
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ;
-ALTER TABLE orders ADD CONSTRAINT orders_terms_par_chk CHECK ((terms_version IS NULL) = (terms_accepted_at IS NULL)) NOT VALID;
-ALTER TABLE orders VALIDATE CONSTRAINT orders_terms_par_chk;
+-- DROP IF EXISTS: blok v VSE_MIGRACIJE.sql je varen tudi ob ponovnem zagonu (vzorec 033, 035). Brez NOT VALID/VALIDATE: v eni transakciji
+-- ne skrajsa zaklepa, tabela orders je majhna.
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_terms_par_chk;
+ALTER TABLE orders ADD CONSTRAINT orders_terms_par_chk CHECK ((terms_version IS NULL) = (terms_accepted_at IS NULL));
 
 COMMENT ON COLUMN orders.terms_version IS 'Razlicica pogojev uporabe, sprejeta ob nakupu z racunom (044, #215). NULL = odjemalec je ni poslal. Gost: guest_terms_version.';
 COMMENT ON COLUMN orders.terms_accepted_at IS 'Cas sprejema pogojev ob nakupu z racunom (044, #215): NOT NULL natanko takrat, ko je terms_version NOT NULL.';
