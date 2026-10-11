@@ -19,6 +19,7 @@ if (!/^4\./.test(EXPRESS_RAZLICICA)) {
 }
 const Layer = require("express/lib/router/layer");
 const { jeNapakaPovezave } = require("./napaka_povezave");
+const sentry = require("./sentry");   // Sentry (#87): no-op brez SENTRY_DSN
 
 let namescen = false;
 function namestiAsinhroniOvoj() {
@@ -54,6 +55,7 @@ function napakaRocnik(err, req, res, next) {
     return res.status(503).set("Retry-After", "5").send("Service temporarily unavailable. Please try again.");
   }
   console.error(`[rocnik] nepricakovana napaka (${kje}):`, (err && err.stack) || err);
+  sentry.porociNapako(err, "rocnik", req, res);
   return res.status(500).send("Server error.");
 }
 

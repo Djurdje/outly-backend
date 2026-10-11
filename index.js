@@ -1,3 +1,6 @@
+// Sentry (#87): vklopljen SAMO ob SENTRY_DSN v okolju (sicer se paket ne naloži); zagon prvi, da ujame tudi napake pri nalaganju modulov.
+const sentry = require("./sentry");
+sentry.zagon();
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
@@ -15,6 +18,8 @@ const app = express();
 // Render stoji za proxyjem. Brez tega je req.ip naslov proxyja in bi
 // omejevanje veljalo za vse uporabnike skupaj.
 app.set("trust proxy", 1);
+// Sentry: vsak odgovor 500 iz katerekoli poti pride v Sentry (odgovor ostane nespremenjen); brez SENTRY_DSN se ne doda nic.
+if (sentry.vklopljen()) app.use(sentry.vmesnik);
 
 // CORS: allowedHeaders namenoma ni nastavljen - paket `cors` tedaj ponovi glave iz preflighta (Access-Control-Request-Headers),
 // zato brskalnik sme poslati Authorization, X-Outly-Club in Idempotency-Key (test_idempotenca.js to preveri).

@@ -1,3 +1,4 @@
+const sentry = require("./sentry");   // Sentry (#87): no-op brez SENTRY_DSN
 // Ali je napaka iz baze/poola zacasna tezava povezave (-> 503 + Retry-After) ali programska/podatkovna napaka (-> 500).
 // Uporablja requireClubNa v index.js (issue #125); loceno, da jo unit test (_testi/test_napaka_povezave.js) preizkusi brez streznika.
 //  - Node omrezne kode (ECONNRESET, ETIMEDOUT, ECONNREFUSED, EPIPE, ENOTFOUND, EAI_AGAIN ...): povezava. Preveri se PRVA, ker
@@ -27,6 +28,7 @@ function odgovoriNaNapako(res, e, kje) {
     return res.status(503).set("Retry-After", "5").json({ error: "service_unavailable", message: "Service temporarily unavailable. Please try again." });
   }
   console.error(`[napaka] nepricakovana napaka${oznaka}:`, (e && e.stack) || e);
+  sentry.porociNapako(e, kje || "pot", null, res);
   return res.status(500).json({ error: "server_error", message: "Server error." });
 }
 module.exports = { jeNapakaPovezave, odgovoriNaNapako };
