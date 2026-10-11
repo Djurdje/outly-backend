@@ -567,18 +567,19 @@ async function enotski() {
 
     console.log("\n# (e) Omejitev velikosti (JAVNI_PREDPOMNILNIK_KLJUCEV=20) in loceni proracun za prosto besedilo");
     const rss0 = rssMB(sA.pid);
-    for (let i = 0; i < 40; i++) await a("GET", `/clubs?offset=${i}`);
+    for (let i = 0; i < 40; i++) await a("GET", `/clubs?limit=${i + 1}`);
     let zadetki = 0;
-    for (let i = 39; i >= 20; i--) if ((await a("GET", `/clubs?offset=${i}`)).stanje === "zadetek") zadetki++;
+    for (let i = 39; i >= 20; i--) if ((await a("GET", `/clubs?limit=${i + 1}`)).stanje === "zadetek") zadetki++;
     assert(zadetki === 20, "po 40 razlicnih kljucih je v predpomnilniku natanko zadnjih 20 (omejitev)", zadetki);
-    r = await a("GET", "/clubs?offset=19");
+    r = await a("GET", "/clubs?limit=20");
     assert(r.stanje === "zgresitev", "21. najnovejsi kljuc je izpodrinjen (LRU)", r.stanje);
     r = await a("GET", "/clubs?q=pure");
     assert(r.status === 200 && r.stanje === "izklopljen", "iskanje q se ne predpomni (gre mimo)", r.stanje);
+    // (vroci kljuci tu so /clubs?limit=N: offset > 0 in city sta od #210 v proracunu prosto)
     // city je prosto besedilo: poplava mest izpodriva samo druge proste kljuce (proracun 10 % kljucev), ne vrocih
-    await a("GET", "/clubs?offset=39");
+    await a("GET", "/clubs?limit=40");
     for (let i = 0; i < 100; i++) await a("GET", `/clubs?city=mesto${i}`);
-    r = await a("GET", "/clubs?offset=39");
+    r = await a("GET", "/clubs?limit=40");
     assert(r.stanje === "zadetek", "vroc kljuc preziv poplavo 100 razlicnih mest", r.stanje);
     let mest = 0;
     for (let i = 99; i >= 98; i--) if ((await a("GET", `/clubs?city=mesto${i}`)).stanje === "zadetek") mest++;
@@ -722,6 +723,24 @@ async function enotski() {
       let ostali = 0;
       for (let i = 99; i >= 90; i--) if ((await d("GET", `/search?q=iskanje${i}`)).stanje === "zadetek") ostali++;
       assert(ostali === 5, "search: od prostih kljucev je ostalo natanko zadnjih 5 (10 % od 50)", ostali);
+      // #210: offset > 0 (do 100000 vrednosti) in clubId (do 20 znakov) sta v proracunu prosto; vroci kljuci brez filtra prezivijo poplavo
+      await d("GET", "/events"); await d("GET", "/clubs"); await d("GET", "/events?upcoming=true");
+      r = await d("GET", "/clubs?offset=0");
+      assert(r.stanje === "zadetek", "#210: /clubs?offset=0 je isti kljuc kot /clubs (ostane vroc)", r.stanje);
+      for (let i = 1; i <= 100; i++) await d("GET", `/clubs?offset=${i}`);
+      assert((await d("GET", "/events")).stanje === "zadetek" && (await d("GET", "/clubs")).stanje === "zadetek" && (await d("GET", "/events?upcoming=true")).stanje === "zadetek",
+        "#210: poplava 100 razlicnih offset ne izpodrine vrocih kljucev /events in /clubs");
+      let ostaliOff = 0;
+      for (let i = 100; i >= 91; i--) if ((await d("GET", `/clubs?offset=${i}`)).stanje === "zadetek") ostaliOff++;
+      assert(ostaliOff === 5, "#210: od offset kljucev je ostalo natanko zadnjih 5 (10 % od 50)", ostaliOff);
+      for (let i = 1; i <= 100; i++) await d("GET", `/events?clubId=${i}0000`);
+      assert((await d("GET", "/events")).stanje === "zadetek" && (await d("GET", "/clubs")).stanje === "zadetek" && (await d("GET", "/events?upcoming=true")).stanje === "zadetek",
+        "#210: poplava 100 razlicnih clubId ne izpodrine vrocih kljucev /events in /clubs");
+      let ostaliClub = 0;
+      for (let i = 100; i >= 91; i--) if ((await d("GET", `/events?clubId=${i}0000`)).stanje === "zadetek") ostaliClub++;
+      assert(ostaliClub === 5, "#210: od clubId kljucev je ostalo natanko zadnjih 5 (10 % od 50)", ostaliClub);
+      r = await d("GET", "/events?clubId=1&upcoming=true");
+      assert(r.status === 200 && Array.isArray(r.body), "#210: stran kluba (clubId) se normalno odzove", r.status);
       assert(!/Unhandled|TypeError|ReferenceError/.test(sD.log), "dnevnik D brez neujetih napak", sD.log.slice(-400));
     }
 

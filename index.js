@@ -1439,6 +1439,11 @@ function kljucKlubov(q) {
   return JSON.stringify(["clubs", stevilo(limit, 100, 200), stevilo(offset, 0, 100000), city || null, withCoords === "true"]);
 }
 
+// #210: kljuc z `offset` > 0 je zaporedna vrednost (do 100000 ključev) -> loceni proracun `prosto`. `offset=0` je isti kljuc kot brez offseta in ostane vroc.
+function prostKljucKlubov(q) {
+  return !!q.city || stevilo(q.offset, 0, 100000) > 0;
+}
+
 // /clubs/map (I17): brez okvira en kljuc; z okvirom stevila kot nizi (JSON.stringify(Infinity) = null bi zlil +/-Infinity), nenavaden bbox mimo.
 function kljucZemljevida(surovBbox, okvir) {
   if (!surovBbox) return JSON.stringify(["clubsmap"]);
@@ -1455,7 +1460,7 @@ function kljucIskanja(surovQ, surovLimit, q, limit) {
 
 app.get("/clubs", async (req, res) => {
   try {
-    // city je prosto besedilo: loceni majhen proracun (`prosto`), da poplava mest ne izpodrine vrocih kljucev.
+    // city je prosto besedilo, offset > 0 zaporedna vrednost (#210): loceni majhen proracun (`prosto`), da poplava ne izpodrine vrocih kljucev.
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucKlubov(req.query), async () => {
     const limit  = stevilo(req.query.limit, 100, 200);
     const offset = stevilo(req.query.offset, 0, 100000);
@@ -1487,7 +1492,7 @@ app.get("/clubs", async (req, res) => {
     // Skupno stevilo v glavi, da telo ostane navaden seznam in se aplikaciji
     // ni treba spreminjati. Dekoder v Swiftu pricakuje [APIClub].
     return { status: 200, json: r.rows, glave: { "X-Total-Count": String(skupaj.rows[0].n) } };
-    }, { prosto: !!req.query.city });
+    }, { prosto: prostKljucKlubov(req.query) });
     return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
     console.error(e);
@@ -2093,6 +2098,12 @@ async function popularniDogodkiKluba(clubId, najvec = NAJVEC_POPULARNIH) {
 }
 
 // Kljuc predpomnilnika za /events (I17): samo kanonicni parametri; clubId mora biti kratek niz.
+// #210: clubId (do 20 znakov, poljubne vrednosti) ima loceni proracun `prosto` (10 % kljucev, pri 300 kljucih 30). Posledica: stran kluba
+// (/events?clubId=..) si deli te ključe z iskanjem; pri vec kot ~10 klubih hkrati (po 3 kljuci: upcoming, popular, upcoming=false) se izpodrivajo
+// med seboj in vec zahtevkov gre v bazo (vsak najvec enkrat na 3 s na klub, single-flight). Seznam brez filtra ostane vroc.
+function prostKljucDogodkov(q) {
+  return !!q.clubId;
+}
 function kljucDogodkov(q) {
   const { clubId, upcoming, popular, lite } = q;
   if (nenavadniParametri([clubId, upcoming, popular, lite], 20)) return null;
@@ -2158,7 +2169,7 @@ async function javniSeznamDogodkov(req, res) {
 
     const r = await pool.query(sql, params);
     return { status: 200, json: dodajNacinPlacila(r.rows) };
-    });
+    }, { prosto: prostKljucDogodkov(req.query) });
     return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
     console.error(e);
