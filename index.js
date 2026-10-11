@@ -1,3 +1,6 @@
+// Sentry (#87): vklopljen SAMO ob SENTRY_DSN v okolju (sicer se paket ne naloži); zagon prvi, da ujame tudi napake pri nalaganju modulov.
+const sentry = require("./sentry");
+sentry.zagon();
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
@@ -15,6 +18,8 @@ const app = express();
 // Render stoji za proxyjem. Brez tega je req.ip naslov proxyja in bi
 // omejevanje veljalo za vse uporabnike skupaj.
 app.set("trust proxy", 1);
+// Sentry: vsak odgovor 500 iz katerekoli poti pride v Sentry (odgovor ostane nespremenjen); brez SENTRY_DSN se ne doda nic.
+if (sentry.vklopljen()) app.use(sentry.vmesnik);
 
 // CORS: allowedHeaders namenoma ni nastavljen - paket `cors` tedaj ponovi glave iz preflighta (Access-Control-Request-Headers),
 // zato brskalnik sme poslati Authorization, X-Outly-Club in Idempotency-Key (test_idempotenca.js to preveri).
@@ -1439,6 +1444,13 @@ function kljucKlubov(q) {
   return JSON.stringify(["clubs", stevilo(limit, 100, 200), stevilo(offset, 0, 100000), city || null, withCoords === "true"]);
 }
 
+// #210: kljuc z `offset` > 0 (do 100000 vrednosti) ali z `limit`, ki ni privzeti 100 (1..200, krat withCoords = do 400 ključev), je zaporedna vrednost ->
+// loceni proracun `prosto`. Vroci ostanejo: brez parametrov, `offset=0`, `limit=100` (tudi neveljaven limit = privzeti) in `withCoords=true` s privzetim limitom.
+// Odjemalca (iOS APIClient.swift, splet podatki.js) kliceta `GET /clubs` brez parametrov; zemljevid uporablja `/clubs/map`.
+function prostKljucKlubov(q) {
+  return !!q.city || stevilo(q.offset, 0, 100000) > 0 || stevilo(q.limit, 100, 200) !== 100;
+}
+
 // /clubs/map (I17): brez okvira en kljuc; z okvirom stevila kot nizi (JSON.stringify(Infinity) = null bi zlil +/-Infinity), nenavaden bbox mimo.
 function kljucZemljevida(surovBbox, okvir) {
   if (!surovBbox) return JSON.stringify(["clubsmap"]);
@@ -1455,7 +1467,7 @@ function kljucIskanja(surovQ, surovLimit, q, limit) {
 
 app.get("/clubs", async (req, res) => {
   try {
-    // city je prosto besedilo: loceni majhen proracun (`prosto`), da poplava mest ne izpodrine vrocih kljucev.
+    // city je prosto besedilo, offset > 0 zaporedna vrednost (#210): loceni majhen proracun (`prosto`), da poplava ne izpodrine vrocih kljucev.
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucKlubov(req.query), async () => {
     const limit  = stevilo(req.query.limit, 100, 200);
     const offset = stevilo(req.query.offset, 0, 100000);
@@ -1487,7 +1499,7 @@ app.get("/clubs", async (req, res) => {
     // Skupno stevilo v glavi, da telo ostane navaden seznam in se aplikaciji
     // ni treba spreminjati. Dekoder v Swiftu pricakuje [APIClub].
     return { status: 200, json: r.rows, glave: { "X-Total-Count": String(skupaj.rows[0].n) } };
-    }, { prosto: !!req.query.city });
+    }, { prosto: prostKljucKlubov(req.query) });
     return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
     console.error(e);
@@ -2093,6 +2105,12 @@ async function popularniDogodkiKluba(clubId, najvec = NAJVEC_POPULARNIH) {
 }
 
 // Kljuc predpomnilnika za /events (I17): samo kanonicni parametri; clubId mora biti kratek niz.
+// #210: clubId (do 20 znakov, poljubne vrednosti) ima loceni proracun `prosto` (10 % kljucev, pri 300 kljucih 30). Posledica: stran kluba
+// (/events?clubId=..) si deli te ključe z iskanjem; pri vec kot ~10 klubih hkrati (po 3 kljuci: upcoming, popular, upcoming=false) se izpodrivajo
+// med seboj in vec zahtevkov gre v bazo (vsak najvec enkrat na 3 s na klub, single-flight). Seznam brez filtra ostane vroc.
+function prostKljucDogodkov(q) {
+  return !!q.clubId;
+}
 function kljucDogodkov(q) {
   const { clubId, upcoming, popular, lite } = q;
   if (nenavadniParametri([clubId, upcoming, popular, lite], 20)) return null;
@@ -2158,7 +2176,7 @@ async function javniSeznamDogodkov(req, res) {
 
     const r = await pool.query(sql, params);
     return { status: 200, json: dodajNacinPlacila(r.rows) };
-    });
+    }, { prosto: prostKljucDogodkov(req.query) });
     return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
     console.error(e);

@@ -567,18 +567,23 @@ async function enotski() {
 
     console.log("\n# (e) Omejitev velikosti (JAVNI_PREDPOMNILNIK_KLJUCEV=20) in loceni proracun za prosto besedilo");
     const rss0 = rssMB(sA.pid);
-    for (let i = 0; i < 40; i++) await a("GET", `/clubs?offset=${i}`);
+    // Vroci kljuci za preizkus LRU: GET /events/:id za 40 kopij dogodka (vstavljeno neposredno v bazo, na koncu pobrisano).
+    // /clubs?limit=N in ?offset=N sta od #210 v proracunu prosto, zato nista primerna za ta del.
+    const kopije = (await pool.query(`INSERT INTO events (club_id, title, description, start_at, ticket_price_cents, capacity, min_age, status)
+      SELECT club_id, title || ' kopija ' || g, description, start_at, ticket_price_cents, capacity, min_age, status FROM events, generate_series(1, 40) g WHERE id = $1 RETURNING id`, [ev])).rows.map((x) => x.id);
+    assert(kopije.length === 40, "pripravljenih 40 kopij dogodka", kopije.length);
+    for (let i = 0; i < 40; i++) await a("GET", `/events/${kopije[i]}`);
     let zadetki = 0;
-    for (let i = 39; i >= 20; i--) if ((await a("GET", `/clubs?offset=${i}`)).stanje === "zadetek") zadetki++;
+    for (let i = 39; i >= 20; i--) if ((await a("GET", `/events/${kopije[i]}`)).stanje === "zadetek") zadetki++;
     assert(zadetki === 20, "po 40 razlicnih kljucih je v predpomnilniku natanko zadnjih 20 (omejitev)", zadetki);
-    r = await a("GET", "/clubs?offset=19");
+    r = await a("GET", `/events/${kopije[19]}`);
     assert(r.stanje === "zgresitev", "21. najnovejsi kljuc je izpodrinjen (LRU)", r.stanje);
     r = await a("GET", "/clubs?q=pure");
     assert(r.status === 200 && r.stanje === "izklopljen", "iskanje q se ne predpomni (gre mimo)", r.stanje);
     // city je prosto besedilo: poplava mest izpodriva samo druge proste kljuce (proracun 10 % kljucev), ne vrocih
-    await a("GET", "/clubs?offset=39");
+    await a("GET", `/events/${kopije[39]}`);
     for (let i = 0; i < 100; i++) await a("GET", `/clubs?city=mesto${i}`);
-    r = await a("GET", "/clubs?offset=39");
+    r = await a("GET", `/events/${kopije[39]}`);
     assert(r.stanje === "zadetek", "vroc kljuc preziv poplavo 100 razlicnih mest", r.stanje);
     let mest = 0;
     for (let i = 99; i >= 98; i--) if ((await a("GET", `/clubs?city=mesto${i}`)).stanje === "zadetek") mest++;
@@ -592,6 +597,7 @@ async function enotski() {
     const statusiPoplave = await Promise.all(kosi);
     assert(statusiPoplave.every((s) => s === 200), "poplava 1500 razlicnih kljucev: vsi 200");
     console.log(`  (informativno) RSS backenda A: ${rss0.toFixed(0)} -> ${rssMB(sA.pid).toFixed(0)} MB; trda omejitev je v enotskih testih (kljucev, bajtov)`);
+    await pool.query("DELETE FROM events WHERE id = ANY($1::int[])", [kopije]);
     r = await a("GET", "/clubs?q=" + "z".repeat(150));
     assert(r.status === 200 && r.stanje === "izklopljen", "predolg niz (>100 znakov) gre mimo predpomnilnika", r.stanje);
     r = await a("GET", "/clubs?q=a&q=b");
@@ -722,6 +728,36 @@ async function enotski() {
       let ostali = 0;
       for (let i = 99; i >= 90; i--) if ((await d("GET", `/search?q=iskanje${i}`)).stanje === "zadetek") ostali++;
       assert(ostali === 5, "search: od prostih kljucev je ostalo natanko zadnjih 5 (10 % od 50)", ostali);
+      // #210: offset > 0 (do 100000 vrednosti) in clubId (do 20 znakov) sta v proracunu prosto; vroci kljuci brez filtra prezivijo poplavo
+      await d("GET", "/events"); await d("GET", "/clubs"); await d("GET", "/events?upcoming=true");
+      r = await d("GET", "/clubs?offset=0");
+      assert(r.stanje === "zadetek", "#210: /clubs?offset=0 je isti kljuc kot /clubs (ostane vroc)", r.stanje);
+      for (let i = 1; i <= 100; i++) await d("GET", `/clubs?offset=${i}`);
+      assert((await d("GET", "/events")).stanje === "zadetek" && (await d("GET", "/clubs")).stanje === "zadetek" && (await d("GET", "/events?upcoming=true")).stanje === "zadetek",
+        "#210: poplava 100 razlicnih offset ne izpodrine vrocih kljucev /events in /clubs");
+      let ostaliOff = 0;
+      for (let i = 100; i >= 91; i--) if ((await d("GET", `/clubs?offset=${i}`)).stanje === "zadetek") ostaliOff++;
+      assert(ostaliOff === 5, "#210: od offset kljucev je ostalo natanko zadnjih 5 (10 % od 50)", ostaliOff);
+      // limit != 100 (1..200, krat withCoords) je tudi zaporedna vrednost: loceni proracun; limit=100 in neveljaven limit sta isti kljuc kot brez
+      await d("GET", "/clubs?withCoords=true");
+      r = await d("GET", "/clubs?limit=100");
+      assert(r.stanje === "zadetek", "#210: /clubs?limit=100 je isti kljuc kot /clubs (vroc)", r.stanje);
+      r = await d("GET", "/clubs?limit=abc");
+      assert(r.stanje === "zadetek", "#210: /clubs?limit=abc (neveljaven = privzeti) je isti kljuc kot /clubs", r.stanje);
+      for (let i = 1; i <= 200; i++) await d("GET", `/clubs?limit=${i === 100 ? 201 : i}${i % 2 ? "&withCoords=true" : ""}`);
+      assert((await d("GET", "/clubs")).stanje === "zadetek" && (await d("GET", "/clubs?withCoords=true")).stanje === "zadetek" && (await d("GET", "/events")).stanje === "zadetek",
+        "#210: poplava limit=1..200 (z withCoords) ne izpodrine /clubs, /clubs?withCoords=true in /events");
+      let ostaliLim = 0;
+      for (let i = 200; i >= 191; i--) if ((await d("GET", `/clubs?limit=${i}${i % 2 ? "&withCoords=true" : ""}`)).stanje === "zadetek") ostaliLim++;
+      assert(ostaliLim === 5, "#210: od limit kljucev je ostalo natanko zadnjih 5 (10 % od 50)", ostaliLim);
+      for (let i = 1; i <= 100; i++) await d("GET", `/events?clubId=${i}0000`);
+      assert((await d("GET", "/events")).stanje === "zadetek" && (await d("GET", "/clubs")).stanje === "zadetek" && (await d("GET", "/events?upcoming=true")).stanje === "zadetek",
+        "#210: poplava 100 razlicnih clubId ne izpodrine vrocih kljucev /events in /clubs");
+      let ostaliClub = 0;
+      for (let i = 100; i >= 91; i--) if ((await d("GET", `/events?clubId=${i}0000`)).stanje === "zadetek") ostaliClub++;
+      assert(ostaliClub === 5, "#210: od clubId kljucev je ostalo natanko zadnjih 5 (10 % od 50)", ostaliClub);
+      r = await d("GET", "/events?clubId=1&upcoming=true");
+      assert(r.status === 200 && Array.isArray(r.body), "#210: stran kluba (clubId) se normalno odzove", r.status);
       assert(!/Unhandled|TypeError|ReferenceError/.test(sD.log), "dnevnik D brez neujetih napak", sD.log.slice(-400));
     }
 
