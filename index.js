@@ -1439,6 +1439,20 @@ function kljucKlubov(q) {
   return JSON.stringify(["clubs", stevilo(limit, 100, 200), stevilo(offset, 0, 100000), city || null, withCoords === "true"]);
 }
 
+// /clubs/map (I17): brez okvira en kljuc; z okvirom stevila kot nizi (JSON.stringify(Infinity) = null bi zlil +/-Infinity), nenavaden bbox mimo.
+function kljucZemljevida(surovBbox, okvir) {
+  if (!surovBbox) return JSON.stringify(["clubsmap"]);
+  if (!okvir || typeof surovBbox !== "string" || surovBbox.length > 100) return null;
+  return JSON.stringify(["clubsmap", okvir.map(String)]);
+}
+// /search (I17): q je prosto besedilo -> loceni proracun (`prosto`) v klicalcu; predolg niz ali nenavaden tip gre mimo.
+// Ključ je TOCEN (obrezan) niz, ne male crke: odgovor vsebuje `query` natanko kot ga je poslal odjemalec.
+function kljucIskanja(surovQ, surovLimit, q, limit) {
+  if (typeof surovQ !== "string" || q.length > 40) return null;
+  if (nenavadniParametri([surovLimit], 10)) return null;
+  return JSON.stringify(["search", q, limit]);
+}
+
 app.get("/clubs", async (req, res) => {
   try {
     // city je prosto besedilo: loceni majhen proracun (`prosto`), da poplava mest ne izpodrine vrocih kljucev.
@@ -1486,26 +1500,32 @@ app.get("/clubs", async (req, res) => {
 // opisi. Ta pot vrne samo to, kar pin potrebuje.
 app.get("/clubs/map", async (req, res) => {
   try {
-    const p = [];
-    const pogoji = ["lat IS NOT NULL", "lng IS NOT NULL", "hidden = FALSE"];
-
     // Neobvezni okvir zemljevida: minLat,minLng,maxLat,maxLng
     const b = req.query.bbox;
+    let okvir = null;
     if (b) {
       const d = String(b).split(",").map(Number);
       if (d.length !== 4 || d.some(Number.isNaN)) {
         return res.status(400).send("bbox must be minLat,minLng,maxLat,maxLng.");
       }
-      p.push(d[0], d[2], d[1], d[3]);
-      pogoji.push("lat BETWEEN $1 AND $2", "lng BETWEEN $3 AND $4");
+      okvir = d;
     }
-
-    const r = await pool.query(
-      `SELECT id, name, lat, lng, logo_url, city, min_age, genres
-       FROM clubs WHERE ${pogoji.join(" AND ")} ORDER BY id LIMIT 1000`,
-      p
-    );
-    res.json(r.rows);
+    // Odgovor ne zavisi od uporabnika (I17). Okvir ima loceni proracun (`prosto`): premikanje zemljevida da vsakic nov kljuc.
+    const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucZemljevida(b, okvir), async () => {
+      const p = [];
+      const pogoji = ["lat IS NOT NULL", "lng IS NOT NULL", "hidden = FALSE"];
+      if (okvir) {
+        p.push(okvir[0], okvir[2], okvir[1], okvir[3]);
+        pogoji.push("lat BETWEEN $1 AND $2", "lng BETWEEN $3 AND $4");
+      }
+      const r = await pool.query(
+        `SELECT id, name, lat, lng, logo_url, city, min_age, genres
+         FROM clubs WHERE ${pogoji.join(" AND ")} ORDER BY id LIMIT 1000`,
+        p
+      );
+      return { status: 200, json: r.rows };
+    }, { prosto: !!okvir });
+    return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
     console.error(e);
     res.status(500).send("Server error.");
@@ -2687,6 +2707,8 @@ app.get("/search", async (req, res) => {
     const limit = stevilo(req.query.limit, 20, 50);
     const vzorec = `%${q}%`;
 
+    // Odgovor ne zavisi od uporabnika (I17); iskalni nizi so prosto besedilo -> loceni proracun (`prosto`).
+    const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucIskanja(req.query.q, req.query.limit, q, limit), async () => {
     const [klubi, dogodki] = await Promise.all([
       pool.query(
         `SELECT id, name, city, logo_url, lat, lng, genres
@@ -2709,12 +2731,14 @@ app.get("/search", async (req, res) => {
       ),
     ]);
 
-    return res.status(200).json({
+    return { status: 200, json: {
       query: q,
       clubs: klubi.rows,
       events: dogodki.rows,
       total: klubi.rows.length + dogodki.rows.length,
-    });
+    } };
+    }, { prosto: true });
+    return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
     console.error(e);
     return res.status(500).send("Server error.");
