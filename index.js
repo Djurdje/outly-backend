@@ -525,13 +525,17 @@ const POLJA_SEJE = "id, email, username, role";
 // pošlje ob registraciji), sicer iz dela e-naslova pred @. Pravila kot pri
 // PATCH /me: 3–20 znakov, črke/številke/podčrtaj, in ne na seznamu prepovedanih imen
 // (prepovedana_imena.js). Tu ne moremo vrniti 400 (vrstica nastane med overitvijo seje,
-// uporabnik bi ostal brez računa), zato prepovedano ime tiho nadomesti del e-naslova,
-// sicer »user«; uporabnik ga zamenja prek PATCH /me. Isti filter velja za del e-naslova
-// (»admin@…« ne postane »admin«).
+// uporabnik bi ostal brez računa), zato prepovedano ime iz metapodatkov tiho nadomesti »user«
+// (NE del e-naslova: ta bi postal javno ime, ki si ga uporabnik ni izbral); uporabnik ga zamenja
+// prek PATCH /me. Manjkajoče ali neveljavno ime: del e-naslova; isti filter velja tudi zanj
+// (»admin@…« ne postane »admin«), sicer »user«.
 function predlogImena(p) {
   const meta = p.user_metadata || {};
   const zeljeno = typeof meta.username === "string" ? meta.username.trim() : "";
-  if (/^[a-zA-Z0-9_]{3,20}$/.test(zeljeno) && !jePrepovedanoIme(zeljeno)) return zeljeno;
+  if (/^[a-zA-Z0-9_]{3,20}$/.test(zeljeno)) {
+    if (!jePrepovedanoIme(zeljeno)) return zeljeno;
+    return "user";   // izbrano ime je prepovedano: del e-naslova bi postal javno ime brez obvestila
+  }
   const osnova = String(p.email).split("@")[0].replace(/[^a-zA-Z0-9_]/g, "").slice(0, 16);
   return (osnova.length >= 3 && !jePrepovedanoIme(osnova) ? osnova : "user") ;
 }

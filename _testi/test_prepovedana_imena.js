@@ -65,6 +65,14 @@ const ZAVRNJENA = [
   // zavajajoca imena (izdajanje za Outly)
   "admin", "Admin", "ADMIN", "adm1n", "admin123", "administrator", "the_admin", "outly", "Outly", "0utly", "outly_team", "outlysupport",
   "support", "Support", "official", "moderator", "mod", "staff", "helpdesk", "security", "verified", "ceo",
+  // porn: koren ostane prepovedan (S1)
+  "porn", "Porn", "porno", "pornhub", "xporn", "porn_star",
+  // S2: 3+ ponovitev crke v korenu z dvojno crko
+  "niggger", "nigggga", "pusssy", "asssshole", "assss", "fagggot", "pisss", "fuuuck", "bitchhh", "shhhit", "n1ggger",
+  // N3: dodani koreni
+  "kurc", "kurec", "Kurec", "fuk", "phuck", "fvck", "fcuk", "peder", "buzerant", "buzerant_99",
+  // N4: zavajajoce kot administrator; N1: odlocitev menedzerja (Ciganovic ostane zavrnjen)
+  "Administracija", "Ciganovic",
 ];
 const SPREJETA = [
   // vsakdanja imena
@@ -73,10 +81,19 @@ const SPREJETA = [
   // »Scunthorpe«: kratek koren kot del navadne besede
   "Scunthorpe", "scunthorpe_fan", "Penistone", "classic", "Assassin", "passage", "bassist", "grape", "therapist", "analyst", "analog", "canal",
   "cocktail", "peacock", "Hancock", "Dickens", "Dickinson", "Essex", "Sussex", "Middlesex", "sextant", "Cumberland", "document", "rapeseed",
-  "Nazir", "spicy", "Pakistan", "raccoon", "Wankel", "Slutsky", "Niggard", "Shiitake", "badminton", "badminton_ana", "administracija",
+  "Nazir", "spicy", "Pakistan", "raccoon", "Wankel", "Slutsky", "Niggard", "Shiitake", "badminton", "badminton_ana", 
   "retardant", "debilitated", "Pickard", "supporter", "unofficial", "modern", "modem", "stafford", "titanic", "title", "assist",
+  // S1: slovenske besede s korenom »porn«
+  "upornik", "uporni_jan", "naporno", "naporna", "sporno", "sporna", "oporni", "opornik",
+  // N1: lazni zadetki
+  "Kurban", "kurban_bajram", "Slutnja", "slutim", "Snigger", "Kshitij", "Yoshitaka", "Ashita", "mishit", "push_it", "this_hit", "Tit",
+  // S2: navadna imena z dvojno crko
+  "Anna", "Matteo", "Ziggy", "Jessica", "Grassi", "Nigeria", "Hannah", "Bobbi",
+  // N3: ne zadene obicajnih imen
+  "Fukushima", "Kurcic", "Pedersen", "Peders", "Buzet",
 ];
 
+let srv = null;   // proces backenda (da ga ob izjemi ali neuspelem zagonu ubijemo)
 let F = null;
 try { F = require("../prepovedana_imena"); } catch (e) { console.log("  (modul prepovedana_imena.js ne obstaja)"); }
 
@@ -96,9 +113,11 @@ try { F = require("../prepovedana_imena"); } catch (e) { console.log("  (modul p
   await pool.query("TRUNCATE omejitve, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
 
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
+  srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
-  for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
+  let vstal = false;
+  for (let i = 0; i < 50 && !vstal; i++) { try { await fetch(BASE + "/"); vstal = true; } catch { await new Promise(r => setTimeout(r, 100)); } }
+  if (!vstal) { console.error("backend ni vstal v 5 s\n" + log); srv.kill(); process.exit(1); }
 
   const dbIme = async (email) => (await pool.query("SELECT username FROM users WHERE email=$1", [email])).rows[0]?.username;
 
@@ -154,12 +173,16 @@ try { F = require("../prepovedana_imena"); } catch (e) { console.log("  (modul p
 
   console.log("\n# Prvi klic (user_metadata.username -> nova vrstica)");
   // Aplikacija ime pošlje Supabasu ob registraciji; backend vrstico ustvari ob prvem klicu. Prepovedano ime tam ne more dati 400
-  // (uporabnik bi ostal brez seje), zato velja nadomestno ime: del e-naslova, sicer »user«.
+  // (uporabnik bi ostal brez seje), zato velja nadomestno ime »user« (ob prepovedanem imenu iz metapodatkov), sicer del e-naslova.
   const prvi = async (email, n, ime) => { const t = zeton(email, uuid(n), ime); const x = await api("GET", "/me", t); return { x, ime: await dbIme(email) }; };
   let p = await prvi("marko@outly.si", 10, "Scunthorpe");
   assert(p.x.status === 200 && p.ime === "Scunthorpe", "primerno ime iz metapodatkov se uporabi", p);
   p = await prvi("marko2@outly.si", 11, "fuck");
-  assert(p.x.status === 200 && p.ime === "marko2", "prepovedano ime iz metapodatkov: vrstica nastane (200), ime = del e-naslova", p);
+  assert(p.x.status === 200 && /^user(_\d{4})?$/.test(p.ime), "prepovedano ime iz metapodatkov: vrstica nastane (200), ime = »user« (del e-naslova NE, postal bi javno ime brez obvestila)", p);
+  p = await prvi("sandra@outly.si", 16, "n1gger");
+  assert(p.x.status === 200 && /^user(_\d{4})?$/.test(p.ime), "prepovedano ime iz metapodatkov, e-naslov primeren -> vseeno »user«", p);
+  p = await prvi("zan@outly.si", 17, "ab");
+  assert(p.x.status === 200 && p.ime === "zan", "neveljavno ime (prekratko): se vedno del e-naslova", p);
   p = await prvi("jebem@outly.si", 12, "k_u_r_a_c");
   assert(p.x.status === 200 && /^user(_\d{4})?$/.test(p.ime), "prepovedano ime IN prepovedan del e-naslova -> »user«", p);
   p = await prvi("admin@outly.si", 13, undefined);
@@ -182,4 +205,4 @@ try { F = require("../prepovedana_imena"); } catch (e) { console.log("  (modul p
   if (/error|Error/.test(log) && !/Resend/.test(log)) { console.log("\n--- log streznika ---\n" + log); }
   srv.kill(); jwksServer.close(); await pool.end();
   process.exit(fail ? 1 : 0);
-})().catch(e => { console.error(e); process.exit(1); });
+})().catch(e => { console.error(e); try { if (srv) srv.kill(); } catch (_) {} process.exit(1); });

@@ -6,8 +6,8 @@
  *
  * Namen je ujeti OČITNO, ne cenzurirati. Zato je seznam kratek, primerjava pa previdna:
  *   - ime se normalizira: male črke, brez diakritike, `_` in nepomenjene števke odpadejo, števke namesto črk se
- *     preslikajo (0->o 1->i 3->e 4->a 5->s 7->t), ponovitve 3+ iste črke se skrčijo (»fuuuck«), dvojni samoglasniki
- *     se skrčijo (»fuuck«, samo za podnize);
+ *     preslikajo (0->o 1->i 3->e 4->a 5->s 7->t), ponovitve 3+ iste črke se skrčijo na 1 IN na 2 (»fuuuck« -> fuck, »niggger« -> nigger; dvojna črka v korenu ostane
+ *     ujeta), dvojni samoglasniki se skrčijo (»fuuck«, samo za podnize);
  *   - PODNIZ: koren (>= 4 črke) je prepovedan kjerkoli v imenu (»bigfucker«);
  *   - CELO: kratek koren (<= 3 črke) ali dvoumen koren je prepoveden samo, če je CELO ime (po normalizaciji, tudi
  *     brez števk na začetku/koncu: »ass69«). Tako »classic«, »passage«, »Hancock«, »Dickens«, »Sussex« ostanejo;
@@ -24,13 +24,13 @@
 const PODNIZ = [
   // angleško
   "fuck", "shit", "bitch", "cunt", "asshole", "arsehole", "dickhead", "pussy", "whore", "slut", "wanker", "bollocks",
-  "cocksuck", "blowjob", "handjob", "jerkoff", "cumshot", "dildo", "porn", "nigger", "nigga", "faggot", "tranny",
+  "cocksuck", "blowjob", "handjob", "jerkoff", "cumshot", "dildo", "porn", "phuck", "fvck", "fcuk", "nigger", "nigga", "faggot", "tranny",
   "shemale", "wetback", "towelhead", "raghead", "hitler", "siegheil", "whitepower", "pedophile", "paedophile",
   "molester", "killyourself", "incest",
   // slovensko, hrvaško, srbsko
   "kurac", "kurca", "kurcina", "kurcev", "kurva", "kurvi", "kurvin", "kurba", "pizd", "jebem", "jebes", "jebi",
   "jebat", "jebac", "jebote", "govn", "sranje", "kreten", "idiot", "cigan", "cefur", "balija", "siptar",
-  "pederast", "pedofil",
+  "pederast", "pedofil", "buzerant",
   // zavajajoča imena (izdajanje za Outly ali njegovo ekipo)
   "admin", "administrator", "outly", "moderator", "helpdesk",
 ];
@@ -38,23 +38,30 @@ const PODNIZ = [
 // Prepovedano samo kot CELO ime (kratki ali dvoumni koreni).
 const CELO = [
   // angleško
-  "ass", "arse", "anus", "anal", "cum", "sex", "tit", "tits", "dick", "cock", "penis", "vagina", "piss", "twat", "wank",
+  "ass", "arse", "anus", "anal", "cum", "sex", "tits", "fuk", "dick", "cock", "penis", "vagina", "piss", "twat", "wank",
   "fag", "fags", "kike", "spic", "chink", "gook", "coon", "paki", "beaner", "retard", "retarded", "rape", "rapes",
   "rapist", "nazi", "nazis", "kkk", "kys", "pedo", "paedo",
   // slovensko, hrvaško, srbsko
-  "picka", "debil",
+  "picka", "debil", "kurc", "kurec", "peder",
   // zavajajoča imena
   "support", "official", "mod", "mods", "staff", "team", "help", "security", "system", "verified", "root", "ceo",
 ];
 
 // Nedolžne besede, ki vsebujejo koren iz PODNIZ; izrežejo se pred iskanjem.
 const SPREJETO = [
-  "scunthorpe", "penistone", "badminton", "padmini", "administrac", "outlying", "pussycat", "slutsky", "niggard", "shiitake",
+  "scunthorpe", "penistone", "badminton", "padmini", "outlying", "pussycat", "slutsky", "niggard", "shiitake",
+  // koren »porn« v slovenskih besedah: upornik, naporno, sporno, oporni (porn, porno, pornhub, xporn ostanejo prepovedani)
+  "uporn", "naporn", "sporn", "oporn",
+  // »kurba« v »Kurban Bajram«; »slut« v »slutnja«, »slutim«; »nigger« v »snigger«
+  "kurban", "slutn", "slutim", "snigger",
+  // »shit« v tujih imenih in besedah: Kshitij, Yoshitaka, Ashita, mishit, push it, this hit
+  "kshitij", "yoshitaka", "ashita", "mishit", "pushit", "thishit",
 ];
 
 const LEET = { 0: "o", 1: "i", 3: "e", 4: "a", 5: "s", 7: "t" };
 
 const zdruziPonovitve = (s) => s.replace(/(.)\1{2,}/g, "$1");        // fuuuck -> fuck
+const zdruziNaDve = (s) => s.replace(/(.)\1{2,}/g, "$1$1");           // niggger -> nigger (koren z dvojno črko)
 const zdruziSamoglasnike = (s) => s.replace(/([aeiou])\1+/g, "$1");   // fuuck -> fuck
 
 function osnova(ime) {
@@ -69,7 +76,8 @@ function razlicice(ime) {
   const A = o.replace(/[0-9]/g, leet).replace(/[^a-z]/g, "");            // števke kot črke
   const B = o.replace(/[^a-z]/g, "");                                     // števke odpadejo
   const C = o.replace(/^[0-9_]+|[0-9_]+$/g, "").replace(/[0-9]/g, leet).replace(/[^a-z]/g, "");   // brez števk na robu: »nazi_1488«
-  const celo = [...new Set([A, B, C].map(zdruziPonovitve))];
+  const osnovne = [A, B, C];
+  const celo = [...new Set([...osnovne.map(zdruziPonovitve), ...osnovne.map(zdruziNaDve)])];
   const podniz = [...new Set([...celo, ...celo.map(zdruziSamoglasnike)])];
   return { celo, podniz };
 }
