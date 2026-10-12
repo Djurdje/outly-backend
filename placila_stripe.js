@@ -146,8 +146,20 @@ async function zakljuci(c, seja) {
   }
   if (o.status !== "pending") {
     if (!["paid", "partially_refunded", "refunded"].includes(o.status)) {
-      // Placilo za ze preklicano narocilo (zaloga je bila sproscena). Ne vknjizimo ga samodejno: lahko bi presegli zalogo.
-      console.error(`[stripe] POZOR: placilo za neaktivno narocilo ${o.public_ref} (stanje ${o.status}, seja ${seja.id}) - vrni rocno v Stripu.`);
+      // Placilo za ze preklicano/neuspelo narocilo (zaloga je bila sproscena). Ne vknjizimo ga (lahko bi presegli zalogo, vstopnic ni): kupec dobi VSE nazaj
+      // po isti poti kot odpoved dogodka (vracila_stripe.js), razlog `inactive_order` (nasa napaka: Stripovo pristojbino nosi Outly, provizija se vrne, #190).
+      // Vrstica gre v vrsto v ISTI transakciji kot zapis webhooka (idempotentno: UNIQUE (order_id, razlog)); obdelovalec jo opravi v ozadju.
+      const pi = typeof seja.payment_intent === "string" ? seja.payment_intent : (seja.payment_intent && seja.payment_intent.id) || null;
+      const znesek = Number.isInteger(seja.amount_total) ? seja.amount_total : 0;
+      if (pi && znesek > 0 && ["cancelled", "failed"].includes(o.status)) {
+        const v = await c.query(
+          `INSERT INTO vracila (order_id, event_id, razlog, znesek_cents, payment_intent_id, checkout_session_id, stripe_livemode)
+           VALUES ($1, $2, 'inactive_order', $3, $4, $5, $6) ON CONFLICT (order_id, razlog) DO NOTHING RETURNING id`,
+          [o.id, o.event_id, znesek, pi, seja.id, typeof seja.livemode === "boolean" ? seja.livemode : null]);
+        console.error(`[stripe] POZOR: placilo za neaktivno narocilo ${o.public_ref} (stanje ${o.status}, seja ${seja.id}): ${v.rows.length ? "vracilo v vrsti (samodejno)" : "vracilo je ze v vrsti"}.`);
+      } else {
+        console.error(`[stripe] POZOR: placilo za neaktivno narocilo ${o.public_ref} (stanje ${o.status}, seja ${seja.id}) - vrni rocno v Stripu.`);
+      }
     }
     return null;
   }
@@ -202,20 +214,58 @@ async function posodobiKlub(c, racun) {
     [racun.id, !!racun.charges_enabled, !!racun.payouts_enabled, !!racun.details_submitted, jeLive()]);
 }
 
+// Stanje narocila po vracilu: refunded_cents (nikoli navzdol), stanje, ob polnem vracilu vstopnice `refunded`. Ena funkcija za webhook `charge.refunded`
+// (Stripova nadzorna plosca ali nase vracilo) IN obdelovalec vracil (vracila_stripe.js): isto stanje, idempotentno (drugic ne spremeni nicesar).
+// o: { id, public_ref, total_cents, refunded_cents, status } (vrstica ze zaklenjena); vrnjenoCents: skupaj vrnjeno po Stripu (absolutno, ne prirastek).
+async function uveljaviVracilo(c, o, vrnjenoCents, chargeId) {
+  const vrnjeno = Math.min(o.total_cents, Math.max(o.refunded_cents || 0, Number(vrnjenoCents) || 0));
+  const polno = vrnjeno >= o.total_cents;
+  const stanje = polno ? "refunded" : (vrnjeno > 0 ? "partially_refunded" : o.status);
+  await c.query("UPDATE orders SET refunded_cents = $2, status = $3, stripe_charge_id = COALESCE(stripe_charge_id, $4) WHERE id = $1",
+    [o.id, vrnjeno, stanje, chargeId || null]);
+  if (polno) await c.query("UPDATE tickets SET status = 'refunded' WHERE order_id = $1 AND status = 'valid'", [o.id]);
+  return { vrnjeno, polno, stanje };
+}
+
 // Vracilo (iz Stripove nadzorne plosce ali API-ja): refunded_cents + stanje; ob polnem vracilu vstopnice `refunded`.
 async function vracilo(c, charge) {
   const pi = typeof charge.payment_intent === "string" ? charge.payment_intent : (charge.payment_intent && charge.payment_intent.id);
   if (!pi) return;
-  const r = await c.query("SELECT id, public_ref, total_cents, status FROM orders WHERE stripe_payment_intent_id = $1 FOR UPDATE", [pi]);
+  const r = await c.query("SELECT id, public_ref, total_cents, refunded_cents, status FROM orders WHERE stripe_payment_intent_id = $1 FOR UPDATE", [pi]);
   if (!r.rows.length) return;
   const o = r.rows[0];
   if (!["paid", "partially_refunded", "refunded"].includes(o.status)) return;
-  const vrnjeno = Math.min(o.total_cents, Math.max(0, Number(charge.amount_refunded) || 0));
-  const polno = vrnjeno >= o.total_cents;
-  await c.query("UPDATE orders SET refunded_cents = $2, status = $3, stripe_charge_id = COALESCE(stripe_charge_id, $4) WHERE id = $1",
-    [o.id, vrnjeno, polno ? "refunded" : (vrnjeno > 0 ? "partially_refunded" : o.status), charge.id]);
-  if (polno) await c.query("UPDATE tickets SET status = 'refunded' WHERE order_id = $1 AND status = 'valid'", [o.id]);
-  console.log(`[stripe] vracilo: narocilo ${o.public_ref}, ${vrnjeno} c${polno ? " (polno)" : ""}`);
+  const u = await uveljaviVracilo(c, o, Number(charge.amount_refunded) || 0, charge.id);
+  console.log(`[stripe] vracilo: narocilo ${o.public_ref}, ${u.vrnjeno} c${u.polno ? " (polno)" : ""}`);
+}
+
+// Spor (chargeback, #190): SAMO zapis stanja v `spori` in alarm. Denarja ne premika, vstopnice ne razveljavi (izid izgubljenega spora ni odlocen, Martin).
+// Objekt je svez iz Stripa (svezObjekt), zato zaporedje dogodkov (created/updated/closed) ni pomembno: vedno zapisemo trenutno stanje.
+// Narocilo najdemo po PaymentIntentu ali naboju (charge); spor brez narocila se zapise (order_id NULL) in sproži alarm.
+const SPOR_ZAPRT = ["won", "lost", "warning_closed"];
+async function spor(c, dp) {
+  const idOd = (v) => (typeof v === "string" ? v : (v && v.id) || null);
+  const pi = idOd(dp.payment_intent), ch = idOd(dp.charge);
+  let n = null;
+  if (pi) n = (await c.query("SELECT id, public_ref FROM orders WHERE stripe_payment_intent_id = $1", [pi])).rows[0] || null;
+  if (!n && ch) n = (await c.query("SELECT id, public_ref FROM orders WHERE stripe_charge_id = $1", [ch])).rows[0] || null;
+  const zaprt = SPOR_ZAPRT.includes(dp.status);
+  const rok = dp.evidence_details && Number.isInteger(dp.evidence_details.due_by) ? new Date(dp.evidence_details.due_by * 1000) : null;
+  const ustvarjen = Number.isInteger(dp.created) ? new Date(dp.created * 1000) : new Date();
+  const znesek = Number.isInteger(dp.amount) && dp.amount >= 0 ? dp.amount : 0;
+  const prej = (await c.query("SELECT stanje FROM spori WHERE id = $1", [dp.id])).rows[0];
+  await c.query(
+    `INSERT INTO spori (id, order_id, payment_intent_id, charge_id, stanje, razlog, znesek_cents, valuta, rok_dokazov_at, ustvarjen_at, zaprt_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 THEN NOW() END)
+     ON CONFLICT (id) DO UPDATE SET stanje = EXCLUDED.stanje, razlog = EXCLUDED.razlog, order_id = COALESCE(spori.order_id, EXCLUDED.order_id),
+            rok_dokazov_at = EXCLUDED.rok_dokazov_at, zaprt_at = COALESCE(spori.zaprt_at, EXCLUDED.zaprt_at), posodobljen_at = NOW()`,
+    [dp.id, n ? n.id : null, pi, ch, String(dp.status || "unknown").slice(0, 40), dp.reason ? String(dp.reason).slice(0, 60) : null, znesek,
+     dp.currency ? String(dp.currency).toUpperCase().slice(0, 3) : null, rok, ustvarjen, zaprt]);
+  const kaj = `spor ${dp.id} (${dp.reason || "?"}) ${znesek} c, stanje ${dp.status}, narocilo ${n ? n.public_ref : "NEZNANO"}`;
+  if (!n) console.error(`[spori] POZOR: ${kaj} - spora ni mogoce povezati z narocilom, preveri v Stripu. Denar ni premaknjen.`);
+  else if (!prej) console.error(`[spori] POZOR: nov ${kaj}. Denar ni premaknjen, vstopnica ostane veljavna; lastnik kluba je obvescen. Rok za dokaze: ${rok ? rok.toISOString() : "?"}.`);
+  else if (zaprt) console.error(`[spori] POZOR: spor zaprt: ${kaj}. Denar ni premaknjen (izgubljen spor: odloci Martin).`);
+  else console.log(`[spori] posodobljen ${kaj}`);
 }
 
 // Objekt dogodka preberemo SVEZ iz Stripa (pripeta API razlicica): oblika webhooka je odvisna od razlicice endpointa v
@@ -226,6 +276,7 @@ async function svezObjekt(s, d) {
   if (d.type.startsWith("checkout.session.")) return s.checkout.sessions.retrieve(o.id);
   if (d.type === "charge.refunded") return s.charges.retrieve(o.id);
   if (d.type === "account.updated") return s.accounts.retrieve(o.id);
+  if (d.type.startsWith("charge.dispute.")) return s.disputes.retrieve(o.id);
   return o;
 }
 
@@ -241,6 +292,7 @@ async function obdelajDogodek(c, d, o) {
     case "checkout.session.async_payment_failed": await prekini(c, o, "failed"); break;
     case "account.updated": await posodobiKlub(c, o); break;
     case "charge.refunded": await vracilo(c, o); break;
+    case "charge.dispute.created": case "charge.dispute.updated": case "charge.dispute.closed": await spor(c, o); break;
     default: break;   // drugi dogodki: samo zabelezeni
   }
   return null;
@@ -248,7 +300,7 @@ async function obdelajDogodek(c, d, o) {
 
 // naPlacano(idNarocila): neobvezen povratni klic PO COMMIT-u, ko narocilo postane placano (webhook ali pospravljalec). Njegova napaka
 // ne sme podreti webhooka (Stripe bi ponavljal) ne pospravljalca; klicatelj jo ujame sam, tu je se varovalka.
-function ustvari({ pool, naPlacano }) {
+function ustvari({ pool, naPlacano, naSporu }) {
   const poPlacilu = (id) => {
     if (!id || !naPlacano) return;
     try { Promise.resolve(naPlacano(id)).catch((e) => console.error("[stripe] naPlacano:", e && e.message)); }
@@ -287,6 +339,11 @@ function ustvari({ pool, naPlacano }) {
       const placano = await obdelajDogodek(c, d, objekt);
       await c.query("COMMIT");
       poPlacilu(placano);
+      // Spor: obvestilo lastniku kluba PO COMMIT-u (napaka maila ne podre webhooka; neposlano ponovi obdelovalec).
+      if (naSporu && d.type.startsWith("charge.dispute.") && objekt && objekt.id) {
+        try { Promise.resolve(naSporu(objekt.id)).catch((e) => console.error("[spori] obvestilo:", e && e.message)); }
+        catch (e) { console.error("[spori] obvestilo:", e && e.message); }
+      }
       return res.json({ received: true });
     } catch (e) {
       await c.query("ROLLBACK").catch(() => {});
@@ -437,4 +494,4 @@ function ustvari({ pool, naPlacano }) {
   return { webhook, pospravi, zazeni, preveriPoteklo };
 }
 
-module.exports = { povratniNaslovi, ustvari, stripe, jeSandbox, jeLive, testniNacin, racunVNacinu, nacinPlacila, nacinPlacilaZ, javniNacin, ustvariCheckout, normalizirajLocale, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };
+module.exports = { uveljaviVracilo, povratniNaslovi, ustvari, stripe, jeSandbox, jeLive, testniNacin, racunVNacinu, nacinPlacila, nacinPlacilaZ, javniNacin, ustvariCheckout, normalizirajLocale, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };

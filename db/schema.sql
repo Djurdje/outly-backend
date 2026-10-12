@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–046, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–047, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -111,6 +111,24 @@ CREATE FUNCTION public.starost(rojstvo date) RETURNS integer
     AS $$
     SELECT CASE WHEN rojstvo IS NULL THEN NULL
                 ELSE EXTRACT(YEAR FROM AGE(CURRENT_DATE, rojstvo))::INTEGER END;
+$$;
+
+
+--
+-- Name: zabelezi_odpoved_dogodka(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.zabelezi_odpoved_dogodka() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF OLD.status IS NOT DISTINCT FROM 'cancelled' THEN RETURN NEW; END IF;   -- ze odpovedan: cas prve odpovedi ostane
+    END IF;
+    INSERT INTO odpovedi_dogodkov (event_id, odpovedan_at) VALUES (NEW.id, NOW())
+    ON CONFLICT (event_id) DO UPDATE SET odpovedan_at = EXCLUDED.odpovedan_at;
+    RETURN NEW;
+END;
 $$;
 
 
@@ -886,6 +904,23 @@ ALTER SEQUENCE public.guest_lists_id_seq OWNED BY public.guest_lists.id;
 
 
 --
+-- Name: odpovedi_dogodkov; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.odpovedi_dogodkov (
+    event_id integer NOT NULL,
+    odpovedan_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE odpovedi_dogodkov; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.odpovedi_dogodkov IS 'Kdaj je bil dogodek odpovedan (sprozilec na events, 047). Samo dogodki iz te tabele sprozijo samodejna vracila; starejsi odpovedani dogodki ne.';
+
+
+--
 -- Name: omejitve; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1132,6 +1167,40 @@ CREATE TABLE public.schema_migrations (
     odtis text NOT NULL,
     uporabljen timestamp with time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: spori; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.spori (
+    id text NOT NULL,
+    order_id bigint,
+    payment_intent_id text,
+    charge_id text,
+    stanje text NOT NULL,
+    razlog text,
+    znesek_cents integer DEFAULT 0 NOT NULL,
+    valuta character(3),
+    rok_dokazov_at timestamp with time zone,
+    ustvarjen_at timestamp with time zone DEFAULT now() NOT NULL,
+    zaprt_at timestamp with time zone,
+    posodobljen_at timestamp with time zone DEFAULT now() NOT NULL,
+    mail_odprt_poskusi smallint DEFAULT 0 NOT NULL,
+    mail_odprt_prevzeto_at timestamp with time zone,
+    mail_odprt_poslano_at timestamp with time zone,
+    mail_zaprt_poskusi smallint DEFAULT 0 NOT NULL,
+    mail_zaprt_prevzeto_at timestamp with time zone,
+    mail_zaprt_poslano_at timestamp with time zone,
+    CONSTRAINT spori_znesek_chk CHECK ((znesek_cents >= 0))
+);
+
+
+--
+-- Name: TABLE spori; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.spori IS 'Stripovi spori (chargeback) iz webhooka charge.dispute.* (047, #190): samo stanje in obvestilo; denarja ne premika, vstopnice ne razveljavi.';
 
 
 --
@@ -1460,6 +1529,68 @@ CREATE TABLE public.view_counts (
 
 
 --
+-- Name: vracila; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.vracila (
+    id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    event_id integer NOT NULL,
+    razlog text NOT NULL,
+    stanje text DEFAULT 'caka'::text NOT NULL,
+    znesek_cents integer,
+    payment_intent_id text,
+    checkout_session_id text,
+    stripe_livemode boolean,
+    stripe_vracilo_id text,
+    application_fee_id text,
+    provizija_za_vrnitev_cents integer,
+    provizija_vracilo_id text,
+    stripe_pristojbina_cents integer,
+    brez_stripa boolean DEFAULT false NOT NULL,
+    poskusi smallint DEFAULT 0 NOT NULL,
+    naslednji_poskus_at timestamp with time zone DEFAULT now() NOT NULL,
+    prevzeto_at timestamp with time zone,
+    napaka text,
+    mail_poskusi smallint DEFAULT 0 NOT NULL,
+    mail_prevzeto_at timestamp with time zone,
+    mail_poslano_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    opravljeno_at timestamp with time zone,
+    CONSTRAINT vracila_provizija_chk CHECK (((provizija_za_vrnitev_cents IS NULL) OR (provizija_za_vrnitev_cents >= 0))),
+    CONSTRAINT vracila_razlog_chk CHECK ((razlog = ANY (ARRAY['event_cancelled'::text, 'inactive_order'::text]))),
+    CONSTRAINT vracila_stanje_chk CHECK ((stanje = ANY (ARRAY['caka'::text, 'v_teku'::text, 'opravljeno'::text, 'ni_uspelo'::text, 'rocno'::text, 'preklicano'::text]))),
+    CONSTRAINT vracila_znesek_chk CHECK (((znesek_cents IS NULL) OR (znesek_cents >= 0)))
+);
+
+
+--
+-- Name: TABLE vracila; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.vracila IS 'Vrsta vracil (047, #190): odpoved dogodka in placilo za neaktivno naroceno. Obdelovalec vracila_stripe.js; Stripe reverse_transfer, idempotentni kljuc outly-vracilo-<id> (I37).';
+
+
+--
+-- Name: vracila_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.vracila_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: vracila_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.vracila_id_seq OWNED BY public.vracila.id;
+
+
+--
 -- Name: bottle_packages id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -1590,6 +1721,13 @@ ALTER TABLE ONLY public.tickets ALTER COLUMN id SET DEFAULT nextval('public.tick
 --
 
 ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+
+
+--
+-- Name: vracila id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vracila ALTER COLUMN id SET DEFAULT nextval('public.vracila_id_seq'::regclass);
 
 
 --
@@ -1761,6 +1899,14 @@ ALTER TABLE ONLY public.guest_lists
 
 
 --
+-- Name: odpovedi_dogodkov odpovedi_dogodkov_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.odpovedi_dogodkov
+    ADD CONSTRAINT odpovedi_dogodkov_pkey PRIMARY KEY (event_id);
+
+
+--
 -- Name: omejitve omejitve_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1790,6 +1936,14 @@ ALTER TABLE ONLY public.reports
 
 ALTER TABLE ONLY public.schema_migrations
     ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (datoteka);
+
+
+--
+-- Name: spori spori_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.spori
+    ADD CONSTRAINT spori_pkey PRIMARY KEY (id);
 
 
 --
@@ -1862,6 +2016,14 @@ ALTER TABLE ONLY public.user_blocks
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: vracila vracila_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vracila
+    ADD CONSTRAINT vracila_pkey PRIMARY KEY (id);
 
 
 --
@@ -2264,6 +2426,20 @@ CREATE INDEX reports_status_idx ON public.reports USING btree (status, created_a
 
 
 --
+-- Name: spori_mail_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX spori_mail_idx ON public.spori USING btree (ustvarjen_at) WHERE ((mail_odprt_poslano_at IS NULL) OR ((zaprt_at IS NOT NULL) AND (mail_zaprt_poslano_at IS NULL)));
+
+
+--
+-- Name: spori_narocilo_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX spori_narocilo_idx ON public.spori USING btree (order_id);
+
+
+--
 -- Name: table_holds_table_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2401,6 +2577,48 @@ CREATE UNIQUE INDEX users_username_lower_key ON public.users USING btree (lower(
 --
 
 CREATE UNIQUE INDEX view_counts_uniq ON public.view_counts USING btree (club_id, COALESCE(event_id, 0), day);
+
+
+--
+-- Name: vracila_caka_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX vracila_caka_idx ON public.vracila USING btree (naslednji_poskus_at) WHERE (stanje = 'caka'::text);
+
+
+--
+-- Name: vracila_dogodek_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX vracila_dogodek_idx ON public.vracila USING btree (event_id);
+
+
+--
+-- Name: vracila_mail_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX vracila_mail_idx ON public.vracila USING btree (id) WHERE ((stanje = 'opravljeno'::text) AND (razlog = 'event_cancelled'::text) AND (mail_poslano_at IS NULL));
+
+
+--
+-- Name: vracila_narocilo_razlog_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX vracila_narocilo_razlog_key ON public.vracila USING btree (order_id, razlog);
+
+
+--
+-- Name: vracila_pozornost_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX vracila_pozornost_idx ON public.vracila USING btree (stanje, id) WHERE (stanje = ANY (ARRAY['v_teku'::text, 'ni_uspelo'::text, 'rocno'::text]));
+
+
+--
+-- Name: events events_odpoved; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER events_odpoved AFTER INSERT OR UPDATE OF status ON public.events FOR EACH ROW WHEN ((new.status = 'cancelled'::text)) EXECUTE FUNCTION public.zabelezi_odpoved_dogodka();
 
 
 --
@@ -2730,6 +2948,14 @@ ALTER TABLE ONLY public.guest_lists
 
 
 --
+-- Name: odpovedi_dogodkov odpovedi_dogodkov_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.odpovedi_dogodkov
+    ADD CONSTRAINT odpovedi_dogodkov_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE CASCADE;
+
+
+--
 -- Name: orders orders_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2791,6 +3017,14 @@ ALTER TABLE ONLY public.reports
 
 ALTER TABLE ONLY public.reports
     ADD CONSTRAINT reports_resolved_by_fkey FOREIGN KEY (resolved_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: spori spori_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.spori
+    ADD CONSTRAINT spori_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT;
 
 
 --
@@ -2935,6 +3169,22 @@ ALTER TABLE ONLY public.view_counts
 
 ALTER TABLE ONLY public.view_counts
     ADD CONSTRAINT view_counts_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE CASCADE;
+
+
+--
+-- Name: vracila vracila_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vracila
+    ADD CONSTRAINT vracila_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: vracila vracila_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vracila
+    ADD CONSTRAINT vracila_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT;
 
 
 --
