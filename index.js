@@ -1391,7 +1391,7 @@ function prodajalecZavraNakup(k, nacin, skupajCents) {
 function napakaProdajalca(e, nacin, skupajCents) {
   return prodajalecZavraNakup(e, nacin, skupajCents) ? NAPAKA_PRODAJALEC_NEPOPOLN : null;
 }
-// Razlog, zakaj je `payment_mode` kluba "unavailable" (samo GET /business/sales, lastnik; #220): "stripe_not_ready" (live, klub brez dokoncanega Stripa -> nacin "klub"),
+// Razlog, zakaj je `payment_mode` kluba "unavailable" (samo GET /business/sales, lastnik in manager; #220): "stripe_not_ready" (live, klub brez dokoncanega Stripa -> nacin "klub"),
 // "payments_not_configured" (Stripe kljuc brez webhook skrivnosti -> "nastavitve", 503), "seller_incomplete" (live, klub s Stripom, nepopolni podatki prodajalca). Sicer null.
 function razlogNerazpolozljivosti(nacin, k, najvecCents, brezplacno) {
   if (javniNacinProdajalca(nacin, k, najvecCents, brezplacno) !== "unavailable") return null;
