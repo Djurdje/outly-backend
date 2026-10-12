@@ -5721,7 +5721,7 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
       // Nacin placila TEGA kluba (#149/#191): "test" | "stripe" | "unavailable"; `mode` zgoraj je globalen (samo ali je sistem v testnem nacinu). DODANO polje.
       // #220: ob sk_live_ in nepopolnih podatkih prodajalca (I34) "unavailable" (placljiv nakup bi bil 409); znesek ni znan, zato se predpostavi placljivo.
       payment_mode: javniNacinProdajalca(nacinKluba, kp || {}, 1, false),
-      // Zakaj je "unavailable" (DODANO polje, samo lastnik): "seller_incomplete" | "stripe_not_ready" | "payments_not_configured" | null (payment_mode ni "unavailable").
+      // Zakaj je "unavailable" (DODANO polje, lastnik in manager): "seller_incomplete" | "stripe_not_ready" | "payments_not_configured" | null (payment_mode ni "unavailable").
       payment_unavailable_reason: razlogNerazpolozljivosti(nacinKluba, kp || {}, 1, false),
       fee_percent: kp && kp.commission_bps !== null ? kp.commission_bps / 100 : PROVIZIJA_ODSTOTEK,
       summary: povzetek.rows[0],
