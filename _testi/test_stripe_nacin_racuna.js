@@ -151,7 +151,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       const r = await api(BS, "POST", "/events", T.lastnik, { clubId: 1, title, startAt: cezDan, ticketPriceCents: cena, capacity: kapaciteta, minAge: 0 });
       assert(r.status === 201, `dogodek ${title}`, r.body); return r.body.id;
     };
-    const evPlac = await dogodek("Placan", 1500), evPlac2 = await dogodek("Placan 2", 1500, 20);
+    const evPlac = await dogodek("Placan", 1500), evPlac2 = await dogodek("Placan 2", 1500, 20), evGost = await dogodek("Placan gost", 1500, 10);
     const sold = async (id) => (await pool.query("SELECT sold_count FROM events WHERE id=$1", [id])).rows[0].sold_count;
     const glavaKlub = { "x-outly-club": "1" };
     const kupi = (b, tok, ev) => api(b, "POST", `/events/${ev}/orders`, tok, { quantity: 1 });
@@ -189,6 +189,11 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     const sejaSand = (await pool.query("SELECT stripe_checkout_session_id FROM orders WHERE id=$1", [oSand])).rows[0].stripe_checkout_session_id;
     assert(/^cs_test_/.test(sejaSand) && S.seje[sejaSand]._destination === "acct_sbx_old", "seja je sandbox (cs_test_) in gre na sandbox racun", sejaSand);
     assert(await sold(evPlac) === 1, "zaloga zasedena (1)");
+    // gostujoce sandbox narocilo (za sklop 6: preklic gosta ob zivem kljucu)
+    r = await gost(BS, evGost);
+    assert(r.status === 201 && r.body.mode === "stripe" && r.body.guest_token, "sandbox gost: 201 stripe, cakajoce narocilo", [r.status, r.body && r.body.mode]);
+    const zetonGost = r.body.guest_token, oGost = r.body.order.id;
+    assert(await sold(evGost) === 1, "zaloga gosta zasedena (1)");
 
     // ================================================================
     console.log("\n# 2. LIVE + sandbox racun: klub NI pripravljen (stripe_not_ready), nakup 409, brez klica Stripa");
@@ -285,6 +290,12 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(await sold(evPlac) === 0, "zaloga sproscena (sold_count 0)");
     assert(await cakajDo(async () => (await vrstica(oZiv)).status === "cancelled"), "zivo narocilo (cs_live_) gre po obicajni poti: potekla seja -> cancelled");
     assert(await sold(evPlac2) === 0, "zaloga zivega narocila sproscena");
+    // preklic gosta (POST /guest/order/cancel) za sandbox sejo ob zivem kljucu: brez klica Stripa, cancelled, zaloga prosta (prej 502)
+    S.dnevnik.length = 0;
+    r = await api(BL, "POST", "/guest/order/cancel", null, undefined, { "x-guest-token": zetonGost });
+    assert(r.status === 200 && r.body.order && r.body.order.status === "cancelled", "gost preklice sandbox narocilo ob sk_live_: 200 cancelled (ne 502)", [r.status, r.text.slice(0, 120)]);
+    assert((await vrstica(oGost)).status === "cancelled" && await sold(evGost) === 0, "baza: cancelled, zaloga sproscena");
+    assert(S.dnevnik.length === 0, "preklic gosta: brez klica Stripa", S.dnevnik.map(x => x.m + " " + x.u));
     await pocakaj(2000);   // vsaj 3 kroge pospravljalca
     assert(!S.dnevnik.some(x => x.u.includes(sejaSand)), "Stripe NIKOLI ni dobil sandbox seje z zivim kljucem (ni ponovitev)", S.dnevnik.filter(x => x.u.includes(sejaSand)).length);
     assert(!/pospravljanje narocila[^\n]*No such/.test(L.log), "dnevnik zivega backenda brez napak pospravljanja", L.log.split("\n").filter(l => /pospravljanje/.test(l)).slice(0, 2));

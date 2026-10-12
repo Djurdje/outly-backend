@@ -5056,7 +5056,10 @@ app.post("/guest/order/cancel", async (req, res) => {
     if (!k) return res.status(404).send("Order not found.");
     const nePending = () => res.status(409).json({ error: "order_not_pending", message: "Only an unpaid order can be cancelled." });
     if (k.status !== "pending") return nePending();
-    if (k.stripe_checkout_session_id) {
+    // I36 (#227): sandbox seja (cs_test_) ob zivem kljucu: Stripe je z zivim kljucem ne pozna (retrieve = 404 -> 502, gost ne bi mogel preklicati). Kot pospravljalec
+    // (placila_stripe.js preveriEno): brez klica Stripa, naslednji korak narocilo preklice in sprosti zalogo (sandbox seje v zivem ni mogoce placati ali zakljuciti).
+    const sandboxSeja = !!k.stripe_checkout_session_id && placilaStripe.jeLive() && /^cs_test_/.test(k.stripe_checkout_session_id);
+    if (k.stripe_checkout_session_id && !sandboxSeja) {
       const s = placilaStripe.stripe();
       if (!s) return res.status(503).send("Payments are not configured yet.");
       const cakaj = gostPreklicVstopi(oid);
@@ -5076,7 +5079,7 @@ app.post("/guest/order/cancel", async (req, res) => {
       if (seja.status === "complete") {
         return res.status(409).json({ error: "order_not_pending", message: "This order has just been paid. Your tickets will be ready in a moment." });
       }
-    } else if (Date.now() - new Date(k.created_at).getTime() < 60 * 1000) {
+    } else if (!k.stripe_checkout_session_id && Date.now() - new Date(k.created_at).getTime() < 60 * 1000) {
       // Checkout seja se ustvarja: preklic bi lahko ostal brez seje, ki jo kupec nato placa (placilo za preklicano narocilo).
       res.set("Retry-After", "2");
       return res.status(409).json({ error: "request_in_progress", message: "Your order is still being set up. Please try again in a moment." });
