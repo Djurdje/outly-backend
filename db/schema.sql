@@ -1192,6 +1192,17 @@ CREATE TABLE public.spori (
     mail_zaprt_poskusi smallint DEFAULT 0 NOT NULL,
     mail_zaprt_prevzeto_at timestamp with time zone,
     mail_zaprt_poslano_at timestamp with time zone,
+    povrnitev_stanje text,
+    povrnitev_poskusi smallint DEFAULT 0 NOT NULL,
+    povrnitev_naslednji_at timestamp with time zone DEFAULT now() NOT NULL,
+    povrnitev_prevzeto_at timestamp with time zone,
+    povrnitev_kljuc_gen smallint DEFAULT 0 NOT NULL,
+    povrnitev_zelena_cents integer,
+    povrnitev_cents integer,
+    pristojbina_spora_cents integer,
+    reversal_id text,
+    povrnitev_napaka text,
+    CONSTRAINT spori_povrnitev_chk CHECK (((povrnitev_stanje IS NULL) OR (povrnitev_stanje = ANY (ARRAY['caka'::text, 'v_teku'::text, 'opravljeno'::text, 'ni_uspelo'::text, 'rocno'::text])))),
     CONSTRAINT spori_znesek_chk CHECK ((znesek_cents >= 0))
 );
 
@@ -1543,6 +1554,8 @@ CREATE TABLE public.vracila (
     checkout_session_id text,
     stripe_livemode boolean,
     stripe_vracilo_id text,
+    stripe_stanje text,
+    kljuc_gen smallint DEFAULT 0 NOT NULL,
     application_fee_id text,
     provizija_za_vrnitev_cents integer,
     provizija_vracilo_id text,
@@ -1552,6 +1565,10 @@ CREATE TABLE public.vracila (
     naslednji_poskus_at timestamp with time zone DEFAULT now() NOT NULL,
     prevzeto_at timestamp with time zone,
     napaka text,
+    mail_odpoved_po_at timestamp with time zone,
+    mail_odpoved_poskusi smallint DEFAULT 0 NOT NULL,
+    mail_odpoved_prevzeto_at timestamp with time zone,
+    mail_odpoved_poslano_at timestamp with time zone,
     mail_poskusi smallint DEFAULT 0 NOT NULL,
     mail_prevzeto_at timestamp with time zone,
     mail_poslano_at timestamp with time zone,
@@ -1559,7 +1576,7 @@ CREATE TABLE public.vracila (
     opravljeno_at timestamp with time zone,
     CONSTRAINT vracila_provizija_chk CHECK (((provizija_za_vrnitev_cents IS NULL) OR (provizija_za_vrnitev_cents >= 0))),
     CONSTRAINT vracila_razlog_chk CHECK ((razlog = ANY (ARRAY['event_cancelled'::text, 'inactive_order'::text]))),
-    CONSTRAINT vracila_stanje_chk CHECK ((stanje = ANY (ARRAY['caka'::text, 'v_teku'::text, 'opravljeno'::text, 'ni_uspelo'::text, 'rocno'::text, 'preklicano'::text]))),
+    CONSTRAINT vracila_stanje_chk CHECK ((stanje = ANY (ARRAY['caka'::text, 'v_teku'::text, 'potrditev'::text, 'opravljeno'::text, 'ni_uspelo'::text, 'rocno'::text, 'preklicano'::text]))),
     CONSTRAINT vracila_znesek_chk CHECK (((znesek_cents IS NULL) OR (znesek_cents >= 0)))
 );
 
@@ -2440,6 +2457,13 @@ CREATE INDEX spori_narocilo_idx ON public.spori USING btree (order_id);
 
 
 --
+-- Name: spori_povrnitev_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX spori_povrnitev_idx ON public.spori USING btree (povrnitev_naslednji_at) WHERE (povrnitev_stanje = 'caka'::text);
+
+
+--
 -- Name: table_holds_table_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2597,7 +2621,14 @@ CREATE INDEX vracila_dogodek_idx ON public.vracila USING btree (event_id);
 -- Name: vracila_mail_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX vracila_mail_idx ON public.vracila USING btree (id) WHERE ((stanje = 'opravljeno'::text) AND (razlog = 'event_cancelled'::text) AND (mail_poslano_at IS NULL));
+CREATE INDEX vracila_mail_idx ON public.vracila USING btree (id) WHERE ((stanje = 'opravljeno'::text) AND (NOT brez_stripa) AND (mail_poslano_at IS NULL));
+
+
+--
+-- Name: vracila_mail_odpoved_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX vracila_mail_odpoved_idx ON public.vracila USING btree (id) WHERE ((razlog = 'event_cancelled'::text) AND (mail_odpoved_poslano_at IS NULL) AND (stanje <> 'preklicano'::text));
 
 
 --
@@ -2605,6 +2636,13 @@ CREATE INDEX vracila_mail_idx ON public.vracila USING btree (id) WHERE ((stanje 
 --
 
 CREATE UNIQUE INDEX vracila_narocilo_razlog_key ON public.vracila USING btree (order_id, razlog);
+
+
+--
+-- Name: vracila_potrditev_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX vracila_potrditev_idx ON public.vracila USING btree (naslednji_poskus_at) WHERE (stanje = 'potrditev'::text);
 
 
 --

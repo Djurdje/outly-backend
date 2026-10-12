@@ -239,10 +239,14 @@ async function vracilo(c, charge) {
   console.log(`[stripe] vracilo: narocilo ${o.public_ref}, ${u.vrnjeno} c${u.polno ? " (polno)" : ""}`);
 }
 
-// Spor (chargeback, #190): SAMO zapis stanja v `spori` in alarm. Denarja ne premika, vstopnice ne razveljavi (izid izgubljenega spora ni odlocen, Martin).
+// Spor (chargeback, #190): zapis stanja v `spori` in alarm. Takoj ob odprtju spora vstopnice naroceno na vratih ne veljajo vec (sken: payment_disputed, brez klica Stripa: indeksiran
+// EXISTS po `spori`); ob `won`/`warning_closed`/`prevented` spet veljajo, ob `lost` ostanejo neveljavne. Ob `lost` se v isti transakciji vrstici nastavi povrnitev_stanje='caka':
+// transfer reversal od kluba izvede obdelovalec (vracila_stripe.js, Martin 12. 10. 2026: izgubljen spor nosi klub).
 // Objekt je svez iz Stripa (svezObjekt), zato zaporedje dogodkov (created/updated/closed) ni pomembno: vedno zapisemo trenutno stanje.
 // Narocilo najdemo po PaymentIntentu ali naboju (charge); spor brez narocila se zapise (order_id NULL) in sproži alarm.
-const SPOR_ZAPRT = ["won", "lost", "warning_closed"];
+// Stripovi statusi (docs.stripe.com/api/disputes/object): warning_needs_response, warning_under_review, warning_closed, needs_response, under_review, won, lost, prevented.
+// Zaprt = won | lost | warning_closed | prevented. Vstopnice naroceno so NA VRATIH neveljavne, dokler spor ni zaprt, in za vedno ob `lost` (index.js: SQL_SPOR_ODPRT).
+const SPOR_ZAPRT = ["won", "lost", "warning_closed", "prevented"];
 async function spor(c, dp) {
   const idOd = (v) => (typeof v === "string" ? v : (v && v.id) || null);
   const pi = idOd(dp.payment_intent), ch = idOd(dp.charge);
@@ -255,16 +259,17 @@ async function spor(c, dp) {
   const znesek = Number.isInteger(dp.amount) && dp.amount >= 0 ? dp.amount : 0;
   const prej = (await c.query("SELECT stanje FROM spori WHERE id = $1", [dp.id])).rows[0];
   await c.query(
-    `INSERT INTO spori (id, order_id, payment_intent_id, charge_id, stanje, razlog, znesek_cents, valuta, rok_dokazov_at, ustvarjen_at, zaprt_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 THEN NOW() END)
+    `INSERT INTO spori (id, order_id, payment_intent_id, charge_id, stanje, razlog, znesek_cents, valuta, rok_dokazov_at, ustvarjen_at, zaprt_at, povrnitev_stanje)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 THEN NOW() END, CASE WHEN $5 = 'lost' THEN 'caka' END)
      ON CONFLICT (id) DO UPDATE SET stanje = EXCLUDED.stanje, razlog = EXCLUDED.razlog, order_id = COALESCE(spori.order_id, EXCLUDED.order_id),
-            rok_dokazov_at = EXCLUDED.rok_dokazov_at, zaprt_at = COALESCE(spori.zaprt_at, EXCLUDED.zaprt_at), posodobljen_at = NOW()`,
+            rok_dokazov_at = EXCLUDED.rok_dokazov_at, zaprt_at = COALESCE(spori.zaprt_at, EXCLUDED.zaprt_at), posodobljen_at = NOW(),
+            povrnitev_stanje = COALESCE(spori.povrnitev_stanje, EXCLUDED.povrnitev_stanje)`,
     [dp.id, n ? n.id : null, pi, ch, String(dp.status || "unknown").slice(0, 40), dp.reason ? String(dp.reason).slice(0, 60) : null, znesek,
      dp.currency ? String(dp.currency).toUpperCase().slice(0, 3) : null, rok, ustvarjen, zaprt]);
   const kaj = `spor ${dp.id} (${dp.reason || "?"}) ${znesek} c, stanje ${dp.status}, narocilo ${n ? n.public_ref : "NEZNANO"}`;
-  if (!n) console.error(`[spori] POZOR: ${kaj} - spora ni mogoce povezati z narocilom, preveri v Stripu. Denar ni premaknjen.`);
-  else if (!prej) console.error(`[spori] POZOR: nov ${kaj}. Denar ni premaknjen, vstopnica ostane veljavna; lastnik kluba je obvescen. Rok za dokaze: ${rok ? rok.toISOString() : "?"}.`);
-  else if (zaprt) console.error(`[spori] POZOR: spor zaprt: ${kaj}. Denar ni premaknjen (izgubljen spor: odloci Martin).`);
+  if (!n) console.error(`[spori] POZOR: ${kaj} - spora ni mogoce povezati z narocilom, preveri v Stripu.`);
+  else if (!prej) console.error(`[spori] POZOR: nov ${kaj}. Vstopnice naroceno na vratih NE veljajo do konca spora; lastnik kluba je obvescen. Rok za dokaze: ${rok ? rok.toISOString() : "?"}.`);
+  else if (zaprt) console.error(`[spori] POZOR: spor zaprt: ${kaj}.${dp.status === "lost" ? " Izgubljen: povrnitev od kluba (transfer reversal) je v vrsti, vstopnice ostanejo neveljavne." : " Vstopnice spet veljajo."}`);
   else console.log(`[spori] posodobljen ${kaj}`);
 }
 
@@ -277,6 +282,7 @@ async function svezObjekt(s, d) {
   if (d.type === "charge.refunded") return s.charges.retrieve(o.id);
   if (d.type === "account.updated") return s.accounts.retrieve(o.id);
   if (d.type.startsWith("charge.dispute.")) return s.disputes.retrieve(o.id);
+  if (d.type === "refund.updated" || d.type === "refund.failed" || d.type === "charge.refund.updated") return s.refunds.retrieve(o.id);
   return o;
 }
 
@@ -293,6 +299,7 @@ async function obdelajDogodek(c, d, o) {
     case "account.updated": await posodobiKlub(c, o); break;
     case "charge.refunded": await vracilo(c, o); break;
     case "charge.dispute.created": case "charge.dispute.updated": case "charge.dispute.closed": await spor(c, o); break;
+    case "refund.updated": case "refund.failed": case "charge.refund.updated": break;   // izid Stripovega vracila: po COMMIT-u (naVracilu)
     default: break;   // drugi dogodki: samo zabelezeni
   }
   return null;
@@ -300,7 +307,7 @@ async function obdelajDogodek(c, d, o) {
 
 // naPlacano(idNarocila): neobvezen povratni klic PO COMMIT-u, ko narocilo postane placano (webhook ali pospravljalec). Njegova napaka
 // ne sme podreti webhooka (Stripe bi ponavljal) ne pospravljalca; klicatelj jo ujame sam, tu je se varovalka.
-function ustvari({ pool, naPlacano, naSporu }) {
+function ustvari({ pool, naPlacano, naSporu, naVracilu }) {
   const poPlacilu = (id) => {
     if (!id || !naPlacano) return;
     try { Promise.resolve(naPlacano(id)).catch((e) => console.error("[stripe] naPlacano:", e && e.message)); }
@@ -343,6 +350,11 @@ function ustvari({ pool, naPlacano, naSporu }) {
       if (naSporu && d.type.startsWith("charge.dispute.") && objekt && objekt.id) {
         try { Promise.resolve(naSporu(objekt.id)).catch((e) => console.error("[spori] obvestilo:", e && e.message)); }
         catch (e) { console.error("[spori] obvestilo:", e && e.message); }
+      }
+      // Izid Stripovega vracila (pending -> succeeded | failed | canceled; vracila_stripe.js): po COMMIT-u, napaka ne podre webhooka.
+      if (naVracilu && ["refund.updated", "refund.failed", "charge.refund.updated"].includes(d.type) && objekt && objekt.id) {
+        try { Promise.resolve(naVracilu(objekt)).catch((e) => console.error("[vracila] webhook refund:", e && e.message)); }
+        catch (e) { console.error("[vracila] webhook refund:", e && e.message); }
       }
       return res.json({ received: true });
     } catch (e) {

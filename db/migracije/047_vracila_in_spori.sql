@@ -9,13 +9,14 @@
 --                       (en INSERT ... SELECT), obdelovalec v ozadju (vracila_stripe.js) jih po eno prevzema (FOR UPDATE SKIP LOCKED), z omejitvijo hitrosti,
 --                       ponovitvami in Stripovim idempotentnim kljucem. UNIQUE (order_id, razlog) = naroceno se zaradi istega razloga vrne najvec enkrat.
 --   razlog              'event_cancelled' (dogodek odpovedan) | 'inactive_order' (placilo za ze preklicano/neuspelo naroceno: nasa napaka, kupec dobi vse)
---   stanje              'caka' | 'v_teku' (prevzeto) | 'opravljeno' | 'ni_uspelo' (alarm, ponovi admin) | 'rocno' (zahteva cloveka: drug nacin Stripa, brez kljuca,
---                       nepricakovano stanje) | 'preklicano' (dogodek ni vec odpovedan, preden je steklo vracilo)
+--   stanje              'caka' | 'v_teku' (prevzeto) | 'potrditev' (Stripe je vracilo sprejel kot `pending`, caka na izid) | 'opravljeno' (Stripe vracilo izvedel) |
+--                       'ni_uspelo' (alarm, ponovi admin) | 'rocno' (zahteva cloveka: drug nacin Stripa, brez kljuca, nepricakovano stanje) |
+--                       'preklicano' (dogodek ni vec odpovedan, preden je steklo vracilo; ponovna odpoved vrstico vrne v `caka`)
 -- odpovedi_dogodkov     kdaj je dogodek PREJ ODPOVEDAN (sprozilec na events). Obdelovalec samodejno vraca samo za dogodke, ki so v tej tabeli:
 --                       dogodki, odpovedani pred to migracijo, NISO v njej (migracija ne dela UPDATE), zato jih nov obdelovalec ne dotakne, dokler lastnik
 --                       izrecno ne pokliche DELETE /events/:id.
--- spori                 Stripov spor (dp_...) iz webhooka charge.dispute.*. SAMO zapis stanja in obvestilo lastniku kluba; denarja ne premika, vstopnice ne razveljavi
---                       (izid izgubljenega spora ni odlocen).
+-- spori                 Stripov spor (dp_...) iz webhooka charge.dispute.*. Zapis stanja, obvestilo lastniku kluba; dokler spor ni zaprt v korist prodajalca (won/warning_closed),
+--                       vstopnice naroceno na vratih NE veljajo (payment_disputed); ob `lost` povrnitev od kluba (transfer reversal, glej spodaj).
 --
 -- Brez UPDATE/DELETE obstojecih vrstic. Novi tabeli ne spreminjata nobenega obstojecega stolpca ali poizvedbe.
 
@@ -37,6 +38,10 @@ CREATE TABLE IF NOT EXISTS vracila (
     stripe_livemode             BOOLEAN,
     -- Stripe: vracilo (re_...) in vracilo provizije (fr_...). Nastavljena, ko Stripe vracilo sprejme; ponovni poskus teh korakov ne ponovi.
     stripe_vracilo_id           TEXT,
+    -- Zadnje znano stanje Stripovega vracila (succeeded | pending | failed | canceled), iz odgovora ali webhooka refund.* / charge.refund.updated.
+    stripe_stanje               TEXT,
+    -- Generacija idempotentnega kljuca: admin `retry` jo poveca, ko je treba zamrznjene vrednosti izracunati znova (isti kljuc = isti shranjen odgovor 24 h).
+    kljuc_gen                   SMALLINT    NOT NULL DEFAULT 0,
     application_fee_id          TEXT,
     provizija_za_vrnitev_cents  INTEGER,
     provizija_vracilo_id        TEXT,
@@ -46,14 +51,19 @@ CREATE TABLE IF NOT EXISTS vracila (
     naslednji_poskus_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     prevzeto_at                 TIMESTAMPTZ,
     napaka                      TEXT,
-    -- Obvestilo kupcu (razlog event_cancelled): vzorec kot gostov mail (natanko enkrat OB USPEHU, poskusi z narascajocim premorom).
+    -- Obvestilo kupcu 1 (samo event_cancelled): »dogodek odpovedan, vracilo je na poti«; poslje obdelovalec, ko mine zamik (mail_odpoved_po_at) in je dogodek se odpovedan.
+    mail_odpoved_po_at          TIMESTAMPTZ,
+    mail_odpoved_poskusi        SMALLINT    NOT NULL DEFAULT 0,
+    mail_odpoved_prevzeto_at    TIMESTAMPTZ,
+    mail_odpoved_poslano_at     TIMESTAMPTZ,
+    -- Obvestilo kupcu 2 (event_cancelled in inactive_order, ko je Stripe vracilo IZVEDEL): »vrnili smo«. Vzorec kot gostov mail (natanko enkrat OB USPEHU, poskusi z narascajocim premorom).
     mail_poskusi                SMALLINT    NOT NULL DEFAULT 0,
     mail_prevzeto_at            TIMESTAMPTZ,
     mail_poslano_at             TIMESTAMPTZ,
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     opravljeno_at               TIMESTAMPTZ,
     CONSTRAINT vracila_razlog_chk  CHECK (razlog IN ('event_cancelled','inactive_order')),
-    CONSTRAINT vracila_stanje_chk  CHECK (stanje IN ('caka','v_teku','opravljeno','ni_uspelo','rocno','preklicano')),
+    CONSTRAINT vracila_stanje_chk  CHECK (stanje IN ('caka','v_teku','potrditev','opravljeno','ni_uspelo','rocno','preklicano')),
     CONSTRAINT vracila_znesek_chk  CHECK (znesek_cents IS NULL OR znesek_cents >= 0),
     CONSTRAINT vracila_provizija_chk CHECK (provizija_za_vrnitev_cents IS NULL OR provizija_za_vrnitev_cents >= 0)
 );
@@ -63,9 +73,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS vracila_narocilo_razlog_key ON vracila (order_
 -- Cakajoca vracila (obdelovalec) in vracila, ki zahtevajo pozornost (admin).
 CREATE INDEX IF NOT EXISTS vracila_caka_idx ON vracila (naslednji_poskus_at) WHERE stanje = 'caka';
 CREATE INDEX IF NOT EXISTS vracila_pozornost_idx ON vracila (stanje, id) WHERE stanje IN ('v_teku','ni_uspelo','rocno');
+CREATE INDEX IF NOT EXISTS vracila_potrditev_idx ON vracila (naslednji_poskus_at) WHERE stanje = 'potrditev';
 CREATE INDEX IF NOT EXISTS vracila_dogodek_idx ON vracila (event_id);
 -- Neposlana obvestila kupcem.
-CREATE INDEX IF NOT EXISTS vracila_mail_idx ON vracila (id) WHERE stanje = 'opravljeno' AND razlog = 'event_cancelled' AND mail_poslano_at IS NULL;
+CREATE INDEX IF NOT EXISTS vracila_mail_idx ON vracila (id) WHERE stanje = 'opravljeno' AND NOT brez_stripa AND mail_poslano_at IS NULL;
+CREATE INDEX IF NOT EXISTS vracila_mail_odpoved_idx ON vracila (id) WHERE razlog = 'event_cancelled' AND mail_odpoved_poslano_at IS NULL AND stanje <> 'preklicano';
 
 COMMENT ON TABLE vracila IS 'Vrsta vracil (047, #190): odpoved dogodka in placilo za neaktivno naroceno. Obdelovalec vracila_stripe.js; Stripe reverse_transfer, idempotentni kljuc outly-vracilo-<id> (I37).';
 
@@ -113,8 +125,23 @@ CREATE TABLE IF NOT EXISTS spori (
     mail_zaprt_poskusi      SMALLINT    NOT NULL DEFAULT 0,
     mail_zaprt_prevzeto_at  TIMESTAMPTZ,
     mail_zaprt_poslano_at   TIMESTAMPTZ,
-    CONSTRAINT spori_znesek_chk CHECK (znesek_cents >= 0)
+    -- Povrnitev od kluba ob IZGUBLJENEM sporu (Martin 12. 10. 2026): Stripe spor (znesek + pristojbina spora) bremeni platformo; Outly ga z transfer reversal
+    -- terja od kluba v znesku (znesek spora - provizija) + Stripova pristojbina spora, omejeno z se neobrnjenim delom transferja (razliko nosi Outly).
+    -- povrnitev_stanje NULL = ni dolgovano (spor ni izgubljen). Vrstica nosi korake in zamrznjene vrednosti kot `vracila` (idempotentni kljuc outly-spor-<id>[-g<n>]).
+    povrnitev_stanje        TEXT,                                    -- caka | v_teku | opravljeno | ni_uspelo | rocno
+    povrnitev_poskusi       SMALLINT    NOT NULL DEFAULT 0,
+    povrnitev_naslednji_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    povrnitev_prevzeto_at   TIMESTAMPTZ,
+    povrnitev_kljuc_gen     SMALLINT    NOT NULL DEFAULT 0,
+    povrnitev_zelena_cents  INTEGER,                                 -- kar bi radi terjali od kluba
+    povrnitev_cents         INTEGER,                                 -- kar je transfer reversal res vrnil (<= zelena)
+    pristojbina_spora_cents INTEGER,                                 -- Stripova pristojbina spora (iz dispute.balance_transactions)
+    reversal_id             TEXT,                                    -- Stripov trr_...
+    povrnitev_napaka        TEXT,
+    CONSTRAINT spori_znesek_chk CHECK (znesek_cents >= 0),
+    CONSTRAINT spori_povrnitev_chk CHECK (povrnitev_stanje IS NULL OR povrnitev_stanje IN ('caka','v_teku','opravljeno','ni_uspelo','rocno'))
 );
+CREATE INDEX IF NOT EXISTS spori_povrnitev_idx ON spori (povrnitev_naslednji_at) WHERE povrnitev_stanje = 'caka';
 CREATE INDEX IF NOT EXISTS spori_narocilo_idx ON spori (order_id);
 CREATE INDEX IF NOT EXISTS spori_mail_idx ON spori (ustvarjen_at) WHERE mail_odprt_poslano_at IS NULL OR (zaprt_at IS NOT NULL AND mail_zaprt_poslano_at IS NULL);
 COMMENT ON TABLE spori IS 'Stripovi spori (chargeback) iz webhooka charge.dispute.* (047, #190): samo stanje in obvestilo; denarja ne premika, vstopnice ne razveljavi.';
