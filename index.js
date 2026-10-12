@@ -540,12 +540,73 @@ function predlogImena(p) {
   return (osnova.length >= 3 && !jePrepovedanoIme(osnova) ? osnova : "user") ;
 }
 
+// Potrditev e-naslova PRI VIRU (issue #222, invarianta I35). `user_metadata` v žetonu lahko prijavljen
+// uporabnik spreminja sam (updateUser({ data })), zato `user_metadata.email_verified` ni dokaz lastništva
+// naslova: varno je bilo samo, dokler je v Supabase vklopljen »Confirm email«. Pred vsako povezavo po
+// e-naslovu in pred vsako novo vrstico zato vprašamo Supabase (GET /auth/v1/user z uporabnikovim žetonom)
+// in zahtevamo email_confirmed_at != null IN enak e-naslov kot v žetonu. Kliče se SAMO za uid brez lokalne
+// vrstice (prvi klic računa); obstoječi uporabniki gredo mimo (vroča pot je nespremenjena).
+// Izpad / časovna omejitev / kakršenkoli odgovor, ki ni 200 z veljavnim JSON (tudi 401/403/404: ni ločljivo od
+// napačnega ključa ali izbrisanega računa) → napaka z `jwks = true` → 503 + Retry-After, nikoli 401 (I10).
+// Nepotrjen ali neujemajoč naslov → "email_unverified" (403), kot prej.
+const POTRDITEV_ROK_MS = 5000;
+const potrditevVLetu = new Map();      // uid|email -> Promise (vzporedni prvi klici istega računa = en klic na Supabase)
+const potrditevZavrnjena = new Map();  // uid|email -> potek (kratek negativni predpomnilnik: zavrnjen žeton ne sproža klicev ob vsakem zahtevku)
+const POTRDITEV_ZAVRNJENA_MS = 10 * 1000;
+const POTRDITEV_USPELA_MS = 5 * 1000;
+
+function napakaPotrditve(sporocilo) {
+  const n = new Error("supabase /user: " + sporocilo); n.jwks = true; return n;
+}
+
+async function potrditevEmailaPriViru(token, uid, email) {
+  let r, telo;
+  try {
+    r = await fetch(SUPABASE_ISS + "/user", {
+      headers: { authorization: "Bearer " + token, apikey: SUPABASE_KEY },
+      signal: AbortSignal.timeout(POTRDITEV_ROK_MS),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    telo = await r.json();
+  } catch (e) { throw napakaPotrditve(e && e.message); }
+  if (!telo || typeof telo !== "object") throw napakaPotrditve("odgovor");
+  const potrjen = telo.email_confirmed_at || telo.confirmed_at;
+  const emailVirni = typeof telo.email === "string" ? telo.email.trim().toLowerCase() : "";
+  const uidVirni = typeof telo.id === "string" ? telo.id.toLowerCase() : "";
+  if (!potrjen || emailVirni !== email || (uidVirni && uidVirni !== uid)) throw new Error("email_unverified");
+}
+
+function potrdiEmailPriViru(token, uid, email) {
+  const k = uid + "|" + email;
+  const zdaj = Date.now();
+  const zavrnjen = potrditevZavrnjena.get(k);
+  if (zavrnjen && zavrnjen > zdaj) return Promise.reject(new Error("email_unverified"));
+  let p = potrditevVLetu.get(k);
+  if (!p) {
+    p = potrditevEmailaPriViru(token, uid, email)
+      .catch((e) => {
+        if (e && e.message === "email_unverified") {
+          if (potrditevZavrnjena.size > 5000) potrditevZavrnjena.clear();
+          potrditevZavrnjena.set(k, Date.now() + POTRDITEV_ZAVRNJENA_MS);
+        }
+        throw e;
+      })
+      .then(
+        (v) => { setTimeout(() => potrditevVLetu.delete(k), POTRDITEV_USPELA_MS).unref(); return v; },   // uspeh velja še nekaj sekund: pozni vzporedni prvi klici ne sprožijo novega klica
+        (e) => { potrditevVLetu.delete(k); throw e; }                                                      // neuspeh se nikoli ne ohrani (izpad ni zavrnitev)
+      );
+    potrditevVLetu.set(k, p);
+  }
+  return p;
+}
+
 // Lokalna vrstica za Supabasov račun:
-//   1. po supabase_uid,
-//   2. po e-naslovu (obstoječi račun iz časov lastne prijave → poveže se; Supabase
-//      e-naslov potrdi pred izdajo seje, zato je lastništvo naslova dokazano),
+//   1. po supabase_uid (vroča pot, brez klica navzven),
+//   2. po e-naslovu (obstoječi račun iz časov lastne prijave → poveže se),
 //   3. sicer nova vrstica (email_verified = true, brez gesla).
-async function uporabnikIzSupabase(p, db = pool) {
+// Koraka 2 in 3 (in rezervna pot ob konfliktu e-naslova) samo, ko je lastništvo naslova potrjeno pri viru
+// (potrdiEmailPriViru); `token` je surovi Supabasov žeton klicatelja.
+async function uporabnikIzSupabase(p, db = pool, token = null) {
   const uid = p.sub.toLowerCase();
   const email = String(p.email).trim().toLowerCase();
 
@@ -554,11 +615,11 @@ async function uporabnikIzSupabase(p, db = pool) {
   const r1 = await db.query(`SELECT ${POLJA_SEJE} FROM users WHERE supabase_uid=$1`, [uid]);
   if (r1.rows.length) return r1.rows[0];
 
-  // Povezava po e-naslovu in nov račun samo s POTRJENIM e-naslovom. Supabase
-  // ga s "Confirm email" potrdi pred prvo sejo in to zapiše v user_metadata;
-  // če bi kdo to nastavitev izklopil, bi sicer vsak lahko prevzel tuj stari
-  // račun z vpisom tujega e-naslova.
+  // Povezava po e-naslovu in nov račun samo s POTRJENIM e-naslovom. Hitri filter: user_metadata.email_verified
+  // (ga zapiše Supabase ob potrditvi, a ga lahko uporabnik ponaredi → ni dokaz); dokaz je potrditev pri viru.
   if (!(p.user_metadata && p.user_metadata.email_verified === true)) throw new Error("email_unverified");
+  if (typeof token !== "string" || !token) throw new Error("email_unverified");   // brez žetona ni preverbe → ni pisanja
+  await potrdiEmailPriViru(token, uid, email);
 
   const r2 = await db.query(
     `UPDATE users SET supabase_uid=$1, email_verified=true, failed_login_count=0, locked_until=NULL
@@ -588,11 +649,15 @@ async function uporabnikIzSupabase(p, db = pool) {
         }
         if (c.includes("email")) {
           // Vrstica s tem e-naslovom že kaže na drug (star) Supabasov uid —
-          // isti lastnik naslova se je pri Supabase registriral znova.
+          // isti lastnik naslova se je pri Supabase registriral znova. Do sem pridemo samo po
+          // potrdiEmailPriViru (zgoraj): brez potrditve pri viru se tuj uid NE prepiše (I35).
+          // Najprej poglej, ali ni vrstice za TA uid že naredil vzporedni prvi klic (tekma): takrat ni kaj prepisovati.
+          const r4a = await db.query(`SELECT ${POLJA_SEJE} FROM users WHERE supabase_uid=$1`, [uid]);
+          if (r4a.rows.length) return r4a.rows[0];
           const r4 = await db.query(
             `UPDATE users SET supabase_uid=$1 WHERE email=$2 RETURNING ${POLJA_SEJE}`, [uid, email]
           );
-          if (r4.rows.length) return r4.rows[0];
+          if (r4.rows.length) { console.warn("[auth] supabase_uid prepisan po potrditvi e-naslova pri viru, user", r4.rows[0].id); return r4.rows[0]; }
         }
         continue;
       }
@@ -615,7 +680,7 @@ async function razberiUporabnika(token, db = pool) {
     if (e && e.jwks) throw e;                         // izpad Supabase JWKS -> 503 (I10)
     const n = new Error("zeton"); n.zeton = true; throw n;   // vsaka napaka pri branju/preverjanju zetona = slab zeton
   }
-  const u = await uporabnikIzSupabase(p, db);
+  const u = await uporabnikIzSupabase(p, db, token);
   return { userId: u.id, email: u.email, username: u.username, role: u.role, auth: "supabase",
            supabaseToken: token, supabaseSub: p.sub.toLowerCase(), supabaseExp: p.exp };
 }
