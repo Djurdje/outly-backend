@@ -1383,9 +1383,19 @@ function prodajalecPopoln(k) {
 // z legal_*, registration_number, tax_number, vat_payer, contact_phone, contact_email kluba (events.club_id = prodajalec). Klic mora biti PRED
 // rezervacijo zaloge/mize, vpisom naroclila in klicem Stripa (brez stranskih ucinkov; idempotencni kljuc se ne zapise). Vrne telo 409 ali null.
 const NAPAKA_PRODAJALEC_NEPOPOLN = { error: "seller_incomplete", message: "This organizer has not completed seller details yet. Purchase is not available." };
+// EN SAM pogoj I34 (#220): uporabljata ga nakup (`napakaProdajalca` -> 409) in javni `payment_mode` ("unavailable"), da se nikoli ne razideta:
+// kupec ne sme videti gumba za nakup, ki ga bo strezniku zavrnil. `k` ima polja prodajalca (vrstica kluba ali `seller_raw`).
+function prodajalecZavraNakup(k, nacin, skupajCents) {
+  return nacin === "stripe" && skupajCents > 0 && placilaStripe.jeLive() && !prodajalecPopoln(k);
+}
 function napakaProdajalca(e, nacin, skupajCents) {
-  if (nacin !== "stripe" || !(skupajCents > 0) || !placilaStripe.jeLive()) return null;
-  return prodajalecPopoln(e) ? null : NAPAKA_PRODAJALEC_NEPOPOLN;
+  return prodajalecZavraNakup(e, nacin, skupajCents) ? NAPAKA_PRODAJALEC_NEPOPOLN : null;
+}
+// `payment_mode` za odjemalce (#149, #220): kot `javniNacin`, le da ob pogoju I34 vrne "unavailable" namesto "stripe". `najvecCents` = najvecji znesek,
+// ki ga kupec lahko placa (> 0 = placljivo); `brezplacno` = obstaja kupljiva ponudba za 0 EUR (ta gre mimo Stripa in I34, zato ostane kupljiva).
+function javniNacinProdajalca(nacin, k, najvecCents, brezplacno) {
+  if (nacin === "stripe" && !brezplacno && prodajalecZavraNakup(k, nacin, najvecCents)) return "unavailable";
+  return placilaStripe.javniNacin(nacin);
 }
 // Javni objekt `seller` iz vrstice kluba (name, legal_*, registration_number, tax_number, vat_payer, address, city, contact_phone, contact_email).
 // Ime/naslov imata nadomestek (clubs.name; "address, city"), zato je `seller` uporaben tudi, ko klub podatkov se ni vpisal (`complete: false`).
@@ -2083,11 +2093,21 @@ if (STOLPCI_DOGODKA_LAHKI === STOLPCI_DOGODKA) throw new Error("STOLPCI_DOGODKA_
 //   "unavailable" nakup bi bil zavrnjen (live kljuc in klub brez Stripa -> 409; Stripe brez webhook skrivnosti -> 503)
 // Izracun je ISTI kot ob nakupu (placilaStripe.nacinPlacilaZ), odvisen od kluba (prodajalec = events.club_id), NE od uporabnika: sme v javni predpomnilnik (I17).
 // Cena 0 EUR gre mimo Stripa, a isti preizkus nacina velja tudi zanjo (ob "unavailable" je nakup zavrnjen tudi za 0 EUR). Pomozni stolpec se iz vrstice odstrani; stripe_account_id ne zapusti streznika.
-const SQL_KLUB_STRIPE_PRIPRAVLJEN = `(SELECT (cs.stripe_account_id IS NOT NULL AND cs.stripe_charges_enabled) FROM clubs cs WHERE cs.id = events.club_id) AS club_stripe_ready`;
+// #220: ob `sk_live_` in nepopolnih podatkih prodajalca (I34) je nakup z zneskom > 0 zavrnjen (409 seller_incomplete), zato je `payment_mode` tam "unavailable"
+// (isti pogoj kot nakup: `prodajalecZavraNakup`). Dogodek, kjer je kaj za 0 EUR (vstopnica ali prosta VIP miza), ostane "stripe": brezplacno je kupljivo.
+// Dogodek je mesanica vstopnic in VIP miz z eno vrednostjo: "unavailable" samo, ce NI nic brezplacnega in je kaj placljivo; pri mesanici (npr. vstopnica 0 EUR + placljiva
+// miza) ostane "stripe", nakup placljivega dela pa vrne 409 (natancno za mize je `payment_mode` v GET /events/:id/vip).
+const SQL_KLUB_STRIPE_PRIPRAVLJEN = `(SELECT (cs.stripe_account_id IS NOT NULL AND cs.stripe_charges_enabled) FROM clubs cs WHERE cs.id = events.club_id) AS club_stripe_ready,
+        (SELECT ${sqlProdajalecSurov("cs")} FROM clubs cs WHERE cs.id = events.club_id) AS club_seller_raw`;
 function dodajNacinPlacila(vrstice) {
   for (const r of vrstice) {
-    r.payment_mode = placilaStripe.javniNacin(placilaStripe.nacinPlacilaZ(r.club_stripe_ready === true));
+    const vstopnica = r.ticket_price_cents === null || r.ticket_price_cents === undefined ? null : Number(r.ticket_price_cents);   // null = brez vstopnic na Outlyju
+    const vip = r.vip_from_cents === null || r.vip_from_cents === undefined ? null : Number(r.vip_from_cents);   // null = brez VIP miz; sicer najcenejsa miza
+    const brezplacno = vstopnica === 0 || vip === 0;
+    const najvec = Math.max(vstopnica || 0, vip || 0);
+    r.payment_mode = javniNacinProdajalca(placilaStripe.nacinPlacilaZ(r.club_stripe_ready === true), r.club_seller_raw || {}, najvec, brezplacno);
     delete r.club_stripe_ready;
+    delete r.club_seller_raw;
   }
   return vrstice;
 }
@@ -5683,11 +5703,12 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
       range ? serijaProdaje(klub, range) : Promise.resolve(null),
     ]);
     // Provizija TEGA kluba (031), ce jo je admin nastavil; sicer privzeta. Lastnik vidi svojo pogodbeno provizijo.
-    const kp = (await pool.query("SELECT commission_bps, (stripe_account_id IS NOT NULL AND stripe_charges_enabled) AS stripe_pripravljen FROM clubs WHERE id=$1", [klub])).rows[0];
+    const kp = (await pool.query(`SELECT commission_bps, (stripe_account_id IS NOT NULL AND stripe_charges_enabled) AS stripe_pripravljen, ${STOLPCI_PRODAJALCA}, contact_phone, contact_email FROM clubs WHERE id=$1`, [klub])).rows[0];
     const odgovor = {
       mode: testniNacinPlacil() ? "test" : "live",
       // Nacin placila TEGA kluba (#149/#191): "test" | "stripe" | "unavailable"; `mode` zgoraj je globalen (samo ali je sistem v testnem nacinu). DODANO polje.
-      payment_mode: placilaStripe.javniNacin(placilaStripe.nacinPlacilaZ(!!(kp && kp.stripe_pripravljen))),
+      // #220: ob sk_live_ in nepopolnih podatkih prodajalca (I34) "unavailable" (placljiv nakup bi bil 409); znesek ni znan, zato se predpostavi placljivo.
+      payment_mode: javniNacinProdajalca(placilaStripe.nacinPlacilaZ(!!(kp && kp.stripe_pripravljen)), kp || {}, 1, false),
       fee_percent: kp && kp.commission_bps !== null ? kp.commission_bps / 100 : PROVIZIJA_ODSTOTEK,
       summary: povzetek.rows[0],
       events: poDogodkih.rows,
@@ -7383,7 +7404,9 @@ app.get("/events/:id/vip", async (req, res) => {
       event_id: e.id,
       enabled,
       on_sale: napakaProdaje({ ...e, hidden: false }, { zahtevajCeno: false }) === null,
-      payment_mode: placilaStripe.javniNacin(placilaStripe.nacinPlacilaZ(e.club_stripe_ready === true)),   // kot pri dogodku (#149)
+      // kot pri dogodku (#149); #220: ob sk_live_ + nepopolnih podatkih prodajalca (I34) "unavailable", razen ce je kupljiva miza za 0 EUR
+      payment_mode: javniNacinProdajalca(placilaStripe.nacinPlacilaZ(e.club_stripe_ready === true), e.seller_raw,
+        Math.max(0, ...mize.map(t => Number(t.price_cents) || 0)), mize.some(t => t.available !== false && Number(t.price_cents) === 0)),
       seller: prodajalec(e.seller_raw),   // prodajalec = events.club_id (043, #94)
       currency: e.currency,
       plan,
