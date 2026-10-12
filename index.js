@@ -540,23 +540,69 @@ function predlogImena(p) {
   return (osnova.length >= 3 && !jePrepovedanoIme(osnova) ? osnova : "user") ;
 }
 
-// Potrditev e-naslova PRI VIRU (issue #222, invarianta I35). `user_metadata` v žetonu lahko prijavljen
-// uporabnik spreminja sam (updateUser({ data })), zato `user_metadata.email_verified` ni dokaz lastništva
-// naslova: varno je bilo samo, dokler je v Supabase vklopljen »Confirm email«. Pred vsako povezavo po
-// e-naslovu in pred vsako novo vrstico zato vprašamo Supabase (GET /auth/v1/user z uporabnikovim žetonom)
-// in zahtevamo email_confirmed_at != null IN enak e-naslov kot v žetonu. Kliče se SAMO za uid brez lokalne
-// vrstice (prvi klic računa); obstoječi uporabniki gredo mimo (vroča pot je nespremenjena).
-// Izpad / časovna omejitev / kakršenkoli odgovor, ki ni 200 z veljavnim JSON (tudi 401/403/404: ni ločljivo od
-// napačnega ključa ali izbrisanega računa) → napaka z `jwks = true` → 503 + Retry-After, nikoli 401 (I10).
+// Povezava po e-naslovu in nov račun: DVE plasti (issue #222, invarianta I35).
+// `user_metadata` v žetonu lahko prijavljen uporabnik spreminja sam (updateUser({ data })), zato
+// `user_metadata.email_verified` ni dokaz lastništva naslova; ostane samo hitri filter.
+//
+// PLAST 1 (varovalo, ZAVRNITEV / fail closed): ob izklopljenem »Confirm email« (mailer_autoconfirm) GoTrue
+// ob registraciji SAM nastavi email_confirmed_at in user_metadata.email_verified (signup → user.Confirm()), zato
+// bi plast 2 v ravno tem scenariju rekla »potrjen«. Zato backend bere javni GET /auth/v1/settings (predpomnilnik
+// 60 s) in ob `mailer_autoconfirm === true` ali `external.anonymous_users === true` NE poveže in NE ustvari
+// vrstice: 503 + Retry-After (ne 401, I10) in glasen console.error. Izpad / rok / odgovor ≠ 200 / slab JSON → 503.
+// PLAST 2: GET /auth/v1/user z uporabnikovim žetonom: email_confirmed_at != null, enak e-naslov (lower) in
+// enak id kot sub (manjkajoč id = zavrnitev). Ujame napačno zaupanje metapodatkom pri vklopljenem »Confirm email«.
+// Obe plasti samo za uid brez lokalne vrstice (prvi klic računa); vroča pot (vrstica po uid) brez klica navzven.
+// Izpad / rok / kakršenkoli odgovor ≠ 200 ali slabo telo (tudi 401/403/404: ni ločljivo od napačnega ključa ali
+// izbrisanega računa) → napaka z `jwks = true` → 503 + Retry-After, nikoli 401 (I10).
 // Nepotrjen ali neujemajoč naslov → "email_unverified" (403), kot prej.
 const POTRDITEV_ROK_MS = 5000;
 const potrditevVLetu = new Map();      // uid|email -> Promise (vzporedni prvi klici istega računa = en klic na Supabase)
-const potrditevZavrnjena = new Map();  // uid|email -> potek (kratek negativni predpomnilnik: zavrnjen žeton ne sproža klicev ob vsakem zahtevku)
-const POTRDITEV_ZAVRNJENA_MS = 10 * 1000;
+const potrditevZavrnjena = new Map();  // uid|email -> { potek, tip } (kratek negativni predpomnilnik: isti žeton ne sproža klica ob vsakem zahtevku)
+const POTRDITEV_ZAVRNJENA_MS = 10 * 1000;   // nepotrjen / neujemajoč naslov → 403
+const POTRDITEV_IZPAD_MS = 5 * 1000;        // izpad /user (4xx, 5xx, rok) → 503
 const POTRDITEV_USPELA_MS = 5 * 1000;
+const NASTAVITVE_ROK_MS = 5000;
+const NASTAVITVE_OSVEZI_MS = 60 * 1000;
+const nastavitveSupabase = { vrednost: null, nalozeno: 0, vLetu: null };
 
 function napakaPotrditve(sporocilo) {
   const n = new Error("supabase /user: " + sporocilo); n.jwks = true; return n;
+}
+function napakaNastavitev(sporocilo) {
+  const n = new Error("supabase /settings: " + sporocilo); n.jwks = true; return n;
+}
+
+async function naloziNastavitveSupabase() {
+  let telo;
+  try {
+    const r = await fetch(SUPABASE_ISS + "/settings", { headers: { apikey: SUPABASE_KEY }, signal: AbortSignal.timeout(NASTAVITVE_ROK_MS) });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    telo = await r.json();
+  } catch (e) { throw napakaNastavitev(e && e.message); }
+  if (!telo || typeof telo !== "object" || typeof telo.mailer_autoconfirm !== "boolean"
+      || !telo.external || typeof telo.external !== "object" || typeof telo.external.anonymous_users !== "boolean") {
+    throw napakaNastavitev("nepricakovan odgovor");
+  }
+  return { autoconfirm: telo.mailer_autoconfirm, anonimni: telo.external.anonymous_users };
+}
+
+// Vrže (503), če so nastavitve nedosegljive ali nevarne. Uspeh se predpomni 60 s, neuspeh nikoli.
+async function preveriNastavitveSupabase() {
+  const zdaj = Date.now();
+  if (!nastavitveSupabase.vrednost || zdaj - nastavitveSupabase.nalozeno >= NASTAVITVE_OSVEZI_MS) {
+    if (!nastavitveSupabase.vLetu) {
+      nastavitveSupabase.vLetu = naloziNastavitveSupabase()
+        .then((v) => { nastavitveSupabase.vrednost = v; nastavitveSupabase.nalozeno = Date.now(); })
+        .finally(() => { nastavitveSupabase.vLetu = null; });
+    }
+    await nastavitveSupabase.vLetu;
+  }
+  const v = nastavitveSupabase.vrednost;
+  if (v.autoconfirm || v.anonimni) {
+    console.error("[auth] POZOR: Supabase mailer_autoconfirm/anonymous_users vklopljen — nove povezave in novi racuni zavrnjeni (503) dokler »Confirm email« ni spet vklopljen"
+      + ` (mailer_autoconfirm=${v.autoconfirm}, anonymous_users=${v.anonimni})`);
+    const n = new Error("supabase nastavitve: autoconfirm/anonymous"); n.jwks = true; throw n;
+  }
 }
 
 async function potrditevEmailaPriViru(token, uid, email) {
@@ -570,30 +616,34 @@ async function potrditevEmailaPriViru(token, uid, email) {
     telo = await r.json();
   } catch (e) { throw napakaPotrditve(e && e.message); }
   if (!telo || typeof telo !== "object") throw napakaPotrditve("odgovor");
-  const potrjen = telo.email_confirmed_at || telo.confirmed_at;
+  // Samo email_confirmed_at: confirmed_at je generiran LEAST(email_confirmed_at, phone_confirmed_at) in bi pri računu
+  // s potrjenim telefonom potrdil naslov, ki ni potrjen.
   const emailVirni = typeof telo.email === "string" ? telo.email.trim().toLowerCase() : "";
   const uidVirni = typeof telo.id === "string" ? telo.id.toLowerCase() : "";
-  if (!potrjen || emailVirni !== email || (uidVirni && uidVirni !== uid)) throw new Error("email_unverified");
+  if (!telo.email_confirmed_at || emailVirni !== email || uidVirni !== uid) throw new Error("email_unverified");
 }
 
 function potrdiEmailPriViru(token, uid, email) {
   const k = uid + "|" + email;
   const zdaj = Date.now();
   const zavrnjen = potrditevZavrnjena.get(k);
-  if (zavrnjen && zavrnjen > zdaj) return Promise.reject(new Error("email_unverified"));
+  if (zavrnjen && zavrnjen.potek > zdaj) {
+    return Promise.reject(zavrnjen.tip === "izpad" ? napakaPotrditve("predpomnjen izpad") : new Error("email_unverified"));
+  }
   let p = potrditevVLetu.get(k);
   if (!p) {
     p = potrditevEmailaPriViru(token, uid, email)
       .catch((e) => {
-        if (e && e.message === "email_unverified") {
+        const tip = e && e.message === "email_unverified" ? "zavrnjen" : (e && e.jwks ? "izpad" : null);
+        if (tip) {
           if (potrditevZavrnjena.size > 5000) potrditevZavrnjena.clear();
-          potrditevZavrnjena.set(k, Date.now() + POTRDITEV_ZAVRNJENA_MS);
+          potrditevZavrnjena.set(k, { potek: Date.now() + (tip === "izpad" ? POTRDITEV_IZPAD_MS : POTRDITEV_ZAVRNJENA_MS), tip });
         }
         throw e;
       })
       .then(
         (v) => { setTimeout(() => potrditevVLetu.delete(k), POTRDITEV_USPELA_MS).unref(); return v; },   // uspeh velja še nekaj sekund: pozni vzporedni prvi klici ne sprožijo novega klica
-        (e) => { potrditevVLetu.delete(k); throw e; }                                                      // neuspeh se nikoli ne ohrani (izpad ni zavrnitev)
+        (e) => { potrditevVLetu.delete(k); throw e; }
       );
     potrditevVLetu.set(k, p);
   }
@@ -604,8 +654,8 @@ function potrdiEmailPriViru(token, uid, email) {
 //   1. po supabase_uid (vroča pot, brez klica navzven),
 //   2. po e-naslovu (obstoječi račun iz časov lastne prijave → poveže se),
 //   3. sicer nova vrstica (email_verified = true, brez gesla).
-// Koraka 2 in 3 (in rezervna pot ob konfliktu e-naslova) samo, ko je lastništvo naslova potrjeno pri viru
-// (potrdiEmailPriViru); `token` je surovi Supabasov žeton klicatelja.
+// Koraka 2 in 3 (in rezervna pot ob konfliktu e-naslova) samo, ko sta uspeli obe plasti (preveriNastavitveSupabase +
+// potrdiEmailPriViru); `token` je surovi Supabasov žeton klicatelja.
 async function uporabnikIzSupabase(p, db = pool, token = null) {
   const uid = p.sub.toLowerCase();
   const email = String(p.email).trim().toLowerCase();
@@ -619,7 +669,8 @@ async function uporabnikIzSupabase(p, db = pool, token = null) {
   // (ga zapiše Supabase ob potrditvi, a ga lahko uporabnik ponaredi → ni dokaz); dokaz je potrditev pri viru.
   if (!(p.user_metadata && p.user_metadata.email_verified === true)) throw new Error("email_unverified");
   if (typeof token !== "string" || !token) throw new Error("email_unverified");   // brez žetona ni preverbe → ni pisanja
-  await potrdiEmailPriViru(token, uid, email);
+  await preveriNastavitveSupabase();                 // plast 1: ob izklopljenem »Confirm email« ZAVRNI (fail closed)
+  await potrdiEmailPriViru(token, uid, email);       // plast 2: potrditev pri viru
 
   const r2 = await db.query(
     `UPDATE users SET supabase_uid=$1, email_verified=true, failed_login_count=0, locked_until=NULL
