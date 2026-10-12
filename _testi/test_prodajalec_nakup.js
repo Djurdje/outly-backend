@@ -20,6 +20,9 @@
  *   8  payment_mode "unavailable" (#220): ZIV + nepopolni podatki -> GET /events, /events?lite, /events?clubId, /events/:id, /events/:id/vip,
  *      /business/events, /business/sales kazejo "unavailable" (isti pogoj kot 409 pri nakupu); popolni -> "stripe"; 0 EUR (vstopnica,
  *      prosta VIP miza) ostane "stripe"; sandbox in testni nacin ostaneta "test"/"stripe" kot doslej
+ *      Dogodek odloca po VSTOPNICI, ce jo ima (placljiva vstopnica + miza za 0 EUR -> dogodek "unavailable", /vip "stripe";
+ *      vstopnica 0 EUR + placljive mize -> dogodek "stripe", /vip "unavailable"). GET /business/sales ima se payment_unavailable_reason:
+ *      "seller_incomplete" | "stripe_not_ready" | "payments_not_configured" | null
  *   9  TEST_PLACILA=true + sk_live_ (I31): vsiljen testni nacin se ignorira -> nepopolni podatki 409 seller_incomplete (vstopnice, miza, gost),
  *      payment_mode "unavailable"; popolni podatki -> "stripe" in 201 stripe
  */
@@ -30,7 +33,7 @@ const { Pool } = require("pg");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const PORT_ZIV = 3300, PORT_SANDBOX = 3301, PORT_TESTNI = 3302, JWKS_PORT = 3303, STRIPE_PORT = 3304, PORT_ZIV_TP = 3305;
+const PORT_ZIV = 3300, PORT_SANDBOX = 3301, PORT_TESTNI = 3302, JWKS_PORT = 3303, STRIPE_PORT = 3304, PORT_ZIV_TP = 3305, PORT_ZIV_BREZ_WH = 3306;
 const WHSEC = "whsec_test_prodajalec";
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
@@ -95,11 +98,14 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
   await new Promise(r => stripeServer.listen(STRIPE_PORT, r));
   const stripeOkolje = { STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}` };
   const ZIV = zagon(PORT_ZIV, { ...stripeOkolje, STRIPE_SECRET_KEY: "sk_live_lokalno", GOST_NAKUP_LIVE: "1" });
-  const SAND = zagon(PORT_SANDBOX, { ...stripeOkolje, STRIPE_SECRET_KEY: "sk_test_lokalno" });
-  const TEST = zagon(PORT_TESTNI, {});
-  const ZIV_TP = zagon(PORT_ZIV_TP, { ...stripeOkolje, STRIPE_SECRET_KEY: "sk_live_lokalno", GOST_NAKUP_LIVE: "1", TEST_PLACILA: "true" });
-  const bZ = `http://127.0.0.1:${PORT_ZIV}`, bS = `http://127.0.0.1:${PORT_SANDBOX}`, bT = `http://127.0.0.1:${PORT_TESTNI}`, bP = `http://127.0.0.1:${PORT_ZIV_TP}`;
-  await Promise.all([bZ, bS, bT, bP].map(cakajStreznik));
+  // Javni predpomnilnik izklopljen na streznikih, kjer podatkov prodajalca ne spreminjamo prek API-ja (da test ni odvisen od vmesnih POST-ov); ZIV ga ima vklopljenega (sklop 8 preverja razveljavitev).
+  const BREZ_PREDPOMNILNIKA = { JAVNI_PREDPOMNILNIK_MS: "0" };
+  const SAND = zagon(PORT_SANDBOX, { ...stripeOkolje, STRIPE_SECRET_KEY: "sk_test_lokalno", ...BREZ_PREDPOMNILNIKA });
+  const TEST = zagon(PORT_TESTNI, { ...BREZ_PREDPOMNILNIKA });
+  const ZIV_TP = zagon(PORT_ZIV_TP, { ...stripeOkolje, STRIPE_SECRET_KEY: "sk_live_lokalno", GOST_NAKUP_LIVE: "1", TEST_PLACILA: "true", ...BREZ_PREDPOMNILNIKA });
+  const ZIV_BREZ_WH = zagon(PORT_ZIV_BREZ_WH, { STRIPE_SECRET_KEY: "sk_live_lokalno", STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, ...BREZ_PREDPOMNILNIKA });
+  const bZ = `http://127.0.0.1:${PORT_ZIV}`, bS = `http://127.0.0.1:${PORT_SANDBOX}`, bT = `http://127.0.0.1:${PORT_TESTNI}`, bP = `http://127.0.0.1:${PORT_ZIV_TP}`, bW = `http://127.0.0.1:${PORT_ZIV_BREZ_WH}`;
+  await Promise.all([bZ, bS, bT, bP, bW].map(cakajStreznik));
 
   try {
     const imena = ["lastnik", "lastnik2", "ana", "bor", "cene", "dana", "eva", "fran", "gina", "hana"];
@@ -251,6 +257,10 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     await pool.query("UPDATE events SET vip_enabled = TRUE WHERE id = $1", [evMizaZastonj]);
     // evMize: brezplacno mizo izklopimo (event_tables.disabled), ostanejo samo placljive -> "unavailable". evMizaZastonj: MZ ostane.
     await pool.query("INSERT INTO event_tables (event_id, table_id, disabled) VALUES ($1, $2, TRUE)", [evMize, MZ]);
+    // Placljiva vstopnica + samo miza za 0 EUR (M1..M4 izklopljene): dogodek odloca vstopnica -> "unavailable", /vip pa "stripe" (prosta miza za 0 EUR je kupljiva).
+    const evBiletMiza = await dogodek(1, "lastnik", "Placljiva vstopnica, miza zastonj", 2000);
+    await pool.query("UPDATE events SET vip_enabled = TRUE WHERE id = $1", [evBiletMiza]);
+    await pool.query("INSERT INTO event_tables (event_id, table_id, disabled) SELECT $1, id, TRUE FROM club_tables WHERE club_id = 1 AND label IN ('M1','M2','M3','M4')", [evBiletMiza]);
     const VSE_PRAZNO = luknje["vse prazno"];
     const poIdIz = (r, id) => (r && Array.isArray(r.body) ? r.body.find(x => x.id === id) : null) || {};
     const modi = async (baza, tok) => {
@@ -265,16 +275,28 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       r = await g("/events?clubId=1"); o.klub = poIdIz(r, evPlac).payment_mode;
       r = await g(`/events/${evMize}/vip`); o.vipPlacljive = r.body.payment_mode;
       r = await g(`/events/${evMizaZastonj}/vip`); o.vipZastonj = r.body.payment_mode;
+      r = await g(`/events/${evZastonj}/vip`); o.vipZastonjDogodekPlacljiveMize = r.body.payment_mode;   // vstopnica 0 EUR, mize placljive (MZ zasedena)
+      r = await g(`/events/${evBiletMiza}`); o.biletMiza = r.body.payment_mode;
+      r = await g("/events"); o.seznamBiletMiza = poIdIz(r, evBiletMiza).payment_mode;
+      r = await g(`/events/${evBiletMiza}/vip`); o.vipBiletMiza = r.body.payment_mode;
       return o;
     };
     const ujema = (o, v) => Object.entries(v).every(([k, x]) => o[k] === x);
 
     await nastaviInRazveljavi(VSE_PRAZNO);
+    let r8x;
     let o = await modi(bZ, null);
     assert(ujema(o, { dogodek: "unavailable", seznam: "unavailable", seznamMize: "unavailable", lahki: "unavailable", klub: "unavailable", vipPlacljive: "unavailable" }),
       "ZIV + nepopolni podatki: GET /events/:id, /events, ?lite, ?clubId, /vip (samo placljive mize) -> unavailable", o);
     assert(ujema(o, { dogodekZastonj: "stripe", seznamZastonj: "stripe" }), "ZIV + nepopolni podatki: dogodek z vstopnico za 0 EUR ostane stripe (kupljiv)", o);
     assert(ujema(o, { vipZastonj: "stripe" }), "ZIV + nepopolni podatki: VIP z mizo za 0 EUR ostane stripe (kupljiv)", o);
+    assert(ujema(o, { biletMiza: "unavailable", seznamBiletMiza: "unavailable", vipBiletMiza: "stripe" }),
+      "placljiva vstopnica + miza za 0 EUR: dogodek unavailable (vstopnica odloca), /vip stripe (prosta miza)", o);
+    assert(ujema(o, { dogodekZastonj: "stripe", vipZastonjDogodekPlacljiveMize: "unavailable" }), "vstopnica 0 EUR + placljive mize: dogodek stripe, /vip unavailable", o);
+    r8x = await kupiVstopnico(bZ, T.cene, evBiletMiza);
+    assert(jeNapaka(r8x), "dogodek unavailable <=> nakup vstopnice 409 seller_incomplete (miza za 0 EUR tega ne spremeni)", r8x);
+    r8x = await kupiMizo(bZ, T.cene, evBiletMiza, MZ);
+    assert(r8x.status === 201 && r8x.body.order.status === "paid", "prosta miza za 0 EUR (/vip stripe) je kupljiva: 201 paid", r8x);
     assert(ujema(o, { dogodekBrezStripa: "unavailable", seznamBrezStripa: "unavailable" }), "klub brez Stripa: unavailable kot doslej", o);
     // Prijavljen uporabnik: isti javni del (predpomnilnik, I17)
     const oA = await modi(bZ, T.ana);
@@ -284,13 +306,24 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(r8.status === 200 && poIdIz(r8, evPlac).payment_mode === "unavailable" && poIdIz(r8, evZastonj).payment_mode === "stripe", "GET /business/events: unavailable pri placljivem, stripe pri 0 EUR", Array.isArray(r8.body) && r8.body.map(x => [x.id, x.payment_mode]));
     r8 = await api(bZ, "GET", "/business/sales", T.lastnik, undefined, lastnikGlava);
     assert(r8.status === 200 && r8.body.payment_mode === "unavailable", "GET /business/sales: payment_mode kluba unavailable", r8.body.payment_mode);
+    assert(r8.body.payment_unavailable_reason === "seller_incomplete", "GET /business/sales: payment_unavailable_reason seller_incomplete", r8.body.payment_unavailable_reason);
+    r8 = await api(bZ, "GET", "/business/sales", T.lastnik2, undefined, { "x-outly-club": "2" });
+    assert(r8.status === 200 && r8.body.payment_mode === "unavailable" && r8.body.payment_unavailable_reason === "stripe_not_ready", "klub brez Stripa (live): payment_unavailable_reason stripe_not_ready", [r8.body.payment_mode, r8.body.payment_unavailable_reason]);
+    r8 = await api(bW, "GET", "/business/sales", T.lastnik, undefined, lastnikGlava);
+    assert(r8.status === 200 && r8.body.payment_mode === "unavailable" && r8.body.payment_unavailable_reason === "payments_not_configured", "Stripe kljuc brez webhook skrivnosti: payment_unavailable_reason payments_not_configured", [r8.body.payment_mode, r8.body.payment_unavailable_reason]);
+    const javni = await api(bZ, "GET", `/events/${evPlac}`);
+    assert(javni.status === 200 && !("payment_unavailable_reason" in javni.body) && !/payment_unavailable_reason/.test((await api(bZ, "GET", "/events")).text), "razlog NI na javnih poteh (GET /events, /events/:id)");
     // Ujemanje z nakupom: kar javni odgovor oznaci kot unavailable, nakup zavrne s seller_incomplete (isti pogoj)
     r8 = await kupiVstopnico(bZ, T.ana, evPlac);
     assert(jeNapaka(r8), "unavailable v javnem odgovoru <=> 409 seller_incomplete pri nakupu (vstopnica)", r8);
     r8 = await kupiMizo(bZ, T.ana, evMize, M1);
     assert(jeNapaka(r8), "unavailable v /vip <=> 409 seller_incomplete pri nakupu (miza)", r8);
-    const surovi = await api(bZ, "GET", "/events", null);
-    assert(!/club_stripe_ready|club_seller_raw|seller_raw|acct_prodajalec1|stripe_account_id/.test(surovi.text), "GET /events: brez pomoznih stolpcev in racuna (I4)");
+    for (const pot of ["/events", `/events/${evPlac}`, "/events?lite=true", `/events/${evMize}/vip`]) {
+      const surovi = await api(bZ, "GET", pot, null);
+      assert(surovi.status === 200 && !/club_stripe_ready|club_seller_raw|seller_raw|acct_prodajalec1|stripe_account_id/.test(surovi.text), `GET ${pot}: brez pomoznih stolpcev (club_seller_raw, club_stripe_ready, seller_raw) in racuna (I4)`);
+    }
+    const surovi = await api(bZ, "GET", "/business/events", T.lastnik, undefined, lastnikGlava);
+    assert(surovi.status === 200 && !/club_stripe_ready|club_seller_raw|seller_raw|acct_prodajalec1|stripe_account_id/.test(surovi.text), "GET /business/events: brez pomoznih stolpcev in racuna (I4)");
 
     // Lastnik dopolni podatke prodajalca prek API-ja -> vse postane stripe (predpomnilnik razveljavljen, brez zamika)
     await nastaviInRazveljavi({ ...VSE_PRAZNO, contact_email: "info@prodajalec.si" });
@@ -299,9 +332,10 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     o = await modi(bZ, null);
     assert(ujema(o, { dogodek: "stripe", seznam: "stripe", seznamMize: "stripe", lahki: "stripe", klub: "stripe", vipPlacljive: "stripe", vipZastonj: "stripe", dogodekZastonj: "stripe" }),
       "ZIV + popolni podatki (po PATCH): vse stripe", o);
+    assert(ujema(o, { biletMiza: "stripe", seznamBiletMiza: "stripe", vipBiletMiza: "stripe", vipZastonjDogodekPlacljiveMize: "stripe" }), "popolni podatki: tudi mesani dogodki stripe", o);
     assert(ujema(o, { dogodekBrezStripa: "unavailable" }), "popolni podatki ne popravijo kluba brez Stripa (unavailable)", o);
     r8 = await api(bZ, "GET", "/business/sales", T.lastnik, undefined, lastnikGlava);
-    assert(r8.status === 200 && r8.body.payment_mode === "stripe", "GET /business/sales: stripe po dopolnitvi", r8.body.payment_mode);
+    assert(r8.status === 200 && r8.body.payment_mode === "stripe" && r8.body.payment_unavailable_reason === null, "GET /business/sales: stripe po dopolnitvi, payment_unavailable_reason null", [r8.body.payment_mode, r8.body.payment_unavailable_reason]);
 
     // Sandbox in testni nacin: payment_mode ni odvisen od podatkov prodajalca (I34 velja samo ob sk_live_)
     await nastaviInRazveljavi(VSE_PRAZNO);
@@ -309,7 +343,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(ujema(oS, { dogodek: "stripe", seznam: "stripe", vipPlacljive: "stripe", dogodekBrezStripa: "test" }), "sandbox + nepopolni podatki: stripe / test kot doslej", oS);
     assert(ujema(oT, { dogodek: "test", seznam: "test", vipPlacljive: "test", dogodekBrezStripa: "test" }), "testni nacin + nepopolni podatki: test kot doslej", oT);
     r8 = await api(bS, "GET", "/business/sales", T.lastnik, undefined, lastnikGlava);
-    assert(r8.status === 200 && r8.body.payment_mode === "stripe", "sandbox: GET /business/sales payment_mode stripe", r8.body.payment_mode);
+    assert(r8.status === 200 && r8.body.payment_mode === "stripe" && r8.body.payment_unavailable_reason === null, "sandbox: GET /business/sales payment_mode stripe, razlog null", [r8.body.payment_mode, r8.body.payment_unavailable_reason]);
 
     // ================================================================
     console.log("\n# 9. TEST_PLACILA=true + sk_live_ (I31): vsiljen testni nacin se ignorira, I34 velja");
@@ -339,7 +373,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     r = await kupiVstopnico(bP, T.gina, evPlac);
     assert(r.status === 201 && r.body.mode === "stripe" && r.body.checkout_url, "TEST_PLACILA + sk_live_ + popolni podatki: 201 stripe + checkout_url", r);
   } finally {
-    for (const o of [ZIV, SAND, TEST, ZIV_TP]) { try { o.srv.kill(); } catch {} }
+    for (const o of [ZIV, SAND, TEST, ZIV_TP, ZIV_BREZ_WH]) { try { o.srv.kill(); } catch {} }
     stripeServer.close(); jwksServer.close(); await pool.end().catch(() => {});
   }
   console.log(`\n${ok} OK, ${fail} NAPAK`);
