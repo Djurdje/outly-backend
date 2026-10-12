@@ -1,6 +1,6 @@
 ---
 name: headless-preverjanje-strani
-description: Headless preverjanje outly.si (landing in spletna aplikacija /app) v oblacni seji brez izhodnega dostopa - Playwright z Chromiumom iz /opt/pw-browsers, stub samo *.supabase.co in backenda, konzola brez napak, mobilna sirina 393 px, posnetki zaslona.
+description: Headless preverjanje outly.si (landing in spletna aplikacija /app) v oblacni seji (lokalno s stubi; zivo stran samo za branje, ce je izhod) - Playwright z Chromiumom iz /opt/pw-browsers, stub samo *.supabase.co in backenda, konzola brez napak, mobilna sirina 393 px, posnetki zaslona.
 ---
 
 # Headless preverjanje strani (outly.si)
@@ -8,7 +8,9 @@ description: Headless preverjanje outly.si (landing in spletna aplikacija /app) 
 **Kdaj:** pred vsakim PR-jem v `outly_webpage` (CLAUDE.md spletne strani, pravilo 8) in kadar je treba
 preveriti, kako se razdelek izrise na telefonu (iPhone 14 Pro, 393 px) in namizju.
 
-**Kaj je dosegljivo:** v oblacni seji `outly.si`, `onrender.com` in `supabase.co` niso dosegljivi (egress proxy).
+**Kaj je dosegljivo:** odvisno od mreznih nastavitev okolja — izmeri s `curl` (skill `preverjanje-produkcije`); 1.-2. 10. 2026
+`outly.si`, `onrender.com` in `supabase.co` niso bili dosegljivi, 12. 10. 2026 so bili. Za preverjanje sprememb PRED merge-om vedno
+uporabljaj lokalni streznik s stubi (spodaj) — ziva stran kaze `main`, ne tvoje veje. Ziva stran je za preverbo PO objavi (samo branje).
 Stran sama ne nalaga nobenega tujega vira: supabase-js je v `vendor/supabase-2.115.0.js`, Inter v `assets/fonts/`
 (preverjeno 2. 10. 2026: `grep -rn "jsdelivr\|googleapis\|gstatic"` po `*.html`, `app/`, `webapp/` ne najde nic).
 Stubati je treba samo **`*.supabase.co`** (REST/RPC/Auth) in backend (`onrender.com`).

@@ -16,7 +16,7 @@ fs.mkdirSync(OUT, { recursive: true });
     const page = await ctx.newPage();
     page.on('console', m => { if (m.type() === 'error') problems.push(`[${name}] console: ${m.text()}`); });
     page.on('pageerror', e => problems.push(`[${name}] pageerror: ${e.message}`));
-    // Stub samo tega, do cesar seja nima izhoda: Supabase REST/RPC/Auth in backend. Vse ostalo je lokalno.
+    // Stub Supabase REST/RPC/Auth in backend: test preverja TVOJO vejo z znanimi podatki (tudi ce ima seja izhod, ne pisi v produkcijo). Vse ostalo je lokalno.
     // POZOR: page.route izklopi HTTP predpomnilnik brskalnika.
     await page.route(/^https?:\/\/(?!127\.0\.0\.1)/, route => {
       const u = route.request().url();
