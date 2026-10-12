@@ -1377,6 +1377,16 @@ function prodajalecPopoln(k) {
   return jeNepraznNiz(k.legal_name) && jeNepraznNiz(k.legal_address) && jeNepraznNiz(k.registration_number) && jeNepraznNiz(k.tax_number)
     && (k.vat_payer === true || k.vat_payer === false) && (jeNepraznNiz(k.contact_phone) || jeNepraznNiz(k.contact_email));
 }
+// Placljiv nakup v ZIVEM nacinu zahteva popolne podatke prodajalca (I34; ZVPot-1 18/1 2. tc.; Martin 12. 10. 2026): kupec mora pred nakupom
+// poznati identiteto in naslov prodajalca. Velja samo, ko nakup RES gre skozi zivi Stripe (`nacin === "stripe"`, sk_live_) in je znesek > 0;
+// brezplacno (0 EUR), sandbox (sk_test_) in testni nacin (klub brez Stripa, brez kljuca, TEST_PLACILA) se ne spremenijo. `e` je vrstica dogodka
+// z legal_*, registration_number, tax_number, vat_payer, contact_phone, contact_email kluba (events.club_id = prodajalec). Klic mora biti PRED
+// rezervacijo zaloge/mize, vpisom naroclila in klicem Stripa (brez stranskih ucinkov; idempotencni kljuc se ne zapise). Vrne telo 409 ali null.
+const NAPAKA_PRODAJALEC_NEPOPOLN = { error: "seller_incomplete", message: "This organizer has not completed seller details yet. Purchase is not available." };
+function napakaProdajalca(e, nacin, skupajCents) {
+  if (nacin !== "stripe" || !(skupajCents > 0) || !placilaStripe.jeLive()) return null;
+  return prodajalecPopoln(e) ? null : NAPAKA_PRODAJALEC_NEPOPOLN;
+}
 // Javni objekt `seller` iz vrstice kluba (name, legal_*, registration_number, tax_number, vat_payer, address, city, contact_phone, contact_email).
 // Ime/naslov imata nadomestek (clubs.name; "address, city"), zato je `seller` uporaben tudi, ko klub podatkov se ni vpisal (`complete: false`).
 function prodajalec(k) {
@@ -4254,7 +4264,8 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
-              c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps
+              c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps,
+              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]
     );
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
@@ -4277,6 +4288,8 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     if (nacin === "klub") { await c.query("ROLLBACK"); return res.status(409).send("This club does not accept online payments yet."); }
     const test = nacin === "test";
     const skupaj = e.ticket_price_cents * q;
+    const np2 = napakaProdajalca(e, nacin, skupaj);
+    if (np2) { await c.query("ROLLBACK"); return res.status(409).json(np2); }
     // 0 EUR (#191): Stripe Checkout ima najmanjsi znesek (Stripe zavrne sejo, nakup bi koncal s 502), zato brezplacno narocilo NE gre v Stripe:
     // takoj `paid`, brez provizije (provizija od 0 je 0) in brez cakajocega narocila; zaloga, idempotenca in starost veljajo enako kot pri placanih.
     const placanoTakoj = test || skupaj === 0;
@@ -4666,7 +4679,8 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
-              c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps
+              c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps,
+              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [g.eventId]
     );
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
@@ -4693,6 +4707,8 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     if (nacin === "klub") { await c.query("ROLLBACK"); return res.status(409).send("This club does not accept online payments yet."); }
     const test = nacin === "test";
     const skupaj = e.ticket_price_cents * g.quantity;
+    const np2 = napakaProdajalca(e, nacin, skupaj);
+    if (np2) { await c.query("ROLLBACK"); return res.status(409).json(np2); }
     const placanoTakoj = test || skupaj === 0;   // 0 EUR gre mimo Stripa (#191), kot pri nakupu z racunom
     if (skupaj === 0) {
       const brezplacno = await omejitevBrezplacnih(c, { gostEmail: g.email, eventId: e.id, enot: g.quantity });
@@ -7416,7 +7432,8 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     }
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_layout_source,
-              e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps
+              e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps,
+              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email
          FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
     const e = er.rows[0];
@@ -7470,6 +7487,8 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     if (nacin === "klub") { await c.query("ROLLBACK"); return res.status(409).send("This club does not accept online payments yet."); }
     const test = nacin === "test";
     const cena = miza.price_cents;
+    const np2 = napakaProdajalca(e, nacin, cena);
+    if (np2) { await c.query("ROLLBACK"); return res.status(409).json(np2); }
     const placanoTakoj = test || cena === 0;   // miza za 0 EUR gre mimo Stripa (#191), kot vstopnice
     if (cena === 0) {
       const brezplacno = await omejitevBrezplacnih(c, { userId: req.user.userId, eventId: e.id, enot: 1 });

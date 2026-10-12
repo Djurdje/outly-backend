@@ -216,7 +216,7 @@ async function enotski() {
     await pool.query("UPDATE users SET role='business' WHERE email='lastnik@outly.si'");
     await pool.query("INSERT INTO clubs (owner_user_id, name, city) VALUES ($1, 'Pure Club', 'Ljubljana')", [id.lastnik]);
     const polnoleten = new Date(Date.now() - 25 * 365.25 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-    for (const k of ["ana", "bor", "cene", "an_x"]) await a("PATCH", "/me", T[k], { dateOfBirth: polnoleten, genres: ["house"] });
+    for (const k of ["ana", "bor", "cene", "an_x"]) await a("PATCH", "/me", T[k], { dateOfBirth: polnoleten, genres: ["house"], share_plans_with_friends: true });   // od 045 je deljenje privzeto izklopljeno
     async function sprijatelji(x, y) {
       const r = await a("POST", "/me/friends/requests", T[x], { user_id: id[y] });
       if (r.status === 201) await a("POST", `/me/friends/requests/${r.body.request.id}/accept`, T[y]);
