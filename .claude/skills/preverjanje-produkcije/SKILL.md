@@ -1,11 +1,25 @@
 ---
 name: preverjanje-produkcije
-description: Preverjanje produkcije po merge-u v main (Render deploy backenda, Cloudflare Pages za outly.si, TestFlight za iOS) iz oblacne seje, ki do onrender.com, outly.si in supabase.co nima izhoda. Uporabi po vsakem merge-u, ki gre v produkcijo, in ko sumis izpad.
+description: Preverjanje produkcije po merge-u v main (Render deploy backenda, Cloudflare Pages za outly.si, TestFlight za iOS) iz oblacne seje: Render MCP, GitHub Actions in (kadar ga mreza okolja dovoli) neposreden curl na produkcijo. Uporabi po vsakem merge-u, ki gre v produkcijo, in ko sumis izpad.
 ---
 # Preverjanje produkcije po deployu
 
-Oblacne seje dobijo 403 za `onrender.com`, `outly.si`, `supabase.co` in `ntfy.sh` — produkcije ne gledas s `curl`,
-ampak prek Render MCP in GitHub Actions. Postopek odkrit 1.-2. 10. 2026 (vir: `outly-hq/docs/UCENJE.md`).
+**Dostop je odvisen od mreznih nastavitev okolja — vedno ga najprej izmeri, ne predpostavljaj.** 1.-2. 10. 2026 so seje
+za `onrender.com`, `outly.si`, `supabase.co` in `ntfy.sh` dobile 403; **12. 10. 2026 so bili vsi dosegljivi** (200; `/me/invites`
+401, kot mora biti). Zastarela trditev »ni izhoda« je 12. 10. povzrocila, da je agent Martinu po nepotrebnem nalozil rocni preizkus.
+
+```bash
+for u in https://outly-backend-roy3.onrender.com/clubs https://outly-backend-roy3.onrender.com/events \
+         https://outly-backend-roy3.onrender.com/me/invites https://outly.si https://outly.si/app/; do
+  echo "$(curl -sS -o /dev/null -m 20 -w '%{http_code}' "$u")  $u"; done
+# pricakovano: 200 200 401 200 200; 403/000 od proxyja = ni izhoda -> samo Render MCP + Nadzor (spodaj)
+```
+Ce je izhod: neposreden curl je **dodatna** preverba (hitra, takoj po deployu); Render MCP (deploy na pravem commitu, 5xx)
+in Nadzor ostaneta obvezna, ker curl ne pove, kateri commit tece. Splet (/app) lahko odpres v headless Chromiumu na zivi
+strani (skill `headless-preverjanje-strani`), a NIKOLI ne oddajaj obrazcev, ki posljejo mail ali spremenijo podatke.
+Supabase RPC z javnim kljucem (`supabase-config.js`) preverjaj samo z vhodi brez stranskih ucinkov (npr. `join_waitlist`
+z neveljavnim naslovom -> `"invalid"`, odvzeta funkcija -> 401 `42501`). Postopek odkrit 1.-2. 10. 2026, dopolnjen 12. 10.
+(vir: `outly-hq/docs/UCENJE.md`, `docs/INCIDENTI.md` 12. 10.).
 
 ## Backend (Render, ~30-90 s po merge-u)
 
