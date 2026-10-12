@@ -61,7 +61,11 @@ function nacinPlacilaZ(klubImaStripe) {
   if (klubImaStripe) return "stripe";
   return jeSandbox() ? "test" : "klub";
 }
-const nacinPlacila = (klub) => nacinPlacilaZ(!!(klub && klub.stripe_account_id && klub.stripe_charges_enabled));
+// I36 (#227): Connect racun kluba je iz sandboxa ali iz zivega nacina (`clubs.stripe_account_livemode`, migracija 046): TRUE = zivi, FALSE = sandbox,
+// NULL/manjka = neznano = SANDBOX (vsi zapisi pred 046 so iz sandboxa). Racun velja samo, ce se nacin ujema s kljucem (`jeLive()`); sicer je klub nepovezan
+// (`stripe_charges_enabled` se ne upostevata). SQL enakovrednik: `sqlRacunVNacinu` v index.js.
+const racunVNacinu = (klub) => !!klub && (klub.stripe_account_livemode === true) === jeLive();
+const nacinPlacila = (klub) => nacinPlacilaZ(!!(klub && klub.stripe_account_id && klub.stripe_charges_enabled && racunVNacinu(klub)));
 // Vrednost za odjemalce (`payment_mode` v javnih odgovorih, #149): "test" (nic se ne zaracuna) | "stripe" (pravo placilo)
 // | "unavailable" (nakup bi vrnil 409 »klub ne sprejema spletnih placil« ali 503 »placila niso nastavljena«).
 const javniNacin = (nacin) => (nacin === "test" || nacin === "stripe" ? nacin : "unavailable");
@@ -188,12 +192,14 @@ async function prekini(c, seja, stanje) {
 }
 
 // Stanje Connect racuna kluba.
+// I36 (#227): posodobi samo klub, ki ima ta racun IN je racun iz tekocega nacina (stripe_account_livemode, NULL = sandbox): dogodek iz drugega nacina
+// ne sme prepisati stanja (testni account.updated ob sk_live_ ne ugasne zivega racuna in obratno).
 async function posodobiKlub(c, racun) {
   await c.query(
     `UPDATE clubs SET stripe_charges_enabled = $2, stripe_payouts_enabled = $3,
             stripe_onboarded_at = CASE WHEN $4 AND stripe_onboarded_at IS NULL THEN NOW() ELSE stripe_onboarded_at END
-      WHERE stripe_account_id = $1`,
-    [racun.id, !!racun.charges_enabled, !!racun.payouts_enabled, !!racun.details_submitted]);
+      WHERE stripe_account_id = $1 AND COALESCE(stripe_account_livemode, FALSE) = $5`,
+    [racun.id, !!racun.charges_enabled, !!racun.payouts_enabled, !!racun.details_submitted, jeLive()]);
 }
 
 // Vracilo (iz Stripove nadzorne plosce ali API-ja): refunded_cents + stanje; ob polnem vracilu vstopnice `refunded`.
@@ -260,6 +266,15 @@ function ustvari({ pool, naPlacano }) {
       try { d = s.webhooks.constructEvent(req.body, podpis, sk); break; } catch (_) { /* naslednja skrivnost */ }
     }
     if (!d) return res.status(400).send("Invalid signature.");
+    // I36 (#227): dogodek iz DRUGEGA nacina ne sme spremeniti stanja ali sprozati klicev. `livemode` ima vsak pravi Stripov dogodek (manjka samo v lazni strezniku).
+    //  - sandbox dogodek ob sk_live_ (npr. webhook sandbox endpointa z napacno skrivnostjo): svezObjekt bi ga z zivim kljucem poiskal in dobil 404 -> 502 -> Stripe
+    //    ponavlja dneve. Sandbox narocil z zivim kljucem tako ali tako ni mogoce zakljuciti, zato 200 in zanemari (pending sandbox narocila pospravi pospravljalec).
+    //  - zivi dogodek ob sandbox kljucu: samo `account.updated` (stanje, ki ga posodobiKlub varuje tudi po nacinu racuna); placilnih dogodkov NE zavrzemo
+    //    (napacen kljuc ob zivem webhooku ne sme tiho izgubiti placila: ostane 502/napaka v dnevniku, kot doslej).
+    if (typeof d.livemode === "boolean" && d.livemode !== jeLive() && (d.livemode === false || d.type === "account.updated")) {
+      console.log(`[stripe] webhook ${d.type} ${d.id}: dogodek iz ${d.livemode ? "zivega" : "sandbox"} nacina, kljuc je ${jeLive() ? "ziv" : "sandbox"} - zanemarjen`);
+      return res.json({ received: true, ignored: "livemode" });
+    }
     let objekt;
     try { objekt = await svezObjekt(s, d); }
     catch (e) { console.error(`[stripe] webhook ${d.type} ${d.id}: branje objekta ni uspelo:`, e.message); return res.status(502).send("Try again."); }
@@ -296,6 +311,15 @@ function ustvari({ pool, naPlacano }) {
     if (!o.stripe_checkout_session_id) {
       await pool.query("UPDATE orders SET status = 'failed', cancelled_at = NOW() WHERE id = $1 AND status = 'pending'", [o.id]);
       console.log(`[stripe] pospravljeno: narocilo ${o.public_ref} brez seje -> failed`);
+      return;
+    }
+    // I36 (#227): sandbox seja (cs_test_) ob zivem kljucu: Stripe jo z zivim kljucem ne pozna (resource_missing), pospravljalec bi jo spraseval vsakih 5 min v
+    // nedogled in z napakami zasedal okno 50 narocil. Narocilo je potekla neplacana sandbox seja (rok + 5 min je mimo; v zivem je ni mogoce placati ali zakljuciti),
+    // zato ga zapremo kot `cancelled` brez klica Stripa (sprozilec sprosti zalogo). Nikoli v obratni smeri (cs_live_ ob sandbox kljucu): tam bi lahko bilo placilo
+    // v obdelavi in prekinitev bi izgubila denar.
+    if (jeLive() && /^cs_test_/.test(o.stripe_checkout_session_id)) {
+      const r = await pool.query("UPDATE orders SET status = 'cancelled', cancelled_at = NOW() WHERE id = $1 AND status = 'pending' AND stripe_payment_intent_id IS NULL RETURNING public_ref", [o.id]);
+      if (r.rows.length) console.log(`[stripe] pospravljeno: narocilo ${r.rows[0].public_ref} ima sandbox sejo (${o.stripe_checkout_session_id}), kljuc je ziv -> cancelled`);
       return;
     }
     let seja = await s.checkout.sessions.retrieve(o.stripe_checkout_session_id);
@@ -413,4 +437,4 @@ function ustvari({ pool, naPlacano }) {
   return { webhook, pospravi, zazeni, preveriPoteklo };
 }
 
-module.exports = { povratniNaslovi, ustvari, stripe, jeSandbox, jeLive, testniNacin, nacinPlacila, nacinPlacilaZ, javniNacin, ustvariCheckout, normalizirajLocale, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };
+module.exports = { povratniNaslovi, ustvari, stripe, jeSandbox, jeLive, testniNacin, racunVNacinu, nacinPlacila, nacinPlacilaZ, javniNacin, ustvariCheckout, normalizirajLocale, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };
