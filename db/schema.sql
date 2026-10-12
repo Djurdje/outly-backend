@@ -2621,7 +2621,7 @@ CREATE INDEX vracila_dogodek_idx ON public.vracila USING btree (event_id);
 -- Name: vracila_mail_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX vracila_mail_idx ON public.vracila USING btree (id) WHERE ((stanje = 'opravljeno'::text) AND (NOT brez_stripa) AND (mail_poslano_at IS NULL));
+CREATE INDEX vracila_mail_idx ON public.vracila USING btree (id) WHERE ((NOT brez_stripa) AND (mail_poslano_at IS NULL) AND (stripe_vracilo_id IS NOT NULL));
 
 
 --

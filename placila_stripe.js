@@ -259,15 +259,17 @@ async function spor(c, dp) {
   const znesek = Number.isInteger(dp.amount) && dp.amount >= 0 ? dp.amount : 0;
   const prej = (await c.query("SELECT stanje FROM spori WHERE id = $1", [dp.id])).rows[0];
   await c.query(
-    `INSERT INTO spori (id, order_id, payment_intent_id, charge_id, stanje, razlog, znesek_cents, valuta, rok_dokazov_at, ustvarjen_at, zaprt_at, povrnitev_stanje)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 THEN NOW() END, CASE WHEN $5 = 'lost' THEN 'caka' END)
+    `INSERT INTO spori (id, order_id, payment_intent_id, charge_id, stanje, razlog, znesek_cents, valuta, rok_dokazov_at, ustvarjen_at, zaprt_at, povrnitev_stanje, povrnitev_napaka)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 THEN NOW() END, CASE WHEN $5 = 'lost' THEN (CASE WHEN $2::bigint IS NULL THEN 'rocno' ELSE 'caka' END) END,
+            CASE WHEN $5 = 'lost' AND $2::bigint IS NULL THEN 'spor brez narocila: povrnitve od kluba ni mogoce izracunati' END)
      ON CONFLICT (id) DO UPDATE SET stanje = EXCLUDED.stanje, razlog = EXCLUDED.razlog, order_id = COALESCE(spori.order_id, EXCLUDED.order_id),
             rok_dokazov_at = EXCLUDED.rok_dokazov_at, zaprt_at = COALESCE(spori.zaprt_at, EXCLUDED.zaprt_at), posodobljen_at = NOW(),
-            povrnitev_stanje = COALESCE(spori.povrnitev_stanje, EXCLUDED.povrnitev_stanje)`,
+            povrnitev_stanje = COALESCE(spori.povrnitev_stanje, EXCLUDED.povrnitev_stanje),
+            povrnitev_napaka = CASE WHEN spori.povrnitev_stanje IS NULL AND EXCLUDED.povrnitev_stanje = 'rocno' THEN 'spor brez narocila: povrnitve od kluba ni mogoce izracunati' ELSE spori.povrnitev_napaka END`,
     [dp.id, n ? n.id : null, pi, ch, String(dp.status || "unknown").slice(0, 40), dp.reason ? String(dp.reason).slice(0, 60) : null, znesek,
      dp.currency ? String(dp.currency).toUpperCase().slice(0, 3) : null, rok, ustvarjen, zaprt]);
   const kaj = `spor ${dp.id} (${dp.reason || "?"}) ${znesek} c, stanje ${dp.status}, narocilo ${n ? n.public_ref : "NEZNANO"}`;
-  if (!n) console.error(`[spori] POZOR: ${kaj} - spora ni mogoce povezati z narocilom, preveri v Stripu.`);
+  if (!n) console.error(`[spori] POZOR: ${kaj} - spora ni mogoce povezati z narocilom, preveri v Stripu.${dp.status === "lost" ? " IZGUBLJEN: povrnitev od kluba NI sprozena (rocno)." : ""}`);
   else if (!prej) console.error(`[spori] POZOR: nov ${kaj}. Vstopnice naroceno na vratih NE veljajo do konca spora; lastnik kluba je obvescen. Rok za dokaze: ${rok ? rok.toISOString() : "?"}.`);
   else if (zaprt) console.error(`[spori] POZOR: spor zaprt: ${kaj}.${dp.status === "lost" ? " Izgubljen: povrnitev od kluba (transfer reversal) je v vrsti, vstopnice ostanejo neveljavne." : " Vstopnice spet veljajo."}`);
   else console.log(`[spori] posodobljen ${kaj}`);

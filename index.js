@@ -4689,9 +4689,9 @@ app.delete("/me/favorites/:eventId", requireAuth, async (req, res) => {
 });
 
 // Oblika vstopnice za zaslon »moje vstopnice«; isti stolpci tudi pri gostu (GET /guest/order), da imata odjemalca eno obliko.
-// Spor (chargeback, #190, Martin 12. 10. 2026): vstopnice naroceno na vratih NE veljajo, dokler je spor odprt (Stripovi statusi needs_response, under_review, warning_*), in za vedno ob `lost`;
-// spet veljajo ob won | warning_closed | prevented. En indeksiran EXISTS (spori_narocilo_idx) v ISTI poizvedbi, ki jo sken ze dela; brez klica Stripa. Alias naroceno: `o`.
-const SQL_SPOR_ODPRT = "EXISTS (SELECT 1 FROM spori sp WHERE sp.order_id = o.id AND (sp.zaprt_at IS NULL OR sp.stanje = 'lost'))";
+// Spor (chargeback, #190, Martin 12. 10. 2026): vstopnice naroceno na vratih NE veljajo, dokler je PRAVI spor odprt (Stripova statusa needs_response, under_review), in za vedno ob `lost`;
+// poizvedba (warning_needs_response, warning_under_review) NI chargeback in vrat ne zapre; spet veljajo ob won | warning_closed | prevented. En indeksiran EXISTS (spori_narocilo_idx) v ISTI poizvedbi, ki jo sken ze dela; brez klica Stripa. Alias naroceno: `o`.
+const SQL_SPOR_ODPRT = "EXISTS (SELECT 1 FROM spori sp WHERE sp.order_id = o.id AND sp.stanje IN ('needs_response', 'under_review', 'lost'))";
 const SQL_VSTOPNICE_POGLED = `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.status AS order_status,
               e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
               cl.id AS club_id, cl.name AS club_name, ${PRIZORISCE_NASLOV}, cl.logo_url, ${PRIZORISCE_E},
@@ -5690,7 +5690,8 @@ const VRACILO_MAIL = {
     pogoj: "v.razlog = 'event_cancelled' AND v.stanje <> 'preklicano' AND v.mail_odpoved_po_at <= NOW() AND EXISTS (SELECT 1 FROM events ev WHERE ev.id = v.event_id AND ev.status = 'cancelled')",
     zadeva: "Dogodek odpovedan / Event cancelled" },
   vrnjeno: { poskusi: "mail_poskusi", prevzeto: "mail_prevzeto_at", poslano: "mail_poslano_at",
-    pogoj: "v.stanje = 'opravljeno' AND NOT v.brez_stripa",
+    // tudi `rocno` / `ni_uspelo` po USPELEM koraku A (npr. vracila provizije ni mogoce izracunati): kupec je denar dobil, mail mu pripada
+    pogoj: "NOT v.brez_stripa AND (v.stanje = 'opravljeno' OR (v.stanje IN ('rocno', 'ni_uspelo') AND v.stripe_vracilo_id IS NOT NULL AND v.stripe_stanje = 'succeeded'))",
     zadeva: "Vračilo / Refund" },
 };
 async function posljiVraciloKupcu(vid, vrsta) {
@@ -5763,10 +5764,11 @@ function sporMailBesedilo(o, vrsta) {
       naslovHtml: zaprt ? T("Spor zaključen", "Dispute closed") : T("Spor zaradi plačila", "Payment dispute"),
       razdelki: [
         { naslov: T("Kaj se je zgodilo", "What happened"), vrstice: zaprt ? [izid]
+          : String(o.stanje).startsWith("warning_") ? [T("Banka imetnika kartice je odprla poizvedbo o plačilu (še ni spor/chargeback). Vstopnice ostanejo veljavne.", "The cardholder's bank opened an inquiry about a payment (not yet a dispute/chargeback). The tickets stay valid.")]
           : [T("Imetnik kartice je pri svoji banki izpodbijal plačilo (spor, chargeback). Znesek spora je do odločitve banke začasno odtegnjen.", "A cardholder disputed a payment with their bank (a chargeback). The disputed amount is withheld until the bank decides.")] },
         { naslov: T("Naročilo", "Order"), vrstice: [T(`Naročilo ${o.public_ref}, dogodek »${o.event_title}«. Znesek spora: ${znesek(o.znesek_cents, o.valuta || "EUR", "sl")}. Razlog (po Stripu): ${o.razlog || "?"}.`,
           `Order ${o.public_ref}, event "${o.event_title}". Disputed amount: ${znesek(o.znesek_cents, o.valuta || "EUR", "en")}. Reason (per Stripe): ${o.razlog || "?"}.`)] },
-        { naslov: T("Naslednji koraki", "Next steps"), vrstice: zaprt ? denarSpora(o, T) : [T(`Vstopnice tega naročila na vratih do odločitve ne veljajo. Če imate podatke, ki bi pomagali (npr. dokaz o obisku), odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`,
+        { naslov: T("Naslednji koraki", "Next steps"), vrstice: zaprt ? denarSpora(o, T) : String(o.stanje).startsWith("warning_") ? [T(`Odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}, če imate podatke, ki bi pomagali (npr. dokaz o obisku).`, `Reply to this email or write to ${POSTA_ODGOVOR} if you have information that could help (for example proof of attendance).`)] : [T(`Vstopnice tega naročila na vratih do odločitve ne veljajo. Če imate podatke, ki bi pomagali (npr. dokaz o obisku), odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`,
           `The tickets of this order are not valid at the door until the dispute is decided. If you have information that could help (for example proof of attendance), reply to this email or write to ${POSTA_ODGOVOR}.`)] },
       ],
     };

@@ -560,6 +560,16 @@ async function webhook(tip, objekt, id) {
     const mw = mailiNa("lastnik@outly.si").find(m => /Dispute closed/.test(m.subject));
     assert(mw && /valid at the door again/.test(mw.text), "mail won: vstopnice spet veljajo", mw && mw.text);
 
+    // poizvedba (warning_needs_response) NI chargeback: vrat ne zapre
+    const Dw = await narocilo({ ev: evD, uporabnik: U.bor, cena: 2000 });
+    dispute("dp_warn", Dw.pi, { znesek: 2000, status: "warning_needs_response", razlog: "general" });
+    w = await webhook("charge.dispute.created", { id: "dp_warn" });
+    r = await skeniraj(Dw.id);
+    assert(w.status === 200 && (await pool.query("SELECT stanje FROM spori WHERE id='dp_warn'")).rows[0].stanje === "warning_needs_response" && r.status === 200 && r.body.result === "ok", "S-A: warning_needs_response (poizvedba, ne chargeback): zapisan, alarm, a sken vstopnico SPREJME", [r.status, r.body.result]);
+    assert(await cakaj(() => mailiNa("lastnik@outly.si").some(m => /Payment dispute/.test(m.subject) && m.subject.includes(Dw.ref))), "S-A: mail lastniku o poizvedbi");
+    const mwarn = mailiNa("lastnik@outly.si").find(m => /Payment dispute/.test(m.subject) && m.subject.includes(Dw.ref));
+    assert(/inquiry/.test(mwarn.text) && /stay valid/.test(mwarn.text) && !/not valid at the door/.test(mwarn.text), "S-A: mail pove, da vstopnice ostanejo veljavne", mwarn.text);
+
     // lost, poceni vstopnica: omejitev na neobrnjen del transferja (transfer 2000, terjatev bi bila 1800 + 500 = 2300)
     dispute("dp_1", D1b.pi, { znesek: 2000, status: "lost", pristojbina: 500 });
     const kliciRev0 = klici("POST", /reversals/).length;
@@ -628,8 +638,15 @@ async function webhook(tip, objekt, id) {
     assert(/\[spori\] POZOR: spor dp_2 .* narocilo NEZNANO/.test(log), "alarm: spora ni mogoce povezati z narocilom");
     await pocakaj(600);
     assert(R.poslano.length === mailov, "spor brez narocila: nobenega maila");
+    S.spori.dp_3 = { id: "dp_3", object: "dispute", charge: "ch_neznan3", payment_intent: "pi_neznan3", amount: 700, currency: "eur", reason: "general", status: "lost", created: Math.floor(Date.now() / 1000), balance_transactions: [{ id: "txn_x", fee: 1500, currency: "eur" }] };
+    const kliciRev3 = klici("POST", /reversals/).length;
+    w = await webhook("charge.dispute.closed", { id: "dp_3" });
+    sp = (await pool.query("SELECT * FROM spori WHERE id='dp_3'")).rows[0];
+    await pocakaj(900);
+    assert(w.status === 200 && sp.order_id === null && sp.povrnitev_stanje === "rocno" && /brez narocila/.test(sp.povrnitev_napaka) && klici("POST", /reversals/).length === kliciRev3, "S-B: izgubljen spor BREZ narocila: povrnitev `rocno`, NI samodejnega reversala", [sp.povrnitev_stanje, sp.povrnitev_napaka]);
+    assert(/\[spori\] POZOR: spor dp_3 .* IZGUBLJEN: povrnitev od kluba NI sprozena/.test(log), "S-B: alarm [spori] POZOR");
     ad = await api("GET", "/admin/api/disputes?open=1", T.admin);
-    assert(ad.status === 200 && ad.body.items.length === 1 && ad.body.items[0].id === "dp_2" && (await api("GET", "/admin/api/disputes", T.admin)).body.items.length === 5, "admin: GET /admin/api/disputes (odprti 1, vsi 5)");
+    assert(ad.status === 200 && ad.body.items.length === 2 && ad.body.items.some(x => x.id === "dp_2") && ad.body.items.some(x => x.id === "dp_warn") && (await api("GET", "/admin/api/disputes", T.admin)).body.items.length === 7, "admin: GET /admin/api/disputes (odprti 2: dp_2 in poizvedba dp_warn, vsi 7)");
 
     // ================================================================
     console.log("\n# 11. Sken");
@@ -677,11 +694,11 @@ async function webhook(tip, objekt, id) {
     console.log("\n# 13. Popravki po pregledu (V1, V2, S1-S3, N1-N3, N5)");
     const koncano = async (oid, stanja = ["opravljeno", "ni_uspelo", "rocno", "preklicano"], ms = 15000) => cakaj(async () => { const q = await vracilo(oid); return q && stanja.includes(q.stanje); }, ms);
     const vnesiVrsto = async (a, ev, polja = {}) => {
-      const k = { stanje: "caka", znesek_cents: null, ...polja };
+      const k = { stanje: "caka", znesek_cents: null, naslednji_poskus_at: new Date(Date.now() + 3600e3), ...polja };   // v prihodnosti: vrstica steče šele po odpovedi dogodka (odpovedSql)
       const kolone = Object.keys(k), vr = Object.values(k);
       return (await pool.query(`INSERT INTO vracila (order_id, event_id, razlog, ${kolone.join(", ")}) VALUES ($1, $2, 'event_cancelled', ${kolone.map((_, i) => "$" + (i + 3)).join(", ")}) RETURNING id`, [a.id, ev, ...vr])).rows[0].id;
     };
-    const odpovedSql = (ev) => pool.query("UPDATE events SET status='cancelled' WHERE id=$1", [ev]);
+    const odpovedSql = async (ev) => { await pool.query("UPDATE events SET status='cancelled' WHERE id=$1", [ev]); await pool.query("UPDATE vracila SET naslednji_poskus_at = NOW() WHERE event_id=$1 AND stanje = 'caka' AND naslednji_poskus_at > NOW() + INTERVAL '30 minutes'", [ev]); };
     const reDodaj = (a, id, znesek, extra = {}) => {   // Stripe je nase vracilo ze naredil (korak A)
       const ch = S.ch[S.pi[a.pi].latest_charge]; ch.amount_refunded += znesek;
       const re = { id: "re_x" + id, object: "refund", amount: znesek, status: "succeeded", payment_intent: a.pi, charge: ch.id, metadata: { vracilo_id: String(id) }, ...extra };
@@ -799,6 +816,9 @@ async function webhook(tip, objekt, id) {
       assert(v.stanje === "rocno" && re.test(v.napaka) && refA(a.pi).length === 1 && o.status === "refunded" && !S.fee_refundi.some(x => x.fee === "fee_" + a.pi.replace(/\W/g, "")), `N3 ${a.ref}: kupec vrnjen (1 vracilo), vracilo provizije rocno (${v.napaka.slice(0, 60)}), brez klica`, [v.stanje, v.napaka]);
     }
     assert(/\[vracila\] POZOR: vracilo narocila OUT-VR\d+ \(event_cancelled\) zahteva ROCNO obravnavo: .*Kupec je vrnjen, dokoncaj vracilo provizije rocno/.test(log), "N3: alarm POZOR (kupec vrnjen, provizija rocno)");
+    assert(await cakaj(() => vrnMaili().some(m => m.subject.includes(N3a.ref)) && vrnMaili().some(m => m.subject.includes(N3b.ref))), "N-c: kupec dobi mail »vrnili smo« TUDI ko vrstica konca v `rocno` zaradi provizije");
+    await pocakaj(700);
+    assert(vrnMaili().filter(m => m.subject.includes(N3a.ref)).length === 1 && vrnMaili().filter(m => m.subject.includes(N3b.ref)).length === 1, "N-c: natanko enkrat");
 
     // N5: sweep ne dotakne dogodkov, odpovedanih pred vec kot 30 dnevi
     const evN5 = await dogodek("N5 noc", 2000), N5 = await narocilo({ ev: evN5, uporabnik: U.ana });
@@ -806,6 +826,50 @@ async function webhook(tip, objekt, id) {
     await pool.query("UPDATE odpovedi_dogodkov SET odpovedan_at = NOW() - INTERVAL '40 days' WHERE event_id=$1", [evN5]);
     await pocakaj(1500);
     assert(!(await vracilo(N5.id)) && (await vrsticaN(N5.id)).status === "paid", "N5: dogodek odpovedan pred 40 dnevi: sweep ga ne dotakne");
+
+    // N-a: webhook refund.* prehiti zapis stripe_vracilo_id: vrstica se najde po metadata iz svezega vracila (ne caka na urno preverbo)
+    const evN4 = await dogodek("N4 noc", 2000), N4 = await narocilo({ ev: evN4, uporabnik: U.ana });
+    const idN4 = await vnesiVrsto(N4, evN4, { znesek_cents: 2000, naslednji_poskus_at: new Date(Date.now() + 3600e3) });
+    S.reById.re_n4 = { id: "re_n4", object: "refund", amount: 2000, status: "pending", payment_intent: N4.pi, metadata: { vracilo_id: String(idN4), order_id: String(N4.id), public_ref: N4.ref } };
+    w = await webhook("refund.updated", { id: "re_n4" });
+    let vN4 = await vracilo(N4.id);
+    assert(w.status === 200 && await cakaj(async () => (await vracilo(N4.id)).stripe_vracilo_id === "re_n4", 5000) && (await vracilo(N4.id)).stripe_stanje === "pending", "N-a: webhook refund.updated posvoji vracilo po metadata (stripe_vracilo_id, stripe_stanje pending)", vN4.stripe_vracilo_id);
+    S.reById.re_n4.status = "succeeded";
+    await webhook("refund.updated", { id: "re_n4" });
+    assert(await cakaj(async () => (await vracilo(N4.id)).stripe_stanje === "succeeded", 5000), "N-a: nato stripe_stanje succeeded");
+    await webhook("refund.updated", { id: "re_n4" }, "evt_vr_n4_tuj");
+    S.reById.re_n5 = { id: "re_n5", object: "refund", amount: 1, status: "succeeded", payment_intent: N4.pi, metadata: { vracilo_id: String(idN4), order_id: "999999" } };
+    await webhook("refund.updated", { id: "re_n5" });
+    await pocakaj(300);
+    assert((await vracilo(N4.id)).stripe_vracilo_id === "re_n4", "N-a: vracilo z drugim order_id v metadata se NE posvoji");
+
+    // N-b: ob posvojitvi ze narejenega reversala se zapise NJEGOV znesek, brez lazne razlike in alarma, brez drugega reversala
+    const D7 = await narocilo({ ev: evD, uporabnik: U.bor, cena: 100000 });
+    const trD7 = "tr_" + D7.pi.replace(/\W/g, "");
+    S.tr[trD7].amount_reversed = 91500;
+    S.reversali.push({ id: "trr_prej", object: "transfer_reversal", amount: 91500, transfer: trD7, metadata: { spor_id: "dp_7" }, kljuc: "potekel" });
+    dispute("dp_7", D7.pi, { znesek: 100000, status: "lost", pristojbina: 1500 });
+    await pool.query("INSERT INTO spori (id, order_id, stanje, razlog, znesek_cents, valuta, zaprt_at, povrnitev_stanje, povrnitev_poskusi) VALUES ('dp_7', $1, 'lost', 'fraudulent', 100000, 'EUR', NOW(), 'caka', 1)", [D7.id]);
+    const kliciRev7 = klici("POST", /reversals/).length;
+    assert(await cakaj(async () => (await pool.query("SELECT povrnitev_stanje FROM spori WHERE id='dp_7'")).rows[0].povrnitev_stanje === "opravljeno"), "N-b: povrnitev dokoncana");
+    sp = (await pool.query("SELECT * FROM spori WHERE id='dp_7'")).rows[0];
+    assert(sp.reversal_id === "trr_prej" && sp.povrnitev_cents === 91500 && sp.povrnitev_zelena_cents === 91500 && sp.povrnitev_napaka === null && klici("POST", /reversals/).length === kliciRev7, "N-b: posvojen obstojeci reversal (91500), brez drugega reversala in brez razlike", sp);
+    assert(!/spor dp_7: od kluba je mogoce povrniti samo/.test(log), "N-b: brez lazne opozorilne vrstice POZOR");
+
+    // N-d: odprt spor na naroceno -> vracilo `rocno` z razlogom spor_odprt (ne generican ni_uspelo); po izidu spora admin retry
+    const evN7 = await dogodek("N7 noc", 2000), N7 = await narocilo({ ev: evN7, uporabnik: U.ana });
+    dispute("dp_n7", N7.pi, { znesek: 2000 });
+    await webhook("charge.dispute.created", { id: "dp_n7" });
+    const idN7 = await vnesiVrsto(N7, evN7);
+    await odpovedSql(evN7);
+    assert(await koncano(N7.id), "N-d: dokoncano");
+    const vN7 = await vracilo(N7.id);
+    assert(vN7.stanje === "rocno" && /spor_odprt:/.test(vN7.napaka) && refA(N7.pi).length === 0, "N-d: stanje rocno, razlog spor_odprt, kupec NI vrnjen (spor ze odtegnil znesek)", [vN7.stanje, vN7.napaka]);
+    assert(new RegExp(`\\[vracila\\] POZOR: vracilo narocila ${N7.ref} \\(event_cancelled\\) zahteva ROCNO obravnavo: (Error: )?spor_odprt`).test(log), "N-d: jasen alarm POZOR (spor_odprt)");
+    S.spori.dp_n7.status = "won";
+    await webhook("charge.dispute.closed", { id: "dp_n7" });
+    r = await api("POST", `/admin/api/refunds/${idN7}/retry`, T.admin);
+    assert(r.status === 200 && await koncano(N7.id, ["opravljeno"]) && refA(N7.pi).length === 1, "N-d: po won admin retry -> vracilo opravljeno", r.status);
 
     // Odpoved dogodka brez placanih narocil: stara pot (izbris), brez vracil
     r = await api("DELETE", `/events/${evPrazen}`, T.lastnik);

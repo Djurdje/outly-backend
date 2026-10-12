@@ -2533,7 +2533,7 @@ CREATE INDEX IF NOT EXISTS vracila_pozornost_idx ON vracila (stanje, id) WHERE s
 CREATE INDEX IF NOT EXISTS vracila_potrditev_idx ON vracila (naslednji_poskus_at) WHERE stanje = 'potrditev';
 CREATE INDEX IF NOT EXISTS vracila_dogodek_idx ON vracila (event_id);
 -- Neposlana obvestila kupcem.
-CREATE INDEX IF NOT EXISTS vracila_mail_idx ON vracila (id) WHERE stanje = 'opravljeno' AND NOT brez_stripa AND mail_poslano_at IS NULL;
+CREATE INDEX IF NOT EXISTS vracila_mail_idx ON vracila (id) WHERE NOT brez_stripa AND mail_poslano_at IS NULL AND stripe_vracilo_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS vracila_mail_odpoved_idx ON vracila (id) WHERE razlog = 'event_cancelled' AND mail_odpoved_poslano_at IS NULL AND stanje <> 'preklicano';
 
 COMMENT ON TABLE vracila IS 'Vrsta vracil (047, #190): odpoved dogodka in placilo za neaktivno naroceno. Obdelovalec vracila_stripe.js; Stripe reverse_transfer, idempotentni kljuc outly-vracilo-<id> (I37).';
@@ -2655,7 +2655,7 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('044_pogoji_na_narocilu.sql', '3fb087559bd1315e'),
     ('045_deljenje_nacrtov_izklopljeno.sql', 'f0d55488f9f1c08c'),
     ('046_stripe_nacin_racuna.sql', '8e558261f10865b3'),
-    ('047_vracila_in_spori.sql', '7baddfc6a71c4fb9')
+    ('047_vracila_in_spori.sql', 'eb5d890bfd79f4cd')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

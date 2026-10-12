@@ -76,7 +76,7 @@ CREATE INDEX IF NOT EXISTS vracila_pozornost_idx ON vracila (stanje, id) WHERE s
 CREATE INDEX IF NOT EXISTS vracila_potrditev_idx ON vracila (naslednji_poskus_at) WHERE stanje = 'potrditev';
 CREATE INDEX IF NOT EXISTS vracila_dogodek_idx ON vracila (event_id);
 -- Neposlana obvestila kupcem.
-CREATE INDEX IF NOT EXISTS vracila_mail_idx ON vracila (id) WHERE stanje = 'opravljeno' AND NOT brez_stripa AND mail_poslano_at IS NULL;
+CREATE INDEX IF NOT EXISTS vracila_mail_idx ON vracila (id) WHERE NOT brez_stripa AND mail_poslano_at IS NULL AND stripe_vracilo_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS vracila_mail_odpoved_idx ON vracila (id) WHERE razlog = 'event_cancelled' AND mail_odpoved_poslano_at IS NULL AND stanje <> 'preklicano';
 
 COMMENT ON TABLE vracila IS 'Vrsta vracil (047, #190): odpoved dogodka in placilo za neaktivno naroceno. Obdelovalec vracila_stripe.js; Stripe reverse_transfer, idempotentni kljuc outly-vracilo-<id> (I37).';

@@ -176,6 +176,8 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
         return;
       }
       if (jeEC && !["paid", "partially_refunded", "refunded"].includes(v.o_status)) throw new Rocno(`naroceno je v stanju ${v.o_status}`);
+      // Odprt ali izgubljen spor (chargeback) na naroceno: Stripe je znesek ze odtegnil platformi, vracilo kupcu bi ga placalo DVAKRAT. Ne vracamo; po izidu spora admin retry.
+      if (v.spor_odprt) throw new Rocno("spor_odprt: na naroceno je odprt ali izgubljen spor (chargeback), vracilo kupcu bi bilo dvojno; pocakaj izid spora (won -> admin retry vracila) ali resi rocno");
       // Brez Stripa: 0 EUR (brezplacno naroceno), testni nacin (PI test_...). Samo stanje.
       if (jeEC && (v.total_cents === 0 || /^test_/.test(pi || ""))) { await opravi(v, v.total_cents === 0 ? 0 : v.total_cents - v.o_refunded, null, true); return; }
     }
@@ -282,12 +284,19 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   // Naroceno ostane `refunded` (Stripe vracilo je bilo sprejeto, denar pa se je vrnil platformi): rocna obravnava.
   async function uskladiVracilo(re) {
     if (!re || !re.id) return;
-    const r = await pool.query("UPDATE vracila SET stripe_stanje = $2 WHERE stripe_vracilo_id = $1 RETURNING id, stanje", [re.id, String(re.status || "").slice(0, 20)]);
+    const status = String(re.status || "").slice(0, 20);
+    let r = await pool.query("UPDATE vracila SET stripe_stanje = $2 WHERE stripe_vracilo_id = $1 RETURNING id, stanje", [re.id, status]);
+    // Webhook je prehitel zapis stripe_vracilo_id (vracilo je ze narejeno, vrstica ga se ne pozna): poisci vrstico po metadata iz SVEZEGA vracila in vracilo posvoji.
+    const md = re.metadata || {};
+    if (!r.rows.length && /^\d{1,15}$/.test(String(md.vracilo_id || "")) && /^\d{1,15}$/.test(String(md.order_id || ""))) {
+      r = await pool.query("UPDATE vracila SET stripe_vracilo_id = $2, stripe_stanje = $3 WHERE id = $1 AND order_id = $4 AND stripe_vracilo_id IS NULL RETURNING id, stanje",
+        [md.vracilo_id, re.id, status, md.order_id]);
+    }
     for (const x of r.rows) {
       if (re.status === "succeeded" && x.stanje === "potrditev") {
         await pool.query("UPDATE vracila SET stanje = 'opravljeno', opravljeno_at = NOW(), napaka = NULL WHERE id = $1 AND stanje = 'potrditev'", [x.id]);
         console.log(`[vracila] opravljeno (Stripe je vracilo izvedel): vracilo ${x.id}`);
-      } else if ((re.status === "failed" || re.status === "canceled") && ["potrditev", "opravljeno", "v_teku"].includes(x.stanje)) {
+      } else if ((re.status === "failed" || re.status === "canceled") && ["potrditev", "opravljeno", "v_teku", "caka"].includes(x.stanje)) {
         await pool.query("UPDATE vracila SET stanje = 'ni_uspelo', napaka = $2, opravljeno_at = NULL WHERE id = $1", [x.id, `Stripe vracilo ${re.id}: ${re.status}${re.failure_reason ? " (" + String(re.failure_reason).slice(0, 60) + ")" : ""}`]);
         console.error(`[vracila] POZOR: Stripe vracilo ${re.id} (vracilo ${x.id}) je ${re.status}${re.failure_reason ? ", razlog " + re.failure_reason : ""}: kupec NI dobil denarja; naroceno je v bazi ze vrnjeno, vrni rocno v Stripu.`);
       }
@@ -332,7 +341,8 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   async function obdelaj(id) {
     const r = await pool.query(
       `SELECT v.*, o.public_ref, o.status AS o_status, o.total_cents, o.refunded_cents AS o_refunded, o.stripe_payment_intent_id AS o_pi,
-              o.stripe_checkout_session_id AS o_seja, e.status AS dogodek_status
+              o.stripe_checkout_session_id AS o_seja, e.status AS dogodek_status,
+              EXISTS (SELECT 1 FROM spori sp WHERE sp.order_id = v.order_id AND sp.stanje IN ('needs_response', 'under_review', 'lost')) AS spor_odprt
          FROM vracila v JOIN orders o ON o.id = v.order_id JOIN events e ON e.id = v.event_id WHERE v.id = $1`, [id]);
     const v = r.rows[0];
     if (!v || v.stanje !== "v_teku") return;
@@ -351,6 +361,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     const s = placila.stripe();
     if (!s) throw new Rocno("STRIPE_SECRET_KEY ni nastavljen");
     if (sp.stanje !== "lost") throw new Rocno(`spor ni izgubljen (${sp.stanje})`);
+    if (sp.order_id === null) throw new Rocno("spor brez narocila: povrnitve od kluba ni mogoce izracunati");
     const dp = await s.disputes.retrieve(sp.id);
     if (dp.status !== "lost") throw new Rocno(`Stripe poroca stanje spora ${dp.status}, ne lost`);
     const chId = typeof dp.charge === "string" ? dp.charge : dp.charge && dp.charge.id;
@@ -358,6 +369,11 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     const ch = await s.charges.retrieve(chId, { expand: ["application_fee"] });
     const trId = typeof ch.transfer === "string" ? ch.transfer : ch.transfer && ch.transfer.id;
     if (!trId) throw new Rocno("naboj nima transferja (ni destination charge?): povrnitve od kluba ni mogoce izracunati");
+    // Ponovitev: reversal je morda ze narejen (potekel kljuc, crash pred zapisom). Najprej ga poisci in posvoji z NJEGOVIM zneskom (ne ponovno izracunanim: transfer ima ta reversal ze v amount_reversed).
+    let rev = null;
+    if (!sp.reversal_id && (sp.povrnitev_poskusi > 1 || sp.povrnitev_kljuc_gen > 0)) {
+      rev = ((await s.transfers.listReversals(trId, { limit: 100 })).data || []).find((x) => x.metadata && x.metadata.spor_id === sp.id) || null;
+    }
     // Zamrznjene vrednosti (prvi poskus): zelena = (znesek spora - sorazmerni del provizije) + Stripova pristojbina spora; dejansko = min(zelena, neobrnjeni del transferja).
     if (sp.povrnitev_zelena_cents === null || sp.povrnitev_zelena_cents === undefined) {
       const fee = ch.application_fee && typeof ch.application_fee === "object" ? ch.application_fee : null;
@@ -368,22 +384,21 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
       const pristojbina = bts.reduce((a, x) => a + (Number(x.fee) || 0), 0);
       const delProvizije = fee && ch.amount > 0 ? Math.round(fee.amount * dp.amount / ch.amount) : 0;
       const zelena = Math.max(0, dp.amount - delProvizije) + pristojbina;
-      const tr0 = await s.transfers.retrieve(trId);
-      const neobrnjeno = Math.max(0, (tr0.amount || 0) - (tr0.amount_reversed || 0));
-      const vrni = Math.min(zelena, neobrnjeno);
+      let vrni;
+      if (rev) vrni = rev.amount;
+      else { const tr0 = await s.transfers.retrieve(trId); vrni = Math.min(zelena, Math.max(0, (tr0.amount || 0) - (tr0.amount_reversed || 0))); }
       await pool.query("UPDATE spori SET povrnitev_zelena_cents = $2, povrnitev_cents = $3, pristojbina_spora_cents = $4 WHERE id = $1", [sp.id, zelena, vrni, pristojbina]);
       sp.povrnitev_zelena_cents = zelena; sp.povrnitev_cents = vrni; sp.pristojbina_spora_cents = pristojbina;
     }
-    if (sp.povrnitev_cents > 0 && !sp.reversal_id) {
-      let rev = (sp.povrnitev_poskusi > 1 || sp.povrnitev_kljuc_gen > 0)
-        ? ((await s.transfers.listReversals(trId, { limit: 100 })).data || []).find((x) => x.metadata && x.metadata.spor_id === sp.id) || null : null;   // ponovitev: morda ze narejeno
-      if (!rev) {
-        rev = await s.transfers.createReversal(trId, { amount: sp.povrnitev_cents, metadata: { spor_id: sp.id, order_id: String(sp.order_id || "") } }, { idempotencyKey: kljucSpor(sp) });
-      }
-      await pool.query("UPDATE spori SET reversal_id = $2 WHERE id = $1", [sp.id, rev.id]);
-      sp.reversal_id = rev.id;
+    if (rev) {
+      await pool.query("UPDATE spori SET reversal_id = $2, povrnitev_cents = $3 WHERE id = $1", [sp.id, rev.id, rev.amount]);
+      sp.reversal_id = rev.id; sp.povrnitev_cents = rev.amount;
+    } else if (sp.povrnitev_cents > 0 && !sp.reversal_id) {
+      const nov = await s.transfers.createReversal(trId, { amount: sp.povrnitev_cents, metadata: { spor_id: sp.id, order_id: String(sp.order_id || "") } }, { idempotencyKey: kljucSpor(sp) });
+      await pool.query("UPDATE spori SET reversal_id = $2 WHERE id = $1", [sp.id, nov.id]);
+      sp.reversal_id = nov.id;
     }
-    const manjka = sp.povrnitev_zelena_cents - sp.povrnitev_cents;
+    const manjka = Math.max(0, sp.povrnitev_zelena_cents - sp.povrnitev_cents);
     await pool.query("UPDATE spori SET povrnitev_stanje = 'opravljeno', povrnitev_napaka = $2 WHERE id = $1 AND povrnitev_stanje = 'v_teku'",
       [sp.id, manjka > 0 ? `neobrnjeni del transferja ne zadosti: ${manjka} c nosi Outly` : null]);
     console.log(`[spori] povrnitev od kluba opravljena: spor ${sp.id}, ${sp.povrnitev_cents} c (zelena ${sp.povrnitev_zelena_cents} c, pristojbina spora ${sp.pristojbina_spora_cents} c)`);
