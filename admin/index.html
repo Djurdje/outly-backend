@@ -610,11 +610,20 @@ async function naloziDogodke() {
         <td class="mono">${datum(x.start_at)}${x.end_at ? `<span class="drobno">do ${datum(x.end_at)}</span>` : ""}</td>
         <td class="mono">${evri(x.ticket_price_cents)}</td>
         <td>${st[x.status] || ubezi(x.status)}</td>
-        <td><div class="vrsta">${x.status !== "cancelled" ? `<button class="nevarno mali" onclick="dStatus(${x.id},'cancelled')">Umakni</button>` : ""}${x.status !== "published" ? `<button class="dobro mali" onclick="dStatus(${x.id},'published')">Objavi</button>` : ""}</div></td>
+        <td><div class="vrsta">${x.status !== "cancelled" ? `<button class="nevarno mali" onclick="dStatus(${x.id},'cancelled',${Number(x.paid_orders) || 0},${Number(x.paid_cents) || 0})">Umakni</button>` : ""}${x.status !== "published" ? `<button class="dobro mali" onclick="dStatus(${x.id},'published')">Objavi</button>` : ""}</div></td>
       </tr>`), "Ni dogodkov.");
   });
 }
-async function dStatus(id, status) {
+async function dStatus(id, status, placanaNarocila, placanoCenti) {
+  // Umik = ODPOVED dogodka (#190, Martin 12. 10. 2026): vsi kupci dobijo celoten znesek nazaj (glavnico vrne klub, Outly provizijo), vstopnice prenehajo veljati, kupci dobijo mail.
+  // Vracila tecejo v ozadju cez ~minuto in jih ni mogoce preklicati, ko so enkrat izvedena. Zato izrecna potrditev s stevilom placanih narocil.
+  if (status === "cancelled") {
+    const n = Number(placanaNarocila) || 0;
+    const besedilo = n > 0
+      ? `Umik dogodka pomeni ODPOVED.\n\nVsem kupcem (${n} plačanih naročil, skupaj ${evri(Number(placanoCenti) || 0)}) se denar samodejno VRNE v celoti, njihove vstopnice prenehajo veljati in dobijo e-pošto o odpovedi. Vračil po izvedbi ni mogoče preklicati.\n\nNadaljujem?`
+      : "Umik dogodka pomeni odpoved. Plačanih naročil ni, zato nihče ne dobi vračila.\n\nNadaljujem?";
+    if (!window.confirm(besedilo)) return;
+  }
   await varno(async () => { const r = await klic("PATCH", "/admin/api/events/" + id, { status }); obvesti(`"${r.title}" → ${status}.`, "ok"); naloziDogodke(); naloziPregled(); });
 }
 
