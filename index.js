@@ -563,7 +563,7 @@ const POTRDITEV_IZPAD_MS = 5 * 1000;        // izpad /user (4xx, 5xx, rok) → 5
 const POTRDITEV_USPELA_MS = 5 * 1000;
 const NASTAVITVE_ROK_MS = 5000;
 const NASTAVITVE_OSVEZI_MS = 60 * 1000;
-const nastavitveSupabase = { vrednost: null, nalozeno: 0, vLetu: null };
+const nastavitveSupabase = { vrednost: null, nalozeno: 0, vLetu: null, zadnjiAlarm: 0 };
 
 function napakaPotrditve(sporocilo) {
   const n = new Error("supabase /user: " + sporocilo); n.jwks = true; return n;
@@ -599,8 +599,12 @@ async function preveriNastavitveSupabase() {
   }
   const v = nastavitveSupabase.vrednost;
   if (v.autoconfirm || v.anonimni) {
-    console.error("[auth] POZOR: Supabase mailer_autoconfirm/anonymous_users vklopljen — nove povezave in novi racuni zavrnjeni (503) dokler »Confirm email« ni spet vklopljen"
-      + ` (mailer_autoconfirm=${v.autoconfirm}, anonymous_users=${v.anonimni})`);
+    // Glasen, a najvec en zapis na 60 s (zavrnitev je lahko na vsak zahtevek novega uid; dnevnik/Sentry ne smeta poplaviti).
+    if (zdaj - nastavitveSupabase.zadnjiAlarm >= NASTAVITVE_OSVEZI_MS) {
+      nastavitveSupabase.zadnjiAlarm = zdaj;
+      console.error("[auth] POZOR: Supabase mailer_autoconfirm/anonymous_users vklopljen — nove povezave in novi racuni zavrnjeni (503) dokler »Confirm email« ni spet vklopljen"
+        + ` (mailer_autoconfirm=${v.autoconfirm}, anonymous_users=${v.anonimni})`);
+    }
     const n = new Error("supabase nastavitve: autoconfirm/anonymous"); n.jwks = true; throw n;
   }
 }

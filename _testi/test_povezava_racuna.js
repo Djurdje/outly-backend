@@ -268,7 +268,8 @@ async function api(method, path, token, baza = BASE) {
     const s0 = stub.stNastavitev, u0 = stub.skupaj;
     a = await api("GET", "/me", zeton("obstojec@outly.si", uuid(950), {}), baza2);
     assert(a.status === 200 && stub.stNastavitev === s0 && stub.skupaj === u0, `${ime}: obstojeci uporabnik (po uid) -> 200 brez klica na /settings ali /user`, { status: a.status, s: stub.stNastavitev - s0, u: stub.skupaj - u0 });
-    assert(/POZOR/.test(p.log), `${ime}: glasen console.error v dnevniku`, p.log.slice(-300));
+    const alarmov = (p.log.match(/\[auth\] POZOR/g) || []).length;
+    assert(alarmov === 1, `${ime}: glasen console.error, a najvec en zapis na 60 s (3 zavrnitve -> 1 zapis)`, { alarmov, log: p.log.slice(-300) });
     p.srv.kill(); await spi(300);
   };
   await primer("mailer_autoconfirm=true", { status: 200, telo: { mailer_autoconfirm: true, external: { anonymous_users: false } } }, 300);
