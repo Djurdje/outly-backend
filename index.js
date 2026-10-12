@@ -1450,7 +1450,7 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 // CLUBS (public + business create)
 // ---------------------------
 // owner_user_id NI tu (issue #113, I4): notranji ID uporabnika ne sodi na javno pot, nobena
-// aplikacija ga ne bere; lastnika pove `my_role` / `GET /me`, admin ga dobi iz ADMIN_STOLPCI_KLUBA.
+// aplikacija ga ne bere; lastnika pove `my_role` / `GET /me`, admin ga dobi iz adminStolpciKluba().
 // Stolpci, ki smejo ven javno. NAMENOMA ni "SELECT *": migracija 002 je
 // klubom dodala stripe_account_id, ki z zvezdico ni bil viden nikomur v
 // pregledu, javno pa bi ga vrnil vsak klic /clubs. Vsak nov stolpec je
@@ -1582,8 +1582,22 @@ function preveriPodatkeProdajalca(b) {
   return { polja };
 }
 
+// I36 (#227): Stripe Connect racun kluba je lahko iz SANDBOXA (acct_ testnega Connecta) ali iz ZIVEGA nacina; zivi kljuc sandbox racuna ne pozna
+// (Checkout s testnim `transfer_data.destination` pade, `accounts.retrieve` in `accountLinks` tudi). `clubs.stripe_account_livemode` (migracija 046):
+// TRUE = zivi, FALSE = sandbox, NULL = neznano = SANDBOX (vsi zapisi pred 046 so nastali v sandboxu: produkcija do preklopa tece na sk_test_).
+// Racun velja za »povezan v tem nacinu« samo, ce se nacin racuna ujema z kljucem (`jeLive()`); sicer klub NI pripravljen in se `stripe_charges_enabled`/
+// `stripe_payouts_enabled` ne upostevata (nacin "klub" = 409 stripe_not_ready / payment_mode "unavailable"), `stripeRacunKluba` pa naredi NOV racun.
+// To je EDINO mesto za SQL (literal `TRUE`/`FALSE` iz `jeLive()` ob klicu, ne ob nalaganju modula; ni uporabniskega vhoda); JS enakovrednik je
+// `placilaStripe.racunVNacinu(klub)`. `a` je predpona alias-a tabele, npr. "c." ali "cs.".
+const sqlRacunVNacinu = (a = "") => `(COALESCE(${a}stripe_account_livemode, FALSE) = ${placilaStripe.jeLive() ? "TRUE" : "FALSE"})`;
+// Klub ima v TEKOCEM nacinu povezan Stripe racun, ki sprejema placila (kot `nacinPlacila(klub)` v placila_stripe.js).
+const sqlStripePripravljen = (a = "") => `(${a}stripe_account_id IS NOT NULL AND ${a}stripe_charges_enabled AND ${sqlRacunVNacinu(a)})`;
+// Stanje Stripa za odgovore (lastnik, admin): vrednost iz baze velja samo, ce je racun iz tekocega nacina, sicer false.
+const sqlStripeStanje = (a = "") => `(${a}stripe_charges_enabled AND ${sqlRacunVNacinu(a)}) AS stripe_charges_enabled, (${a}stripe_payouts_enabled AND ${sqlRacunVNacinu(a)}) AS stripe_payouts_enabled`;
+
 // Lastnik vidi še stanje vidnosti in Stripa, ne pa stripe_account_id. Podatki prodajalca (043) so surovi, `seller_complete` doda koda.
-const STOLPCI_KLUBA_LASTNIKA = `${JAVNI_STOLPCI_KLUBA}, hidden, stripe_charges_enabled, stripe_payouts_enabled, ${STOLPCI_PRODAJALCA}`;
+// Stanje Stripa je »v tekocem nacinu« (I36): racun iz drugega nacina se kaze kot nepovezan (false).
+const stolpciKlubaLastnika = () => `${JAVNI_STOLPCI_KLUBA}, hidden, ${sqlStripeStanje()}, ${STOLPCI_PRODAJALCA}`;
 
 function stevilo(vrednost, privzeto, najvec) {
   const n = parseInt(vrednost, 10);
@@ -1771,7 +1785,7 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
        address, city, country, lat, lng, min_age, genres, is_organizer)
        VALUES
       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-       RETURNING ${STOLPCI_KLUBA_LASTNIKA}`,
+       RETURNING ${stolpciKlubaLastnika()}`,
       [
         req.user.userId,
         name,
@@ -1971,7 +1985,7 @@ app.get("/business/clubs/me", requireAuth, requireClub(), async (req, res) => {
   try {
     if (!req.klub.clubId) return res.status(404).send("Club not found.");
     const r = await pool.query(
-      `SELECT ${STOLPCI_KLUBA_LASTNIKA} FROM clubs WHERE id=$1`,
+      `SELECT ${stolpciKlubaLastnika()} FROM clubs WHERE id=$1`,
       [req.klub.clubId]
     );
 
@@ -2077,7 +2091,7 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
 
     if (sets.length === 0) {
       // nothing to update -> return current club
-      const cur = await pool.query(`SELECT ${STOLPCI_KLUBA_LASTNIKA} FROM clubs WHERE id=$1`, [clubId]);
+      const cur = await pool.query(`SELECT ${stolpciKlubaLastnika()} FROM clubs WHERE id=$1`, [clubId]);
       return res.status(200).json(dodajSellerComplete(cur.rows[0]));
     }
 
@@ -2090,7 +2104,7 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
     }
 
     values.push(clubId);
-    const sql = `UPDATE clubs SET ${sets.join(", ")} WHERE id = $${idx} RETURNING ${STOLPCI_KLUBA_LASTNIKA}`;
+    const sql = `UPDATE clubs SET ${sets.join(", ")} WHERE id = $${idx} RETURNING ${stolpciKlubaLastnika()}`;
 
     const updated = await pool.query(sql, values);
     return res.status(200).json(dodajSellerComplete(updated.rows[0]));
@@ -2226,7 +2240,8 @@ if (STOLPCI_DOGODKA_LAHKI === STOLPCI_DOGODKA) throw new Error("STOLPCI_DOGODKA_
 // Dogodek je mesanica vstopnic in VIP miz z eno vrednostjo: odloca vstopnica (`ticket_price_cents`), ce obstaja, sicer najcenejsa miza (`vip_from_cents`).
 // Pri mesanici (vstopnica 0 EUR + placljiva miza ali obratno) je payment_mode dogodka po vstopnici, nakup drugega dela pa vrne 409;
 // natancno za mize je `payment_mode` v GET /events/:id/vip.
-const SQL_KLUB_STRIPE_PRIPRAVLJEN = `(SELECT (cs.stripe_account_id IS NOT NULL AND cs.stripe_charges_enabled) FROM clubs cs WHERE cs.id = events.club_id) AS club_stripe_ready,
+// I36: `club_stripe_ready` = racun iz TEKOCEGA nacina (sqlStripePripravljen), zato je funkcija (nacin je znan ob klicu).
+const sqlKlubStripePripravljen = () => `(SELECT ${sqlStripePripravljen("cs.")} FROM clubs cs WHERE cs.id = events.club_id) AS club_stripe_ready,
         (SELECT ${sqlProdajalecSurov("cs")} FROM clubs cs WHERE cs.id = events.club_id) AS club_seller_raw`;
 function dodajNacinPlacila(vrstice) {
   for (const r of vrstice) {
@@ -2254,7 +2269,7 @@ app.get("/business/events", requireAuth, requireClub(), async (req, res) => {
     const top = await popularniDogodkiKluba(req.klub.clubId);
     const r = await pool.query(
       `SELECT e.*, (e.id = ANY($2::int[])) AS recap_allowed
-         FROM (SELECT ${STOLPCI_DOGODKA}, ${SQL_KLUB_STRIPE_PRIPRAVLJEN} FROM events WHERE club_id=$1) e
+         FROM (SELECT ${STOLPCI_DOGODKA}, ${sqlKlubStripePripravljen()} FROM events WHERE club_id=$1) e
         ORDER BY e.start_at DESC LIMIT 500`,
       [req.klub.clubId, top]
     );
@@ -2301,7 +2316,7 @@ function kljucDogodkov(q) {
 async function javniSeznamDogodkov(req, res) {
   try {
     const { clubId, upcoming, popular } = req.query;
-    const stolpci = (req.query.lite === "true" ? STOLPCI_DOGODKA_LAHKI : STOLPCI_DOGODKA) + ", " + SQL_KLUB_STRIPE_PRIPRAVLJEN;
+    const stolpci = (req.query.lite === "true" ? STOLPCI_DOGODKA_LAHKI : STOLPCI_DOGODKA) + ", " + sqlKlubStripePripravljen();
 
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucDogodkov(req.query), async () => {
     // ?clubId=..&popular=true -> najvec 3 koncani dogodki kluba po prodanih vstopnicah
@@ -2372,7 +2387,7 @@ app.get("/events/:id", neobveznaPrijava, async (req, res) => {
     if (!/^\d+$/.test(req.params.id)) return res.status(400).send("Invalid event id.");
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucId("event", req.params.id), async () => {
       const r = await pool.query(
-        `SELECT ${STOLPCI_DOGODKA}, ${SQL_KLUB_STRIPE_PRIPRAVLJEN}, ${SQL_PRODAJALEC_DOGODKA} FROM events
+        `SELECT ${STOLPCI_DOGODKA}, ${sqlKlubStripePripravljen()}, ${SQL_PRODAJALEC_DOGODKA} FROM events
          WHERE id=$1 AND status='published'
            AND club_id NOT IN (SELECT id FROM clubs WHERE hidden)`,
         [req.params.id]
@@ -2963,9 +2978,10 @@ const ADMIN_POLJA_UPORABNIKA = `id, email, username, role, email_verified, avata
 
 // Klub za admina: javni stolpci + hidden + stanje Stripa (brez stripe_account_id,
 // ki ga panel ne potrebuje in ki ne sme uhajati nikamor).
-const ADMIN_STOLPCI_KLUBA = `c.id, c.owner_user_id, c.name, c.logo_url, c.banner_url, c.description,
+// Stanje Stripa je »v tekocem nacinu« (I36, sqlRacunVNacinu).
+const adminStolpciKluba = () => `c.id, c.owner_user_id, c.name, c.logo_url, c.banner_url, c.description,
   c.contact_email, c.contact_phone, c.instagram, c.website, c.address, c.city, c.country,
-  c.lat, c.lng, c.min_age, c.genres, c.hidden, c.stripe_charges_enabled, c.commission_bps, c.created_at,
+  c.lat, c.lng, c.min_age, c.genres, c.hidden, (c.stripe_charges_enabled AND ${sqlRacunVNacinu("c.")}) AS stripe_charges_enabled, c.commission_bps, c.created_at,
   c.is_organizer, c.is_official,
   c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer,
   u.email AS owner_email, u.username AS owner_username`;
@@ -3247,7 +3263,7 @@ admin.get("/clubs", async (req, res) => {
     let kje = "";
     if (req.query.q) { p.push(`%${String(req.query.q).trim()}%`); kje = `WHERE c.name ILIKE $1 OR c.city ILIKE $1 OR u.email ILIKE $1`; }
     const r = await pool.query(
-      `SELECT ${ADMIN_STOLPCI_KLUBA},
+      `SELECT ${adminStolpciKluba()},
               (SELECT COUNT(*)::int FROM events e WHERE e.club_id = c.id) AS event_count
        FROM clubs c LEFT JOIN users u ON u.id = c.owner_user_id
        ${kje} ORDER BY c.created_at DESC LIMIT 500`, p
@@ -3376,7 +3392,7 @@ admin.post("/clubs", async (req, res) => {
       vrednosti
     );
     const nov = await c.query(
-      `SELECT ${ADMIN_STOLPCI_KLUBA}, 0 AS event_count FROM clubs c LEFT JOIN users u ON u.id=c.owner_user_id WHERE c.id=$1`,
+      `SELECT ${adminStolpciKluba()}, 0 AS event_count FROM clubs c LEFT JOIN users u ON u.id=c.owner_user_id WHERE c.id=$1`,
       [r.rows[0].id]
     );
     await c.query("COMMIT");
@@ -3428,7 +3444,7 @@ admin.patch("/clubs/:id", async (req, res) => {
       vrednosti
     );
     const r = await c.query(
-      `SELECT ${ADMIN_STOLPCI_KLUBA}, (SELECT COUNT(*)::int FROM events e WHERE e.club_id=c.id) AS event_count
+      `SELECT ${adminStolpciKluba()}, (SELECT COUNT(*)::int FROM events e WHERE e.club_id=c.id) AS event_count
        FROM clubs c LEFT JOIN users u ON u.id=c.owner_user_id WHERE c.id=$1`, [id]
     );
     await c.query("COMMIT");
@@ -3576,7 +3592,7 @@ admin.get("/finance", async (req, res) => {
                 COUNT(*) FILTER (WHERE o.stripe_payment_intent_id LIKE 'test_%')::int AS test_orders
          FROM orders o WHERE ${KJE}`, p),
       pool.query(
-        `SELECT c.id, c.name, c.city, c.stripe_charges_enabled, c.stripe_payouts_enabled,
+        `SELECT c.id, c.name, c.city, ${sqlStripeStanje("c.")},
                 COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
                 COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
@@ -3823,9 +3839,15 @@ app.post("/stripe/webhook", express.raw({ type: "*/*", limit: "1mb" }), stripePl
 // Klub, za katerega gre (requireClub). Admin brez izbranega kluba ga mora izbrati (glava X-Outly-Club).
 async function stripeKlub(req, res) {
   if (!req.klub || !req.klub.clubId) { res.status(400).send("Choose a club."); return null; }
-  const r = await pool.query("SELECT id, name, stripe_account_id, stripe_charges_enabled, stripe_payouts_enabled FROM clubs WHERE id=$1", [req.klub.clubId]);
+  const r = await pool.query("SELECT id, name, stripe_account_id, stripe_charges_enabled, stripe_payouts_enabled, stripe_account_livemode FROM clubs WHERE id=$1", [req.klub.clubId]);
   if (!r.rows.length) { res.status(404).send("Club not found."); return null; }
-  return r.rows[0];
+  const k = r.rows[0];
+  // I36 (#227): racun iz drugega nacina (sandbox racun ob sk_live_) je za ta nacin NEPOVEZAN: brez klica Stripa na tuj racun
+  // (accounts.retrieve / createLoginLink bi padla), onboarding naredi nov racun (stripeRacunKluba).
+  if (k.stripe_account_id && !placilaStripe.racunVNacinu(k)) {
+    k.stripe_account_id = null; k.stripe_charges_enabled = false; k.stripe_payouts_enabled = false;
+  }
+  return k;
 }
 function stripeNapaka(res, e, kaj) {
   console.error(`[stripe] ${kaj}:`, e && (e.message || e));
@@ -3835,13 +3857,17 @@ function stripeNapaka(res, e, kaj) {
 // Express racun kluba: ustvari ga najvec enkrat. Hkratna klika serializira zaklep na klub (velja med instancami), drugi
 // po zaklepu vidi racun prvega. NAMENOMA brez Stripovega idempotentnega kljuca: Stripe si pod kljucem 24 h zapomni tudi
 // ZAVRNITEV (3. 10. 2026: politika "Accounts v1" je bila izklopljena, po vklopu je isti kljuc se naprej vracal napako).
+// I36 (#227): obstojec racun se ohrani samo, ce je iz TEKOCEGA nacina (`racunVNacinu`). Racun iz drugega nacina (sandbox racun ob sk_live_) se NADOMESTI
+// z novim (id, `stripe_account_livemode = jeLive()`, charges/payouts false, onboarding znova), pod istim zaklepom. Obratno (ziv racun, sandbox kljuc) racuna
+// NE prepisemo: izgubili bi povezavo z zivim racunom, zato napaka `stripe_live_account` (409). Ob ustvarjanju vedno zapisemo nacin.
 async function stripeRacunKluba(s, k, userId) {
   const c = await pool.connect();
   try {
     await c.query("BEGIN");
     await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [`stripe-racun:${k.id}`]);
-    const ze = (await c.query("SELECT stripe_account_id FROM clubs WHERE id=$1", [k.id])).rows[0];
-    if (ze && ze.stripe_account_id) { await c.query("COMMIT"); return ze.stripe_account_id; }
+    const ze = (await c.query("SELECT stripe_account_id, stripe_account_livemode FROM clubs WHERE id=$1", [k.id])).rows[0];
+    if (ze && ze.stripe_account_id && placilaStripe.racunVNacinu(ze)) { await c.query("COMMIT"); return ze.stripe_account_id; }
+    if (ze && ze.stripe_account_id && ze.stripe_account_livemode === true) { const e = new Error("club has a live Stripe account"); e.koda = "stripe_live_account"; throw e; }
     const u = await c.query("SELECT email FROM users WHERE id=$1", [userId]);
     const nov = await s.accounts.create({
       type: "express",
@@ -3851,9 +3877,12 @@ async function stripeRacunKluba(s, k, userId) {
       business_profile: { name: k.name },
       metadata: { club_id: String(k.id) },
     });
-    await c.query("UPDATE clubs SET stripe_account_id=$2 WHERE id=$1", [k.id, nov.id]);
+    const ziv = placilaStripe.jeLive();
+    await c.query(
+      `UPDATE clubs SET stripe_account_id=$2, stripe_account_livemode=$3, stripe_charges_enabled=FALSE, stripe_payouts_enabled=FALSE, stripe_onboarded_at=NULL
+        WHERE id=$1`, [k.id, nov.id, ziv]);
     await c.query("COMMIT");
-    console.log(`[stripe] klub ${k.id}: nov Connect racun`);
+    console.log(`[stripe] klub ${k.id}: nov Connect racun (${ziv ? "LIVE" : "sandbox"}${ze && ze.stripe_account_id ? ", nadomesca racun iz drugega nacina" : ""})`);
     return nov.id;
   } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
   finally { c.release(); }
@@ -3875,7 +3904,10 @@ app.post("/business/stripe/onboard", requireAuth, requireClub("owner"), async (r
       refresh_url: `${nastavitve}?stripe=osvezi`, return_url: `${nastavitve}?stripe=vrnitev`,
     });
     return res.json({ url: povezava.url });
-  } catch (e) { return stripeNapaka(res, e, "onboarding"); }
+  } catch (e) {
+    if (e && e.koda === "stripe_live_account") return res.status(409).send("This club is connected to a live Stripe account. Payments are in test mode right now.");
+    return stripeNapaka(res, e, "onboarding");
+  }
 });
 
 // GET /business/stripe/status — lastnik/manager: ali klub sprejema placila. Osvezi stanje iz Stripa (ce webhook zamuja).
@@ -4415,7 +4447,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
-              c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps,
+              c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]
     );
@@ -4830,7 +4862,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
-              c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps,
+              c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [g.eventId]
     );
@@ -5024,7 +5056,10 @@ app.post("/guest/order/cancel", async (req, res) => {
     if (!k) return res.status(404).send("Order not found.");
     const nePending = () => res.status(409).json({ error: "order_not_pending", message: "Only an unpaid order can be cancelled." });
     if (k.status !== "pending") return nePending();
-    if (k.stripe_checkout_session_id) {
+    // I36 (#227): sandbox seja (cs_test_) ob zivem kljucu: Stripe je z zivim kljucem ne pozna (retrieve = 404 -> 502, gost ne bi mogel preklicati). Kot pospravljalec
+    // (placila_stripe.js preveriEno): brez klica Stripa, naslednji korak narocilo preklice in sprosti zalogo (sandbox seje v zivem ni mogoce placati ali zakljuciti).
+    const sandboxSeja = !!k.stripe_checkout_session_id && placilaStripe.jeLive() && /^cs_test_/.test(k.stripe_checkout_session_id);
+    if (k.stripe_checkout_session_id && !sandboxSeja) {
       const s = placilaStripe.stripe();
       if (!s) return res.status(503).send("Payments are not configured yet.");
       const cakaj = gostPreklicVstopi(oid);
@@ -5044,7 +5079,7 @@ app.post("/guest/order/cancel", async (req, res) => {
       if (seja.status === "complete") {
         return res.status(409).json({ error: "order_not_pending", message: "This order has just been paid. Your tickets will be ready in a moment." });
       }
-    } else if (Date.now() - new Date(k.created_at).getTime() < 60 * 1000) {
+    } else if (!k.stripe_checkout_session_id && Date.now() - new Date(k.created_at).getTime() < 60 * 1000) {
       // Checkout seja se ustvarja: preklic bi lahko ostal brez seje, ki jo kupec nato placa (placilo za preklicano narocilo).
       res.set("Retry-After", "2");
       return res.status(409).json({ error: "request_in_progress", message: "Your order is still being set up. Please try again in a moment." });
@@ -5834,7 +5869,7 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
       range ? serijaProdaje(klub, range) : Promise.resolve(null),
     ]);
     // Provizija TEGA kluba (031), ce jo je admin nastavil; sicer privzeta. Lastnik vidi svojo pogodbeno provizijo.
-    const kp = (await pool.query(`SELECT commission_bps, (stripe_account_id IS NOT NULL AND stripe_charges_enabled) AS stripe_pripravljen, ${STOLPCI_PRODAJALCA}, contact_phone, contact_email FROM clubs WHERE id=$1`, [klub])).rows[0];
+    const kp = (await pool.query(`SELECT commission_bps, ${sqlStripePripravljen()} AS stripe_pripravljen, ${STOLPCI_PRODAJALCA}, contact_phone, contact_email FROM clubs WHERE id=$1`, [klub])).rows[0];
     const nacinKluba = placilaStripe.nacinPlacilaZ(!!(kp && kp.stripe_pripravljen));
     const odgovor = {
       mode: testniNacinPlacil() ? "test" : "live",
@@ -7494,7 +7529,7 @@ app.get("/events/:id/vip", async (req, res) => {
     if (!id) return res.status(400).send("Invalid event id.");
     const er = await pool.query(
       `SELECT e.id, e.club_id, e.vip_enabled, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.min_age,
-              e.vip_layout_source, e.floor_plan, (c.stripe_account_id IS NOT NULL AND c.stripe_charges_enabled) AS club_stripe_ready,
+              e.vip_layout_source, e.floor_plan, ${sqlStripePripravljen("c.")} AS club_stripe_ready,
               ${sqlProdajalecSurov("c")} AS seller_raw
          FROM events e JOIN clubs c ON c.id = e.club_id
         WHERE e.id = $1 AND e.status = 'published' AND NOT c.hidden`, [id]);
@@ -7589,7 +7624,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     }
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_layout_source,
-              e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.commission_bps,
+              e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email
          FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }

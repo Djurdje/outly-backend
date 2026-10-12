@@ -118,6 +118,10 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     // Klub 1: Stripe pripravljen (Connect onboarding koncan). Klub 2: brez Stripa. Podatki prodajalca na obeh sprva prazni (le kontakt je lahko izpolnjen).
     await pool.query("INSERT INTO clubs (owner_user_id, name, city, address, stripe_account_id, stripe_charges_enabled) VALUES ((SELECT id FROM users WHERE email='lastnik@outly.si'), 'Prodajalec Club', 'Ljubljana', 'Slovenska 1', 'acct_prodajalec1', TRUE)");
     await pool.query("INSERT INTO clubs (owner_user_id, name, city, address) VALUES ((SELECT id FROM users WHERE email='lastnik2@outly.si'), 'Brez Stripa Club', 'Maribor', 'Glavni trg 2')");
+    // I36 (#227): klub 1 ima za zive streznike (ZIV, ZIV_TP) ZIVI Connect racun (stripe_account_livemode TRUE); za sandbox streznik (sklopa 6 in 8) se
+    // nacin racuna zacasno postavi na FALSE (= sandbox racun, kot v produkciji pred preklopom) in nato vrne.
+    const racunNacin = (ziv) => pool.query("UPDATE clubs SET stripe_account_livemode=$1 WHERE id=1", [ziv]);
+    await racunNacin(true);
     const cezDan = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
     const dogodek = async (klub, lastnik, title, cena, kapaciteta = 100) => {
       const r = await api(bZ, "POST", "/events", T[lastnik], { clubId: klub, title, startAt: cezDan, ticketPriceCents: cena, capacity: kapaciteta, minAge: 0 });
@@ -227,6 +231,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
 
     console.log("\n# 6. Sandbox (sk_test_) in testni nacin: nepopolni podatki nakupa NE ustavijo (produkcija danes = sandbox)");
     await nastaviProdajalca(luknje["vse prazno"]);
+    await racunNacin(false);
     r = await kupiVstopnico(bS, T.eva, evPlac);
     assert(r.status === 201 && r.body.mode === "stripe" && r.body.checkout_url, "sandbox + klub s Stripom: 201 stripe kot doslej", r);
     r = await kupiMizo(bS, T.fran, evMize, M3);
@@ -241,6 +246,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(r.status === 201 && r.body.mode === "test" && r.body.order.status === "paid", "testni nacin, VIP miza: 201 test", r);
     r = await kupiGost(bT, evPlac, "gost-testni@example.com");
     assert(r.status === 201 && r.body.mode === "test" && r.body.order.status === "paid", "testni nacin, gost: 201 test", r);
+    await racunNacin(true);
 
     console.log("\n# 7. Javni odgovori nespremenjeni (seller.complete in payment_mode sta ze v odgovoru)");
     r = await api(bZ, "GET", `/events/${evPlac}`);
@@ -341,11 +347,13 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
 
     // Sandbox in testni nacin: payment_mode ni odvisen od podatkov prodajalca (I34 velja samo ob sk_live_)
     await nastaviInRazveljavi(VSE_PRAZNO);
+    await racunNacin(false);
     const oS = await modi(bS, null), oT = await modi(bT, null);
     assert(ujema(oS, { dogodek: "stripe", seznam: "stripe", vipPlacljive: "stripe", dogodekBrezStripa: "test" }), "sandbox + nepopolni podatki: stripe / test kot doslej", oS);
     assert(ujema(oT, { dogodek: "test", seznam: "test", vipPlacljive: "test", dogodekBrezStripa: "test" }), "testni nacin + nepopolni podatki: test kot doslej", oT);
     r8 = await api(bS, "GET", "/business/sales", T.lastnik, undefined, lastnikGlava);
     assert(r8.status === 200 && r8.body.payment_mode === "stripe" && r8.body.payment_unavailable_reason === null, "sandbox: GET /business/sales payment_mode stripe, razlog null", [r8.body.payment_mode, r8.body.payment_unavailable_reason]);
+    await racunNacin(true);
 
     // ================================================================
     console.log("\n# 9. TEST_PLACILA=true + sk_live_ (I31): vsiljen testni nacin se ignorira, I34 velja");

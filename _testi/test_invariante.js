@@ -142,7 +142,7 @@ async function pockaj(base) {
   r = await api("GET", `/clubs/${klubId}`, null);
   assert(r.body && r.body.name === "Pure Club" && r.body.bar_prices !== undefined, "javni klub vseeno vrne svoja javna polja", r.body);
   // I4b: notranji ID lastnika (owner_user_id) ne sme na javne in poslovne poti (issue #113).
-  // Admin panel ga NAMENOMA vidi (ADMIN_STOLPCI_KLUBA), zato admin poti niso na seznamu.
+  // Admin panel ga NAMENOMA vidi (adminStolpciKluba()), zato admin poti niso na seznamu.
   // Iscemo po kljucih v razclenjenem JSON-u (tudi ugnezdenih), ne po besedilu.
   const lastnikId = (await pool.query("SELECT id FROM users WHERE email='lastnik@outly.si'")).rows[0].id;
   function kljuci(x, acc = new Set()) {

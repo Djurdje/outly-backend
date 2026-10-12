@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–045, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–046, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -365,6 +365,7 @@ CREATE TABLE public.clubs (
     registration_number text DEFAULT ''::text NOT NULL,
     tax_number text DEFAULT ''::text NOT NULL,
     vat_payer boolean,
+    stripe_account_livemode boolean,
     CONSTRAINT clubs_bar_prices_chk CHECK ((jsonb_typeof(bar_prices) = 'array'::text)),
     CONSTRAINT clubs_commission_bps_chk CHECK (((commission_bps IS NULL) OR ((commission_bps >= 0) AND (commission_bps <= 5000)))),
     CONSTRAINT clubs_coords_chk CHECK (((lat IS NULL) = (lng IS NULL))),
@@ -434,6 +435,13 @@ COMMENT ON COLUMN public.clubs.tax_number IS 'Davcna stevilka / ID za DDV prodaj
 --
 
 COMMENT ON COLUMN public.clubs.vat_payer IS 'DDV status prodajalca (043, #94, #101): NULL = ni vpisano, TRUE = zavezanec, FALSE = ni zavezanec. Doloca besedilo o DDV pri odjemalcih in v potrdilu.';
+
+
+--
+-- Name: COLUMN clubs.stripe_account_livemode; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.clubs.stripe_account_livemode IS 'Nacin Stripe Connect racuna kluba (046, #227): TRUE = zivi (sk_live_), FALSE = sandbox, NULL = neznano = sandbox (vsi zapisi pred 046). Racun velja za povezan samo, ce se ujema z kljucem (I36).';
 
 
 --

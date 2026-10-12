@@ -118,15 +118,19 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
     nastavi({}); assert(nacinPlacila(s) === "test", "brez kljuca -> test");
     nastavi({ STRIPE_SECRET_KEY: "sk_test_x" }); assert(nacinPlacila(s) === "nastavitve", "kljuc brez webhook skrivnosti -> nastavitve (503)");
     nastavi({ STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec" });
-    assert(nacinPlacila(s) === "stripe", "sandbox + klub s Stripom -> stripe");
+    assert(nacinPlacila(s) === "stripe" && nacinPlacila({ ...s, stripe_account_livemode: null }) === "stripe" && nacinPlacila({ ...s, stripe_account_livemode: false }) === "stripe", "sandbox + klub s Stripom -> stripe (livemode manjka / NULL / FALSE: kot doslej)");
+    assert(nacinPlacila({ ...s, stripe_account_livemode: true }) === "test", "sandbox + ZIV racun -> test (racun iz drugega nacina ne velja, I36)");
     assert(nacinPlacila(brez) === "test", "sandbox + klub brez Stripa -> test (demo klubi delajo naprej)");
     assert(nacinPlacila({ stripe_account_id: "acct_1", stripe_charges_enabled: false }) === "test", "sandbox + nedokoncan onboarding -> test");
     nastavi({ STRIPE_SECRET_KEY: "sk_live_x", STRIPE_WEBHOOK_SECRET: "whsec" });
-    assert(nacinPlacila(s) === "stripe", "live + klub s Stripom -> stripe");
+    // I36 (#227): racun velja samo, ce je iz TEKOCEGA nacina (stripe_account_livemode: TRUE zivi, FALSE/NULL/manjka = sandbox)
+    const sZiv = { ...s, stripe_account_livemode: true };
+    assert(nacinPlacila(sZiv) === "stripe", "live + klub z zivim racunom -> stripe");
+    assert(nacinPlacila(s) === "klub" && nacinPlacila({ ...s, stripe_account_livemode: null }) === "klub" && nacinPlacila({ ...s, stripe_account_livemode: false }) === "klub", "live + sandbox racun (livemode manjka / NULL / FALSE) -> klub (409), ne stripe");
     assert(nacinPlacila(brez) === "klub", "live + klub brez Stripa -> klub (409)");
     // #191: TEST_PLACILA=true vsili test samo brez kljuca / ob sandbox kljucu; ob sk_live_ je IGNORIRAN (ena napacna spremenljivka ne sme pomeniti prave prodaje brez placila)
     nastavi({ STRIPE_SECRET_KEY: "sk_live_x", STRIPE_WEBHOOK_SECRET: "whsec", TEST_PLACILA: "true" });
-    assert(nacinPlacila(s) === "stripe" && nacinPlacila(brez) === "klub", "TEST_PLACILA=true ob sk_live_ je ignoriran (stripe / klub 409)");
+    assert(nacinPlacila(sZiv) === "stripe" && nacinPlacila(brez) === "klub" && nacinPlacila(s) === "klub", "TEST_PLACILA=true ob sk_live_ je ignoriran (stripe / klub 409)");
     nastavi({ STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec", TEST_PLACILA: "true" });
     assert(nacinPlacila(s) === "test", "TEST_PLACILA=true ob sandbox kljucu vsili test");
     nastavi({ TEST_PLACILA: "true" });

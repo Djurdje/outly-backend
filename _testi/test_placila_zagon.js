@@ -166,6 +166,8 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       while (!/\[placila\] POZOR: TEST_PLACILA=true/.test(L.log) && Date.now() - poZagonu < 4000) await pocakaj(100);
       assert(/\[placila\] POZOR: TEST_PLACILA=true je nastavljen ob ZIVEM Stripe kljucu/.test(L.log) && /IGNORIRAN/.test(L.log), "live + TEST_PLACILA: glasen POZOR v dnevniku ob zagonu", L.log.slice(0, 300));
       assert(!/\[placila\] POZOR/.test(A.log + N.log), "sandbox / brez kljuca: brez POZOR");
+      // I36 (#227): klub 1 ima za zivi streznik ZIVI Connect racun (stripe_account_livemode TRUE); za sandbox streznike ostane NULL (= sandbox). Na koncu sklopa vrnjeno.
+      await pool.query("UPDATE clubs SET stripe_account_livemode=TRUE WHERE id=1");
       let r = await apiL("POST", `/events/${evPlain}/orders`, T.ana, { quantity: 1 });
       assert(r.status === 409 && /does not accept online payments/.test(r.text), "live + TEST_PLACILA + klub brez Stripa: nakup 409 (ne testna vstopnica)", [r.status, r.text.slice(0, 80)]);
       assert((await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE event_id=$1", [evPlain])).rows[0].n === 0, "brez narocila v bazi");
@@ -182,6 +184,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       assert(r.status === 200 && r.body.payment_mode === "unavailable", "live: dogodek kluba brez Stripa payment_mode unavailable", r.body.payment_mode);
       r = await apiL("GET", `/events/${evStripe}`);
       assert(r.status === 200 && r.body.payment_mode === "stripe", "live: dogodek kluba s Stripom payment_mode stripe", r.body.payment_mode);
+      await pool.query("UPDATE clubs SET stripe_account_livemode=NULL WHERE id=1");
       // Sandbox: TEST_PLACILA se spostuje (ni v produkcijski vrsti); brez kljuca: test
       r = await apiN("POST", `/events/${evPlain}/orders`, T.ana, { quantity: 1 });
       assert(r.status === 201 && r.body.mode === "test", "brez kljuca + TEST_PLACILA=true: testni nacin kot doslej", r.body.mode);
