@@ -72,7 +72,7 @@ async function api(method, path, token, body) {
   console.log("\n# /me: nova polja");
   let r = await api("GET", "/me", T.ana);
   assert(r.body.pending_friend_requests === 0, "/me vraca pending_friend_requests = 0", r.body.pending_friend_requests);
-  assert(r.body.share_plans_with_friends === true, "/me vraca share_plans_with_friends = true (privzeto)", r.body.share_plans_with_friends);
+  assert(r.body.share_plans_with_friends === false, "/me vraca share_plans_with_friends = false (privzeto od 045: privolitev zahteva pritrdilno dejanje)", r.body.share_plans_with_friends);
 
   console.log("\n# Iskanje");
   r = await api("GET", "/users/search?q=a");
@@ -160,7 +160,7 @@ async function api(method, path, token, body) {
   await pool.query("UPDATE users SET role='business' WHERE email='lastnik@outly.si'");
   await pool.query("INSERT INTO clubs (owner_user_id, name, city) VALUES ($1, 'Pure Club', 'Ljubljana')", [id.lastnik]);
   const polnoleten = new Date(Date.now() - 25 * 365.25 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-  for (const k of ["ana", "bor", "cene", "an_x"]) await api("PATCH", "/me", T[k], { dateOfBirth: polnoleten, genres: ["house"] });
+  for (const k of ["ana", "bor", "cene", "an_x"]) await api("PATCH", "/me", T[k], { dateOfBirth: polnoleten, genres: ["house"], share_plans_with_friends: true });   // od 045 je deljenje privzeto izklopljeno: pritrdilno dejanje
   const cezTeden = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
   r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Zabava", startAt: cezTeden, ticketPriceCents: 1000, capacity: 100, minAge: 0 });
   assert(r.status === 201, "dogodek ustvarjen", r.body);

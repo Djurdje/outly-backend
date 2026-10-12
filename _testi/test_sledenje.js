@@ -209,6 +209,7 @@ const VIDEO = "https://res.cloudinary.com/outly/video/upload/posnetek.mp4";
   // ----------------------------------------------- nacrti prijateljev
   console.log("\n# Nacrti prijateljev: koncanih dogodkov ni na seznamu");
   await pool.query("INSERT INTO friendships (user_a, user_b) VALUES (LEAST($1::int,$2::int), GREATEST($1::int,$2::int))", [idAna, idBor]);
+  await pool.query("UPDATE users SET share_plans_with_friends = TRUE WHERE id = $1", [idBor]);   // od 045 je deljenje privzeto izklopljeno: bor ga je izrecno vklopil
   for (const [eid, ref] of [[eTeden, "ref-1"], [eZdaj, "ref-2"], [e10, "ref-3"]]) {
     await pool.query(
       `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, status, buyer_email, paid_at)

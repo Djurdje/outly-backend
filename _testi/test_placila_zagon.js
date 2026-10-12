@@ -138,7 +138,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     await pool.query("INSERT INTO clubs (owner_user_id, name, city) VALUES ((SELECT id FROM users WHERE email='lastnik2@outly.si'), 'Plain Club', 'Maribor')");
     // Klub 1 ima dokoncan Connect (racun v lazni bazi Stripa, da ga account.updated lahko ponovno prebere), klub 2 ga nima.
     S.racuni.acct_test1 = { id: "acct_test1", object: "account", charges_enabled: true, payouts_enabled: true, details_submitted: true, requirements: { currently_due: [], disabled_reason: null } };
-    await pool.query("UPDATE clubs SET stripe_account_id='acct_test1', stripe_charges_enabled=TRUE, stripe_payouts_enabled=TRUE WHERE id=1");
+    await pool.query("UPDATE clubs SET stripe_account_id='acct_test1', stripe_charges_enabled=TRUE, stripe_payouts_enabled=TRUE, legal_name='Stripe d.o.o.', legal_address='Slovenska 1, 1000 Ljubljana', registration_number='1234567000', tax_number='SI12345678', vat_payer=TRUE, contact_email='info@stripe-club.si' WHERE id=1");   // I34: pri sk_live_ plačljiv nakup zahteva popolne podatke prodajalca
     const cezDan = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
     const dogodek = async (klubToken, klub, title, cena, kapaciteta = 10) => {
       const r = await api("POST", "/events", klubToken, { clubId: klub, title, startAt: cezDan, ticketPriceCents: cena, capacity: kapaciteta, minAge: 0 });

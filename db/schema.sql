@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–044, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–045, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -1396,13 +1396,20 @@ CREATE TABLE public.users (
     genres text[] DEFAULT '{}'::text[] NOT NULL,
     onboarded_at timestamp with time zone,
     supabase_uid uuid,
-    share_plans_with_friends boolean DEFAULT true NOT NULL,
+    share_plans_with_friends boolean DEFAULT false NOT NULL,
     CONSTRAINT users_country_chk CHECK (((country IS NULL) OR (country ~ '^[A-Z]{2}$'::text))),
     CONSTRAINT users_dob_chk CHECK (((date_of_birth IS NULL) OR ((date_of_birth < CURRENT_DATE) AND (date_of_birth > (CURRENT_DATE - '120 years'::interval))))),
     CONSTRAINT users_email_chk CHECK ((POSITION(('@'::text) IN (email)) > 1)),
     CONSTRAINT users_phone_chk CHECK (((phone IS NULL) OR (phone ~ '^\+[1-9][0-9]{7,14}$'::text))),
     CONSTRAINT users_role_chk CHECK ((role = ANY (ARRAY['user'::text, 'business'::text, 'admin'::text, 'backup'::text])))
 );
+
+
+--
+-- Name: COLUMN users.share_plans_with_friends; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.users.share_plans_with_friends IS 'Ali prijatelji vidijo, na katere dogodke gre uporabnik (016). Od 045 je privzeto FALSE za nove uporabnike (privolitev zahteva pritrdilno dejanje); obstojece vrstice nespremenjene.';
 
 
 --
