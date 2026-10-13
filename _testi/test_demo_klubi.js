@@ -33,6 +33,7 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
 const SQL = brezTransakcije("022_demo_klubi.sql");
 const SQL_LOGOTIPI = brezTransakcije("023_logotipi_demo_klubov.sql");
 const SQL_VELVET = brezTransakcije("024_dogodki_velvet.sql");
+const SQL_OZNAKA = brezTransakcije("050_demo_klubi_oznaka.sql");
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
@@ -128,6 +129,13 @@ const SQL_VELVET = brezTransakcije("024_dogodki_velvet.sql");
   assert(new Date(vd[0].start_at).toISOString() === "2026-10-12T20:00:00.000Z", "Velvet Nights 12. 10. 2026 ob 22:00 CEST", vd[0].start_at);
   assert(vd.every(e => e.status === "published" && e.genres.every(g => ["house", "rnb", "rap", "balkan", "pop"].includes(g))), "objavljeni, veljavni zanri", vd);
 
+  console.log("\n# Migracija 050: oznaka is_demo po 022 (verigo sestavlja prava 022, ne rocni vnos)");
+  assert((await pool.query("SELECT COUNT(*)::int AS n FROM clubs WHERE is_demo")).rows[0].n === 0, "pred 050 noben klub ni demo (privzeto FALSE)");
+  await pool.query("BEGIN"); await pool.query(SQL_OZNAKA); await pool.query("COMMIT");
+  const demoImena = (await pool.query("SELECT name FROM clubs WHERE is_demo ORDER BY name")).rows.map(r => r.name);
+  assert(demoImena.join("|") === "Mansion|Mirage|Nexus|Olie|Velvet", "oznaceni natanko Velvet, Nexus, Mirage, Mansion, Olie", demoImena);
+  assert((await pool.query("SELECT is_demo FROM clubs WHERE name='Sesti'")).rows[0].is_demo === false, "6. klub (pravo ime) ni demo");
+
   console.log("\n# Javne poti");
   const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: "http://127.0.0.1:1", RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
@@ -136,6 +144,7 @@ const SQL_VELVET = brezTransakcije("024_dogodki_velvet.sql");
   const seznam = Array.isArray(r.body) ? r.body : (r.body.clubs || []);
   assert(r.status === 200 && seznam.some(c => c.name === "Velvet" && c.contact_phone === "+386 1 620 41 10"), "GET /clubs vrne Velvet s telefonom", r.status);
   const velvet = seznam.find(c => c.name === "Velvet") || {};
+  assert(velvet.is_demo === true && seznam.find(c => c.name === "Sesti").is_demo === false, "GET /clubs: Velvet is_demo true, Sesti false", [velvet.is_demo]);
   assert((velvet.logo_url ?? velvet.logoUrl) === "https://outly.si/assets/clubs/velvet.jpg", "GET /clubs vrne Velvetov logotip", velvet.logo_url ?? velvet.logoUrl);
   for (const id of [1, 2, 3, 4, 5]) {
     r = await api(`/events?clubId=${id}&popular=true`);
