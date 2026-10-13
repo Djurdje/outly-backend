@@ -1003,6 +1003,23 @@ app.delete("/me/devices/:token", requireAuth, omeji({ kljuc: "naprave", najvec: 
   } catch (e) { return odgovoriNaNapako(res, e, "DELETE /me/devices/:token"); }
 });
 
+// POST /help/feedback { article, helpful } — »Was this helpful?« pod clankom pomoci v aplikaciji (migracija 049). Clanki so staticni v aplikaciji, zato strezniku
+// seznam clankov NI znan (aplikacija doda clanek brez deploya): preveri se samo oblika id-ja. En glas na uporabnika na clanek: ponovni glas prepise prejsnjega
+// (helpful + updated_at). Odgovor 204. Omejevalnik je na IP kot pri /me/devices (omrezja z NAT delijo IP, zato 120/h, ne 60).
+const POMOC_CLANEK_VZOREC = /^[a-z0-9-]{1,40}$/;
+app.post("/help/feedback", requireAuth, omeji({ kljuc: "pomoc-odziv", najvec: 120, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+  try {
+    const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+    if (typeof b.article !== "string" || !POMOC_CLANEK_VZOREC.test(b.article)) return res.status(400).json({ error: "invalid_article", message: "article must be 1-40 characters: lowercase letters, digits and hyphens." });
+    if (typeof b.helpful !== "boolean") return res.status(400).json({ error: "invalid_helpful", message: "helpful must be true or false." });
+    await pool.query(
+      `INSERT INTO help_feedback (user_id, article, helpful) VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, article) DO UPDATE SET helpful = EXCLUDED.helpful, updated_at = now()`,
+      [req.user.userId, b.article, b.helpful]);
+    return res.status(204).end();
+  } catch (e) { return odgovoriNaNapako(res, e, "POST /help/feedback"); }
+});
+
 // test endpoint
 app.get("/", (req, res) => {
   res.send("Outly backend OK");
@@ -8810,6 +8827,21 @@ admin.get("/reports", async (req, res) => {
     const r = await pool.query(`${PRIJAVE_ADMIN_SQL} WHERE ($1::text = 'all' OR r.status = $1::text) ORDER BY r.created_at DESC, r.id DESC LIMIT 500`, [status]);
     return res.json({ reports: r.rows });
   } catch (e) { return odgovoriNaNapako(res, e, "GET /admin/api/reports"); }
+});
+
+// GET /admin/api/help-feedback -> { articles: [{ article, helpful, not_helpful, last_at }] } po stevilu glasov padajoce (nato po id-ju). SAMO agregati: brez uporabnikov in e-naslovov.
+// Stevci so cela stevila (COUNT je BIGINT -> ::int), last_at = cas zadnjega glasu (updated_at).
+admin.get("/help-feedback", async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT article,
+              COUNT(*) FILTER (WHERE helpful)::int     AS helpful,
+              COUNT(*) FILTER (WHERE NOT helpful)::int AS not_helpful,
+              MAX(updated_at)                          AS last_at
+         FROM help_feedback GROUP BY article
+        ORDER BY COUNT(*) DESC, article LIMIT 1000`);
+    return res.json({ articles: r.rows });
+  } catch (e) { return odgovoriNaNapako(res, e, "GET /admin/api/help-feedback"); }
 });
 
 // PATCH /admin/api/reports/:id { status: "resolved" | "open", note? } -> { report }. note: niz do 1000 znakov; null ali "" ga zbrise; brez polja ostane.

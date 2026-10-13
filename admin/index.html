@@ -136,6 +136,7 @@
       <button data-z="prijave">Reports <span class="n skrito" id="nPrijav"></span></button>
       <button data-z="finance">Finance</button>
       <button data-z="vracila">Vračila in spori <span class="n skrito" id="nVracil"></span></button>
+      <button data-z="pomoc">Pomoč – odzivi</button>
     </nav>
 
     <!-- PREGLED -->
@@ -178,6 +179,15 @@
       <div class="skupina"><h2>Po klubih</h2><div class="telo" style="padding:0" id="fKlubi"></div></div>
       <div class="skupina"><h2>Po dogodkih</h2><div class="telo" style="padding:0" id="fDogodki"></div></div>
       <div class="skupina"><h2>Zadnja naročila</h2><div class="telo" style="padding:0" id="fNarocila"></div></div>
+    </section>
+
+    <!-- POMOČ – ODZIVI (»Was this helpful?« pod članki v aplikaciji, migracija 049) -->
+    <section id="z-pomoc" class="skrito">
+      <div class="skupina">
+        <h2>Pomoč – odzivi <span class="desno"><button class="tih mali" id="po_osvezi" type="button">Osveži</button></span></h2>
+        <div class="telo" style="font-size:12.5px;color:var(--faint)">Glasovi uporabnikov pod članki pomoči v aplikaciji (en glas na uporabnika na članek, ponovni glas prepiše prejšnjega). Samo seštevki, brez uporabnikov. Članki z veliko glasovi »ni koristno« so kandidati za popravek besedila v aplikaciji.</div>
+        <div class="tabela" id="po_tabela"></div>
+      </div>
     </section>
 
     <!-- VRAČILA IN SPORI (#190, migracija 047; #233) -->
@@ -474,7 +484,7 @@ function pokaziPanel() {
 
 // ---------- zavihki ----------
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => pokaziZavihek(b.dataset.z));
-const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke, guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila };
+const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke, guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila, pomoc: naloziPomoc };
 function pokaziZavihek(z) {
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("aktiven", b.dataset.z === z));
   document.querySelectorAll("section[id^=z-]").forEach(s => s.classList.toggle("skrito", s.id !== "z-" + z));
@@ -876,6 +886,30 @@ async function naloziPrijave() {
 }
 $("r_osvezi").onclick = naloziPrijave;
 $("r_filter").onchange = naloziPrijave;
+
+// ---------- pomoč – odzivi (migracija 049) ----------
+// Id članka prihaja iz aplikacije (uporabnikov odjemalec): v DOM samo prek h() / textContent (XSS).
+async function naloziPomoc() {
+  await varno(async () => {
+    const d = await klic("GET", "/admin/api/help-feedback");
+    const el = $("po_tabela");
+    if (!d.articles.length) { el.replaceChildren(h("div", { class: "prazno" }, "Še ni odzivov.")); return; }
+    const vrstica = (x) => {
+      const skupaj = x.helpful + x.not_helpful;
+      const delez = skupaj ? Math.round(100 * x.helpful / skupaj) : null;
+      return h("tr", {},
+        h("td", { class: "mono" }, x.article),
+        h("td", {}, x.helpful),
+        h("td", {}, x.not_helpful),
+        h("td", {}, delez === null ? "—" : delez + " %"),
+        h("td", {}, datum(x.last_at)));
+    };
+    el.replaceChildren(h("table", {},
+      h("thead", {}, h("tr", {}, ["Članek", "👍", "👎", "Delež koristnih", "Zadnji glas"].map(g => h("th", {}, g)))),
+      h("tbody", {}, d.articles.map(vrstica))));
+  });
+}
+$("po_osvezi").onclick = naloziPomoc;
 
 // ---------- vračila in spori (#233; API iz #232) ----------
 // Vsi podatki gredo v DOM prek h() (textContent); razredi (znacka ...) so samo iz spodnjih tabel, nikoli iz podatkov.
