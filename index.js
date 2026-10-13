@@ -1191,6 +1191,29 @@ const ZANRI = [
 
 app.get("/genres", (req, res) => res.status(200).json({ genres: ZANRI }));
 
+// Zanri iz baze (npr. podedovani od kluba): normaliziraj kot preveriZanre, neznane in ne-nize samo izpusti (brez 400).
+function ociscenoZanre(seznam) {
+  if (!Array.isArray(seznam)) return [];
+  return [...new Set(seznam.filter(g => typeof g === "string").map(g => g.trim().toLowerCase()))].filter(g => ZANRI.includes(g));
+}
+
+// Zanri iz vhoda na VSEH poteh, ki jih pisejo (PATCH /me, POST/PATCH klub, POST/PATCH dogodek): seznam nizov,
+// normaliziran (trim, lowercase, brez podvojenih), vsak mora biti v ZANRI. Brez tega bi poljuben niz (npr. <img onerror>)
+// prisel v bazo in od tam v admin panel in v odjemalce (stored XSS, pregled #238). Vrne seznam ali null, ce je
+// 400 ze poslan (neznan zanr: { error: "unknown_genres", message, unknown, allowed }).
+function preveriZanre(vhod, res) {
+  if (!Array.isArray(vhod)) { res.status(400).send("genres must be an array."); return null; }
+  if (vhod.length > ZANRI.length) { res.status(400).send("Too many genres."); return null; }
+  if (vhod.some(g => typeof g !== "string")) { res.status(400).send("genres must be an array of strings."); return null; }
+  const izbrani = [...new Set(vhod.map(g => g.trim().toLowerCase()))];
+  const neznani = izbrani.filter(g => !ZANRI.includes(g));
+  if (neznani.length > 0) {
+    res.status(400).json({ error: "unknown_genres", message: "Unknown genres.", unknown: neznani.slice(0, 20).map(g => g.slice(0, 60)), allowed: ZANRI });
+    return null;
+  }
+  return izbrani;
+}
+
 // Polja, ki jih vrnemo o uporabniku. Na enem mestu, da se GET /me, PATCH /me
 // in PATCH /me/avatar ne razidejo.
 const POLJA_UPORABNIKA = `id, email, username, role, avatar_url, email_verified,
@@ -1286,13 +1309,8 @@ app.patch("/me", requireAuth, async (req, res) => {
 
     // --- zanri ---
     if (b.genres !== undefined) {
-      if (!Array.isArray(b.genres)) return res.status(400).send("genres must be an array.");
-      if (b.genres.length > ZANRI.length) return res.status(400).send("Too many genres.");
-      const izbrani = [...new Set(b.genres.map(g => String(g).trim().toLowerCase()))];
-      const neznani = izbrani.filter(g => !ZANRI.includes(g));
-      if (neznani.length > 0) {
-        return res.status(400).json({ error: "unknown_genres", unknown: neznani, allowed: ZANRI });
-      }
+      const izbrani = preveriZanre(b.genres, res);
+      if (!izbrani) return;
       dodaj("genres", izbrani);
     }
 
@@ -1795,6 +1813,10 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
 
     if (!name) return res.status(400).send("Missing name.");
 
+    // Zanri: neznan zanr = 400 (preveriZanre); manjkajoce ali null = brez zanrov (kot doslej).
+    const zanriKluba = (genres === undefined || genres === null) ? [] : preveriZanre(genres, res);
+    if (!zanriKluba) return;
+
     const r = await pool.query(
       `INSERT INTO clubs
       (owner_user_id, name, logo_url, banner_url, description,
@@ -1819,7 +1841,7 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
         lat ?? null,
         lng ?? null,
         minAge ?? 18,
-        Array.isArray(genres) ? genres : [],
+        zanriKluba,
         isOrganizer === true
       ]
     );
@@ -2084,10 +2106,8 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
     }
 
     if (incoming.genres !== undefined) {
-      if (!Array.isArray(incoming.genres)) return res.status(400).send("genres must be an array.");
-      incoming.genres = [...new Set(incoming.genres.map(g => String(g).trim().toLowerCase()))];
-      const neznani = incoming.genres.filter(g => !ZANRI.includes(g));
-      if (neznani.length) return res.status(400).json({ error: "unknown_genres", unknown: neznani, allowed: ZANRI });
+      incoming.genres = preveriZanre(incoming.genres, res);
+      if (!incoming.genres) return;
     }
     if (incoming.min_age !== undefined) {
       const n = Number(incoming.min_age);
@@ -2661,7 +2681,8 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
       const c = Number(ticketPriceCents);
       if (!Number.isInteger(c) || c < 0) return res.status(400).send("ticketPriceCents must be a non-negative integer.");
     }
-    if (genres !== undefined && !Array.isArray(genres)) return res.status(400).send("genres must be an array.");
+    const zanriDogodka = genres === undefined ? undefined : preveriZanre(genres, res);
+    if (genres !== undefined && !zanriDogodka) return;
     if (minAge !== undefined && minAge !== null) {
       const a = Number(minAge);
       if (!Number.isInteger(a) || a < 0 || a > 99) return res.status(400).send("minAge must be between 0 and 99.");
@@ -2684,7 +2705,8 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
     if (!(await preveriPrizorisce(prizorisce, club.id, club.is_organizer, res))) return;
 
     const finalMinAge = (minAge ?? club.min_age ?? 18);
-    const finalGenres = Array.isArray(genres) ? genres : (club.genres || []);
+    // Podedovani zanri kluba so lahko stari zapisi izven ZANRI: ociscimo (brez 400, neznane izpustimo), da se umazanija ne siri na nove dogodke.
+    const finalGenres = zanriDogodka ?? ociscenoZanre(club.genres);
 
     const r = await pool.query(
       `INSERT INTO events
@@ -2853,8 +2875,9 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
         !["draft","published","cancelled"].includes(dovoljeno.status)) {
       return res.status(400).send("status must be draft, published or cancelled.");
     }
-    if (dovoljeno.genres !== undefined && !Array.isArray(dovoljeno.genres)) {
-      return res.status(400).send("genres must be an array.");
+    if (dovoljeno.genres !== undefined) {
+      dovoljeno.genres = preveriZanre(dovoljeno.genres, res);
+      if (!dovoljeno.genres) return;
     }
     if (dovoljeno.ticket_price_cents !== undefined && dovoljeno.ticket_price_cents !== null) {
       const c = Number(dovoljeno.ticket_price_cents);
