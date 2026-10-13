@@ -390,6 +390,10 @@ ZVPot-1 21/1-2, ZEPT 7/1 (osnutek pravnika, ne odvetniški nasvet): Outly mora z
 - **Ni pokrito:** 500 brez `console.error(Error)` v istem koraku (npr. po `await` med logom in odgovorom) pride brez sklada; 502/503 in odgovori, ki jih pot pošlje mimo `res.status` (`sendStatus`, `writeHead`), se ne poročajo; webhook za plačila in `POZOR` vrstice vse delujejo prek istega mehanizma, a sam webhook ni posebej označen.
 - **Test:** `_testi/test_sentry.js` (lažni ingest `localhost:3138`).
 
+## Odzivi pod članki pomoči (migracija 049, 13. 10. 2026)
+
+`POST /help/feedback { article, helpful }` (`requireAuth`) -> 204: »Was this helpful?« pod članki pomoči v iOS aplikaciji. `article` = id članka iz aplikacije (`^[a-z0-9-]{1,40}$`, sicer 400 `invalid_article`), `helpful` mora biti boolean (sicer 400 `invalid_helpful`). **Strežnik seznama člankov ne pozna** (aplikacija doda članek brez deploya backenda; tabela nima FK na članek). Tabela `help_feedback`: ključ `(user_id, article)` = en glas na uporabnika na članek, ponovni glas prepiše `helpful` in `updated_at`; `ON DELETE CASCADE` na `users`, zato `DELETE /me` pobriše tudi glasove. Omejevalnik `pomoc-odziv` 120/h/IP (kot `/me/devices`: na IP, zato višje od 60). Admin: `GET /admin/api/help-feedback` -> `{ articles: [{ article, helpful, not_helpful, last_at }] }` po številu glasov padajoče, samo agregati (brez uporabnikov); zavihek »Pomoč – odzivi« v `admin/index.html` (podatki prek `textContent`). **Test:** `_testi/test_pomoc_odzivi.js`.
+
 ## Poslovne invariante
 
 Stvari, ki se ne smejo zgoditi NIKOLI. Vsaka ima mehanizem v kodi, ki jo zagotavlja, in test, ki pade, če

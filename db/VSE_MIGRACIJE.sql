@@ -2622,6 +2622,30 @@ DROP INDEX IF EXISTS vracila_mail_idx;
 CREATE INDEX IF NOT EXISTS vracila_mail_idx ON vracila (id) WHERE NOT brez_stripa AND mail_poslano_at IS NULL;
 
 
+-- 049_pomoc_odzivi.sql
+-- ODZIVI POD CLANKI POMOCI (13. 10. 2026, Martin: »Was this helpful?« v iOS aplikaciji). Samo DODAJANJE nove tabele; nobena obstojeca vrstica se ne spremeni.
+--
+-- Zakaj: clanki pomoci so staticni v aplikaciji (id npr. `buy`, `transfer`, `club-scanner`). Strezniku ni treba poznati seznama clankov (aplikacija lahko doda clanek
+-- brez deploya backenda), zato `article` ni tuj kljuc, samo oblikovno omejen niz. En glas na uporabnika na clanek (PRIMARY KEY): ponovni glas prepise prejsnjega.
+-- Admin vidi samo agregate (GET /admin/api/help-feedback), nikoli uporabnikov.
+-- Izbris racuna: ON DELETE CASCADE, zato DELETE /me pobrise tudi glasove uporabnika (osebni podatek: vezan je na racun).
+-- Zaklep: CREATE TABLE/INDEX na novi tabeli ne zaklene nobene obstojece tabele (tuj kljuc na users vzame kratek SHARE ROW EXCLUSIVE na users, kar sken ne bere vec kot za trenutek).
+
+CREATE TABLE IF NOT EXISTS help_feedback (
+    user_id    INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    article    TEXT        NOT NULL,
+    helpful    BOOLEAN     NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, article),
+    CONSTRAINT help_feedback_article_chk CHECK (article ~ '^[a-z0-9-]{1,40}$')
+);
+
+CREATE INDEX IF NOT EXISTS help_feedback_article_idx ON help_feedback (article);
+
+COMMENT ON TABLE help_feedback IS 'Odzivi »Was this helpful?« pod clanki pomoci (049): en glas na uporabnika na clanek, ponovni glas prepise. article = id clanka iz aplikacije (brez tujega kljuca). CASCADE ob izbrisu racuna.';
+
+
 -- =============================================================================
 -- Vpis v evidenco
 -- =============================================================================
@@ -2674,7 +2698,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('045_deljenje_nacrtov_izklopljeno.sql', 'f0d55488f9f1c08c'),
     ('046_stripe_nacin_racuna.sql', '8e558261f10865b3'),
     ('047_vracila_in_spori.sql', 'eb5d890bfd79f4cd'),
-    ('048_vracila_mail_indeks.sql', '598f065eae62693d')
+    ('048_vracila_mail_indeks.sql', '598f065eae62693d'),
+    ('049_pomoc_odzivi.sql', '35404e303bc6ead4')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
