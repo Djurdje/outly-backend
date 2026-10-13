@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–048, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–049, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -901,6 +901,27 @@ CREATE SEQUENCE public.guest_lists_id_seq
 --
 
 ALTER SEQUENCE public.guest_lists_id_seq OWNED BY public.guest_lists.id;
+
+
+--
+-- Name: help_feedback; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.help_feedback (
+    user_id integer NOT NULL,
+    article text NOT NULL,
+    helpful boolean NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT help_feedback_article_chk CHECK ((article ~ '^[a-z0-9-]{1,40}$'::text))
+);
+
+
+--
+-- Name: TABLE help_feedback; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.help_feedback IS 'Odzivi »Was this helpful?« pod clanki pomoci (049): en glas na uporabnika na clanek, ponovni glas prepise. article = id clanka iz aplikacije (brez tujega kljuca). CASCADE ob izbrisu racuna.';
 
 
 --
@@ -1916,6 +1937,14 @@ ALTER TABLE ONLY public.guest_lists
 
 
 --
+-- Name: help_feedback help_feedback_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.help_feedback
+    ADD CONSTRAINT help_feedback_pkey PRIMARY KEY (user_id, article);
+
+
+--
 -- Name: odpovedi_dogodkov odpovedi_dogodkov_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2300,6 +2329,13 @@ CREATE INDEX guest_lists_dogodek_idx ON public.guest_lists USING btree (event_id
 --
 
 CREATE INDEX guest_lists_gostitelj_idx ON public.guest_lists USING btree (host_user_id) WHERE (revoked_at IS NULL);
+
+
+--
+-- Name: help_feedback_article_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX help_feedback_article_idx ON public.help_feedback USING btree (article);
 
 
 --
@@ -2983,6 +3019,14 @@ ALTER TABLE ONLY public.guest_lists
 
 ALTER TABLE ONLY public.guest_lists
     ADD CONSTRAINT guest_lists_host_user_id_fkey FOREIGN KEY (host_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: help_feedback help_feedback_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.help_feedback
+    ADD CONSTRAINT help_feedback_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
