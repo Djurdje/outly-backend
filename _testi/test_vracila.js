@@ -532,6 +532,22 @@ async function webhook(tip, objekt, id) {
     assert(sl.status === 200 && tSl && tSl.status === "unpaid" && tSl.payment_disputed === true && sl.body.tickets.some(x => x.payment_disputed === false), "scan-list (brez povezave): status unpaid (rdece) + novo polje payment_disputed", tSl);
     const mt = await api("GET", "/me/tickets", T.ana);
     assert(mt.status === 200 && mt.body.find(x => x.id === r.body.ticket.id).payment_disputed === true && mt.body.some(x => x.payment_disputed === false), "/me/tickets: novo polje payment_disputed (true samo za spor)");
+    const mo = await api("GET", "/me/orders", T.ana);
+    const moD = mo.body.find && mo.body.find(o => Number(o.id) === Number(D1b.id)), moC = mo.body.find && mo.body.find(o => Number(o.id) === Number(D1.id));
+    assert(mo.status === 200 && moD && moD.tickets.length > 0 && moD.tickets.every(x => x.payment_disputed === true) && moC && moC.tickets.length > 0 && moC.tickets.every(x => x.payment_disputed === false), "GET /me/orders: tickets[].payment_disputed (true pri sporu, false brez)", { d: moD && moD.tickets.map(x => x.payment_disputed), c: moC && moC.tickets.map(x => x.payment_disputed) });
+    // Poslovni seznam vstopnic dogodka (splet #62, iOS #93 berejo payment_disputed tudi tu) in /guest/ticket (bel seznam polj)
+    const tDisp = r.body.ticket.id, tCist = (await pool.query("SELECT t.id FROM tickets t WHERE t.event_id=$1 AND t.id <> $2 AND NOT EXISTS (SELECT 1 FROM spori sp WHERE sp.order_id = t.order_id) ORDER BY t.id LIMIT 1", [evD, tDisp])).rows[0].id * 1;
+    const bt = await api("GET", `/business/events/${evD}/tickets`, T.lastnik);
+    const btD = bt.body.find && bt.body.find(x => x.id === tDisp), btC = bt.body.find && bt.body.find(x => x.id === tCist);
+    assert(bt.status === 200 && btD && btD.payment_disputed === true && btD.status === "valid" && btC && btC.payment_disputed === false, "GET /business/events/:id/tickets: payment_disputed true pri sporu, false brez (status ostane valid)", { btD, btC });
+    const prejHolder = (await pool.query("SELECT id, holder_user_id, holder_is_guest FROM tickets WHERE id = ANY($1)", [[tDisp, tCist]])).rows;
+    const zDisp = "d".repeat(43), zCist = "c".repeat(43);
+    await pool.query("UPDATE tickets SET holder_is_guest = TRUE, holder_user_id = NULL WHERE id = ANY($1)", [[tDisp, tCist]]);
+    await pool.query("INSERT INTO gost_zetoni_vstopnic (token_hash, ticket_id) VALUES ($1, $2), ($3, $4)", [crypto.createHash("sha256").update(zDisp).digest("hex"), tDisp, crypto.createHash("sha256").update(zCist).digest("hex"), tCist]);
+    const gD = await api("GET", "/guest/ticket", null, undefined, { "X-Guest-Token": zDisp }), gC = await api("GET", "/guest/ticket", null, undefined, { "X-Guest-Token": zCist });
+    assert(gD.status === 200 && gD.body.ticket.payment_disputed === true && gC.status === 200 && gC.body.ticket.payment_disputed === false, "GET /guest/ticket: payment_disputed true pri sporu, false brez", { d: gD.body.ticket && gD.body.ticket.payment_disputed, c: gC.body.ticket && gC.body.ticket.payment_disputed });
+    await pool.query("DELETE FROM gost_zetoni_vstopnic WHERE ticket_id = ANY($1)", [[tDisp, tCist]]);
+    for (const x of prejHolder) await pool.query("UPDATE tickets SET holder_is_guest = $2, holder_user_id = $3 WHERE id = $1", [x.id, x.holder_is_guest, x.holder_user_id]);
     const sb = await api("POST", "/business/tickets/scan-batch", T.lastnik, { device_id: "dev-spor-1", scans: [{ client_scan_id: "cs-spor-0001", serial: r.body.ticket.serial }] });
     assert(sb.status === 200 && sb.body.results && sb.body.results[0].result === "payment_disputed", "scan-batch: payment_disputed", sb.body);
     const casiSkena = [];
