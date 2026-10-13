@@ -459,8 +459,10 @@ async function naloziFinance() {
     const f = await klic("GET", `/admin/api/finance?from=${$("fOd").value}&to=${$("fDo").value}`);
     fPodatki = f;
     const s = f.summary, v = f.all_time;
-    $("fNacin").textContent = f.mode === "test" ? "TESTNI NAČIN – brez pravega denarja" : "v živo";
-    $("fNacin").className = "znacka " + (f.mode === "test" ? "opoz" : "ok");
+    // Način plačil (#230): payments_mode fake | sandbox | live; star backend ga nima -> mode (test | live).
+    const nacin = f.payments_mode || (f.mode === "test" ? "fake" : "live");
+    $("fNacin").textContent = nacin === "fake" ? "TESTNI NAČIN – brez pravega denarja" : nacin === "sandbox" ? "Stripe SANDBOX – ni pravi denar" : "v živo";
+    $("fNacin").className = "znacka " + (nacin === "live" ? "ok" : "opoz");
     const kos = (n, ime, pod) => `<div class="stevilka"><b>${n}</b><span>${ime}</span>${pod ? `<small>${pod}</small>` : ""}</div>`;
     $("fStevilke").innerHTML =
       kos(evri(s.gross_cents), "bruto prodaja (pravi)", `od začetka ${evri(v.gross_cents)}`) +
@@ -471,7 +473,8 @@ async function naloziFinance() {
       kos(s.orders, "naročil", `${s.buyers} kupcev · ${s.clubs_with_sales} klubov`);
     // Zgoraj je SAMO pravi promet; testna naročila (lažni način brez Stripa: test_…, Stripe sandbox: seja cs_test_…) so v ločenem bloku (#230).
     $("fOpomba").textContent = "Zgoraj, po klubih, dogodkih in dnevih je samo pravi promet (vključno z brezplačnimi naročili brez Stripa). Testna naročila so šteta posebej, v bloku spodaj."
-      + (f.mode === "test" ? " Backend je zdaj v testnem načinu: nova naročila so testna." : "");
+      + (nacin === "fake" ? " Backend je zdaj v testnem načinu: nova naročila so testna."
+        : nacin === "sandbox" ? " Backend je zdaj v Stripe sandboxu (sk_test_): nova plačana naročila so testna, ni pravi denar." : "");
     const t = f.test_summary || { orders: 0, gross_cents: 0, fee_cents: 0, refunded_cents: 0, tickets_sold: 0 }, vt = f.all_time_test || { orders: 0, gross_cents: 0 };
     const kosT = (n, ime, pod) => `<div class="stevilka opoz"><b>${n}</b><span>${ime}</span>${pod ? `<small>${pod}</small>` : ""}</div>`;
     $("fTestStevilke").innerHTML =

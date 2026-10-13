@@ -3731,7 +3731,9 @@ admin.get("/finance", async (req, res) => {
       pool.query(`SELECT ${SESTEVEK_TEST} FROM orders o WHERE o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}`),
     ]);
     return res.json({
-      mode: testniNacinPlacil() ? "test" : "live",
+      mode: testniNacinPlacil() ? "test" : "live",   // "live" je tudi ob sandbox kljucu (sk_test_): za panel glej payments_mode
+      // payments_mode (#230): "fake" = brez Stripa / TEST_PLACILA (vstopnice brez placila), "sandbox" = Stripe sk_test_ (ni pravi denar), "live" = sk_live_.
+      payments_mode: placilaStripe.testniNacin() ? "fake" : (placilaStripe.jeSandbox() ? "sandbox" : "live"),
       fee_percent: PROVIZIJA_ODSTOTEK,
       from: od, to: do_,
       summary: { ...skupaj.rows[0], test_orders: testObdobje.rows[0].orders },   // test_orders: staro polje, zdaj po novi definiciji

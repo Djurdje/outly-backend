@@ -2613,7 +2613,9 @@ COMMENT ON TABLE spori IS 'Stripovi spori (chargeback) iz webhooka charge.disput
 -- implicira, ne sme uporabiti, zato se indeks ni uporabljal.
 -- Pogoj poizvedbe (`NOT v.brez_stripa ... AND v.mail_poslano_at IS NULL`) implicira novi pogoj indeksa (`NOT brez_stripa AND mail_poslano_at IS NULL`).
 -- Vedenje kode se NE spremeni (poizvedba je ista, mail gre tudi za vrstice brez stripe_vracilo_id).
--- Tabela vracila je majhna (ena vrstica na vrnjeno naročilo), zato je gradnja indeksa v trenutku (kratek zaklep SHARE).
+-- Zaklep: DROP INDEX vzame ACCESS EXCLUSIVE na `vracila` do COMMIT (CREATE INDEX nato SHARE, v isti transakciji), zato v tem casu tabele ne more brati nihce. Tabela je majhna
+-- (ena vrstica na vrnjeno narocilo, gradnja indeksa v trenutku), bere jo samo admin (GET /admin/api/refunds) in obdelovalec vracil v ozadju; sken vstopnic, nakup in prijava je
+-- ne uporabljajo. migrate.js migraciji nastavi lock_timeout (privzeto 2 s) in jo ob izteku zaklepa ponovi (MIGRACIJA_PONOVITVE, privzeto 4x, 10 s premora): migracija ne caka na dolgo transakcijo.
 
 DROP INDEX IF EXISTS vracila_mail_idx;
 CREATE INDEX IF NOT EXISTS vracila_mail_idx ON vracila (id) WHERE NOT brez_stripa AND mail_poslano_at IS NULL;
@@ -2671,7 +2673,7 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('045_deljenje_nacrtov_izklopljeno.sql', 'f0d55488f9f1c08c'),
     ('046_stripe_nacin_racuna.sql', '8e558261f10865b3'),
     ('047_vracila_in_spori.sql', 'eb5d890bfd79f4cd'),
-    ('048_vracila_mail_indeks.sql', '7f6b53854f0184ca')
+    ('048_vracila_mail_indeks.sql', '191ab9fce33359c4')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

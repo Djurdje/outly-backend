@@ -156,6 +156,22 @@ async function api(method, path, token, body) {
   assert(znacke[narocilo.id] === false && znacke[o4.id] === false, "recent_orders: pravi (cs_live_) in 0 EUR brez Stripa NISTA test", znacke);
   assert(znacke[o2.id] === true && znacke[o3.id] === true && znacke[o5.id] === true, "recent_orders: test_ , cs_test_ + pi_ in 0 EUR lazni so test", znacke);
 
+  console.log("\n# payments_mode (panel: lazni nacin / Stripe SANDBOX / v zivo)");
+  assert(r.body.payments_mode === "fake" && r.body.mode === "test", "brez Stripa: payments_mode fake (mode test)", [r.body.payments_mode, r.body.mode]);
+  // Dodatni backendi na isti bazi z drugim nacinom placil; samo GET /admin/api/finance (ob zagonu ne kličejo Stripa).
+  const nacini = [[3231, { STRIPE_SECRET_KEY: "sk_test_lokalno" }, "sandbox", "live", "Stripe sandbox (sk_test_; mode je tu zgodovinsko live)"],
+    [3232, { STRIPE_SECRET_KEY: "sk_live_lokalno" }, "live", "live", "Stripe v zivo (sk_live_)"],
+    [3233, { STRIPE_SECRET_KEY: "sk_test_lokalno", TEST_PLACILA: "true" }, "fake", "test", "sandbox kljuc + TEST_PLACILA=true (vstopnice brez placila)"]];
+  for (const [port, okolje, pricakovan, mode, ime] of nacini) {
+    const s2 = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", STRIPE_POSPRAVI_MS: "3600000", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
+    try {
+      for (let i = 0; i < 50; i++) { try { await fetch(`http://127.0.0.1:${port}/`); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
+      const x = await fetch(`http://127.0.0.1:${port}/admin/api/finance`, { headers: { authorization: "Bearer " + T.admin } });
+      const j = await x.json();
+      assert(x.status === 200 && j.payments_mode === pricakovan && j.mode === mode, `${ime}: payments_mode ${pricakovan} (mode ${mode} ostane)`, [x.status, j.payments_mode, j.mode]);
+    } finally { s2.kill(); }
+  }
+
   console.log("\n# GET /admin/api/finance z vracilom");
   await pool.query("UPDATE orders SET refunded_cents = 500, status = 'partially_refunded' WHERE id = $1", [narocilo.id]);
   r = await api("GET", "/admin/api/finance", T.admin);
