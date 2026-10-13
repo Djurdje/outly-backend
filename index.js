@@ -3578,11 +3578,11 @@ admin.patch("/events/:id", async (req, res) => {
 });
 
 // --- vracila in spori (#190, migracija 047) ---
-// GET /admin/api/refunds?state=ni_uspelo|rocno|caka|v_teku|opravljeno|preklicano&event_id=&limit= : vrsta vracil (brez e-naslovov kupcev). `attention` = vracila, ki so
+// GET /admin/api/refunds?state=ni_uspelo|rocno|potrditev|caka|v_teku|opravljeno|preklicano&event_id=&limit= : vrsta vracil (brez e-naslovov kupcev). `attention` = vracila, ki so
 // ostala brez denarja za kupca (ni_uspelo, rocno) ali visijo (v_teku): jih je treba pogledati. Tudi v dnevniku: `[vracila] POZOR`.
 admin.get("/refunds", async (req, res) => {
   try {
-    const STANJA = ["caka", "v_teku", "opravljeno", "ni_uspelo", "rocno", "preklicano"];
+    const STANJA = ["caka", "v_teku", "potrditev", "opravljeno", "ni_uspelo", "rocno", "preklicano"];
     const stanje = req.query.state === undefined ? null : String(req.query.state);
     if (stanje !== null && !STANJA.includes(stanje)) return res.status(400).send("state must be one of: " + STANJA.join(", ") + ".");
     const ev = req.query.event_id === undefined ? null : celoId4(req.query.event_id);
@@ -4229,7 +4229,7 @@ const JOIN_IMETNIK = `LEFT JOIN users hu ON hu.id = ${IMETNIK}`;
 async function vstopniceNarocil(idsNarocil, db = pool) {
   if (!idsNarocil.length) return {};
   const r = await db.query(
-    `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, ${STOLPCI_IMETNIKA} FROM tickets t JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK}
+    `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, ${STOLPCI_IMETNIKA}, ${SQL_SPOR_ODPRT} AS payment_disputed FROM tickets t JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK}
      WHERE t.order_id = ANY($1::bigint[]) ORDER BY t.id`, [idsNarocil]
   );
   const po = {};
@@ -5939,7 +5939,7 @@ app.get("/guest/ticket", async (req, res) => {
     const bel = {};
     for (const k of ["id", "serial", "status", "used_at", "created_at", "event_id", "event_title", "start_at", "end_at", "poster_url", "min_age", "club_id", "club_name",
       "address", "city", "logo_url", "venue_club_id", "venue_club_name", "venue_club_logo_url", "venue_name", "venue_address", "venue_city", "venue_lat", "venue_lng",
-      "is_vip", "table_label", "table_seats", "package_name", "package_description", "public_ref", "transferred", "holder_username", "is_guest_holder"]) bel[k] = t[k];
+      "is_vip", "table_label", "table_seats", "package_name", "package_description", "public_ref", "transferred", "holder_username", "is_guest_holder", "payment_disputed"]) bel[k] = t[k];
     return res.json({
       ticket: { ...bel, qr: qrVstopnice(t), transferable: false, from_username: pos, buyer_username: pos },   // gost vstopnice ne more naprej (brez racuna)
       event: { id: t.event_id, title: t.event_title, start_at: t.start_at, end_at: t.end_at, poster_url: t.poster_url, min_age: t.min_age,
@@ -6194,7 +6194,7 @@ app.get("/business/events/:id/tickets", requireAuth, requireClub("owner", "manag
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
     const r = await pool.query(
-      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.buyer_email, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username, ${STOLPCI_IMETNIKA}
+      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.buyer_email, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username, ${STOLPCI_IMETNIKA}, ${SQL_SPOR_ODPRT} AS payment_disputed
        FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id
        LEFT JOIN users u ON u.id = o.user_id ${JOIN_IMETNIK}
        WHERE t.event_id = $1 AND e.club_id = $2 ORDER BY t.id LIMIT 1000`, [id, klub]

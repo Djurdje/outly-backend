@@ -80,6 +80,10 @@
   .stevilka b{display:block;font-size:26px;font-weight:700;letter-spacing:-.02em}
   .stevilka span{font-size:11.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
   .stevilka small{display:block;font-size:11.5px;color:var(--faint);margin-top:2px}
+  .stevilka.pozor{background:var(--napaka-soft);border-color:#4A2029}
+  .stevilka.pozor b{color:var(--napaka)}
+  .stevilka.opoz{background:var(--opoz-soft);border-color:#4A3A1C}
+  .stevilka.opoz b{color:var(--opoz)}
   .graf{display:flex;align-items:flex-end;gap:3px;height:140px;padding-top:18px}
   .graf .stolpec{flex:1;min-width:6px;height:100%;background:var(--panel2);border-radius:3px 3px 0 0;position:relative;display:flex;flex-direction:column;justify-content:flex-end}
   .graf .stolpec i{display:block;background:#4C76FF;border-radius:3px 3px 0 0;width:100%}
@@ -124,6 +128,7 @@
       <button data-z="guest">Guest lists</button>
       <button data-z="prijave">Reports <span class="n skrito" id="nPrijav"></span></button>
       <button data-z="finance">Finance</button>
+      <button data-z="vracila">Vračila in spori <span class="n skrito" id="nVracil"></span></button>
     </nav>
 
     <!-- PREGLED -->
@@ -160,6 +165,26 @@
       <div class="skupina"><h2>Po klubih</h2><div class="telo" style="padding:0" id="fKlubi"></div></div>
       <div class="skupina"><h2>Po dogodkih</h2><div class="telo" style="padding:0" id="fDogodki"></div></div>
       <div class="skupina"><h2>Zadnja naročila</h2><div class="telo" style="padding:0" id="fNarocila"></div></div>
+    </section>
+
+    <!-- VRAČILA IN SPORI (#190, migracija 047; #233) -->
+    <section id="z-vracila" class="skrito">
+      <div class="skupina">
+        <h2>Vračila <span class="desno"><select id="v_filter" style="width:auto">
+          <option value="attention">ni uspelo + ročno</option><option value="ni_uspelo">ni uspelo</option><option value="rocno">ročno</option>
+          <option value="potrditev">čaka potrditev Stripa</option><option value="v_teku">v teku</option><option value="caka">čaka</option>
+          <option value="opravljeno">opravljeno</option><option value="preklicano">preklicano</option><option value="all">vsa</option></select>
+          <button class="tih mali" id="v_osvezi" type="button">Osveži</button></span></h2>
+        <div class="telo" style="font-size:12.5px;color:var(--faint)">Vračila kupcem ob odpovedi dogodka ali plačilu po preklicu naročila. <b>Ni uspelo</b> in <b>ročno</b> sta ostali brez denarja za kupca in zahtevata pogled (npr. klub brez sredstev, naročilo iz drugega načina Stripa). »Poskusi znova« vrne vračilo v vrsto; pred dvojnim vračilom varuje preverba že narejenih vračil pri Stripu in ostanek naboja. Če je Stripe vračilo zavrnil po sprejetju, ponovni poskus zavrne (409): vrni ga ročno v Stripu.
+          <div class="vrsta" id="v_stevci" style="margin-top:8px"></div></div>
+        <div class="tabela" id="v_tabela"></div>
+      </div>
+      <div class="skupina">
+        <h2>Spori (chargeback) <span class="desno"><select id="s_filter" style="width:auto"><option value="all">vsi</option><option value="open">samo odprti</option></select>
+          <button class="tih mali" id="s_osvezi" type="button">Osveži</button></span></h2>
+        <div class="telo" style="font-size:12.5px;color:var(--faint)">Stripovi spori na plačilih. Med odprtim sporom vstopnice na vratih ne veljajo. Ob izgubljenem sporu se znesek terja od kluba (povrnitev); če ne uspe (npr. klub brez sredstev), jo po odpravi vzroka poskusi znova.</div>
+        <div class="tabela" id="s_tabela"></div>
+      </div>
     </section>
 
     <!-- PROŠNJE -->
@@ -383,7 +408,7 @@ function pokaziPanel() {
 
 // ---------- zavihki ----------
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => pokaziZavihek(b.dataset.z));
-const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke, guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance };
+const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke, guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila };
 function pokaziZavihek(z) {
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("aktiven", b.dataset.z === z));
   document.querySelectorAll("section[id^=z-]").forEach(s => s.classList.toggle("skrito", s.id !== "z-" + z));
@@ -400,10 +425,16 @@ async function naloziPregled() {
   await varno(async () => {
     const s = await klic("GET", "/admin/api/summary");
     const kos = (n, ime) => `<div class="stevilka"><b>${n}</b><span>${ime}</span></div>`;
+    // Števci vračil/sporov: številka je vedno Number (polja lahko manjkajo na starem backendu); > 0 = poudarjeno.
+    const kosPozor = (n, ime, vrsta) => { const x = Number(n) || 0; return `<div class="stevilka${x > 0 ? " " + vrsta : ""}"><b>${x}</b><span>${ime}</span></div>`; };
     $("stevilke").innerHTML =
       kos(s.new_applications, "novih prošenj") + kos(s.clubs, "klubov") + kos(s.hidden_clubs, "skritih klubov") +
       kos(s.events, "dogodkov") + kos(s.upcoming_events, "prihajajočih") + kos(s.users, "uporabnikov") +
-      kos(s.business_users, "poslovnih računov") + kos(s.admins, "adminov");
+      kos(s.business_users, "poslovnih računov") + kos(s.admins, "adminov") +
+      kosPozor(s.refunds_attention, "vračil za pozornost", "pozor") + kosPozor(s.open_disputes, "odprtih sporov", "opoz") +
+      kosPozor(s.dispute_recovery_attention, "povrnitev sporov za pozornost", "pozor");
+    const nV = (Number(s.refunds_attention) || 0) + (Number(s.dispute_recovery_attention) || 0);
+    $("nVracil").textContent = nV; $("nVracil").classList.toggle("skrito", !nV);
     $("nProsenj").textContent = s.new_applications; $("nProsenj").classList.toggle("skrito", !s.new_applications);
     $("nPrijav").textContent = s.open_reports || 0; $("nPrijav").classList.toggle("skrito", !s.open_reports);
   });
@@ -767,6 +798,115 @@ async function naloziPrijave() {
 }
 $("r_osvezi").onclick = naloziPrijave;
 $("r_filter").onchange = naloziPrijave;
+
+// ---------- vračila in spori (#233; API iz #232) ----------
+// Vsi podatki gredo v DOM prek h() (textContent); razredi (znacka ...) so samo iz spodnjih tabel, nikoli iz podatkov.
+const V_STANJA = { caka: ["siva", "čaka"], v_teku: ["", "v teku"], potrditev: ["opoz", "čaka potrditev Stripa"], opravljeno: ["ok", "opravljeno"], ni_uspelo: ["slabo", "ni uspelo"], rocno: ["slabo", "ročno"], preklicano: ["siva", "preklicano"] };
+const V_RAZLOGI = { event_cancelled: "odpoved dogodka", inactive_order: "plačilo po preklicu naročila" };
+const S_STANJA = { needs_response: ["slabo", "čaka na odgovor"], under_review: ["opoz", "v pregledu"], warning_needs_response: ["opoz", "poizvedba: čaka na odgovor"], warning_under_review: ["opoz", "poizvedba: v pregledu"], won: ["ok", "dobljen"], lost: ["slabo", "izgubljen"], warning_closed: ["siva", "poizvedba zaprta"], prevented: ["ok", "preprečen"] };
+const P_STANJA = { caka: ["siva", "čaka"], v_teku: ["", "v teku"], opravljeno: ["ok", "opravljeno"], ni_uspelo: ["slabo", "ni uspelo"], rocno: ["slabo", "ročno"] };
+const RETRY_STANJA = ["ni_uspelo", "rocno"];
+function znackaIz(tab, k) {
+  const e = Object.prototype.hasOwnProperty.call(tab, k) ? tab[k] : ["siva", String(k ?? "—")];
+  return h("span", { class: ("znacka " + e[0]).trim() }, e[1]);
+}
+// Celi centi -> "12,05 €" brez deljenja z plavajočo vejico (I9); drugo kot EUR se izpiše s kodo valute.
+function evriCelo(c, valuta) {
+  if (!Number.isSafeInteger(c)) return "—";
+  const a = Math.abs(c);
+  const v = valuta && String(valuta).toLowerCase() !== "eur" ? " " + String(valuta).toUpperCase().slice(0, 3) : " €";
+  return (c < 0 ? "−" : "") + Math.floor(a / 100) + "," + String(a % 100).padStart(2, "0") + v;
+}
+// Kupčevih e-naslovov na zaslonu ni (API jih ne vrača); če bi jih Stripova napaka vsebovala, jih zakrijemo.
+function brezMaila(s) { return String(s ?? "").replace(/[^\s<>"'@]+@[^\s<>"'@]+/g, "[e-naslov]"); }
+function vTabela(el, glave, vrstice, prazno) {
+  if (!vrstice.length) { el.replaceChildren(h("div", { class: "prazno" }, prazno)); return; }
+  el.replaceChildren(h("table", {}, h("thead", {}, h("tr", {}, glave.map(g => h("th", {}, g)))), h("tbody", {}, vrstice)));
+}
+const V_NAPAKA_STIL = "max-width:300px;white-space:pre-wrap;word-break:break-word";
+async function vRetry(url, opis, sporocilo, gumb, opombaOb409 = "") {
+  if (!window.confirm(opis)) return;
+  gumb.disabled = true;
+  try {
+    await klic("POST", url);
+    obvesti(sporocilo, "ok");
+  } catch (e) {
+    obvesti(/^409/.test(e.message) ? e.message + " — vrstica je morda že v vrsti (drug zavihek ali admin; seznam je osvežen)" + (opombaOb409 ? "; " + opombaOb409 : "") + "." : e.message, "slabo");
+  } finally { gumb.disabled = false; }
+  await naloziVracila();
+  naloziPregled();
+}
+async function naloziVracila() {
+  await Promise.all([naloziVracilaSeznam(), naloziSpore()]);
+}
+async function naloziVracilaSeznam() {
+  await varno(async () => {
+    const f = $("v_filter").value, LIM = 200;
+    let d;
+    if (f === "attention") {
+      const [a, b] = await Promise.all(RETRY_STANJA.map(x => klic("GET", `/admin/api/refunds?state=${x}&limit=${LIM}`)));
+      d = { counts: a.counts, items: [...a.items, ...b.items].sort((x, y) => Number(y.id) - Number(x.id)) };
+    } else {
+      d = await klic("GET", "/admin/api/refunds?limit=" + LIM + (f === "all" ? "" : "&state=" + encodeURIComponent(f)));
+    }
+    $("v_stevci").replaceChildren(...Object.keys(V_STANJA).filter(k => d.counts && k in d.counts).map(k => h("span", {}, znackaIz(V_STANJA, k), " ", Number(d.counts[k]) || 0)));
+    const vrstica = (x) => h("tr", {},
+      h("td", { class: "mono" }, x.id),
+      h("td", {}, h("b", {}, x.public_ref || "—"), h("span", { class: "drobno" }, "naročilo #" + x.order_id)),
+      h("td", {}, x.event_title || "—", h("span", { class: "drobno" }, "dogodek #" + x.event_id)),
+      h("td", { class: "mono" }, evriCelo(x.amount_cents, x.currency),
+        x.amount_cents === null || x.amount_cents === undefined ? h("span", { class: "drobno" }, "se določi ob prvem poskusu") : null,
+        Number.isSafeInteger(x.fee_refund_cents) && x.fee_refund_cents > 0 ? h("span", { class: "drobno" }, "provizija: " + evriCelo(x.fee_refund_cents, x.currency)) : null),
+      h("td", {}, V_RAZLOGI[x.reason] || x.reason || "—", x.no_stripe ? h("span", { class: "drobno" }, "brez Stripa (test/0 €)") : null),
+      h("td", {}, znackaIz(V_STANJA, x.state), h("span", { class: "drobno" }, "poskusov: " + (Number(x.attempts) || 0))),
+      h("td", { style: V_NAPAKA_STIL }, x.error ? brezMaila(x.error) : "—"),
+      h("td", { class: "mono" }, datum(x.created_at),
+        x.done_at ? h("span", { class: "drobno" }, "opravljeno " + datum(x.done_at)) : null,
+        (x.state === "caka" || x.state === "v_teku") && x.next_attempt_at ? h("span", { class: "drobno" }, "naslednji poskus " + datum(x.next_attempt_at)) : null),
+      h("td", {}, RETRY_STANJA.includes(x.state)
+        ? h("button", { class: "mali", type: "button", onclick: (ev) => vRetry(`/admin/api/refunds/${encodeURIComponent(x.id)}/retry`,
+            `Poskusi znova vračilo #${x.id} (naročilo ${x.public_ref}, ${evriCelo(x.amount_cents, x.currency)})?\n\nVračilo gre znova v vrsto in se izvede v ozadju (~10 s). Najprej odpravi vzrok (npr. klub nima sredstev). Pred dvojnim vračilom varuje preverba že narejenih vračil pri Stripu.`,
+            `Vračilo #${x.id} je znova v vrsti.`, ev.currentTarget, "če je Stripe vračilo zavrnil po sprejetju, ga vrni ročno v Stripu") }, "Poskusi znova")
+        : null));
+    const pln = d.items.length >= LIM;
+    vTabela($("v_tabela"), ["#", "Naročilo", "Dogodek", "Znesek", "Razlog", "Stanje", "Napaka", "Čas", ""], d.items.map(vrstica),
+      f === "attention" ? "Nobeno vračilo ne zahteva pozornosti." : "Ni vračil v tem stanju.");
+    if (pln) obvesti(`Prikazanih je prvih ${LIM} vračil; zoži filter.`, "");
+  });
+}
+async function naloziSpore() {
+  await varno(async () => {
+    const d = await klic("GET", "/admin/api/disputes?limit=200" + ($("s_filter").value === "open" ? "&open=1" : ""));
+    const vrstica = (x) => {
+      const odprt = !x.closed_at;
+      const imaPovrnitev = x.recovery_state !== null && x.recovery_state !== undefined;
+      return h("tr", {},
+        h("td", { class: "mono" }, x.id),
+        h("td", {}, x.public_ref ? h("b", {}, x.public_ref) : h("span", { class: "znacka slabo" }, "ni povezan z naročilom"),
+          x.event_title ? h("span", { class: "drobno" }, x.event_title) : null),
+        h("td", { class: "mono" }, evriCelo(x.amount_cents, x.currency)),
+        h("td", {}, znackaIz(S_STANJA, x.state), h("span", { class: "drobno" }, x.reason || "")),
+        h("td", {}, odprt ? h("span", { class: "znacka opoz" }, "odprt") : h("span", { class: "znacka siva" }, "zaprt"),
+          h("span", { class: "drobno" }, odprt ? (x.evidence_due_at ? "dokazi do " + datum(x.evidence_due_at) : "") : datum(x.closed_at))),
+        h("td", {}, imaPovrnitev ? znackaIz(P_STANJA, x.recovery_state) : h("span", { class: "drobno" }, "ni dolgovana"),
+          imaPovrnitev ? h("span", { class: "drobno" }, `terjatev ${evriCelo(x.recovery_wanted_cents, x.currency)} · vrnjeno ${evriCelo(x.recovered_cents, x.currency)}`) : null,
+          imaPovrnitev && Number.isSafeInteger(x.dispute_fee_cents) ? h("span", { class: "drobno" }, "pristojbina spora " + evriCelo(x.dispute_fee_cents, x.currency)) : null),
+        h("td", { style: V_NAPAKA_STIL }, x.recovery_error ? brezMaila(x.recovery_error) : "—"),
+        h("td", { class: "mono" }, datum(x.created_at)),
+        h("td", {}, imaPovrnitev && RETRY_STANJA.includes(x.recovery_state)
+          ? h("button", { class: "mali", type: "button", onclick: (ev) => vRetry(`/admin/api/disputes/${encodeURIComponent(x.id)}/retry`,
+              `Poskusi znova povrnitev spora ${x.id} (${evriCelo(x.amount_cents, x.currency)}) od kluba?\n\nPovrnitev (transfer reversal) gre znova v vrsto in se izvede v ozadju. Najprej odpravi vzrok (npr. klub nima sredstev).`,
+              `Povrnitev spora ${x.id} je znova v vrsti.`, ev.currentTarget) }, "Poskusi znova")
+          : null));
+    };
+    vTabela($("s_tabela"), ["Spor", "Naročilo", "Znesek", "Stanje (Stripe)", "Odprt", "Povrnitev od kluba", "Napaka", "Ustvarjen", ""], d.items.map(vrstica),
+      $("s_filter").value === "open" ? "Ni odprtih sporov." : "Ni sporov.");
+  });
+}
+$("v_osvezi").onclick = naloziVracilaSeznam;
+$("v_filter").onchange = naloziVracilaSeznam;
+$("s_osvezi").onclick = naloziSpore;
+$("s_filter").onchange = naloziSpore;
 
 // ---------- zagon ----------
 if (seja.token) {
