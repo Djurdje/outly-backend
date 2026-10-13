@@ -8,7 +8,8 @@
 -- Pogoj poizvedbe (`NOT v.brez_stripa ... AND v.mail_poslano_at IS NULL`) implicira novi pogoj indeksa (`NOT brez_stripa AND mail_poslano_at IS NULL`).
 -- Vedenje kode se NE spremeni (poizvedba je ista, mail gre tudi za vrstice brez stripe_vracilo_id).
 -- Zaklep: DROP INDEX vzame ACCESS EXCLUSIVE na `vracila` do COMMIT (CREATE INDEX nato SHARE, v isti transakciji), zato v tem casu tabele ne more brati nihce. Tabela je majhna
--- (ena vrstica na vrnjeno narocilo, gradnja indeksa v trenutku), bere jo samo admin (GET /admin/api/refunds) in obdelovalec vracil v ozadju; sken vstopnic, nakup in prijava je
+-- (ena vrstica na vrnjeno narocilo, gradnja indeksa v trenutku). Uporabljajo jo admin (GET /admin/api/refunds, /summary), obdelovalec vracil v ozadju, Stripe webhooki
+-- (checkout.session.completed za neaktivno narocilo, refund.*) in odpoved dogodka (DELETE /events/:id): ti za trenutek pocakajo. Sken vstopnic, nakup in prijava je
 -- ne uporabljajo. migrate.js migraciji nastavi lock_timeout (privzeto 2 s) in jo ob izteku zaklepa ponovi (MIGRACIJA_PONOVITVE, privzeto 4x, 10 s premora): migracija ne caka na dolgo transakcijo.
 
 BEGIN;

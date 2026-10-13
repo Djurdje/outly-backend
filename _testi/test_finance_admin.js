@@ -161,7 +161,8 @@ async function api(method, path, token, body) {
   // Dodatni backendi na isti bazi z drugim nacinom placil; samo GET /admin/api/finance (ob zagonu ne kličejo Stripa).
   const nacini = [[3231, { STRIPE_SECRET_KEY: "sk_test_lokalno" }, "sandbox", "live", "Stripe sandbox (sk_test_; mode je tu zgodovinsko live)"],
     [3232, { STRIPE_SECRET_KEY: "sk_live_lokalno" }, "live", "live", "Stripe v zivo (sk_live_)"],
-    [3233, { STRIPE_SECRET_KEY: "sk_test_lokalno", TEST_PLACILA: "true" }, "fake", "test", "sandbox kljuc + TEST_PLACILA=true (vstopnice brez placila)"]];
+    [3233, { STRIPE_SECRET_KEY: "sk_test_lokalno", TEST_PLACILA: "true" }, "fake", "test", "sandbox kljuc + TEST_PLACILA=true (vstopnice brez placila)"],
+    [3234, { STRIPE_SECRET_KEY: "sk_live_lokalno", TEST_PLACILA: "true" }, "live", "live", "zivi kljuc + TEST_PLACILA=true: TEST_PLACILA se ignorira (I31)"]];
   for (const [port, okolje, pricakovan, mode, ime] of nacini) {
     const s2 = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", STRIPE_POSPRAVI_MS: "3600000", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
     try {
