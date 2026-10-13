@@ -1,6 +1,6 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-13 (finance: testni promet ločen #230, migracija 048 indeks vracila_mail_idx #233; prej 2026-10-12: vračila in spori #190, migracija 047; prej 2026-10-11: Sentry vklopljen + past `user.geo`; #210 proračun prosto, Sentry backend izklopljen do DSN; STATE skrajšan pod 200 vrstic: pogodbe polj za odjemalce so v ARCHITECTURE, zgodovina v `docs/arhiv/`; prej 2026-10-10: varovala pred živo prodajo, payment_mode, potrdilo kupcu, migracija 042).
+Zadnja posodobitev: 2026-10-13 (demo klubi brez nakupa, migracija 050, I41; finance: testni promet ločen #230, migracija 048 indeks vracila_mail_idx #233; prej 2026-10-12: vračila in spori #190, migracija 047; prej 2026-10-11: Sentry vklopljen + past `user.geo`; #210 proračun prosto, Sentry backend izklopljen do DSN; STATE skrajšan pod 200 vrstic: pogodbe polj za odjemalce so v ARCHITECTURE, zgodovina v `docs/arhiv/`; prej 2026-10-10: varovala pred živo prodajo, payment_mode, potrdilo kupcu, migracija 042).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje** (pasti, predpostavke agenta, kar nobeno orodje ne ve). Drugje: odprte naloge → GitHub Issues (`agent` / `martin`); testi → Actions `Testi`; produkcija → `Nadzor produkcije` + `/clubs`;
 kaj se je spremenilo → PR-ji; zakaj → `DECISIONS.md`; kaj se ne sme zgoditi → `ARCHITECTURE.md` »Poslovne invariante«; kaj je že padlo → `INCIDENTI.md`. Tega ne prepisuj sem.
@@ -138,6 +138,13 @@ Pogodba polj in poti za odjemalca (`ios-dev` #184, `web-dev`) je opravljena in v
 - Brez `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_KEY_P8` na Renderju push ne teče (`[push] izklopljen`); registracija deluje. Strežba: push samo če bi bila vidna v zvoncu (od 2 h pred začetkom) in sken ≤ 30 min star.
 - Pasti: JWT podpis `ieee-p1363` (DER = tih 403 `InvalidProviderToken`); preklic `.p8` = nov ključ v Render secrets (`[push] APNs: status 403 ...`, največ 1/min); `DeviceTokenNotForTopic` = napačen `APNS_TOPIC` (žetona ne označi); ≥ 10 žetonov in > polovica `BadDeviceToken` v enem pošiljanju = `[push] ALARM` (največ 1/min; verjetno napačno okolje/ključ), teh ne označi (410 se označi vedno).
   Žeton je skrivnost (ni v dnevniku/odgovoru; backup ga vsebuje). **Znana omejitev:** stari `invalid_at` žetoni se ne pospravljajo.
+
+## Demo klubi: `is_demo` in 409 `demo_club` (od 13. 10. 2026; migracija 050, I41; ARCHITECTURE »Demo klubi«, DECISIONS 13. 10.)
+
+- **Pogodba za odjemalce (samo dodajanje; natančna oblika v ARCHITECTURE):** `is_demo: boolean` na vsakem klubu in dogodku (dogodek = prodajalec `club_id`); demo dogodek ima `payment_mode: "unavailable"` (tudi `GET /events/:id/vip`, ki ima zdaj tudi `is_demo`; razlog `demo_club` je samo v `payment_unavailable_reason` pri `GET /business/sales`, javno razlogov ni, I34); nakup (`POST /events/:id/orders`, `…/tables/:tableId/orders`, `POST /guest/events/:id/orders`) vrne **409 `{ "error": "demo_club", "message": "This is a demo club. Tickets can't be bought." }`**.
+- **ios-dev / web-dev (odprto):** dekodiraj `is_demo` (privzeto `false`); na demo klubu/dogodku pokaži oznako »Demo« in skrij nakup; ob 409 `demo_club` pokaži `message`. Prijavljenemu adminu (`GET /me` → `role: "admin"`) gumb za nakup pokaži (strežnik ga dovoli, ostali dobijo 409). Demo ugotovi iz `is_demo`, ne iz `payment_mode`: `unavailable` je lahko tudi `seller_incomplete` / `stripe_not_ready`.
+- **Past:** migracija 050 UPDATE-a samo kluba, ki ima še ime in `<ime>@example.com` iz 022; klub, ki mu je kdo po 022 spremenil ime ali e-naslov, ostane `is_demo = FALSE` → admin ga označi ročno (panel, Klubi, »Demo«). Preveri po deployu: `GET /clubs` mora imeti `is_demo: true` pri petih demo klubih. Pred pravim zagonom (ko pravi klubi zamenjajo demo) oznako ugasni ali klub izbriši.
+- **Past:** `payment_mode` ne zavisi od uporabnika (I17), zato admin v odgovoru vidi `unavailable`, a nakup uspe; pri testiranju toka na demo klubu uporabi račun z vlogo `admin`.
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 

@@ -1493,8 +1493,18 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 const JAVNI_STOLPCI_KLUBA = `id, name, logo_url, banner_url, description,
   contact_email, contact_phone, instagram, website, address, city, country,
   lat, lng, min_age, genres, created_at, bar_prices, gallery_urls, video_url,
-  is_organizer, is_official,
+  is_organizer, is_official, is_demo,
   (SELECT COUNT(*)::int FROM club_follows cf WHERE cf.club_id = clubs.id) AS followers_count`;
+
+// Demo klub (migracija 050, Martin 13. 10. 2026): izmisljen klub za predstavitev. DODANO javno polje `is_demo` (klubi, dogodki = is_demo PRODAJALCA events.club_id,
+// iskanje, zemljevid); nakup vstopnic/VIP miz za njegove dogodke je 409 `demo_club` (spodaj), razen vloge admin (testiranje toka; odlocitev agenta, DECISIONS).
+// Nastavi ga SAMO admin (PATCH /admin/api/clubs/:id). Invarianta I41.
+const NAPAKA_DEMO_KLUB = { error: "demo_club", message: "This is a demo club. Tickets can't be bought." };
+// `e` = vrstica dogodka z `is_demo` kluba-prodajalca (events.club_id; pri gostovanem dogodku organizator, ne prizorisce). `vloga` = req.user.role ali undefined (gost).
+// Klic mora biti PRED rezervacijo zaloge/mize, vpisom naroclila in klicem Stripa (brez stranskih ucinkov). Vrne telo 409 ali null.
+function napakaDemoKluba(e, vloga) {
+  return e.is_demo === true && vloga !== "admin" ? NAPAKA_DEMO_KLUB : null;
+}
 
 // Cenik bara (migracija 014): seznam postavk, ki ga klub ureja v celoti.
 // Vrne ocisceno kopijo ali niz z napako. Cene v centih, kot pri vstopnicah.
@@ -1745,7 +1755,7 @@ app.get("/clubs/map", async (req, res) => {
         pogoji.push("lat BETWEEN $1 AND $2", "lng BETWEEN $3 AND $4");
       }
       const r = await pool.query(
-        `SELECT id, name, lat, lng, logo_url, city, min_age, genres
+        `SELECT id, name, lat, lng, logo_url, city, min_age, genres, is_demo
          FROM clubs WHERE ${pogoji.join(" AND ")} ORDER BY id LIMIT 1000`,
         p
       );
@@ -2215,6 +2225,8 @@ const STOLPCI_DOGODKA = `
         club_id,
         -- Ime prodajalca/organizatorja (037): kartica gostovanega dogodka na strani gostitelja ga kaze. DODANO polje.
         (SELECT cn.name FROM clubs cn WHERE cn.id = events.club_id) AS club_name,
+        -- Demo klub (050): prodajalec (events.club_id) je demo klub; nakup je 409 demo_club. DODANO polje.
+        (SELECT cd.is_demo FROM clubs cd WHERE cd.id = events.club_id) AS is_demo,
         title,
         description,
         poster_url,
@@ -2289,6 +2301,9 @@ function dodajNacinPlacila(vrstice) {
     const brezplacno = vstopnica !== null ? vstopnica === 0 : vip === 0;
     const najvec = vstopnica !== null ? vstopnica : (vip || 0);
     r.payment_mode = javniNacinProdajalca(placilaStripe.nacinPlacilaZ(r.club_stripe_ready === true), r.club_seller_raw || {}, najvec, brezplacno);
+    // Demo klub (050): nakup je zavrnjen za vse (tudi 0 EUR), zato "unavailable"; razlog javno NI (kot pri ostalih razlogih, I34): odjemalec ga bere iz `is_demo`.
+    // Ne zavisi od uporabnika (I17): vloga admin sme kupiti kljub temu (odjemalec naj prijavljenemu adminu gumb pokaze; strezniku odlocitev vedno pripada).
+    if (r.is_demo === true) r.payment_mode = "unavailable";
     delete r.club_stripe_ready;
     delete r.club_seller_raw;
   }
@@ -2973,7 +2988,7 @@ app.get("/search", async (req, res) => {
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucIskanja(req.query.q, req.query.limit, q, limit), async () => {
     const [klubi, dogodki] = await Promise.all([
       pool.query(
-        `SELECT id, name, city, logo_url, lat, lng, genres
+        `SELECT id, name, city, logo_url, lat, lng, genres, is_demo
          FROM clubs
          WHERE hidden = FALSE
            AND (name ILIKE $1 OR city ILIKE $1 OR description ILIKE $1)
@@ -2983,7 +2998,7 @@ app.get("/search", async (req, res) => {
       ),
       pool.query(
         `SELECT e.id, e.club_id, e.title, e.poster_url, e.start_at,
-                e.ticket_price_cents, e.currency, c.name AS club_name, ${PRIZORISCE_E}
+                e.ticket_price_cents, e.currency, c.name AS club_name, c.is_demo, ${PRIZORISCE_E}
          FROM events e JOIN clubs c ON c.id = e.club_id ${PRIZORISCE_JOIN_JAVNO}
          WHERE e.status = 'published' AND c.hidden = FALSE
            AND (e.title ILIKE $1 OR e.description ILIKE $1 OR c.name ILIKE $1)
@@ -3033,7 +3048,7 @@ const ADMIN_POLJA_UPORABNIKA = `id, email, username, role, email_verified, avata
 const adminStolpciKluba = () => `c.id, c.owner_user_id, c.name, c.logo_url, c.banner_url, c.description,
   c.contact_email, c.contact_phone, c.instagram, c.website, c.address, c.city, c.country,
   c.lat, c.lng, c.min_age, c.genres, c.hidden, (c.stripe_charges_enabled AND ${sqlRacunVNacinu("c.")}) AS stripe_charges_enabled, c.commission_bps, c.created_at,
-  c.is_organizer, c.is_official,
+  c.is_organizer, c.is_official, c.is_demo,
   c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer,
   u.email AS owner_email, u.username AS owner_username`;
 
@@ -3392,8 +3407,8 @@ function poljaKluba(b, zaVstavljanje) {
     if (typeof b.hidden !== "boolean") return { napaka: "hidden must be true or false." };
     out.hidden = b.hidden;
   }
-  // Organizator brez prizorisca in uradni profil Outly (037). is_official se nastavi SAMO tu (admin pot); PATCH /business/clubs/me ga ne sprejme.
-  for (const [kljuc, ...imena] of [["is_organizer", "isOrganizer", "is_organizer"], ["is_official", "isOfficial", "is_official"]]) {
+  // Organizator brez prizorisca in uradni profil Outly (037). is_official in is_demo (050) se nastavita SAMO tu (admin pot); PATCH /business/clubs/me ju ne sprejme.
+  for (const [kljuc, ...imena] of [["is_organizer", "isOrganizer", "is_organizer"], ["is_official", "isOfficial", "is_official"], ["is_demo", "isDemo", "is_demo"]]) {
     const ime = imena.find(i => b[i] !== undefined);
     if (ime === undefined) continue;
     if (typeof b[ime] !== "boolean") return { napaka: `${imena[0]} must be true or false.` };
@@ -4592,11 +4607,14 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
               c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
-              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email
+              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]
     );
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
     const e = er.rows[0];
+    // Demo klub (050): 409 PRED zalogo, nacinom placila in Stripom; izjema vloga admin (testiranje toka, DECISIONS 13. 10. 2026).
+    const demo = napakaDemoKluba(e, req.user.role);
+    if (demo) { await c.query("ROLLBACK"); return res.status(409).json(demo); }
     const np = napakaProdaje(e, { zahtevajCeno: true });
     if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
     if (e.capacity !== null && e.sold_count + q > e.capacity) {
@@ -5011,11 +5029,14 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
               c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
-              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email
+              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [g.eventId]
     );
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
     const e = er.rows[0];
+    // Demo klub (050): gost nima vloge, zato vedno 409 (PRED zalogo in Stripom).
+    const demo = napakaDemoKluba(e, undefined);
+    if (demo) { await c.query("ROLLBACK"); return res.status(409).json(demo); }
     const np = napakaProdaje(e, { zahtevajCeno: true });
     if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
     if (e.capacity !== null && e.sold_count + g.quantity > e.capacity) {
@@ -6227,15 +6248,15 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
       range ? serijaProdaje(klub, range) : Promise.resolve(null),
     ]);
     // Provizija TEGA kluba (031), ce jo je admin nastavil; sicer privzeta. Lastnik vidi svojo pogodbeno provizijo.
-    const kp = (await pool.query(`SELECT commission_bps, ${sqlStripePripravljen()} AS stripe_pripravljen, ${STOLPCI_PRODAJALCA}, contact_phone, contact_email FROM clubs WHERE id=$1`, [klub])).rows[0];
+    const kp = (await pool.query(`SELECT commission_bps, is_demo, ${sqlStripePripravljen()} AS stripe_pripravljen, ${STOLPCI_PRODAJALCA}, contact_phone, contact_email FROM clubs WHERE id=$1`, [klub])).rows[0];
     const nacinKluba = placilaStripe.nacinPlacilaZ(!!(kp && kp.stripe_pripravljen));
     const odgovor = {
       mode: testniNacinPlacil() ? "test" : "live",
       // Nacin placila TEGA kluba (#149/#191): "test" | "stripe" | "unavailable"; `mode` zgoraj je globalen (samo ali je sistem v testnem nacinu). DODANO polje.
       // #220: ob sk_live_ in nepopolnih podatkih prodajalca (I34) "unavailable" (placljiv nakup bi bil 409); znesek ni znan, zato se predpostavi placljivo.
-      payment_mode: javniNacinProdajalca(nacinKluba, kp || {}, 1, false),
-      // Zakaj je "unavailable" (DODANO polje, lastnik in manager): "seller_incomplete" | "stripe_not_ready" | "payments_not_configured" | null (payment_mode ni "unavailable").
-      payment_unavailable_reason: razlogNerazpolozljivosti(nacinKluba, kp || {}, 1, false),
+      payment_mode: kp && kp.is_demo ? "unavailable" : javniNacinProdajalca(nacinKluba, kp || {}, 1, false),
+      // Zakaj je "unavailable" (DODANO polje, lastnik in manager): "demo_club" (050) | "seller_incomplete" | "stripe_not_ready" | "payments_not_configured" | null (payment_mode ni "unavailable").
+      payment_unavailable_reason: kp && kp.is_demo ? "demo_club" : razlogNerazpolozljivosti(nacinKluba, kp || {}, 1, false),
       fee_percent: kp && kp.commission_bps !== null ? kp.commission_bps / 100 : PROVIZIJA_ODSTOTEK,
       summary: povzetek.rows[0],
       events: poDogodkih.rows,
@@ -7892,7 +7913,7 @@ app.get("/events/:id/vip", async (req, res) => {
     if (!id) return res.status(400).send("Invalid event id.");
     const er = await pool.query(
       `SELECT e.id, e.club_id, e.vip_enabled, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.min_age,
-              e.vip_layout_source, e.floor_plan, ${sqlStripePripravljen("c.")} AS club_stripe_ready,
+              e.vip_layout_source, e.floor_plan, c.is_demo, ${sqlStripePripravljen("c.")} AS club_stripe_ready,
               ${sqlProdajalecSurov("c")} AS seller_raw
          FROM events e JOIN clubs c ON c.id = e.club_id
         WHERE e.id = $1 AND e.status = 'published' AND NOT c.hidden`, [id]);
@@ -7937,8 +7958,10 @@ app.get("/events/:id/vip", async (req, res) => {
       enabled,
       on_sale: napakaProdaje({ ...e, hidden: false }, { zahtevajCeno: false }) === null,
       // kot pri dogodku (#149); #220: ob sk_live_ + nepopolnih podatkih prodajalca (I34) "unavailable", razen ce je kupljiva miza za 0 EUR
-      payment_mode: javniNacinProdajalca(placilaStripe.nacinPlacilaZ(e.club_stripe_ready === true), e.seller_raw,
+      // Demo klub (050): "unavailable" (nakup mize je 409 demo_club, razen vloge admin); `is_demo` = prodajalec (events.club_id) je demo klub. Razloga javno ni (I34).
+      payment_mode: e.is_demo ? "unavailable" : javniNacinProdajalca(placilaStripe.nacinPlacilaZ(e.club_stripe_ready === true), e.seller_raw,
         Math.max(0, ...mize.map(t => Number(t.price_cents) || 0)), mize.some(t => t.available !== false && Number(t.price_cents) === 0)),
+      is_demo: e.is_demo === true,
       seller: prodajalec(e.seller_raw),   // prodajalec = events.club_id (043, #94)
       currency: e.currency,
       plan,
@@ -7988,10 +8011,13 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_layout_source,
               e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
-              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email
+              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo
          FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
     const e = er.rows[0];
+    // Demo klub (050): 409 PRED mizo, zalogo in Stripom; izjema vloga admin.
+    const demo = napakaDemoKluba(e, req.user.role);
+    if (demo) { await c.query("ROLLBACK"); return res.status(409).json(demo); }
     if (e.status !== "published" || e.hidden) { await c.query("ROLLBACK"); return res.status(409).send("Event is not on sale."); }
     if (!e.vip_enabled) { await c.query("ROLLBACK"); return res.status(404).send("Table not found."); }
 
