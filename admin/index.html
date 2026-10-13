@@ -392,9 +392,11 @@ function osveziSejo() {
 function zavrnjenaOsvezitev(e) { return !!e && e.status >= 400 && e.status < 500 && e.status !== 429; }
 
 function obvesti(bes, vrsta) {
+  for (const o of $("obvestila").children) if (o.textContent === bes) return;   // isto sporocilo ne dvakrat (vzporedni klici)
   const d = document.createElement("div"); d.className = "obv " + (vrsta || ""); d.textContent = bes;
   $("obvestila").appendChild(d); setTimeout(() => d.remove(), vrsta === "slabo" ? 9000 : 4500);
 }
+function cel(n) { const x = Number(n); return Number.isFinite(x) ? x : 0; }   // za ststevilke v onclick="..." (nikoli surov niz iz streznika)
 function ubezi(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function datum(s) { if (!s) return "—"; const d = new Date(s); return d.toLocaleString("sl-SI", { dateStyle: "short", timeStyle: "short" }); }
 function evri(c) { return c === null || c === undefined ? "—" : (c / 100).toFixed(2).replace(".", ",") + " €"; }
@@ -407,9 +409,11 @@ async function klic(metoda, pot, telo, ponovno = true) {
     const bil = seja.refresh;
     try { await osveziSejo(); }
     catch (e) {
-      // drug zavihek je morda že osvežil (osveževalni žeton se je zamenjal): poskusi z njegovim
+      // drug zavihek je morda že osvežil (osveževalni žeton se je zamenjal): poskusi z njegovim.
+      // Ob zavrnitvi mu damo 400 ms, da nov žeton res zapiše v hrambo (tekma dveh zavihkov).
+      if (zavrnjenaOsvezitev(e)) await new Promise(r => setTimeout(r, 400));
       if (seja.refresh && seja.refresh !== bil) return klic(metoda, pot, telo, false);
-      if (!zavrnjenaOsvezitev(e)) throw new Error("Osvežitev seje ni uspela (omrežje). Poskusi znova.");
+      if (!zavrnjenaOsvezitev(e)) throw new Error(`Osvežitev seje ni uspela (${e.status ? "strežnik: " + e.status : "omrežje"}). Poskusi znova.`);
       odjava("Seja je potekla. Prijavi se znova."); throw new Error("Seja je potekla.");
     }
     return klic(metoda, pot, telo, false);
@@ -454,6 +458,7 @@ function odjava(sporocilo) {
   const t = seja.token;
   if (t) supabaseAuth("/logout", {}, t).catch(() => {});
   seja.pocisti(); $("panel").classList.add("skrito"); $("prijava").classList.remove("skrito"); $("jaz").innerHTML = "";
+  $("pGeslo").value = ""; $("pZapomni").checked = false;   // skupni racunalnik: geslo in kljukica ne ostaneta za naslednjega
   if (sporocilo) $("pNapaka").textContent = sporocilo;
 }
 $("pGumb").onclick = prijava;
@@ -462,6 +467,7 @@ $("pGeslo").onkeydown = (e) => { if (e.key === "Enter") prijava(); };
 function pokaziPanel() {
   const v = seja.jaz || { email: "", role: "" };
   $("jaz").innerHTML = `<span>${ubezi(v.email)}</span><span class="znacka">${ubezi(v.role)}</span><button class="tih mali" onclick="odjava()">Odjava</button>`;
+  $("pGeslo").value = "";
   $("prijava").classList.add("skrito"); $("panel").classList.remove("skrito");
   pokaziZavihek("pregled"); naloziPregled();
 }
@@ -484,7 +490,7 @@ async function varno(fn) { try { await fn(); } catch (e) { obvesti(e.message, "s
 async function naloziPregled() {
   await varno(async () => {
     const s = await klic("GET", "/admin/api/summary");
-    const kos = (n, ime) => `<div class="stevilka"><b>${n}</b><span>${ime}</span></div>`;
+    const kos = (n, ime) => `<div class="stevilka"><b>${ubezi(n)}</b><span>${ubezi(ime)}</span></div>`;
     // Števci vračil/sporov: številka je vedno Number (polja lahko manjkajo na starem backendu); > 0 = poudarjeno.
     const kosPozor = (n, ime, vrsta) => { const x = Number(n) || 0; return `<div class="stevilka${x > 0 ? " " + vrsta : ""}"><b>${x}</b><span>${ime}</span></div>`; };
     $("stevilke").innerHTML =
@@ -517,7 +523,7 @@ async function naloziFinance() {
     const nacin = f.payments_mode || (f.mode === "test" ? "fake" : "live");
     $("fNacin").textContent = nacin === "fake" ? "TESTNI NAČIN – brez pravega denarja" : nacin === "sandbox" ? "Stripe SANDBOX – ni pravi denar" : "v živo";
     $("fNacin").className = "znacka " + (nacin === "live" ? "ok" : "opoz");
-    const kos = (n, ime, pod) => `<div class="stevilka"><b>${n}</b><span>${ime}</span>${pod ? `<small>${pod}</small>` : ""}</div>`;
+    const kos = (n, ime, pod) => `<div class="stevilka"><b>${ubezi(n)}</b><span>${ubezi(ime)}</span>${pod ? `<small>${ubezi(pod)}</small>` : ""}</div>`;
     $("fStevilke").innerHTML =
       kos(evri(s.gross_cents), "bruto prodaja (pravi)", `od začetka ${evri(v.gross_cents)}`) +
       kos(evri(s.fee_cents), `prihodek Outlyja (${f.fee_percent} %)`, `od začetka ${evri(v.fee_cents)}`) +
@@ -530,7 +536,7 @@ async function naloziFinance() {
       + (nacin === "fake" ? " Backend je zdaj v testnem načinu: nova naročila so testna."
         : nacin === "sandbox" ? " Backend je zdaj v Stripe sandboxu (sk_test_): nova plačana naročila so testna, ni pravi denar." : "");
     const t = f.test_summary || { orders: 0, gross_cents: 0, fee_cents: 0, refunded_cents: 0, tickets_sold: 0 }, vt = f.all_time_test || { orders: 0, gross_cents: 0 };
-    const kosT = (n, ime, pod) => `<div class="stevilka opoz"><b>${n}</b><span>${ime}</span>${pod ? `<small>${pod}</small>` : ""}</div>`;
+    const kosT = (n, ime, pod) => `<div class="stevilka opoz"><b>${ubezi(n)}</b><span>${ubezi(ime)}</span>${pod ? `<small>${ubezi(pod)}</small>` : ""}</div>`;
     $("fTestStevilke").innerHTML =
       kosT(t.orders, "testnih naročil", `od začetka ${vt.orders}`) +
       kosT(evri(t.gross_cents), "testni bruto", `od začetka ${evri(vt.gross_cents)}`) +
@@ -542,24 +548,24 @@ async function naloziFinance() {
     const maks = Math.max(1, ...f.by_day.map(d => d.gross_cents));
     $("fGraf").innerHTML = f.by_day.map(d => {
       const h = Math.round(100 * d.gross_cents / maks);
-      return `<div class="stolpec" data-o="${d.day}: ${evri(d.gross_cents)} · ${d.tickets} vst."><i style="height:${h}%"></i></div>`;
+      return `<div class="stolpec" data-o="${ubezi(d.day)}: ${evri(d.gross_cents)} · ${ubezi(d.tickets)} vst."><i style="height:${h}%"></i></div>`;
     }).join("");
-    $("fOsi").innerHTML = `<span>${f.from}</span><span>${f.to}</span>`;
+    $("fOsi").innerHTML = `<span>${ubezi(f.from)}</span><span>${ubezi(f.to)}</span>`;
     tabela($("fKlubi"), ["Klub", "Bruto", "Provizija", "Vračila", "Neto klubu", "Vstopnic", "Naročil", "Stripe"], f.by_club.map(k => `
       <tr><td><b>${ubezi(k.name)}</b><span class="drobno">${ubezi(k.city || "")}</span></td>
       <td class="mono">${evri(k.gross_cents)}</td><td class="mono">${evri(k.fee_cents)}</td><td class="mono">${evri(k.refunded_cents)}</td>
-      <td class="mono"><b>${evri(k.net_cents)}</b></td><td class="mono">${k.tickets_sold}</td><td class="mono">${k.orders}</td>
+      <td class="mono"><b>${evri(k.net_cents)}</b></td><td class="mono">${ubezi(k.tickets_sold)}</td><td class="mono">${ubezi(k.orders)}</td>
       <td>${k.stripe_payouts_enabled ? '<span class="znacka ok">nakazila</span>' : (k.stripe_charges_enabled ? '<span class="znacka opoz">brez nakazil</span>' : '<span class="znacka">ni povezan</span>')}</td></tr>`), "V tem obdobju ni prodaje.");
     tabela($("fDogodki"), ["Dogodek", "Klub", "Kdaj", "Cena", "Prodano / kap.", "Prišlo", "Bruto", "Provizija"], f.by_event.map(e => `
       <tr><td><b>${ubezi(e.title)}</b><span class="drobno">${ubezi(e.status)}</span></td><td>${ubezi(e.club_name)}</td>
       <td class="mono">${datum(e.start_at)}</td><td class="mono">${evri(e.ticket_price_cents)}</td>
-      <td class="mono">${e.tickets_sold}${e.capacity ? " / " + e.capacity : ""}</td><td class="mono">${e.checked_in}</td>
+      <td class="mono">${ubezi(e.tickets_sold)}${e.capacity ? " / " + ubezi(e.capacity) : ""}</td><td class="mono">${ubezi(e.checked_in)}</td>
       <td class="mono">${evri(e.gross_cents)}</td><td class="mono">${evri(e.fee_cents)}</td></tr>`), "V tem obdobju ni prodaje.");
     const st = { paid: '<span class="znacka ok">plačano</span>', partially_refunded: '<span class="znacka opoz">delno vrnjeno</span>', refunded: '<span class="znacka slabo">vrnjeno</span>', cancelled: '<span class="znacka slabo">preklicano</span>', pending: '<span class="znacka">v teku</span>' };
     tabela($("fNarocila"), ["Ref", "Kdaj", "Dogodek", "Klub", "Kupec", "Kol.", "Znesek", "Provizija", "Stanje"], f.recent_orders.map(o => `
       <tr><td class="mono">${ubezi(o.public_ref)}${o.is_test ? ' <span class="znacka opoz">test</span>' : ""}</td><td class="mono">${datum(o.created_at)}</td>
       <td>${ubezi(o.event_title)}</td><td>${ubezi(o.club_name)}</td><td>${ubezi(o.buyer_username || "")}<span class="drobno">${ubezi(o.buyer_email)}</span></td>
-      <td class="mono">${o.quantity}</td><td class="mono">${evri(o.total_cents)}</td><td class="mono">${evri(o.application_fee_cents)}</td>
+      <td class="mono">${ubezi(o.quantity)}</td><td class="mono">${evri(o.total_cents)}</td><td class="mono">${evri(o.application_fee_cents)}</td>
       <td>${st[o.status] || ubezi(o.status)}${o.refunded_cents ? `<span class="drobno">vrnjeno ${evri(o.refunded_cents)}</span>` : ""}</td></tr>`), "V tem obdobju ni naročil.");
   });
 }
@@ -581,13 +587,13 @@ async function naloziProsnje() {
     const st = { new: '<span class="znacka opoz">nova</span>', approved: '<span class="znacka ok">odobrena</span>', rejected: '<span class="znacka slabo">zavrnjena</span>' };
     tabela($("prTabela"), ["#", "Podjetje", "Kontakt", "Kraj", "Oddana", "Stanje", ""], p.map(x => `
       <tr>
-        <td class="mono">${x.id}</td>
+        <td class="mono">${ubezi(x.id)}</td>
         <td><b>${ubezi(x.business_name)}</b><span class="drobno">${ubezi(x.business_type)}${x.licence_id ? " · " + ubezi(x.licence_id) : ""}</span>${x.message ? `<span class="drobno">${ubezi(x.message)}</span>` : ""}</td>
-        <td>${ubezi(x.contact_name)}${x.contact_role ? " (" + ubezi(x.contact_role) + ")" : ""}<span class="drobno">${ubezi(x.email)}${x.phone ? " · " + ubezi(x.phone) : ""}</span>${x.user_id ? `<span class="drobno">iz aplikacije, uporabnik #${x.user_id}</span>` : `<span class="drobno">brez prijave</span>`}</td>
+        <td>${ubezi(x.contact_name)}${x.contact_role ? " (" + ubezi(x.contact_role) + ")" : ""}<span class="drobno">${ubezi(x.email)}${x.phone ? " · " + ubezi(x.phone) : ""}</span>${x.user_id ? `<span class="drobno">iz aplikacije, uporabnik #${ubezi(x.user_id)}</span>` : `<span class="drobno">brez prijave</span>`}</td>
         <td>${ubezi(x.city)}<span class="drobno">${ubezi(x.business_address)}</span></td>
         <td class="mono">${datum(x.created_at)}</td>
-        <td>${st[x.status] || ubezi(x.status)}${x.decided_at ? `<span class="drobno">${datum(x.decided_at)}${x.decision_note ? " · " + ubezi(x.decision_note) : ""}</span>` : ""}${x.club_id ? `<span class="drobno">klub #${x.club_id}</span>` : ""}</td>
-        <td>${x.status === "new" ? `<div class="vrsta"><input placeholder="opomba (neobvezno)" id="prOp${x.id}" style="width:160px"><button class="dobro mali" onclick="odloci(${x.id},'approve')">Odobri</button><button class="nevarno mali" onclick="odloci(${x.id},'reject')">Zavrni</button></div>` : ""}</td>
+        <td>${st[x.status] || ubezi(x.status)}${x.decided_at ? `<span class="drobno">${datum(x.decided_at)}${x.decision_note ? " · " + ubezi(x.decision_note) : ""}</span>` : ""}${x.club_id ? `<span class="drobno">klub #${ubezi(x.club_id)}</span>` : ""}</td>
+        <td>${x.status === "new" ? `<div class="vrsta"><input placeholder="opomba (neobvezno)" id="prOp${cel(x.id)}" style="width:160px"><button class="dobro mali" onclick="odloci(${cel(x.id)},'approve')">Odobri</button><button class="nevarno mali" onclick="odloci(${cel(x.id)},'reject')">Zavrni</button></div>` : ""}</td>
       </tr>`), "Ni prošenj.");
   });
 }
@@ -661,15 +667,15 @@ async function naloziKlube() {
     klubi = await klic("GET", "/admin/api/clubs?q=" + encodeURIComponent($("kIsci").value.trim()));
     tabela($("kTabela"), ["#", "", "Klub", "Lastnik", "Kraj", "Koord.", "Dogodki", "Stanje", ""], klubi.map(k => `
       <tr>
-        <td class="mono">${k.id}</td>
+        <td class="mono">${ubezi(k.id)}</td>
         <td>${k.logo_url ? `<img class="mini" src="${ubezi(k.logo_url)}" alt="">` : `<span class="mini" style="display:inline-block"></span>`}</td>
-        <td><b>${ubezi(k.name)}</b><span class="drobno">${[(k.genres || []).join(", "), k.min_age ? k.min_age + "+" : "", k.commission_bps !== null && k.commission_bps !== undefined ? "provizija " + (k.commission_bps / 100).toLocaleString("sl-SI") + " %" : "provizija privzeta", k.is_organizer ? "organizator" : "", k.is_official ? "uradni profil Outly" : ""].filter(Boolean).join(" · ")}</span>${k.seller_complete ? "" : '<span class="znacka opoz" title="Firma, sedež, matična, davčna številka, DDV status ali kontakt manjkajo: kupec jih ne vidi v celoti">podatki prodajalca manjkajo</span>'}</td>
+        <td><b>${ubezi(k.name)}</b><span class="drobno">${ubezi([(k.genres || []).join(", "), k.min_age ? k.min_age + "+" : "", k.commission_bps !== null && k.commission_bps !== undefined ? "provizija " + (k.commission_bps / 100).toLocaleString("sl-SI") + " %" : "provizija privzeta", k.is_organizer ? "organizator" : "", k.is_official ? "uradni profil Outly" : ""].filter(Boolean).join(" · "))}</span>${k.seller_complete ? "" : '<span class="znacka opoz" title="Firma, sedež, matična, davčna številka, DDV status ali kontakt manjkajo: kupec jih ne vidi v celoti">podatki prodajalca manjkajo</span>'}</td>
         <td>${ubezi(k.owner_email || "—")}<span class="drobno">${ubezi(k.owner_username || "")}</span></td>
         <td>${ubezi(k.city)}<span class="drobno">${ubezi(k.address)}</span></td>
         <td class="mono">${k.lat !== null ? k.lat.toFixed(4) + ", " + k.lng.toFixed(4) : '<span class="znacka opoz">brez</span>'}</td>
-        <td class="mono">${k.event_count}</td>
+        <td class="mono">${ubezi(k.event_count)}</td>
         <td>${k.hidden ? '<span class="znacka slabo">skrit</span>' : '<span class="znacka ok">viden</span>'}${k.stripe_charges_enabled ? ' <span class="znacka">stripe</span>' : ""}</td>
-        <td><div class="vrsta"><button class="tih mali" onclick="kUredi(${k.id})">Uredi</button>${k.hidden ? `<button class="dobro mali" onclick="kSkrij(${k.id},false)">Pokaži</button>` : `<button class="nevarno mali" onclick="kSkrij(${k.id},true)">Skrij</button>`}</div></td>
+        <td><div class="vrsta"><button class="tih mali" onclick="kUredi(${cel(k.id)})">Uredi</button>${k.hidden ? `<button class="dobro mali" onclick="kSkrij(${cel(k.id)},false)">Pokaži</button>` : `<button class="nevarno mali" onclick="kSkrij(${cel(k.id)},true)">Skrij</button>`}</div></td>
       </tr>`), "Ni klubov. Ustvari prvega zgoraj.");
   });
 }
@@ -681,13 +687,13 @@ async function naloziUporabnike() {
     const zaklenjen = (x) => x.locked_until && new Date(x.locked_until) > new Date();
     tabela($("uTabela"), ["#", "E-naslov", "Ime", "Vloga", "E-pošta", "Zaklep", "Klubi", "Registriran", ""], u.map(x => `
       <tr>
-        <td class="mono">${x.id}</td>
+        <td class="mono">${ubezi(x.id)}</td>
         <td>${ubezi(x.email)}${x.phone ? `<span class="drobno">${ubezi(x.phone)}</span>` : ""}</td>
         <td>${ubezi(x.username)}${x.country ? `<span class="drobno">${ubezi(x.country)}</span>` : ""}</td>
-        <td><select id="uVloga${x.id}" style="width:auto" onchange="uVloga(${x.id})">${["user", "business", "admin", "backup"].map(r => `<option ${r === x.role ? "selected" : ""}>${r}</option>`).join("")}</select></td>
-        <td>${x.email_verified ? '<span class="znacka ok">potrjen</span>' : `<span class="znacka opoz">nepotrjen</span> <button class="tih mali" onclick="uPotrdi(${x.id})">Potrdi e-naslov</button>`}</td>
-        <td>${zaklenjen(x) ? `<span class="znacka slabo">do ${datum(x.locked_until)}</span> <button class="tih mali" onclick="uOdkleni(${x.id})">Odkleni</button>` : (x.failed_login_count ? `${x.failed_login_count} nap. poskusov` : "—")}</td>
-        <td class="mono">${x.club_count}</td>
+        <td><select id="uVloga${cel(x.id)}" style="width:auto" onchange="uVloga(${cel(x.id)})">${["user", "business", "admin", "backup"].map(r => `<option ${r === x.role ? "selected" : ""}>${r}</option>`).join("")}</select></td>
+        <td>${x.email_verified ? '<span class="znacka ok">potrjen</span>' : `<span class="znacka opoz">nepotrjen</span> <button class="tih mali" onclick="uPotrdi(${cel(x.id)})">Potrdi e-naslov</button>`}</td>
+        <td>${zaklenjen(x) ? `<span class="znacka slabo">do ${datum(x.locked_until)}</span> <button class="tih mali" onclick="uOdkleni(${cel(x.id)})">Odkleni</button>` : (x.failed_login_count ? `${ubezi(x.failed_login_count)} nap. poskusov` : "—")}</td>
+        <td class="mono">${ubezi(x.club_count)}</td>
         <td class="mono">${datum(x.created_at)}${x.onboarded_at ? "" : '<span class="drobno">račun ni dokončan</span>'}</td>
         <td></td>
       </tr>`), "Ni zadetkov.");
@@ -707,13 +713,13 @@ async function naloziDogodke() {
     const st = { published: '<span class="znacka ok">objavljen</span>', draft: '<span class="znacka siva">osnutek</span>', cancelled: '<span class="znacka slabo">odpovedan</span>' };
     tabela($("dTabela"), ["#", "Dogodek", "Klub", "Začetek", "Cena", "Stanje", ""], d.map(x => `
       <tr>
-        <td class="mono">${x.id}</td>
-        <td><b>${ubezi(x.title)}</b><span class="drobno">${[(x.genres || []).join(", "), x.min_age ? x.min_age + "+" : ""].filter(Boolean).join(" · ")}</span></td>
+        <td class="mono">${ubezi(x.id)}</td>
+        <td><b>${ubezi(x.title)}</b><span class="drobno">${ubezi([(x.genres || []).join(", "), x.min_age ? x.min_age + "+" : ""].filter(Boolean).join(" · "))}</span></td>
         <td>${ubezi(x.club_name)}${x.club_hidden ? ' <span class="znacka slabo">klub skrit</span>' : ""}</td>
         <td class="mono">${datum(x.start_at)}${x.end_at ? `<span class="drobno">do ${datum(x.end_at)}</span>` : ""}</td>
         <td class="mono">${evri(x.ticket_price_cents)}</td>
         <td>${st[x.status] || ubezi(x.status)}</td>
-        <td><div class="vrsta">${x.status !== "cancelled" ? `<button class="nevarno mali" onclick="dStatus(${x.id},'cancelled',${Number(x.paid_orders) || 0},${Number(x.paid_cents) || 0})">Umakni</button>` : ""}${x.status !== "published" ? `<button class="dobro mali" onclick="dStatus(${x.id},'published')">Objavi</button>` : ""}</div></td>
+        <td><div class="vrsta">${x.status !== "cancelled" ? `<button class="nevarno mali" onclick="dStatus(${cel(x.id)},'cancelled',${Number(x.paid_orders) || 0},${Number(x.paid_cents) || 0})">Umakni</button>` : ""}${x.status !== "published" ? `<button class="dobro mali" onclick="dStatus(${cel(x.id)},'published')">Objavi</button>` : ""}</div></td>
       </tr>`), "Ni dogodkov.");
   });
 }

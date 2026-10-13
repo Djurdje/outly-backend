@@ -13,7 +13,7 @@ const path = require("path");
 const { chromium } = require("playwright");
 
 const SB = "https://zbewqcxnvrwebxonvebx.supabase.co";
-const STRAN = fs.readFileSync(path.join(__dirname, "..", "admin", "index.html"));
+const STRAN = fs.readFileSync(process.env.ADMIN_HTML || path.join(__dirname, "..", "admin", "index.html"));   // ADMIN_HTML: za preverbo, da test na stari kodi pade
 let napake = 0;
 function preveri(ok, opis, podrobnost) {
   console.log((ok ? "OK    " : "NAPAKA ") + opis + (ok ? "" : "  -> " + JSON.stringify(podrobnost)));
@@ -30,7 +30,7 @@ function najdiChromium() {
 
 // ---- stub Supabase Auth + backend ----
 function novStub() {
-  const st = { veljavniDostop: new Set(), veljavniRefresh: new Set(), stevec: 0, osvezitve: [], odjave: 0, nacinOsvezitve: "ok" };
+  const st = { veljavniDostop: new Set(), veljavniRefresh: new Set(), stevec: 0, osvezitve: [], odjave: 0, nacinOsvezitve: "ok", priOsvezitvi: null, odgovori: {} };
   st.izdaj = () => {
     const n = ++st.stevec, o = { access_token: "A-" + n, refresh_token: "R-" + n };
     st.veljavniDostop.add(o.access_token); st.veljavniRefresh.add(o.refresh_token); return o;
@@ -49,7 +49,9 @@ async function namestiStub(ctx, st, origin) {
     if (u.pathname.endsWith("/token") && u.searchParams.get("grant_type") === "refresh_token") {
       st.osvezitve.push(telo.refresh_token);
       if (st.nacinOsvezitve === "omrezje") return route.abort("failed");
+      if (st.priOsvezitvi) await st.priOsvezitvi();
       if (st.nacinOsvezitve === "5xx") return json(503, { msg: "unavailable" });
+      if (st.nacinOsvezitve === "429") return json(429, { msg: "rate limit" });
       if (st.nacinOsvezitve === "zavrni" || !st.veljavniRefresh.has(telo.refresh_token)) return json(400, { error_description: "Invalid Refresh Token" });
       st.veljavniRefresh.delete(telo.refresh_token);      // enkraten, kot pri Supabase
       return json(200, st.izdaj());
@@ -62,6 +64,7 @@ async function namestiStub(ctx, st, origin) {
     if (u.pathname === "/me" || u.pathname.startsWith("/admin/api/")) {
       const tok = (route.request().headers().authorization || "").replace(/^Bearer /, "");
       if (!st.veljavniDostop.has(tok)) return route.fulfill({ status: 401, body: "Invalid token." });
+      if (Object.prototype.hasOwnProperty.call(st.odgovori, u.pathname)) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(st.odgovori[u.pathname]) });
       if (u.pathname === "/me") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ email: "admin@primer.si", role: "admin" }) });
       if (u.pathname === "/admin/api/summary") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ clubs: 3, users: 7, new_applications: 0 }) });
       return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
@@ -75,6 +78,10 @@ async function hrambe(page) {
     const vzemi = (s) => { try { return Object.fromEntries(Object.entries(s).filter(([k]) => k.startsWith("outly_admin_"))); } catch (e) { return { napaka: String(e) }; } };
     return { loc: vzemi(localStorage), ses: vzemi(sessionStorage) };
   });
+}
+async function cakaj(pogoj, ms = 5000) {            // poizvedovanje po stanju stuba (namesto fiksnih zakasnitev)
+  const t0 = Date.now();
+  while (!pogoj()) { if (Date.now() - t0 > ms) throw new Error("cakanje na stanje je poteklo"); await new Promise(r => setTimeout(r, 25)); }
 }
 const prazno = (o) => Object.keys(o).length === 0;
 async function panelVidnost(page) {
@@ -211,16 +218,39 @@ async function vpisi(page, origin, zapomni) {
       await ctx.close();
     }
 
-    // ---- (c4) omrezna napaka / 5xx pri osvezitvi NE pobrise trajne seje ----
-    for (const nacin of ["omrezje", "5xx"]) {
+    // ---- (c4) omrezna napaka / 5xx / 429 pri osvezitvi NE pobrise trajne seje; sporocilo ni zavajajoce in je samo enkrat ----
+    for (const nacin of ["omrezje", "5xx", "429"]) {
       const st = novStub(); st.nacinOsvezitve = nacin; st.veljavniRefresh.add("R-stari");
       const jaz = JSON.stringify({ email: "admin@primer.si", role: "admin" });
       const origins = [{ origin, localStorage: [{ name: "outly_admin_token", value: "STALE" }, { name: "outly_admin_refresh", value: "R-stari" }, { name: "outly_admin_jaz", value: jaz }] }];
       const ctx = await brskalnik.newContext({ storageState: { cookies: [], origins } }); await namestiStub(ctx, st, origin);
       const page = await ctx.newPage();
-      await page.goto(origin + "/admin/"); await page.waitForTimeout(600);
+      await page.goto(origin + "/admin/");
+      await page.waitForSelector(".obv.slabo", { timeout: 5000 });              // cakamo na obvestilo o napaki (osvezitev je obdelana)
       const h = await hrambe(page);
+      const obv = await page.$$eval(".obv", (e) => e.map((x) => x.textContent));
+      preveri(st.osvezitve.length >= 1, `(c4) ${nacin}: osvezitev se je res zgodila`, st.osvezitve);
       preveri(h.loc.outly_admin_refresh === "R-stari" && h.loc.outly_admin_token === "STALE", `(c4) osvezitev ni uspela (${nacin}) -> seja ostane v localStorage`, h);
+      const pricakovano = nacin === "omrezje" ? /omrežje/ : nacin === "5xx" ? /strežnik: 503/ : /strežnik: 429/;
+      preveri(obv.length === 1 && /Osvežitev seje ni uspela/.test(obv[0]) && pricakovano.test(obv[0]) && (nacin === "omrezje" || !/omrežje/.test(obv[0])), `(c4) ${nacin}: tocno eno sporocilo, brez napacnega »omrezje«`, obv);
+      await ctx.close();
+    }
+
+    // ---- (c5) tekma dveh zavihkov: osvezitev zavrnjena, drug zavihek je medtem zapisal nov zeton -> ostane prijavljen ----
+    {
+      const st = novStub(); st.nacinOsvezitve = "zavrni";
+      const jaz = JSON.stringify({ email: "admin@primer.si", role: "admin" });
+      const origins = [{ origin, localStorage: [{ name: "outly_admin_token", value: "STALE" }, { name: "outly_admin_refresh", value: "R-stari" }, { name: "outly_admin_jaz", value: jaz }] }];
+      const ctx = await brskalnik.newContext({ storageState: { cookies: [], origins } }); await namestiStub(ctx, st, origin);
+      const page = await ctx.newPage(); const k = []; beleziKonzolo(page, k);
+      const drug = await ctx.newPage(); await drug.goto(origin + "/nic");     // »drug zavihek« (isti localStorage)
+      st.veljavniDostop.add("A-drugi"); st.veljavniRefresh.add("R-drugi");
+      st.priOsvezitvi = async () => { setTimeout(() => drug.evaluate(() => { localStorage.setItem("outly_admin_token", "A-drugi"); localStorage.setItem("outly_admin_refresh", "R-drugi"); }).catch(() => {}), 100); };
+      await page.goto(origin + "/admin/");
+      await page.waitForFunction(() => document.querySelectorAll("#stevilke .stevilka").length > 0, null, { timeout: 5000 }).catch(() => {});
+      const v = await panelVidnost(page), h = await hrambe(page);
+      preveri(v.panel && !v.prijava && h.loc.outly_admin_refresh === "R-drugi", "(c5) tekma zavihkov: zavrnjena osvezitev, drug zavihek je zapisal nov zeton -> ostane prijavljen", { v, h });
+      preveri(k.filter(x => !/status of (401|400)/.test(x)).length === 0, "(c5) konzola brez napak (razen pricakovanih 401/400 stuba)", k);
       await ctx.close();
     }
 
@@ -229,9 +259,13 @@ async function vpisi(page, origin, zapomni) {
       const { ctx, st } = await nov({}); const page = await ctx.newPage(); const k = []; beleziKonzolo(page, k);
       await vpisi(page, origin, true);
       await page.evaluate(() => { sessionStorage.setItem("outly_admin_token", "ostanek"); sessionStorage.setItem("outly_admin_refresh", "ostanek"); sessionStorage.setItem("outly_admin_jaz", "{}"); });
+      preveri(await page.inputValue("#pGeslo") === "", "(d) geslo je izpraznjeno ze po prijavi");
       await page.click("#jaz button");
-      await page.waitForTimeout(300);
+      await page.waitForFunction(() => !document.getElementById("prijava").classList.contains("skrito"), null, { timeout: 5000 });
+      await cakaj(() => st.odjave >= 1);
       const v = await panelVidnost(page), h = await hrambe(page);
+      const polja = await page.evaluate(() => ({ geslo: document.getElementById("pGeslo").value, zapomni: document.getElementById("pZapomni").checked }));
+      preveri(polja.geslo === "" && polja.zapomni === false, "(d) odjava izprazni geslo in odznaci »Zapomni si me«", polja);
       preveri(v.prijava && !v.panel, "(d) odjava pokaze prijavo", v);
       preveri(prazno(h.loc) && prazno(h.ses), "(d) odjava pocisti OBE hrambi", h);
       preveri(st.odjave === 1, "(d) odjava obvesti Supabase (/logout)", st.odjave);
@@ -252,7 +286,8 @@ async function vpisi(page, origin, zapomni) {
       await vpisi(page, origin, true);
       const v = await panelVidnost(page);
       preveri(v.panel && !v.prijava, "(e) hrambi vrzeta izjemo: prijava vseeno deluje (pomnilnik strani)", v);
-      await page.click("#jaz button"); await page.waitForTimeout(200);
+      await page.click("#jaz button");
+      await page.waitForFunction(() => !document.getElementById("prijava").classList.contains("skrito"), null, { timeout: 5000 });
       preveri((await panelVidnost(page)).prijava, "(e) odjava brez hrambe deluje");
       preveri(brezPricakovanih(k).length === 0, "(e) konzola brez napak", k);
       await ctx.close();
@@ -268,13 +303,52 @@ async function vpisi(page, origin, zapomni) {
       await ctx.close();
     }
 
+    // ---- (k1) XSS: nizi iz streznika (tudi stevila, id) v zavihkih panela NE smejo izvesti skripte ----
+    {
+      const NAK = '<img src=x onerror="window.__xss=1">';
+      const st = novStub();
+      const klub = { id: 1, name: NAK, city: NAK, address: NAK, country: NAK, owner_email: NAK, owner_username: NAK, genres: [NAK], min_age: NAK, commission_bps: null, is_organizer: false, is_official: false,
+        seller_complete: true, lat: null, lng: null, event_count: NAK, hidden: false, stripe_charges_enabled: false, logo_url: null };
+      const dogodek = { id: 2, title: NAK, genres: [NAK], min_age: NAK, club_name: NAK, club_hidden: false, start_at: "2027-01-01T20:00:00Z", end_at: null, ticket_price_cents: 1000, status: "published", paid_orders: 0, paid_cents: 0 };
+      const uporabnik = { id: 3, email: NAK, username: NAK, phone: NAK, country: NAK, role: "user", email_verified: true, locked_until: null, failed_login_count: NAK, club_count: NAK, created_at: "2026-01-01T00:00:00Z", onboarded_at: "2026-01-01T00:00:00Z" };
+      const prosnja = { id: 4, business_name: NAK, business_type: NAK, licence_id: NAK, message: NAK, contact_name: NAK, contact_role: NAK, email: NAK, phone: NAK, user_id: NAK, club_id: NAK, city: NAK, business_address: NAK, created_at: "2026-01-01T00:00:00Z", status: NAK, decided_at: null, decision_note: NAK };
+      const zneski = { gross_cents: 100, fee_cents: 10, clubs_net_cents: 90, refunded_cents: 0, tickets_sold: NAK, orders: NAK, buyers: NAK, clubs_with_sales: NAK };
+      st.odgovori["/admin/api/clubs"] = [klub];
+      st.odgovori["/admin/api/events"] = [dogodek];
+      st.odgovori["/admin/api/users"] = [uporabnik];
+      st.odgovori["/admin/api/creator-applications"] = [prosnja];
+      st.odgovori["/admin/api/summary"] = { clubs: NAK, users: NAK, new_applications: NAK, events: NAK };
+      st.odgovori["/admin/api/finance"] = { from: NAK, to: NAK, fee_percent: NAK, payments_mode: "live", summary: zneski, all_time: { gross_cents: 1, fee_cents: 1, tickets_sold: NAK },
+        test_summary: { orders: NAK, gross_cents: 0, fee_cents: 0, refunded_cents: 0, tickets_sold: NAK }, all_time_test: { orders: NAK, gross_cents: 0 },
+        by_day: [{ day: NAK, gross_cents: 100, tickets: NAK }],
+        by_club: [{ name: NAK, city: NAK, gross_cents: 1, fee_cents: 1, refunded_cents: 0, net_cents: 1, tickets_sold: NAK, orders: NAK }],
+        by_event: [{ title: NAK, status: NAK, club_name: NAK, start_at: "2027-01-01T20:00:00Z", ticket_price_cents: 100, tickets_sold: NAK, capacity: NAK, checked_in: NAK, gross_cents: 1, fee_cents: 1 }],
+        recent_orders: [{ public_ref: NAK, created_at: "2026-01-01T00:00:00Z", event_title: NAK, club_name: NAK, buyer_username: NAK, buyer_email: NAK, quantity: NAK, total_cents: 1, application_fee_cents: 0, refunded_cents: 0, status: NAK, is_test: false }] };
+      const ctx = await brskalnik.newContext(); await namestiStub(ctx, st, origin);
+      const page = await ctx.newPage(); const k = [];
+      page.on("pageerror", (e) => k.push("pageerror: " + e.message));
+      await vpisi(page, origin, false);
+      for (const [zavihek, tabela] of [["pregled", "#stevilke"], ["klubi", "#kTabela"], ["dogodki", "#dTabela"], ["uporabniki", "#uTabela"], ["prosnje", "#prTabela"], ["finance", "#fStevilke"]]) {
+        await page.click(`nav button[data-z="${zavihek}"]`);
+        await page.waitForSelector(`${tabela} *`, { timeout: 5000 });
+        if (zavihek === "finance") await page.waitForSelector("#fNarocila table", { timeout: 5000 });
+        await page.evaluate(() => new Promise((r) => setTimeout(r, 300)));      // negativna preverba (onerror teče asinhrono): kratek premor je neizogiben
+        const o = await page.evaluate((t) => ({ xss: window.__xss === undefined ? null : window.__xss, slike: document.querySelectorAll('#panel img[src="x"]').length,
+          besedilo: document.querySelector(t).textContent.includes("<img src=x") }), tabela);
+        preveri(o.xss === null && o.slike === 0 && o.besedilo, `(k1) zavihek ${zavihek}: skripta se ne izvede, besedilo je vidno ubezano`, o);
+      }
+      preveri(k.length === 0, "(k1) brez pageerror", k);
+      await ctx.close();
+    }
+
     // ---- (f) vzporedni 401 si delijo eno osvezitev ----
     {
       const st = novStub(); st.veljavniRefresh.add("R-stari");
       const origins = [{ origin, localStorage: [{ name: "outly_admin_token", value: "STALE" }, { name: "outly_admin_refresh", value: "R-stari" }, { name: "outly_admin_jaz", value: JSON.stringify({ email: "admin@primer.si", role: "admin" }) }] }];
       const ctx = await brskalnik.newContext({ storageState: { cookies: [], origins } }); await namestiStub(ctx, st, origin);
       const page = await ctx.newPage();
-      await page.goto(origin + "/admin/"); await page.waitForTimeout(400);
+      await page.goto(origin + "/admin/");
+      await page.waitForFunction(() => document.querySelectorAll("#stevilke .stevilka").length > 0, null, { timeout: 5000 });
       await page.evaluate(() => { localStorage.setItem("outly_admin_token", "STALE"); });
       const r = await page.evaluate(() => Promise.all([klic("GET", "/admin/api/summary"), klic("GET", "/admin/api/summary"), klic("GET", "/admin/api/summary")]).then(() => "ok", e => String(e)));
       preveri(r === "ok" && st.osvezitve.length === 2, "(f) trije vzporedni klici z zastarelim zetonom -> ena sama dodatna osvezitev", { r, osvezitve: st.osvezitve });
