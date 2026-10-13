@@ -3578,11 +3578,11 @@ admin.patch("/events/:id", async (req, res) => {
 });
 
 // --- vracila in spori (#190, migracija 047) ---
-// GET /admin/api/refunds?state=ni_uspelo|rocno|caka|v_teku|opravljeno|preklicano&event_id=&limit= : vrsta vracil (brez e-naslovov kupcev). `attention` = vracila, ki so
+// GET /admin/api/refunds?state=ni_uspelo|rocno|potrditev|caka|v_teku|opravljeno|preklicano&event_id=&limit= : vrsta vracil (brez e-naslovov kupcev). `attention` = vracila, ki so
 // ostala brez denarja za kupca (ni_uspelo, rocno) ali visijo (v_teku): jih je treba pogledati. Tudi v dnevniku: `[vracila] POZOR`.
 admin.get("/refunds", async (req, res) => {
   try {
-    const STANJA = ["caka", "v_teku", "opravljeno", "ni_uspelo", "rocno", "preklicano"];
+    const STANJA = ["caka", "v_teku", "potrditev", "opravljeno", "ni_uspelo", "rocno", "preklicano"];
     const stanje = req.query.state === undefined ? null : String(req.query.state);
     if (stanje !== null && !STANJA.includes(stanje)) return res.status(400).send("state must be one of: " + STANJA.join(", ") + ".");
     const ev = req.query.event_id === undefined ? null : celoId4(req.query.event_id);

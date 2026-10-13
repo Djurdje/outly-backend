@@ -745,6 +745,8 @@ async function webhook(tip, objekt, id) {
     r = await api("DELETE", `/events/${evP}`, T.lastnik);
     assert(r.body.refunds_queued === 3, "S2: odpoved s 3 narocili", r.body);
     assert(await cakaj(async () => (await pool.query("SELECT COUNT(*)::int AS n FROM vracila WHERE event_id=$1 AND stanje='potrditev'", [evP])).rows[0].n === 3), "S2: vsa 3 vracila v stanju `potrditev` (Stripe pending)");
+    const adPot = await api("GET", "/admin/api/refunds?state=potrditev", T.admin);
+    assert(adPot.status === 200 && adPot.body.items.length === 3 && adPot.body.items.every(x => x.state === "potrditev") && adPot.body.counts.potrditev === 3, "S2: GET /admin/api/refunds?state=potrditev (admin zaslon #233): 3 vracila + counts.potrditev", adPot.body.counts);
     assert((await vrsticaN(P1.id)).status === "refunded", "S2: naroceno je lokalno ze refunded (kot webhook charge.refunded)");
     await pocakaj(400);
     assert(!vrnMaili().some(m => m.subject.includes(P1.ref)) && odpMaili().some(m => m.subject.includes(P1.ref)), "S2: mail »odpovedan« da, mail »vrnili smo« NE, dokler vracilo ni succeeded");
