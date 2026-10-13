@@ -129,6 +129,12 @@ const ZLI = [
     assert(JSON.stringify(await zanriDogodka(ev)) === JSON.stringify(["techno", "rap"]), "v bazi je normalizirano", await zanriDogodka(ev));
     r = await api("POST", "/events", T.lastnik, dogodek({}));
     assert(r.status === 201 && JSON.stringify(r.body.genres) === JSON.stringify(["techno", "pop"]), "brez `genres` -> zanri kluba", r.body.genres);
+    // Podedovani zanri: klub s starimi umazanimi zanri (vstavljeni mimo API-ja) ne sme prenesti umazanije na nov dogodek.
+    await pool.query("UPDATE clubs SET genres = $2 WHERE id=$1", [klubId, ["House", "<b>x</b>", "techno", "  Techno "]]);
+    r = await api("POST", "/events", T.lastnik, dogodek({}));
+    assert(r.status === 201 && JSON.stringify(r.body.genres) === JSON.stringify(["house", "techno"]), "brez `genres` -> podedovani zanri kluba so ocisceni (samo veljavni, normalizirani)", r.body.genres);
+    assert(JSON.stringify(await zanriDogodka(r.body.id)) === JSON.stringify(["house", "techno"]), "v bazi samo ocisceni podedovani zanri", await zanriDogodka(r.body.id));
+    await pool.query("UPDATE clubs SET genres = $2 WHERE id=$1", [klubId, ["techno", "pop"]]);
     r = await api("POST", "/events", T.lastnik, dogodek({ genres: [] }));
     assert(r.status === 201 && r.body.genres.length === 0, "genres: [] -> []", r.body.genres);
 

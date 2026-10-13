@@ -1191,6 +1191,12 @@ const ZANRI = [
 
 app.get("/genres", (req, res) => res.status(200).json({ genres: ZANRI }));
 
+// Zanri iz baze (npr. podedovani od kluba): normaliziraj kot preveriZanre, neznane in ne-nize samo izpusti (brez 400).
+function ociscenoZanre(seznam) {
+  if (!Array.isArray(seznam)) return [];
+  return [...new Set(seznam.filter(g => typeof g === "string").map(g => g.trim().toLowerCase()))].filter(g => ZANRI.includes(g));
+}
+
 // Zanri iz vhoda na VSEH poteh, ki jih pisejo (PATCH /me, POST/PATCH klub, POST/PATCH dogodek): seznam nizov,
 // normaliziran (trim, lowercase, brez podvojenih), vsak mora biti v ZANRI. Brez tega bi poljuben niz (npr. <img onerror>)
 // prisel v bazo in od tam v admin panel in v odjemalce (stored XSS, pregled #238). Vrne seznam ali null, ce je
@@ -2699,7 +2705,8 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
     if (!(await preveriPrizorisce(prizorisce, club.id, club.is_organizer, res))) return;
 
     const finalMinAge = (minAge ?? club.min_age ?? 18);
-    const finalGenres = zanriDogodka ?? (club.genres || []);
+    // Podedovani zanri kluba so lahko stari zapisi izven ZANRI: ociscimo (brez 400, neznane izpustimo), da se umazanija ne siri na nove dogodke.
+    const finalGenres = zanriDogodka ?? ociscenoZanre(club.genres);
 
     const r = await pool.query(
       `INSERT INTO events
