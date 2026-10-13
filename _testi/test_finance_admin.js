@@ -75,6 +75,33 @@ async function api(method, path, token, body) {
   assert(narocilo.total_cents === 3000, "total_cents = 3000", narocilo);
   assert(narocilo.application_fee_cents === 300, "provizija 10% = 300 centov", narocilo);
 
+  // Promet treh vrst (#230). Backend v tem testu tece v lazni nacin (brez Stripa), zato vsako narocilo dobi `test_<uuid>`;
+  // oznake, ki jih ob pravem Stripu zapise webhook (pi_... + seja cs_live_/cs_test_), nastavimo neposredno v bazi.
+  //   O1 (3 x 10 EUR)  pravo:    pi_live + cs_live_
+  //   O2 (1 x 10 EUR)  test:     lazni nacin, test_<uuid> (ostane, kot ga je zapisal backend)
+  //   O3 (4 x 10 EUR)  test:     sandbox Stripe, pi_... + cs_test_ (BREZ test_ predpone: to je primer iz #230)
+  //   O4 (2 x 0 EUR)   pravo:    brezplacno narocilo brez Stripa (pi NULL, seja NULL), 0 EUR
+  //   O5 (1 x 0 EUR)   test:     brezplacno narocilo v laznem nacinu (test_<uuid>)
+  await pool.query("UPDATE orders SET stripe_payment_intent_id='pi_live_1', stripe_checkout_session_id='cs_live_aaa' WHERE id=$1", [narocilo.id]);
+  r = await api("POST", `/events/${dogodekId}/orders`, T.kupec, { quantity: 1 });
+  assert(r.status === 201 && r.body.order.total_cents === 1000, "O2: testno (lazni nacin) narocilo 1000 centov", r.body);
+  const o2 = r.body.order;
+  r = await api("POST", `/events/${dogodekId}/orders`, T.kupec, { quantity: 4 });
+  assert(r.status === 201 && r.body.order.total_cents === 4000, "O3: sandbox narocilo 4000 centov", r.body);
+  const o3 = r.body.order;
+  await pool.query("UPDATE orders SET stripe_payment_intent_id='pi_3SandboxAbc', stripe_checkout_session_id='cs_test_bbb' WHERE id=$1", [o3.id]);
+  r = await api("POST", "/events", T.lastnik, { clubId: 1, title: "Brezplacen dogodek", startAt: cezTeden, ticketPriceCents: 0, capacity: 50, minAge: 0 });
+  assert(r.status === 201, "brezplacen dogodek ustvarjen", r.body);
+  const brezplacenId = r.body.id;
+  r = await api("POST", `/events/${brezplacenId}/orders`, T.kupec, { quantity: 2 });
+  assert(r.status === 201 && r.body.order.total_cents === 0, "O4: brezplacno narocilo 0 centov", r.body);
+  const o4 = r.body.order;
+  await pool.query("UPDATE orders SET stripe_payment_intent_id=NULL, stripe_checkout_session_id=NULL WHERE id=$1", [o4.id]);
+  r = await api("POST", `/events/${brezplacenId}/orders`, T.kupec, { quantity: 1 });
+  assert(r.status === 201 && r.body.order.total_cents === 0, "O5: brezplacno narocilo v laznem nacinu", r.body);
+  const o5 = r.body.order;
+  await pool.query("UPDATE orders SET refunded_cents = 500, status = 'partially_refunded' WHERE id = $1", [o3.id]);   // vracilo na SANDBOX narocilu
+
   console.log("\n# Vloge in dostop");
   r = await api("GET", "/admin/api/finance", null);
   assert(r.status === 401, "GET /admin/api/finance brez zetona -> 401", r.status);
@@ -103,13 +130,31 @@ async function api(method, path, token, body) {
   assert(r.status === 200, "admin -> 200", r.body);
   assert(r.body.fee_percent === 10, "fee_percent = 10", r.body.fee_percent);
   assert(r.body.mode === "test", "mode = test (Stripe ni nastavljen)", r.body.mode);
-  assert(r.body.summary.gross_cents === 3000, "bruto promet (privzeto obdobje) = 3000", r.body.summary);
+  assert(r.body.summary.gross_cents === 3000, "bruto promet (privzeto obdobje) = 3000 (samo pravi promet; test 5000 ni zraven)", r.body.summary);
   assert(r.body.summary.fee_cents === 300, "provizija (10%) = 300", r.body.summary);
-  assert(r.body.summary.clubs_net_cents === 3000 - 300 - 0, "neto klubom = bruto - provizija - vracila = 2700", r.body.summary);
-  assert(r.body.summary.tickets_sold === 3, "tickets_sold = 3", r.body.summary);
-  assert(r.body.summary.test_orders === 1, "test_orders steje testna narocila", r.body.summary);
+  assert(r.body.summary.clubs_net_cents === 3000 - 300 - 0, "neto klubom = bruto - provizija - vracila = 2700 (sandbox vracilo 500 ni zraven)", r.body.summary);
+  assert(r.body.summary.tickets_sold === 5, "tickets_sold = 5 (3 placane + 2 brezplacni; testnih 6 ni zraven)", r.body.summary);
+  assert(r.body.summary.orders === 2 && r.body.summary.buyers === 1 && r.body.summary.clubs_with_sales === 1, "summary: 2 pravi narocili (placano + 0 EUR), 1 kupec, 1 klub", r.body.summary);
+  assert(r.body.summary.refunded_cents === 0, "pravi promet: vracil 0 (500 je na sandbox narocilu)", r.body.summary);
+  assert(r.body.summary.test_orders === 3, "summary.test_orders (staro polje) = 3 testna narocila v obdobju (lazni + sandbox + 0 EUR lazni)", r.body.summary);
+  assert(r.body.test_summary && r.body.test_summary.orders === 3 && r.body.test_summary.gross_cents === 5000 && r.body.test_summary.fee_cents === 500
+    && r.body.test_summary.refunded_cents === 500 && r.body.test_summary.tickets_sold === 6, "test_summary: 3 narocila, bruto 5000, provizija 500, vracila 500, 6 vstopnic", r.body.test_summary);
+  assert(r.body.all_time.gross_cents === 3000 && r.body.all_time.fee_cents === 300 && r.body.all_time.orders === 2 && r.body.all_time.tickets_sold === 5, "all_time = samo pravi promet", r.body.all_time);
+  assert(r.body.all_time_test && r.body.all_time_test.orders === 3 && r.body.all_time_test.gross_cents === 5000 && r.body.all_time_test.fee_cents === 500
+    && r.body.all_time_test.refunded_cents === 500, "all_time_test: 3 narocila, bruto 5000, provizija 500, vracila 500", r.body.all_time_test);
   const klub = r.body.by_club.find(c => c.name === "Pure Club");
-  assert(klub && klub.gross_cents === 3000 && klub.net_cents === 2700, "by_club: Pure Club bruto 3000, neto 2700", klub);
+  assert(klub && klub.gross_cents === 3000 && klub.net_cents === 2700 && klub.orders === 2 && klub.tickets_sold === 5 && klub.refunded_cents === 0, "by_club: Pure Club bruto 3000, neto 2700, 2 narocili, brez testnih", klub);
+  assert(r.body.by_event.length === 2, "by_event: samo dogodka s pravim prometom", r.body.by_event.map(e => e.title));
+  const dog1 = r.body.by_event.find(e => e.id === dogodekId), dog2 = r.body.by_event.find(e => e.id === brezplacenId);
+  assert(dog1 && dog1.gross_cents === 3000 && dog1.fee_cents === 300 && dog1.tickets_sold === 3, "by_event: placan dogodek bruto 3000, 3 vstopnice (brez testnih)", dog1);
+  assert(dog2 && dog2.gross_cents === 0 && dog2.tickets_sold === 2, "by_event: brezplacen dogodek 0 EUR, 2 vstopnici (pravo narocilo brez Stripa je pravi promet)", dog2);
+  const danes = r.body.by_day.find(d => d.day === new Date().toISOString().slice(0, 10)) || r.body.by_day[r.body.by_day.length - 1];
+  assert(danes && danes.gross_cents === 3000 && danes.fee_cents === 300 && danes.orders === 2 && danes.tickets === 5, "by_day: danes samo pravi promet", danes);
+  assert(r.body.by_day.reduce((a, d) => a + d.gross_cents, 0) === 3000, "by_day: vsota bruto = 3000 (testnih ni)", r.body.by_day);
+  assert(r.body.recent_orders.length === 5, "recent_orders vsebuje vseh 5 narocil (pravi in testni)", r.body.recent_orders.length);
+  const znacke = Object.fromEntries(r.body.recent_orders.map(o => [o.id, o.is_test]));
+  assert(znacke[narocilo.id] === false && znacke[o4.id] === false, "recent_orders: pravi (cs_live_) in 0 EUR brez Stripa NISTA test", znacke);
+  assert(znacke[o2.id] === true && znacke[o3.id] === true && znacke[o5.id] === true, "recent_orders: test_ , cs_test_ + pi_ in 0 EUR lazni so test", znacke);
 
   console.log("\n# GET /admin/api/finance z vracilom");
   await pool.query("UPDATE orders SET refunded_cents = 500, status = 'partially_refunded' WHERE id = $1", [narocilo.id]);
@@ -122,6 +167,8 @@ async function api(method, path, token, body) {
   const pojutrisnjem = new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString().slice(0, 10);
   r = await api("GET", `/admin/api/finance?from=${jutri}&to=${pojutrisnjem}`, T.admin);
   assert(r.status === 200 && r.body.summary.gross_cents === 0, "obdobje brez narocil (jutri-pojutrisnjem) -> gross 0", r.body.summary);
+  assert(r.body.test_summary.gross_cents === 0 && r.body.test_summary.orders === 0 && r.body.summary.test_orders === 0, "obdobje brez narocil: tudi test blok 0", r.body.test_summary);
+  assert(r.body.all_time_test.orders === 3, "all_time_test ne glede na obdobje", r.body.all_time_test);
   r = await api("GET", `/admin/api/finance?from=${pojutrisnjem}&to=${jutri}`, T.admin);
   assert(r.status === 400, "from > to -> 400", r.status);
   const privzetiOd = new Date(Date.now() - 29 * 24 * 3600 * 1000).toISOString().slice(0, 10);

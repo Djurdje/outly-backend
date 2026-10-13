@@ -245,6 +245,10 @@ async function webhook(tip, objekt, id) {
     const vstopnice = async (oid) => (await pool.query("SELECT status FROM tickets WHERE order_id=$1", [oid])).rows.map(x => x.status);
     const koncna = (st) => ["opravljeno", "ni_uspelo", "rocno", "preklicano"].includes(st);
 
+    // Indeks za mail »vrnili smo« (048, #233): pogoj poizvedbe (VRACILO_MAIL.vrnjeno) NE vsebuje stripe_vracilo_id, zato ga indeks ne sme imeti (sicer ga planer ne uporabi).
+    const ixMail = (await pool.query("SELECT indexdef FROM pg_indexes WHERE tablename='vracila' AND indexname='vracila_mail_idx'")).rows[0];
+    assert(ixMail && !/stripe_vracilo_id/.test(ixMail.indexdef) && /brez_stripa/.test(ixMail.indexdef) && /mail_poslano_at IS NULL/.test(ixMail.indexdef), "vracila_mail_idx brez pogoja stripe_vracilo_id (048)", ixMail);
+
     // ================================================================
     console.log("\n# 1. Priprava: naroceila vseh vrst na dogodku A");
     const A1 = await narocilo({ ev: evA, uporabnik: U.ana, cena: 2000 });

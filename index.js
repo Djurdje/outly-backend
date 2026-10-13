@@ -3645,8 +3645,18 @@ admin.post("/disputes/:id/retry", async (req, res) => {
 // po dnevih, zadnja naročila. Zneski v centih, EUR. "Prihodek Outlyja" =
 // application_fee_cents (provizija PROVIZIJA_ODSTOTEK); "za klube" = bruto
 // minus provizija minus vračila. Štejejo se samo plačana naročila
-// (paid, partially_refunded); v testnem načinu (Stripe še ni) so to naročila
-// s public_ref 'test_%' — panel to jasno označi.
+// (paid, partially_refunded).
+//
+// TESTNI PROMET (#230): summary, all_time, by_club, by_event in by_day so SAMO PRAVI promet; testni je ločen
+// (test_summary, all_time_test, summary.test_orders). Testno naročilo (SQL_TESTNO_NAROCILO) je
+//   * `stripe_payment_intent_id LIKE 'test_%'`  - lažni način brez Stripa (backend sam zapiše test_<uuid>), ali
+//   * `stripe_checkout_session_id LIKE 'cs_test_%'` - Stripe SANDBOX (seja cs_test_, PaymentIntent pi_... je enak kot v živem, zato ga po njem ni mogoče ločiti).
+// Plačilo prek Stripa vedno gre skozi Checkout sejo (zakljuci() v placila_stripe.js zapiše sejo ob prehodu v paid), zato druge poti do sandbox naročila brez seje ni.
+// Brezplačno (0 EUR) naročilo brez Stripa (pi NULL, seja NULL) je PRAVO naročilo (brezplačne vstopnice, prava vstopnica in obveznost), le brez denarja;
+// 0 EUR naročilo v lažnem načinu ima test_ in je zato testno. is_test v recent_orders ima to definicijo, NE pomena iz STOLPCI_NAROCILA (tam is_test = lažni način
+// brez plačila in vodi vedenje nakupa: sandbox naročilo je šlo skozi Stripe, ima checkout_url in prave maile).
+const SQL_TESTNO_NAROCILO = `(COALESCE(o.stripe_payment_intent_id LIKE 'test\\_%', FALSE) OR COALESCE(o.stripe_checkout_session_id LIKE 'cs\\_test\\_%', FALSE))`;
+const SQL_PRAVO_NAROCILO = `NOT ${SQL_TESTNO_NAROCILO}`;
 admin.get("/finance", async (req, res) => {
   try {
     const dan = (v) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v : null;
@@ -3656,9 +3666,15 @@ admin.get("/finance", async (req, res) => {
     // Meji sta datuma; zgornja je vključujoča (do konca dneva).
     const p = [od, do_];
     // o.guest_list_id IS NULL: guest lista (035, I24) ni prodaja (brez zneska); ne sme v stevilo narocil, kupcev, vstopnic.
-    const KJE = `o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day')`;
+    const KJE_VSE = `o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day')`;
+    const KJE = `${KJE_VSE} AND ${SQL_PRAVO_NAROCILO}`;   // pravi promet (brez lažnega načina in sandboxa)
+    const SESTEVEK_TEST = `COUNT(*)::int AS orders,
+                COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
+                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
+                COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
+                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold`;
 
-    const [skupaj, poKlubih, poDogodkih, poDnevih, zadnja, vseh] = await Promise.all([
+    const [skupaj, poKlubih, poDogodkih, poDnevih, zadnja, vseh, testObdobje, testVseh] = await Promise.all([
       pool.query(
         `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
@@ -3667,8 +3683,7 @@ admin.get("/finance", async (req, res) => {
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold,
                 COUNT(*)::int AS orders,
                 COUNT(DISTINCT COALESCE(o.user_id::text, lower(o.guest_email)))::int AS buyers,
-                COUNT(DISTINCT o.club_id)::int AS clubs_with_sales,
-                COUNT(*) FILTER (WHERE o.stripe_payment_intent_id LIKE 'test_%')::int AS test_orders
+                COUNT(DISTINCT o.club_id)::int AS clubs_with_sales
          FROM orders o WHERE ${KJE}`, p),
       pool.query(
         `SELECT c.id, c.name, c.city, ${sqlStripeStanje("c.")},
@@ -3698,11 +3713,11 @@ admin.get("/finance", async (req, res) => {
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets,
                 COUNT(o.id)::int AS orders
          FROM generate_series($1::date, $2::date, '1 day') AS d(dan)
-         LEFT JOIN orders o ON o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL
+         LEFT JOIN orders o ON o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}
               AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
          GROUP BY d.dan ORDER BY d.dan`, p),
       pool.query(
-        `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, c.name AS club_name, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
+        `SELECT ${STOLPCI_NAROCILA}, ${SQL_TESTNO_NAROCILO} AS testni_promet, e.title AS event_title, c.name AS club_name, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
          FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs c ON c.id = o.club_id
          LEFT JOIN users u ON u.id = o.user_id
          WHERE o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day') AND o.guest_list_id IS NULL
@@ -3711,18 +3726,22 @@ admin.get("/finance", async (req, res) => {
         `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold, COUNT(*)::int AS orders
-         FROM orders o WHERE o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL`),
+         FROM orders o WHERE o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}`),
+      pool.query(`SELECT ${SESTEVEK_TEST} FROM orders o WHERE ${KJE_VSE} AND ${SQL_TESTNO_NAROCILO}`, p),
+      pool.query(`SELECT ${SESTEVEK_TEST} FROM orders o WHERE o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}`),
     ]);
     return res.json({
       mode: testniNacinPlacil() ? "test" : "live",
       fee_percent: PROVIZIJA_ODSTOTEK,
       from: od, to: do_,
-      summary: skupaj.rows[0],
+      summary: { ...skupaj.rows[0], test_orders: testObdobje.rows[0].orders },   // test_orders: staro polje, zdaj po novi definiciji
       all_time: vseh.rows[0],
+      test_summary: testObdobje.rows[0],       // testni promet v obdobju (ni pravi denar)
+      all_time_test: testVseh.rows[0],
       by_club: poKlubih.rows,
       by_event: poDogodkih.rows,
       by_day: poDnevih.rows,
-      recent_orders: zadnja.rows,
+      recent_orders: zadnja.rows.map(({ testni_promet, ...o }) => ({ ...o, is_test: testni_promet })),   // is_test: nova definicija (glej SQL_TESTNO_NAROCILO)
     });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });

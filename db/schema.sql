@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–047, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–048, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -2621,7 +2621,7 @@ CREATE INDEX vracila_dogodek_idx ON public.vracila USING btree (event_id);
 -- Name: vracila_mail_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX vracila_mail_idx ON public.vracila USING btree (id) WHERE ((NOT brez_stripa) AND (mail_poslano_at IS NULL) AND (stripe_vracilo_id IS NOT NULL));
+CREATE INDEX vracila_mail_idx ON public.vracila USING btree (id) WHERE ((NOT brez_stripa) AND (mail_poslano_at IS NULL));
 
 
 --

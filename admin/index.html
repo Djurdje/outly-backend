@@ -161,6 +161,12 @@
           <div id="fOpomba" style="font-size:12.5px;color:var(--faint);margin-top:10px"></div>
         </div>
       </div>
+      <div class="skupina"><h2>Testni promet (sandbox / testni način, ni pravi denar)</h2>
+        <div class="telo">
+          <div class="stevilke" id="fTestStevilke"></div>
+          <div id="fTestOpomba" style="font-size:12.5px;color:var(--faint);margin-top:10px"></div>
+        </div>
+      </div>
       <div class="skupina"><h2>Po dnevih</h2><div class="telo"><div id="fGraf" class="graf"></div><div class="graf-osi" id="fOsi"></div></div></div>
       <div class="skupina"><h2>Po klubih</h2><div class="telo" style="padding:0" id="fKlubi"></div></div>
       <div class="skupina"><h2>Po dogodkih</h2><div class="telo" style="padding:0" id="fDogodki"></div></div>
@@ -457,15 +463,24 @@ async function naloziFinance() {
     $("fNacin").className = "znacka " + (f.mode === "test" ? "opoz" : "ok");
     const kos = (n, ime, pod) => `<div class="stevilka"><b>${n}</b><span>${ime}</span>${pod ? `<small>${pod}</small>` : ""}</div>`;
     $("fStevilke").innerHTML =
-      kos(evri(s.gross_cents), "bruto prodaja", `od začetka ${evri(v.gross_cents)}`) +
+      kos(evri(s.gross_cents), "bruto prodaja (pravi)", `od začetka ${evri(v.gross_cents)}`) +
       kos(evri(s.fee_cents), `prihodek Outlyja (${f.fee_percent} %)`, `od začetka ${evri(v.fee_cents)}`) +
       kos(evri(s.clubs_net_cents), "za klube (neto)", `bruto − provizija − vračila`) +
       kos(evri(s.refunded_cents), "vračila") +
       kos(s.tickets_sold, "vstopnic", `od začetka ${v.tickets_sold}`) +
       kos(s.orders, "naročil", `${s.buyers} kupcev · ${s.clubs_with_sales} klubov`);
-    $("fOpomba").textContent = s.test_orders
-      ? `${s.test_orders} od ${s.orders} naročil je testnih (brez plačila). Pravi denar teče šele s Stripom; takrat se tu pokažejo tudi nakazila klubom.`
-      : "";
+    // Zgoraj je SAMO pravi promet; testna naročila (lažni način brez Stripa: test_…, Stripe sandbox: seja cs_test_…) so v ločenem bloku (#230).
+    $("fOpomba").textContent = "Zgoraj, po klubih, dogodkih in dnevih je samo pravi promet (vključno z brezplačnimi naročili brez Stripa). Testna naročila so šteta posebej, v bloku spodaj."
+      + (f.mode === "test" ? " Backend je zdaj v testnem načinu: nova naročila so testna." : "");
+    const t = f.test_summary || { orders: 0, gross_cents: 0, fee_cents: 0, refunded_cents: 0, tickets_sold: 0 }, vt = f.all_time_test || { orders: 0, gross_cents: 0 };
+    const kosT = (n, ime, pod) => `<div class="stevilka opoz"><b>${n}</b><span>${ime}</span>${pod ? `<small>${pod}</small>` : ""}</div>`;
+    $("fTestStevilke").innerHTML =
+      kosT(t.orders, "testnih naročil", `od začetka ${vt.orders}`) +
+      kosT(evri(t.gross_cents), "testni bruto", `od začetka ${evri(vt.gross_cents)}`) +
+      kosT(evri(t.fee_cents), "testna provizija") +
+      kosT(evri(t.refunded_cents), "testna vračila") +
+      kosT(t.tickets_sold, "testnih vstopnic");
+    $("fTestOpomba").textContent = "Ni pravi denar in ni v zgornjih številkah: lažni način (brez Stripa) in Stripe sandbox. Za obračun s klubi se ne upošteva.";
     // graf po dnevih (bruto; provizija temnejši del)
     const maks = Math.max(1, ...f.by_day.map(d => d.gross_cents));
     $("fGraf").innerHTML = f.by_day.map(d => {
