@@ -1,7 +1,7 @@
 // Headless preverjanje seje admin panela (kljukica »Zapomni si me«, osvezevanje zetona, odjava).
-// NI del `npm test`: rabi Playwright + Chromium, ki nista odvisnosti repozitorija (CI ju nima).
-// Zazeni rocno pred PR-jem, ki se dotakne admin/index.html (seja, prijava):
-//   NODE_PATH="$(npm root -g)" node _orodja/preveri_admin_seja.js
+// NI v `npm test` (ta je izrecen seznam skript, zato se ta datoteka ne zazene sama): rabi Playwright + Chromium,
+// ki nista odvisnosti repozitorija (CI ju nima). Zazeni rocno pred PR-jem, ki se dotakne admin/index.html (seja, prijava, XSS):
+//   NODE_PATH="$(npm root -g)" node _testi/headless_admin_seja.js
 // Chromium: PW_CHROMIUM=/pot/do/chrome ali samodejno /opt/pw-browsers/chromium-*/chrome-linux/chrome
 // (nikoli `playwright install`). Stubana sta samo Supabase Auth in backend (`page.route`), panel strezemo
 // iz lokalnega streznika na istem izvoru kot API (kot Express: /admin/ + /me + /admin/api/*).
