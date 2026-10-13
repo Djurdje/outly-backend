@@ -316,6 +316,7 @@ let srv = null;
   // kapaciteta dogodka evA = 3; guest lista ima ze 4 vstopnice (gostitelj + ana + bor + cene), prodaja vseeno dela
   r = await api("POST", `/events/${evA}/orders`, T.kupec, { quantity: 3 });
   assert(r.status === 201 && r.body.tickets.length === 3 && r.body.order.total_cents === 3000, "kupec kupi 3 vstopnice (kapaciteta 3): guest lista ni porabila zaloge", [r.status, r.body.order]);
+  const kupecNarociloId = r.body.order.id;
   assert((await pool.query("SELECT sold_count FROM events WHERE id=$1", [evA])).rows[0].sold_count === 3, "sold_count = 3 (samo prodaja)");
   r = await api("POST", `/events/${evA}/orders`, T.f2, { quantity: 1 });
   assert(r.status === 409 && /Only 0 tickets left/.test(r.body), "razprodano: 409 (kapaciteto steje samo prodaja)", [r.status, r.body]);
@@ -336,6 +337,8 @@ let srv = null;
     const x = await api("GET", `/business/sales?range=${range}`, T.lastnik);
     assert(x.body.series.reduce((a, d) => a + d.tickets, 0) === 3 && x.body.series.reduce((a, d) => a + d.gross_cents, 0) === 3000, `sales.series (${range}): 3 vstopnice, brez guest liste`, x.body.series.slice(-2));
   }
+  // Backend tece v lazni nacin (test_<uuid>), a finance steje testni promet ločeno (#230): kupcevo narocilo oznacimo kot pravo (Stripe zivo), da preverimo izlocitev guest liste.
+  await pool.query("UPDATE orders SET stripe_payment_intent_id='pi_live_gl', stripe_checkout_session_id='cs_live_gl' WHERE id = $1", [kupecNarociloId]);
   r = await api("GET", "/admin/api/finance", T.admin);
   assert(r.status === 200, "GET /admin/api/finance", r.status);
   assert(r.body.summary.orders === 1 && r.body.summary.tickets_sold === 3 && r.body.summary.gross_cents === 3000 && r.body.summary.buyers === 1, "finance.summary: orders 1, tickets_sold 3, gross 3000, buyers 1", r.body.summary);
