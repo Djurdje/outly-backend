@@ -173,6 +173,10 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     const pi = v.payment_intent_id || v.o_pi || null;
     let znesek = v.znesek_cents !== null && v.znesek_cents !== undefined ? v.znesek_cents : (jeEC ? v.total_cents - v.o_refunded : 0);
 
+    // Stripovo vracilo je ze zavrnjeno (failed/canceled), a zapis `ni_uspelo` se ni uspel (proces ugasnjen ali napaka baze) in je sprostitev vrstico vrnila v vrsto:
+    // NE uveljavimo narocila in NE vracamo provizije (kupec denarja ni dobil). Enako kot takojsnja zavrnitev: ni_uspelo + alarm, retry 409, panel kaze razlago.
+    if (aOpravljen && stripeZavrnil(v)) throw Object.assign(new Error(`vracilo ${v.stripe_vracilo_id} je v stanju ${v.stripe_stanje}`), { type: "StripeInvalidRequestError", code: "refund_" + v.stripe_stanje });
+
     if (!aOpravljen) {
       // Dogodek je bil med cakanjem obnovljen (zmota lastnika), denar se se ni premaknil: ne vracamo.
       if (jeEC && v.dogodek_status !== "cancelled") {
@@ -296,7 +300,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   async function uskladiVracilo(re) {
     if (!re || !re.id) return;
     const status = String(re.status || "").slice(0, 20);
-    let r = await pool.query("UPDATE vracila SET stripe_stanje = $2 WHERE stripe_vracilo_id = $1 RETURNING id, stanje", [re.id, status]);
+    let r = await pool.query("UPDATE vracila v SET stripe_stanje = $2 FROM (SELECT id, stripe_stanje AS prej FROM vracila WHERE stripe_vracilo_id = $1 FOR UPDATE) p WHERE v.id = p.id RETURNING v.id, v.stanje, p.prej", [re.id, status]);
     // Webhook je prehitel zapis stripe_vracilo_id (vracilo je ze narejeno, vrstica ga se ne pozna): poisci vrstico po metadata iz SVEZEGA vracila in vracilo posvoji.
     const md = re.metadata || {};
     if (!r.rows.length && /^\d{1,15}$/.test(String(md.vracilo_id || "")) && /^\d{1,15}$/.test(String(md.order_id || ""))) {
@@ -307,6 +311,9 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
       if (re.status === "succeeded" && x.stanje === "potrditev") {
         await pool.query("UPDATE vracila SET stanje = 'opravljeno', opravljeno_at = NOW(), napaka = NULL WHERE id = $1 AND stanje = 'potrditev'", [x.id]);
         console.log(`[vracila] opravljeno (Stripe je vracilo izvedel): vracilo ${x.id}`);
+      } else if ((re.status === "failed" || re.status === "canceled") && ["rocno", "ni_uspelo"].includes(x.stanje) && ["pending", "requires_action", "succeeded"].includes(x.prej)) {
+        // Vrstica je ze v rocni obravnavi/ni_uspelo (stanje ostane), Stripe pa je vracilo pozneje zavrnil: admin mora vedeti, da kupec NI dobil denarja.
+        console.error(`[vracila] POZOR: Stripe vracilo ${re.id} (vracilo ${x.id}) je ${re.status}${re.failure_reason ? ", razlog " + re.failure_reason : ""}: kupec NI dobil denarja (vrstica je ze v stanju ${x.stanje}, stanje ni spremenjeno; prej Stripe: ${x.prej}); retry je zavrnjen (409), vrni rocno v Stripu.`);
       } else if ((re.status === "failed" || re.status === "canceled") && ["potrditev", "opravljeno", "v_teku", "caka"].includes(x.stanje)) {
         await pool.query("UPDATE vracila SET stanje = 'ni_uspelo', napaka = $2, opravljeno_at = NULL WHERE id = $1", [x.id, `Stripe vracilo ${re.id}: ${re.status}${re.failure_reason ? " (" + String(re.failure_reason).slice(0, 60) + ")" : ""}`]);
         console.error(`[vracila] POZOR: Stripe vracilo ${re.id} (vracilo ${x.id}) je ${re.status}${re.failure_reason ? ", razlog " + re.failure_reason : ""}: kupec NI dobil denarja; naroceno je v bazi ze vrnjeno, vrni rocno v Stripu.`);
@@ -324,7 +331,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
         await uskladiVracilo(re);
         if (re.status === "pending" || re.status === "requires_action") {
           await pool.query("UPDATE vracila SET naslednji_poskus_at = NOW() + ($2::bigint * INTERVAL '1 millisecond') WHERE id = $1 AND stanje = 'potrditev'", [x.id, POTRDITEV_MS]);
-          if (Date.now() - new Date(x.created_at).getTime() > 10 * 86400000) console.error(`[vracila] POZOR: Stripe vracilo ${x.stripe_vracilo_id} (vracilo ${x.id}) je pending ze vec kot 10 dni.`);
+          if (Date.now() - new Date(x.created_at).getTime() > 10 * 86400000) console.error(`[vracila] POZOR: Stripe vracilo ${x.stripe_vracilo_id} (vracilo ${x.id}) je ${re.status} ze vec kot 10 dni.`);
         }
       } catch (e) { console.error(`[vracila] preverba vracila ${x.id}:`, e && e.message); }
     }
