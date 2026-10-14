@@ -188,7 +188,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(besedilo.includes("2 x 15.00 EUR = 30.00 EUR"), "besedilo: stevilo vstopnic in cena", besedilo);
     assert(besedilo.includes("The price includes VAT (22%)."), "besedilo: stopnja DDV iz narocila");
     assert(besedilo.includes("Plain Club") && besedilo.includes("Glavni trg 5, Maribor") && besedilo.includes("+38641333444") && besedilo.includes("hello@plain-club.si"), "besedilo: prodajalec (klub: ime, naslov, kontakt)");
-    assert(besedilo.includes("NEXT DIMENSIONS") && /intermediary/.test(besedilo), "besedilo: Outly kot posrednik");
+    assert(besedilo.includes("TIP&TAP") && /intermediary/.test(besedilo), "besedilo: Outly kot posrednik");
     assert(besedilo.includes("Article 135, point 12") && /no right of withdrawal/i.test(besedilo), "besedilo: odstopna pravica (ZVPot-1 135/12)");
     assert(besedilo.includes("https://outly.test/app/tickets") && besedilo.includes("https://outly.si/terms"), "besedilo: povezava na vstopnice v aplikaciji in pogoje");
     assert(/test purchase: nothing was charged/.test(besedilo), "besedilo: testno narocilo je oznaceno");
@@ -204,7 +204,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(sl.includes(`NAROČILO\nNaročilo ${r.body.order.public_ref}. Čas naročila: `) && /\(ljubljanski čas\)/.test(sl) && !/Ljubljana time/.test(sl), "sl: stevilka narocila in cas po sl-SI", sl.slice(0, 200));
     assert(sl.includes("2 x 15,00 EUR = 30,00 EUR") && sl.includes("Cena vključuje DDV (22 %).") && !sl.includes("15.00") && en.includes("2 x 15.00 EUR = 30.00 EUR") && !en.includes("15,00"), "sl: znesek z decimalno vejico in stopnja DDV; en nespremenjen");
     assert(sl.includes("Noc & <b>Test</b>") && sl.includes("Plain Club") && sl.includes("Glavni trg 5, Maribor") && sl.includes("+38641333444") && sl.includes("hello@plain-club.si"), "sl: dogodek in prodajalec (isti podatki kot en)");
-    assert(sl.includes("Outly je samo posrednik: NEXT DIMENSIONS") && sl.includes("135. člen, 12. točka") && sl.includes("https://outly.si/terms") && sl.includes("https://outly.test/app/tickets"), "sl: posrednik, odstop (ZVPot-1 135/12), pogoji, povezava");
+    assert(sl.includes("Outly je samo posrednik: TIP&TAP") && sl.includes("135. člen, 12. točka") && sl.includes("https://outly.si/terms") && sl.includes("https://outly.test/app/tickets"), "sl: posrednik, odstop (ZVPot-1 135/12), pogoji, povezava");
     assert(sl.includes("To je bil testni nakup: nič ni bilo zaračunano.") && /PRODAJALEC\nVstopnico prodaja klub: Plain Club/.test(sl) && /VAŠE VSTOPNICE\n/.test(sl), "sl: testno narocilo, razdelka Prodajalec in Vaše vstopnice");
     assert((html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="sl">,<div lang="en">' && html.indexOf('lang="sl"') < html.indexOf('lang="en"'), "HTML: bloka sl in en, sl prvi");
     assert((html.match(/Noc &amp; &lt;b&gt;Test&lt;\/b&gt;/g) || []).length >= 2 && (html.match(/<a href="https:\/\/outly\.test\/app\/tickets">/g) || []).length === 2, "HTML: ubezen naslov in klikljiva povezava v OBEH blokih");
