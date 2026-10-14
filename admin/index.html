@@ -740,10 +740,10 @@ async function naloziDogodke() {
 async function dStatus(id, status, placanaNarocila, placanoCenti, testnaNarocila, testnoCenti) {
   // Umik = ODPOVED dogodka (#190, Martin 12. 10. 2026): vsi kupci dobijo celoten znesek nazaj (glavnico vrne klub, Outly provizijo), vstopnice prenehajo veljati, kupci dobijo mail.
   // Vracila tecejo v ozadju cez ~minuto in jih ni mogoce preklicati, ko so enkrat izvedena. Zato izrecna potrditev s stevilom placanih narocil.
-  // #236: paid_* so samo PRAVA naročila; testna (lazni nacin, Stripe sandbox) so v test_paid_* in se prikazejo posebej (ni pravi denar), odpoved pa vrne VSA placana.
+  // #236: paid_* so samo PRAVA naročila; testna (lazni nacin, Stripe sandbox) so v test_paid_* in se prikazejo posebej (ni pravi denar), odpoved obravnava VSA placana (lazna samo v bazi, sandbox v Stripe sandboxu, ob zivem kljucu rocno: vracila_stripe.js).
   if (status === "cancelled") {
     const n = Number(placanaNarocila) || 0, nt = Number(testnaNarocila) || 0;
-    const testno = nt > 0 ? `V dogodku je še ${nt} testnih naročil (${evri(Number(testnoCenti) || 0)}, ni pravi denar), ki jih odpoved tudi vrne (v testnem/sandbox načinu).` : "";
+    const testno = nt > 0 ? `Še ${nt} testnih naročil (${evri(Number(testnoCenti) || 0)}, ni pravi denar). Odpoved jih obravnava kot doslej: lažna samo v bazi, sandbox v Stripe sandboxu (ob živem ključu označena za ročno vračilo).` : "";
     let besedilo;
     if (n > 0) besedilo = `Umik dogodka pomeni ODPOVED.\n\nVsem kupcem (${n} plačanih naročil, skupaj ${evri(Number(placanoCenti) || 0)}) se denar samodejno VRNE v celoti, njihove vstopnice prenehajo veljati in dobijo e-pošto o odpovedi. Vračil po izvedbi ni mogoče preklicati.${testno ? "\n\n" + testno : ""}\n\nNadaljujem?`;
     else if (nt > 0) besedilo = `Umik dogodka pomeni odpoved. Pravih plačanih naročil ni, zato noben pravi kupec ne dobi vračila.\n\n${testno}\n\nNadaljujem?`;

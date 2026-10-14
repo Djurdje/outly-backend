@@ -6211,20 +6211,25 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
     const range = ["week", "month", "year"].includes(req.query.range) ? req.query.range : null;
-    const [povzetek, poDogodkih, zadnja, poDnevih, serija, testno] = await Promise.all([
+    const [povzetek, poDogodkih, zadnja, poDnevih, serija] = await Promise.all([
+      // Ena poizvedba za pravi (summary) IN testni (test_summary, #236) promet: samo 5 vzporednih poizvedb na ogled plosce (pool ima 10 povezav).
       pool.query(
-        `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
-                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
-                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents),0)::int AS net_cents,
+        `SELECT COALESCE(SUM(o.total_cents) FILTER (WHERE ${SQL_PRAVO_NAROCILO}),0)::int AS gross_cents,
+                COALESCE(SUM(o.application_fee_cents) FILTER (WHERE ${SQL_PRAVO_NAROCILO}),0)::int AS fee_cents,
+                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents) FILTER (WHERE ${SQL_PRAVO_NAROCILO}),0)::int AS net_cents,
                 -- tickets_sold = samo navadne vstopnice (narocila brez mize); gross_cents vkljucuje mize (migracija 025).
-                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold,
-                COUNT(*)::int AS orders,
-                COUNT(DISTINCT COALESCE(o.user_id::text, lower(o.guest_email)))::int AS buyers,
-                COALESCE(SUM(o.total_cents) FILTER (WHERE o.created_at > NOW() - INTERVAL '7 days'),0)::int AS gross_7d_cents,
-                COALESCE(SUM(o.quantity) FILTER (WHERE o.created_at > NOW() - INTERVAL '7 days' AND o.table_id IS NULL),0)::int AS tickets_7d,
-                COUNT(*) FILTER (WHERE o.table_id IS NOT NULL)::int AS tables_sold,
-                COALESCE(SUM(o.total_cents) FILTER (WHERE o.table_id IS NOT NULL),0)::int AS tables_gross_cents
-         FROM orders o WHERE o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}`, [klub]),   // guest lista (035, I24) ni prodaja: ne v bruto, tickets_sold, stevilo narocil; testno narocilo (#236, I39) tudi ne (glej test_summary)
+                COALESCE(SUM(o.quantity) FILTER (WHERE ${SQL_PRAVO_NAROCILO} AND o.table_id IS NULL),0)::int AS tickets_sold,
+                COUNT(*) FILTER (WHERE ${SQL_PRAVO_NAROCILO})::int AS orders,
+                COUNT(DISTINCT COALESCE(o.user_id::text, lower(o.guest_email))) FILTER (WHERE ${SQL_PRAVO_NAROCILO})::int AS buyers,
+                COALESCE(SUM(o.total_cents) FILTER (WHERE ${SQL_PRAVO_NAROCILO} AND o.created_at > NOW() - INTERVAL '7 days'),0)::int AS gross_7d_cents,
+                COALESCE(SUM(o.quantity) FILTER (WHERE ${SQL_PRAVO_NAROCILO} AND o.created_at > NOW() - INTERVAL '7 days' AND o.table_id IS NULL),0)::int AS tickets_7d,
+                COUNT(*) FILTER (WHERE ${SQL_PRAVO_NAROCILO} AND o.table_id IS NOT NULL)::int AS tables_sold,
+                COALESCE(SUM(o.total_cents) FILTER (WHERE ${SQL_PRAVO_NAROCILO} AND o.table_id IS NOT NULL),0)::int AS tables_gross_cents,
+                -- test_summary (DODANO polje): ves testni promet TEGA kluba od zacetka (ni pravi denar); tickets_sold brez miz kot zgoraj
+                COUNT(*) FILTER (WHERE ${SQL_TESTNO_NAROCILO})::int AS test_orders,
+                COALESCE(SUM(o.total_cents) FILTER (WHERE ${SQL_TESTNO_NAROCILO}),0)::int AS test_gross_cents,
+                COALESCE(SUM(o.quantity) FILTER (WHERE ${SQL_TESTNO_NAROCILO} AND o.table_id IS NULL),0)::int AS test_tickets_sold
+         FROM orders o WHERE o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL`, [klub]),   // guest lista (035, I24) ni prodaja: ne v bruto, tickets_sold, stevilo narocil; testno narocilo (#236, I39) ni v summary
       pool.query(
         `SELECT e.id, e.title, e.start_at, e.poster_url, e.status, e.ticket_price_cents, e.capacity, e.sold_count,
                 -- #236 (I39): samo PRAVI promet. Pogoj je v FILTER (ne v ON): dogodek brez pravega prometa ostane v seznamu z nicelami.
@@ -6253,16 +6258,11 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
          GROUP BY d.dan ORDER BY d.dan`, [klub]),
       // Novo, samo ce je ?range= navedеn — DODANO polje, star odjemalec (brez range) ga ne dobi.
       range ? serijaProdaje(klub, range) : Promise.resolve(null),
-      // test_summary (#236, DODANO polje): ves testni promet TEGA kluba od zacetka (ni pravi denar, ni v summary/events/grafih). Brez miz v tickets_sold kot summary.
-      pool.query(
-        `SELECT COUNT(*)::int AS orders,
-                COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
-                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold
-         FROM orders o WHERE o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}`, [klub]),
     ]);
     // Provizija TEGA kluba (031), ce jo je admin nastavil; sicer privzeta. Lastnik vidi svojo pogodbeno provizijo.
     const kp = (await pool.query(`SELECT commission_bps, is_demo, ${sqlStripePripravljen()} AS stripe_pripravljen, ${STOLPCI_PRODAJALCA}, contact_phone, contact_email FROM clubs WHERE id=$1`, [klub])).rows[0];
     const nacinKluba = placilaStripe.nacinPlacilaZ(!!(kp && kp.stripe_pripravljen));
+    const { test_orders, test_gross_cents, test_tickets_sold, ...summary } = povzetek.rows[0];
     const odgovor = {
       mode: testniNacinPlacil() ? "test" : "live",
       // Nacin placila TEGA kluba (#149/#191): "test" | "stripe" | "unavailable"; `mode` zgoraj je globalen (samo ali je sistem v testnem nacinu). DODANO polje.
@@ -6271,8 +6271,8 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
       // Zakaj je "unavailable" (DODANO polje, lastnik in manager): "demo_club" (050) | "seller_incomplete" | "stripe_not_ready" | "payments_not_configured" | null (payment_mode ni "unavailable").
       payment_unavailable_reason: kp && kp.is_demo ? "demo_club" : razlogNerazpolozljivosti(nacinKluba, kp || {}, 1, false),
       fee_percent: kp && kp.commission_bps !== null ? kp.commission_bps / 100 : PROVIZIJA_ODSTOTEK,
-      summary: povzetek.rows[0],   // #236: samo pravi promet (testni je v test_summary)
-      test_summary: testno.rows[0],
+      summary,   // #236: samo pravi promet (testni je v test_summary)
+      test_summary: { orders: test_orders, gross_cents: test_gross_cents, tickets_sold: test_tickets_sold },
       events: poDogodkih.rows,
       recent_orders: zadnja.rows,
       sales_by_day: poDnevih.rows,
