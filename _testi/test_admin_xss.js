@@ -141,7 +141,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
   const gumbov = (korenski) => { let n = 0; sprehod(korenski, (e) => { if (e.nodeType === 1 && e.tagName === "button") n++; }); return n; };
   const razlaga = (korenski) => korenski.textContent.includes("vrni ročno v Stripu");
   const primeri = [
-    ["ni_uspelo", "failed", false], ["ni_uspelo", "canceled", false], ["rocno", "failed", false], ["rocno", "canceled", false],
+    ["ni_uspelo", "failed", false], ["ni_uspelo", "canceled", false], ["ni_uspelo", "requires_action", false], ["rocno", "failed", false], ["rocno", "canceled", false],
     ["ni_uspelo", null, true], ["rocno", null, true], ["ni_uspelo", "pending", true], ["rocno", "succeeded", true], ["ni_uspelo", undefined, true],
     ["opravljeno", "succeeded", null], ["opravljeno", "failed", null], ["potrditev", "pending", null], ["caka", null, null],
   ];

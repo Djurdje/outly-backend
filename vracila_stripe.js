@@ -132,6 +132,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   }
 
   // Stripov napaka: trajna (ponovitev ne pomaga) ali prehodna (omrezje, 5xx, omejitev hitrosti).
+  const STRIPE_NEDOKONCNO = ["failed", "canceled", "requires_action"];   // stanja Stripovega vracila, pri katerih admin retry ni dovoljen (409); glej ponovi()
   const jeTrajna = (e) => ["StripeInvalidRequestError", "StripeIdempotencyError", "StripePermissionError", "StripeAuthenticationError"].includes(e && e.type);
 
   // Je Stripe nase vracilo ze ustvaril (proces ugasnjen pred zapisom, potekel idempotentni kljuc, vracilo narejeno v prejsnji generaciji kljuca)? Iscemo po metadata.vracilo_id.
@@ -241,8 +242,9 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
           if (!re) { await rocnoVrnjeno(znesek); return; }
         } else throw e;
       }
+      await posvoji(re);   // Stripovo stanje zapisemo VEDNO, tudi ob takojsnji zavrnitvi (failed/canceled): panel takoj pokaze razlago, ponovi() pa novega vracila ne naredi
+      // requires_action: obdelovalec ga ne spremlja (preveriPotrditve gleda samo `potrditev`), zato ga obravnavamo kot zavrnitev: vracilo obstaja pri Stripu, retry bi bil dvojen -> rocno v Stripu.
       if (!["succeeded", "pending"].includes(re.status)) throw Object.assign(new Error(`vracilo ${re.id} je v stanju ${re.status}`), { type: "StripeInvalidRequestError", code: "refund_" + re.status });
-      await posvoji(re);
     }
     await uveljaviLokalno(v);   // kupec je vrnjen: stanje narocila zapisemo takoj (korak B lahko traja ali pade)
 
@@ -476,11 +478,18 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
       `SELECT v.*, o.stripe_payment_intent_id AS o_pi FROM vracila v JOIN orders o ON o.id = v.order_id WHERE v.id = $1 AND v.stanje IN ('ni_uspelo','rocno')`, [id]);
     const v = r.rows[0];
     if (!v) return false;
-    if (["failed", "canceled"].includes(v.stripe_stanje)) return false;   // Stripe je vracilo zavrnil po sprejetju: novo vracilo bi lahko bilo dvojno, rocno v Stripu
+    // Stripe je vracilo zavrnil (failed/canceled) ali ga ni dokoncal (requires_action): novo vracilo bi lahko bilo dvojno, rocno v Stripu. Panel gumba tedaj ne ponuja (STRIPE_ZAVRNJENO v admin/index.html).
+    if (STRIPE_NEDOKONCNO.includes(v.stripe_stanje)) return false;
     let najdeno = null;
     const pi = v.payment_intent_id || v.o_pi;
     const s = placila.stripe();
     if (!v.stripe_vracilo_id && s && pi && !/^test_/.test(pi)) najdeno = await najdiNaseVracilo(s, pi, v);
+    // Nase vracilo pri Stripu ze obstaja, a ni ne succeeded ne pending (vrstica tega ni vedela: zapis ni uspel ali je starejsa): zapisemo stanje in NE posvojimo v novo vrsto
+    // (sicer bi izvedi() z aOpravljen oznacil naroceno `refunded`, kupec pa denarja ni dobil). Admin dobi 409 in rocno razlago.
+    if (najdeno && !["succeeded", "pending"].includes(najdeno.status)) {
+      await pool.query("UPDATE vracila SET stripe_vracilo_id = COALESCE(stripe_vracilo_id, $2), stripe_stanje = $3 WHERE id = $1", [id, najdeno.id, najdeno.status]);
+      return false;
+    }
     const u = await pool.query(
       `UPDATE vracila SET stanje = 'caka', poskusi = 0, naslednji_poskus_at = NOW(), napaka = NULL, kljuc_gen = kljuc_gen + 1,
               stripe_vracilo_id = COALESCE(stripe_vracilo_id, $2), stripe_stanje = COALESCE($3, stripe_stanje),

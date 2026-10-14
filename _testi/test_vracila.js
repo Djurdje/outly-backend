@@ -76,7 +76,7 @@ const mailiNa = (email) => R.poslano.filter(m => m.to === email || (Array.isArra
 // ---------- lazni Stripe ----------
 // pi: PaymentIntent, ch: naboj, fee: application fee, bt: balance transaction. refundi: ustvarjena vracila; fee_refundi: vracila provizije; klici: vsi zahtevki.
 const S = { pi: {}, ch: {}, fee: {}, bt: {}, tr: {}, seje: {}, spori: {}, idem: {}, refundi: [], reById: {}, fee_refundi: [], reversali: [], klici: [], zakasnitev: 0, stR: 0, stSej: 0,
-  refundHook: null, feeHook: null, revHook: null, idemPotekel: false, pending: new Set() };
+  refundHook: null, feeHook: null, revHook: null, idemPotekel: false, pending: new Set(), takoj: {} };
 const obrazec = (t) => { const o = {}; for (const [k, v] of new URLSearchParams(t)) o[k] = v; return o; };
 function dodajPlacilo(pi, { amount, fee = 0, stripeFee = 59, vrnjeno = 0, btValuta = "eur", brezStripeFee = false }) {
   const n = pi.replace(/\W/g, "");
@@ -152,9 +152,10 @@ const stripeServer = http.createServer((req, res) => {
       if (ostane <= 0) return napaka(400, "invalid_request_error", "charge_already_refunded", "Charge has already been refunded.");
       const znesek = p.amount ? Number(p.amount) : ostane;
       if (znesek > ostane) return napaka(400, "invalid_request_error", "amount_too_large", "Refund amount is greater than unrefunded amount on charge");
-      ch.amount_refunded += znesek;
+      const status = S.takoj[pi.id] || (S.pending.has(pi.id) ? "pending" : "succeeded");   // takoj: Stripe vrne failed/canceled/requires_action ze v odgovoru na create (denar se ni premaknil)
+      if (status === "pending" || status === "succeeded") ch.amount_refunded += znesek;
       const md = {}; for (const [k, v] of Object.entries(p)) { const mm = k.match(/^metadata\[(\w+)\]$/); if (mm) md[mm[1]] = v; }
-      const re = { id: "re_" + (++S.stR), object: "refund", amount: znesek, status: S.pending.has(pi.id) ? "pending" : "succeeded", payment_intent: pi.id, charge: ch.id, metadata: md };
+      const re = { id: "re_" + (++S.stR), object: "refund", amount: znesek, status, payment_intent: pi.id, charge: ch.id, metadata: md };
       S.reById[re.id] = re;
       S.refundi.push({ ...re, params: p, kljuc });
       if (kljuc) S.idem[kljuc] = re;
@@ -799,7 +800,30 @@ async function webhook(tip, objekt, id) {
     assert(stanjaZ.every(x => x.kljuc_gen === 0) && stanjaZ.find(x => x.id === idZ1).stanje === "rocno" && stanjaZ.find(x => x.id === idZ2).stanje === "ni_uspelo", "S2b: zavrnjen retry vrstice ne spremeni (stanje, kljuc_gen 0)", stanjaZ);
     const odgZ3 = await api("POST", `/admin/api/refunds/${idZ3}/retry`, T.admin);
     assert(odgZ3.status === 200, "S2b: retry `ni_uspelo` brez Stripovega vracila (stripe_state null) ostane mozen: 200", odgZ3.body);
-    assert(/stripe_state/.test(html) && /RETRY_STANJA\.includes\(x\.state\) && !STRIPE_ZAVRNJENO\.includes\(x\.stripe_state\)/.test(html), "S2b: admin panel gumba ne ponuja pri stripe_state failed/canceled");
+    // N1: Stripe vrne failed/canceled/requires_action ze v odgovoru na refunds.create. Stripovo stanje se zapise (panel takoj pokaze razlago), retry je 409 in narocilo NI `refunded`
+    // (prej: stripe_stanje ostal NULL -> retry je zavrnjeno vracilo posvojil, uveljaviLokalno je narocilo oznacil `refunded`, kupec pa denarja ni dobil).
+    const evY = await dogodek("Takoj failed noc", 2000);
+    const Y = [["failed", await narocilo({ ev: evY, uporabnik: U.ana })], ["canceled", await narocilo({ ev: evY, uporabnik: U.bor })], ["requires_action", await narocilo({ ev: evY, uporabnik: U.ana })]];
+    for (const [st, a] of Y) { S.takoj[a.pi] = st; await vnesiVrsto(a, evY, { znesek_cents: 2000 }); }
+    await odpovedSql(evY);
+    for (const [st, a] of Y) {
+      assert(await koncano(a.id, ["ni_uspelo", "rocno"]), `N1 ${st}: vrstica obdelana`);
+      const vr = await vracilo(a.id), reS = refA(a.pi);
+      assert(vr.stanje === "ni_uspelo" && vr.stripe_stanje === st && vr.stripe_vracilo_id === reS[0].id, `N1 ${st}: takoj ob create zapisan stripe_stanje in stripe_vracilo_id, vrstica ni_uspelo`, [vr.stanje, vr.stripe_stanje, vr.stripe_vracilo_id]);
+      const lista = await api("GET", `/admin/api/refunds?event_id=${evY}`, T.admin);
+      assert((lista.body.items.find(x => String(x.id) === String(vr.id)) || {}).stripe_state === st, `N1 ${st}: GET /admin/api/refunds kaze stripe_state (panel takoj pokaze razlago, ne gumba)`);
+      const rr = await api("POST", `/admin/api/refunds/${vr.id}/retry`, T.admin);
+      const vr2 = await vracilo(a.id);
+      assert(rr.status === 409 && vr2.stanje === "ni_uspelo" && vr2.kljuc_gen === 0 && (await vrsticaN(a.id)).status === "paid" && reS.length === 1 && Number((await vrsticaN(a.id)).refunded_cents) === 0,
+        `N1 ${st}: retry 409, naroceno ostane paid (NI refunded), novega vracila ni`, [rr.status, vr2.stanje, (await vrsticaN(a.id)).status]);
+    }
+    // N1b: stripe_stanje je ostal NULL (stara vrstica ali zapis ni uspel), Stripe pa ze ima zavrnjeno vracilo: retry ga zapise in vrne 409 (ponovi() ne sme posvojiti zavrnjenega vracila)
+    const evY2 = await dogodek("Takoj failed 2 noc", 2000), Y3 = await narocilo({ ev: evY2, uporabnik: U.bor });
+    const idY3 = await vnesiVrsto(Y3, evY2, { stanje: "ni_uspelo", znesek_cents: 2000, napaka: "vracilo je v stanju failed" });
+    reDodaj(Y3, idY3, 2000, { status: "failed" }); S.ch[S.pi[Y3.pi].latest_charge].amount_refunded = 0;
+    const rY3 = await api("POST", `/admin/api/refunds/${idY3}/retry`, T.admin), vY3 = await vracilo(Y3.id);
+    assert(rY3.status === 409 && vY3.stanje === "ni_uspelo" && vY3.stripe_stanje === "failed" && vY3.stripe_vracilo_id === "re_x" + idY3 && (await vrsticaN(Y3.id)).status === "paid" && vY3.kljuc_gen === 0,
+      "N1b: retry, ko Stripe ze ima zavrnjeno vracilo, ki ga vrstica ne pozna: 409, zapisano failed, naroceno paid", [rY3.status, vY3.stanje, vY3.stripe_stanje]);
     S.reById[reP3].status = "succeeded";   // brez webhooka: preverba v obdelovalcu (VRACILA_POTRDITEV_MS)
     assert(await cakaj(async () => (await vracilo(P3.id)).stanje === "opravljeno", 8000), "S2: brez webhooka obdelovalec sam preveri pending vracilo");
 
