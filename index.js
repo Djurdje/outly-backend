@@ -3641,6 +3641,7 @@ admin.patch("/events/:id", async (req, res) => {
 // --- vracila in spori (#190, migracija 047) ---
 // GET /admin/api/refunds?state=ni_uspelo|rocno|potrditev|caka|v_teku|opravljeno|preklicano&event_id=&limit= : vrsta vracil (brez e-naslovov kupcev). `attention` = vracila, ki so
 // ostala brez denarja za kupca (ni_uspelo, rocno) ali visijo (v_teku): jih je treba pogledati. Tudi v dnevniku: `[vracila] POZOR`.
+// `stripe_state` = Stripovo stanje vracila (pending|succeeded|failed|canceled|…, lahko null). `failed`/`canceled`: retry je zavrnjen (409, vracilo.ponovi), panel gumba ne ponuja. `requires_action` NI zavrnitev (kupec dobi navodila, vracilo se nadaljuje): vrstica je v `potrditev` kot pri pending.
 admin.get("/refunds", async (req, res) => {
   try {
     const STANJA = ["caka", "v_teku", "potrditev", "opravljeno", "ni_uspelo", "rocno", "preklicano"];
@@ -3656,7 +3657,7 @@ admin.get("/refunds", async (req, res) => {
       `SELECT v.id, v.order_id, o.public_ref, v.event_id, e.title AS event_title, v.razlog AS reason, v.stanje AS state, v.znesek_cents AS amount_cents, o.currency,
               v.poskusi AS attempts, v.napaka AS error, v.brez_stripa AS no_stripe, v.stripe_vracilo_id AS stripe_refund_id,
               v.provizija_za_vrnitev_cents AS fee_refund_cents, v.provizija_vracilo_id AS stripe_fee_refund_id, v.stripe_pristojbina_cents AS stripe_fee_cents,
-              v.created_at, v.naslednji_poskus_at AS next_attempt_at, v.opravljeno_at AS done_at, v.mail_poslano_at AS mail_sent_at
+              v.stripe_stanje AS stripe_state, v.created_at, v.naslednji_poskus_at AS next_attempt_at, v.opravljeno_at AS done_at, v.mail_poslano_at AS mail_sent_at
          FROM vracila v JOIN orders o ON o.id = v.order_id JOIN events e ON e.id = v.event_id
         WHERE ($1::text IS NULL OR v.stanje = $1) AND ($2::int IS NULL OR v.event_id = $2)
         ORDER BY v.id DESC LIMIT $3`, [stanje, ev, limit]);
