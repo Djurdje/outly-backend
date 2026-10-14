@@ -177,6 +177,8 @@ async function api(method, path, token, body) {
   r = await api("GET", `/business/team/${id.manager}/scans`);
   assert(r.status === 401, "brez zetona -> 401", r.status);
 
+  // #236 (I39): v laznem nacinu (test_<uuid>) so narocila TESTNA in jih GET /business/sales ne steje med prodajo; za preverjanje prodaje jih oznacimo kot prava (Stripe zivo).
+  await pool.query("UPDATE orders SET stripe_payment_intent_id = 'pi_zivo_' || id, stripe_checkout_session_id = 'cs_live_' || id WHERE stripe_payment_intent_id LIKE 'test\\_%'");
   console.log("\n# GET /business/sales?range=... — series in interested_count");
   r = await api("GET", "/business/sales", T.lastnik);
   assert(r.status === 200 && r.body.series === undefined && Array.isArray(r.body.sales_by_day) && r.body.sales_by_day.length === 14,

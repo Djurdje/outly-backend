@@ -499,6 +499,8 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(r.status === 200 && r.body.results[0].result === "ok", "scan-batch: gostujoca vstopnica ok", r.body);
     r = await brezAvtorizacije(A, "/guest/order", zeton1);
     assert(r.body.tickets.every(t => t.status === "used"), "gost vidi, da sta vstopnici porabljeni", r.body.tickets.map(t => t.status));
+    // #236 (I39): v laznem nacinu (test_<uuid>) so narocila TESTNA in jih GET /business/sales ne steje med prodajo; za preverjanje prodaje jih oznacimo kot prava (Stripe zivo).
+    await pool.query("UPDATE orders SET stripe_payment_intent_id = 'pi_zivo_' || id, stripe_checkout_session_id = 'cs_live_' || id WHERE stripe_payment_intent_id LIKE 'test\\_%'");
     r = await api("GET", "/business/sales", T.lastnik, undefined, { "x-outly-club": "1" });
     const gostov = r.body.recent_orders.find(x => x.id === gostOrder);
     assert(r.status === 200 && gostov && gostov.buyer_username === "Guest" && gostov.is_guest === true, "prodaja: gostujoce narocilo med zadnjimi, kupec »Guest«", gostov);
