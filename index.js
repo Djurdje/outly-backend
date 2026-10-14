@@ -5322,7 +5322,7 @@ async function prevzemiGostujocaNarocila(userId, zVmesnimSpominom = false) {
 // Placano (total > 0, ne-testno) potrdilo ostane zakonska obveznost (ZVPot-1): nikoli izpuscen.
 // Napaka maila NE sme podreti placila ali webhooka (klicatelji ne cakajo in ne vidijo izjem). Vrne true, ce je mail poslan.
 const SQL_PRODAJALEC_MAIL = "cl.legal_name, cl.legal_address, cl.registration_number, cl.tax_number, cl.vat_payer";   // za sellerVrstice (043)
-const POSREDNIK_VRSTICA = "NEXT DIMENSIONS, družba za marketing, d.o.o., Trebče 81, 3256 Bistrica ob Sotli, luka@outly.si";
+const POSREDNIK_VRSTICA = "TIP&TAP, storitve, razvoj in izobraževanje, d.o.o., Kvedrova cesta 6, 1000 Ljubljana, luka@outly.si";
 const POSTA_ODGOVOR = "luka@outly.si";
 // Maili, ki so del nakupa (potrdilo kupcu, vstopnice gostu, prejeta vstopnica), so DVOJEZICNI: slovenski blok, locilo, angleski blok (#100, ZVPot-1 7/1: informacije pred
 // sklenitvijo pogodbe v slovenscini). Podatki so eni, razdelke za vsak jezik gradi ista funkcija z `jez` ("sl" | "en") in jih izrise izrisiDvojezicno.

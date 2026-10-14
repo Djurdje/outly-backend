@@ -1,12 +1,17 @@
 # Stanje — Outly (posodobi ob koncu vsakega sklopa)
 
-Zadnja posodobitev: 2026-10-13 (demo klubi brez nakupa, migracija 050, I41; finance: testni promet ločen #230, migracija 048 indeks vracila_mail_idx #233; prej 2026-10-12: vračila in spori #190, migracija 047; prej 2026-10-11: Sentry vklopljen + past `user.geo`; #210 proračun prosto, Sentry backend izklopljen do DSN; STATE skrajšan pod 200 vrstic: pogodbe polj za odjemalce so v ARCHITECTURE, zgodovina v `docs/arhiv/`; prej 2026-10-10: varovala pred živo prodajo, payment_mode, potrdilo kupcu, migracija 042).
+Zadnja posodobitev: 2026-10-14 (podjetje TIP&TAP namesto NEXT DIMENSIONS; prej 2026-10-13: demo klubi brez nakupa, migracija 050, I41; finance: testni promet ločen #230, migracija 048 indeks vracila_mail_idx #233; prej 2026-10-12: vračila in spori #190, migracija 047; prej 2026-10-11: Sentry vklopljen + past `user.geo`; #210 proračun prosto, Sentry backend izklopljen do DSN; STATE skrajšan pod 200 vrstic: pogodbe polj za odjemalce so v ARCHITECTURE, zgodovina v `docs/arhiv/`; prej 2026-10-10: varovala pred živo prodajo, payment_mode, potrdilo kupcu, migracija 042).
 
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje** (pasti, predpostavke agenta, kar nobeno orodje ne ve). Drugje: odprte naloge → GitHub Issues (`agent` / `martin`); testi → Actions `Testi`; produkcija → `Nadzor produkcije` + `/clubs`;
 kaj se je spremenilo → PR-ji; zakaj → `DECISIONS.md`; kaj se ne sme zgoditi → `ARCHITECTURE.md` »Poslovne invariante«; kaj je že padlo → `INCIDENTI.md`. Tega ne prepisuj sem.
 
 **Zgodovina** (zaključeni sklopi, dnevniki sej, stari načrti, pogodbe polj, ki jih odjemalca že imata) je v `docs/arhiv/` (`STATE-do-2026-10-02*.md`, `STATE-do-2026-10-11.md`) — ni merodajna. Ta datoteka ima **največ 200 vrstic** (outly-hq pravilo 5);
 kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte naloge so v [GitHub Issues](https://github.com/Djurdje/outly-backend/issues); zagon (komercialna uporaba): glavni seznam [#198](https://github.com/Djurdje/outly-backend/issues/198)** — preberi ga pred vsako nalogo, povezano s plačili, pravom, App Store ali zanesljivostjo.
+
+## Podjetje TIP&TAP (od 14. 10. 2026, DECISIONS)
+
+- **Koda in besedila** navajajo TIP&TAP (`POSREDNIK_VRSTICA` v potrdilih in mailih GDPR 14). **Podatki prodajalca uradnega profila Outly so v BAZI**, ne v kodi: Martin jih v `/admin/` popravi na TIP&TAP, `vat_payer = false` (TIP&TAP ni zavezanec za DDV). Pravnik (outly-hq `pravno/2026-10-14-menjava-podjetja-tiptap.md`, T3): dogodkov »Organized by Outly« ne prodajati, dokler računovodja ne potrdi DDV in davčnega potrjevanja.
+- **Stripe platformni račun** je bil odprt na NEXT DIMENSIONS: `sk_live_` NE nastavljati s tega računa; živi račun se odpre na TIP&TAP (T5). Apple: pretvorba Individual → Organization na TIP&TAP (outly-backend#17).
 
 ## Spremljanje napak
 

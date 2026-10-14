@@ -24,9 +24,9 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 
 - 2026-09: **Denarnice v aplikaciji NE BO.** Denar se v aplikaciji ne hrani. Razlog: hramba sredstev = izdajanje
   elektronskega denarja (ZPlaSSIED, dovoljenje Banke Slovenije). Zasloni Add money / Withdraw / Balance iz Figme se ne gradijo.
-- 2026-09: **Prodajalec vstopnice je KLUB, Outly je posrednik** s provizijo. V promet NEXT DIMENSIONS šteje samo
+- 2026-09: **Prodajalec vstopnice je KLUB, Outly je posrednik** s provizijo. V promet podjetja (od 14. 10. 2026 TIP&TAP, prej NEXT DIMENSIONS) šteje samo
   provizija; DDV in vračila so obveznost kluba. Tehnično: Stripe Connect, destination charges, `application_fee`.
-  *velja dokler*: Outly sam ne postane prodajalec (takrat DDV, blagajna in vračila preidejo na NEXT DIMENSIONS).
+  *velja dokler*: Outly sam ne postane prodajalec (takrat DDV, blagajna in vračila preidejo na TIP&TAP).
 - 2026-09-08: **Provizija Outlyja je 10 %** (`PROVIZIJA_ODSTOTEK`, privzeto 10).
   *velja dokler*: ne podpišemo drugačne pogodbe s klubi; odstotek je spremenljivka okolja, ne koda.
 - 2026-10-03: **Provizija po klubu** (Martin: »z vsakim klubom drugačna provizija, nekje 5 %, nekje 2 %«). `clubs.commission_bps`
@@ -47,7 +47,17 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
 - 2026-09-11: Pravni dokumenti: `outly.si/terms` in `outly.si/privacy-app` (slovenska, aplikacija + waitlist),
   `outly.si/privacy` (angleška, spletna stran). Rok vračila ob prestavitvi dogodka 14 dni, obvestilo o spremembi 15 dni.
 - Upravljavec podatkov: NEXT DIMENSIONS, družba za marketing, d.o.o., Trebče 81, 3256 Bistrica ob Sotli (matična 7238274000).
-  Kontakt projekta luka@outly.si.
+  Kontakt projekta luka@outly.si. *nadomeščena z*: 2026-10-14 »Podjetje Outlyja je TIP&TAP« (spodaj).
+- 2026-10-14: **Podjetje Outlyja je TIP&TAP, storitve, razvoj in izobraževanje, d.o.o.**, Kvedrova cesta 6, 1000 Ljubljana,
+  matična 6599346000, davčna 23185392, **ni zavezanec za DDV**. Povsod nadomesti NEXT DIMENSIONS: upravljavec osebnih podatkov,
+  ponudnik in posrednik, imetnik Stripe platformnega računa, blagovne znamke in bodočega Apple Organization računa, prodajalec pri
+  dogodkih »Organized by Outly«. Kontakt ostane luka@outly.si.
+  *vir/dokaz*: Martin v seji menedžerja outly-hq 14. 10. 2026 ~11:50 (»novo podjetje, treba vse zamenjat«; v vprašalniku potrdil
+  podatke, »da, povsod«, kontakt luka@outly.si); podatki iz ebonitete.si (ogled 14. 10. 2026; AJPES ni preverjen); posledice:
+  outly-hq `pravno/2026-10-14-menjava-podjetja-tiptap.md` ·
+  *velja dokler*: trajno (do nove menjave podjetja) · *nadomeščena z*: —
+  Odprto (Martin/računovodja/odvetnik): kdo ima pooblastilo za podpis (direktorica Barbara Čufer), ID za DDV za storitve iz tujine,
+  prodaja »Organized by Outly« brez DDV, obvestilo uporabnikom o novem upravljavcu, ponoven sprejem DPA pri ponudnikih.
 
 ## Identiteta in računi
 
@@ -126,7 +136,7 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   *nadomeščena z*: 2026-10-03 »Stripe Checkout + Connect« (spodaj): s SANDBOX ključem testna pot ostane za klube brez Stripa.
 - 2026-10-03: **Stripe Checkout + Connect Express** (issue #19, `placila_stripe.js`, migracija 030). Destination charge z
   `application_fee_amount` (10 %) **in `on_behalf_of` = račun kluba**, da je klub tudi »business of record« (pravna analiza
-  1. 10. 2026, tveganje V1: brez `on_behalf_of` bi bil to NEXT DIMENSIONS). Naročilo je `pending`, dokler ga ne potrdi
+  1. 10. 2026, tveganje V1: brez `on_behalf_of` bi bil to NEXT DIMENSIONS, od 14. 10. 2026 TIP&TAP). Naročilo je `pending`, dokler ga ne potrdi
   **webhook** (`checkout.session.completed`) ali pospravljalec, ki sejo preveri pri Stripu; odjemalec plačila nikoli ne potrdi sam.
   Seja traja 30 min, zaloga/miza je med tem rezervirana. Način: brez ključa = test; `sk_test_` + klub s `charges_enabled` = Stripe,
   klub brez Stripa = še vedno test (demo klubi in TestFlight delajo naprej); `sk_live_` + klub brez Stripa = 409.
@@ -286,10 +296,10 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   `0.1c-256mb`, kjer bo počasneje; treba izmeriti po deployu ·
   *velja dokler*: omejeni klici ostanejo pod ~1.000/s na instanco in je baza majhna; ob več ali opaznem CPU baze zaradi `omejitve` → Redis ·
   *nadomeščena z*: — (nadomešča omejevalnik v pomnilniku procesa, S-02)
-- 2026-09-16: Apple Developer: Martin ima **Individual račun**; pozneje App Transfer na NEXT DIMENSIONS. Bundle ID `si.outly.app`,
+- 2026-09-16: Apple Developer: Martin ima **Individual račun**; pozneje App Transfer na NEXT DIMENSIONS (od 14. 10. 2026: pretvorba v Organization na TIP&TAP). Bundle ID `si.outly.app`,
   ime v App Store Connect »Outly - Nightlife« (»Outly« zasedeno). **Distribucija samo prek TestFlighta** (podpis v GitHub Actions s cloud
   signing, API ključ v secrets, nič v repu); Sideloadly/AltServer se opustita. Runner `macos-26`; `MARKETING_VERSION` dviguje Martin.
-  *velja dokler*: je račun **Individual** (App Transfer na NEXT DIMENSIONS zahteva nove ključe v secrets in nov dogovor o vlogah)
+  *velja dokler*: je račun **Individual** (App Transfer na podjetje — od 14. 10. 2026 TIP&TAP — zahteva nove ključe v secrets in nov dogovor o vlogah)
   in dokler Apple sprejema iOS 26 SDK (`macos-26`).
 - 2026-09-16: iOS PR-ji morajo skozi prevod za simulator v Actions pred merge-om; TestFlight upload samo ob pushu v `master`.
 - 2026-09-20: **Razvojni certifikat za `Gradnja iOS` je v GitHub secrets (`IOS_DEV_CERT_P12` base64 + `IOS_DEV_CERT_PASSWORD`),
@@ -301,7 +311,7 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   *velja dokler*: certifikat velja (**eno leto, do ~20. 9. 2027**) in dokler je Apple račun Individual (App Transfer = nov
   certifikat pod novim teamom). Ob poteku: nov CSR → nov .p12 → zamenjava obeh secrets; postopek v outly-app `CLAUDE.md`.
   *nadomeščena z*: —
-- Stripe račun odpre Luka za NEXT DIMENSIONS; Connect Express za klube; ključi `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
+- Stripe račun odpre Luka za NEXT DIMENSIONS (od 14. 10. 2026: živi račun odpreti na TIP&TAP, ne na NEXT DIMENSIONS); Connect Express za klube; ključi `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
   na Render nastavi Martin/Luka; webhook `/stripe/webhook`, idempotentnost prek `orders_pi_key`.
   *velja dokler*: je Outly posrednik in ne prodajalec (destination charges).
 - Supabase Pro (25 USD) pred javnim zagonom (kopije). *velja dokler*: brezplačni paket zadošča —
