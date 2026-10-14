@@ -783,6 +783,23 @@ async function webhook(tip, objekt, id) {
     assert(!vrnMaili().some(m => m.subject.includes(P2.ref)), "S2: pri failed mail »vrnili smo« NI poslan");
     r = await api("POST", `/admin/api/refunds/${vP2.id}/retry`, T.admin);
     assert(r.status === 409, "S2: retry vracila, ki ga je Stripe zavrnil po sprejetju: 409 (rocno v Stripu, da ne bo dvojnega)", r.status);
+    // S2b: admin API kaze `stripe_state` (samo dodajanje), da panel gumba »Poskusi znova« ne ponuja, kjer bi retry vrnil 409
+    const evZ = await dogodek("Failed noc", 2000), Z1 = await narocilo({ ev: evZ, uporabnik: U.ana }), Z2 = await narocilo({ ev: evZ, uporabnik: U.bor }), Z3 = await narocilo({ ev: evZ, uporabnik: U.ana });
+    const idZ1 = await vnesiVrsto(Z1, evZ, { stanje: "rocno", stripe_stanje: "failed", napaka: "Stripe vracilo failed" });
+    const idZ2 = await vnesiVrsto(Z2, evZ, { stanje: "ni_uspelo", stripe_stanje: "canceled", napaka: "Stripe vracilo canceled" });
+    const idZ3 = await vnesiVrsto(Z3, evZ, { stanje: "ni_uspelo", napaka: "balance_insufficient" });
+    const adZ = await api("GET", `/admin/api/refunds?event_id=${evZ}`, T.admin), stZ = (id) => (adZ.body.items.find(x => String(x.id) === String(id)) || {}).stripe_state;
+    assert(adZ.status === 200 && "stripe_state" in adZ.body.items[0] && stZ(idZ1) === "failed" && stZ(idZ2) === "canceled" && stZ(idZ3) === null,
+      "S2b: GET /admin/api/refunds ima stripe_state (failed / canceled / null)", adZ.body.items.map(x => [x.id, x.stripe_state]));
+    const adP2 = await api("GET", `/admin/api/refunds?state=ni_uspelo`, T.admin);
+    assert(adP2.body.items.every(x => "stripe_state" in x) && (adP2.body.items.find(x => String(x.id) === String(vP2.id)) || {}).stripe_state === "failed", "S2b: stripe_state je v vseh vrsticah; vracilo S2 (refund.failed) ima failed");
+    assert((await api("POST", `/admin/api/refunds/${idZ1}/retry`, T.admin)).status === 409 && (await api("POST", `/admin/api/refunds/${idZ2}/retry`, T.admin)).status === 409,
+      "S2b: retry vracila `rocno`/`ni_uspelo` z stripe_stanje failed/canceled: 409");
+    const stanjaZ = (await pool.query("SELECT id, stanje, kljuc_gen FROM vracila WHERE id = ANY($1)", [[idZ1, idZ2]])).rows;
+    assert(stanjaZ.every(x => x.kljuc_gen === 0) && stanjaZ.find(x => x.id === idZ1).stanje === "rocno" && stanjaZ.find(x => x.id === idZ2).stanje === "ni_uspelo", "S2b: zavrnjen retry vrstice ne spremeni (stanje, kljuc_gen 0)", stanjaZ);
+    const odgZ3 = await api("POST", `/admin/api/refunds/${idZ3}/retry`, T.admin);
+    assert(odgZ3.status === 200, "S2b: retry `ni_uspelo` brez Stripovega vracila (stripe_state null) ostane mozen: 200", odgZ3.body);
+    assert(/stripe_state/.test(html) && /RETRY_STANJA\.includes\(x\.state\) && !STRIPE_ZAVRNJENO\.includes\(x\.stripe_state\)/.test(html), "S2b: admin panel gumba ne ponuja pri stripe_state failed/canceled");
     S.reById[reP3].status = "succeeded";   // brez webhooka: preverba v obdelovalcu (VRACILA_POTRDITEV_MS)
     assert(await cakaj(async () => (await vracilo(P3.id)).stanje === "opravljeno", 8000), "S2: brez webhooka obdelovalec sam preveri pending vracilo");
 

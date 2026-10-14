@@ -198,7 +198,7 @@
           <option value="potrditev">čaka potrditev Stripa</option><option value="v_teku">v teku</option><option value="caka">čaka</option>
           <option value="opravljeno">opravljeno</option><option value="preklicano">preklicano</option><option value="all">vsa</option></select>
           <button class="tih mali" id="v_osvezi" type="button">Osveži</button></span></h2>
-        <div class="telo" style="font-size:12.5px;color:var(--faint)">Vračila kupcem ob odpovedi dogodka ali plačilu po preklicu naročila. <b>Ni uspelo</b> in <b>ročno</b> sta ostali brez denarja za kupca in zahtevata pogled (npr. klub brez sredstev, naročilo iz drugega načina Stripa). »Poskusi znova« vrne vračilo v vrsto; pred dvojnim vračilom varuje preverba že narejenih vračil pri Stripu in ostanek naboja. Če je Stripe vračilo zavrnil po sprejetju, ponovni poskus zavrne (409): vrni ga ročno v Stripu.
+        <div class="telo" style="font-size:12.5px;color:var(--faint)">Vračila kupcem ob odpovedi dogodka ali plačilu po preklicu naročila. <b>Ni uspelo</b> in <b>ročno</b> sta ostali brez denarja za kupca in zahtevata pogled (npr. klub brez sredstev, naročilo iz drugega načina Stripa). »Poskusi znova« vrne vračilo v vrsto; pred dvojnim vračilom varuje preverba že narejenih vračil pri Stripu in ostanek naboja. Če je Stripe vračilo zavrnil po sprejetju (<code>failed</code>/<code>canceled</code>), gumba ni, ker bi ponovni poskus zavrnil (409; novo vračilo bi bilo dvojno): vrni ga ročno v Stripu.
           <div class="vrsta" id="v_stevci" style="margin-top:8px"></div></div>
         <div class="tabela" id="v_tabela"></div>
       </div>
@@ -922,6 +922,7 @@ const V_RAZLOGI = { event_cancelled: "odpoved dogodka", inactive_order: "plačil
 const S_STANJA = { needs_response: ["slabo", "čaka na odgovor"], under_review: ["opoz", "v pregledu"], warning_needs_response: ["opoz", "poizvedba: čaka na odgovor"], warning_under_review: ["opoz", "poizvedba: v pregledu"], won: ["ok", "dobljen"], lost: ["slabo", "izgubljen"], warning_closed: ["siva", "poizvedba zaprta"], prevented: ["ok", "preprečen"] };
 const P_STANJA = { caka: ["siva", "čaka"], v_teku: ["", "v teku"], opravljeno: ["ok", "opravljeno"], ni_uspelo: ["slabo", "ni uspelo"], rocno: ["slabo", "ročno"] };
 const RETRY_STANJA = ["ni_uspelo", "rocno"];
+const STRIPE_ZAVRNJENO = ["failed", "canceled"];   // zrcali `vracila_stripe.js` ponovi(): Stripe je vracilo zavrnil po sprejetju
 function znackaIz(tab, k) {
   const e = Object.prototype.hasOwnProperty.call(tab, k) ? tab[k] : ["siva", String(k ?? "—")];
   return h("span", { class: ("znacka " + e[0]).trim() }, e[1]);
@@ -979,7 +980,11 @@ async function naloziVracilaSeznam() {
       h("td", { class: "mono" }, datum(x.created_at),
         x.done_at ? h("span", { class: "drobno" }, "opravljeno " + datum(x.done_at)) : null,
         (x.state === "caka" || x.state === "v_teku") && x.next_attempt_at ? h("span", { class: "drobno" }, "naslednji poskus " + datum(x.next_attempt_at)) : null),
-      h("td", {}, RETRY_STANJA.includes(x.state)
+      // Gumb samo, kadar bi POST .../retry uspel: vracila_stripe.js ponovi() sprejme vrstico v stanju ni_uspelo/rocno IN stripe_stanje ni failed/canceled
+      // (stripe_state = v.stripe_stanje, null = Stripovega vracila ni, `undefined` = star backend -> kot prej). Sicer je retry 409 (novo vracilo bi bilo dvojno).
+      h("td", {}, RETRY_STANJA.includes(x.state) && STRIPE_ZAVRNJENO.includes(x.stripe_state)
+        ? h("span", { class: "drobno", style: V_NAPAKA_STIL }, "Stripe je vračilo zavrnil — vrni ročno v Stripu (ponovni poskus bi lahko vrnil dvojno)")
+        : RETRY_STANJA.includes(x.state) && !STRIPE_ZAVRNJENO.includes(x.stripe_state)
         ? h("button", { class: "mali", type: "button", onclick: (ev) => vRetry(`/admin/api/refunds/${encodeURIComponent(x.id)}/retry`,
             `Poskusi znova vračilo #${x.id} (naročilo ${x.public_ref}, ${evriCelo(x.amount_cents, x.currency)})?\n\nVračilo gre znova v vrsto in se izvede v ozadju (~10 s). Najprej odpravi vzrok (npr. klub nima sredstev). Pred dvojnim vračilom varuje preverba že narejenih vračil pri Stripu.`,
             `Vračilo #${x.id} je znova v vrsti.`, ev.currentTarget, "če je Stripe vračilo zavrnil po sprejetju, ga vrni ročno v Stripu") }, "Poskusi znova")
