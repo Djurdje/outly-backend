@@ -3585,6 +3585,9 @@ admin.patch("/users/:id", async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
+// Testno naročilo (alias `o`), glej komentar »TESTNI PROMET (#230)« pri GET /admin/api/finance. Uporabljajo: /finance, /admin/api/events (#236), GET /business/sales (#236).
+const SQL_TESTNO_NAROCILO = `(COALESCE(o.stripe_payment_intent_id LIKE 'test\\_%', FALSE) OR COALESCE(o.stripe_checkout_session_id LIKE 'cs\\_test\\_%', FALSE))`;
+const SQL_PRAVO_NAROCILO = `NOT ${SQL_TESTNO_NAROCILO}`;
 // --- dogodki ---
 admin.get("/events", async (req, res) => {
   try {
@@ -3605,8 +3608,11 @@ admin.get("/events", async (req, res) => {
               e.start_at, e.end_at, e.min_age, e.genres, e.status, e.ticket_price_cents, e.currency,
               e.ticket_url, e.created_at, ${PRIZORISCE_E},
               -- #190: koliko placanih narocil (brez guest liste) bi odpoved vrnila kupcem; admin panel to pokaze v potrditvenem oknu pred »Umakni«
-              (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = e.id AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL) AS paid_orders,
-              (SELECT COALESCE(SUM(o.total_cents - o.refunded_cents), 0)::int FROM orders o WHERE o.event_id = e.id AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL) AS paid_cents
+              -- #236: paid_orders/paid_cents = samo PRAVI promet; testna (lazni nacin, Stripe sandbox) locena v test_paid_*; odpoved vrne vsa placana narocila (panel pokaze oboje)
+              (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = e.id AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}) AS paid_orders,
+              (SELECT COALESCE(SUM(o.total_cents - o.refunded_cents), 0)::int FROM orders o WHERE o.event_id = e.id AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}) AS paid_cents,
+              (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = e.id AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}) AS test_paid_orders,
+              (SELECT COALESCE(SUM(o.total_cents - o.refunded_cents), 0)::int FROM orders o WHERE o.event_id = e.id AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}) AS test_paid_cents
        FROM events e JOIN clubs c ON c.id = e.club_id ${PRIZORISCE_JOIN}
        ${kje} ORDER BY e.start_at DESC LIMIT 500`, p
     );
@@ -3710,8 +3716,7 @@ admin.post("/disputes/:id/retry", async (req, res) => {
 // Brezplačno (0 EUR) naročilo brez Stripa (pi NULL, seja NULL) je PRAVO naročilo (brezplačne vstopnice, prava vstopnica in obveznost), le brez denarja;
 // 0 EUR naročilo v lažnem načinu ima test_ in je zato testno. is_test v recent_orders ima to definicijo, NE pomena iz STOLPCI_NAROCILA (tam is_test = lažni način
 // brez plačila in vodi vedenje nakupa: sandbox naročilo je šlo skozi Stripe, ima checkout_url in prave maile).
-const SQL_TESTNO_NAROCILO = `(COALESCE(o.stripe_payment_intent_id LIKE 'test\\_%', FALSE) OR COALESCE(o.stripe_checkout_session_id LIKE 'cs\\_test\\_%', FALSE))`;
-const SQL_PRAVO_NAROCILO = `NOT ${SQL_TESTNO_NAROCILO}`;
+// (SQL_TESTNO_NAROCILO in SQL_PRAVO_NAROCILO sta definirana pred admin GET /events; razlaga definicije je v komentarju pri /finance.)
 admin.get("/finance", async (req, res) => {
   try {
     const dan = (v) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v : null;
@@ -6182,7 +6187,7 @@ async function serijaProdaje(klub, range) {
               COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets
          FROM generate_series(date_trunc('month', CURRENT_DATE - INTERVAL '11 months'),
                                date_trunc('month', CURRENT_DATE), '1 month') AS d(mesec)
-         LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL
+         LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}
               AND o.created_at >= d.mesec AND o.created_at < d.mesec + INTERVAL '1 month'
         GROUP BY d.mesec ORDER BY d.mesec`, [klub]
     );
@@ -6194,7 +6199,7 @@ async function serijaProdaje(klub, range) {
             COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
             COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets
        FROM generate_series((CURRENT_DATE - $2 * INTERVAL '1 day')::date, CURRENT_DATE, '1 day') AS d(dan)
-       LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL
+       LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}
             AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
       GROUP BY d.dan ORDER BY d.dan`, [klub, dni]
   );
@@ -6206,7 +6211,7 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
     const range = ["week", "month", "year"].includes(req.query.range) ? req.query.range : null;
-    const [povzetek, poDogodkih, zadnja, poDnevih, serija] = await Promise.all([
+    const [povzetek, poDogodkih, zadnja, poDnevih, serija, testno] = await Promise.all([
       pool.query(
         `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
@@ -6219,20 +6224,22 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.created_at > NOW() - INTERVAL '7 days' AND o.table_id IS NULL),0)::int AS tickets_7d,
                 COUNT(*) FILTER (WHERE o.table_id IS NOT NULL)::int AS tables_sold,
                 COALESCE(SUM(o.total_cents) FILTER (WHERE o.table_id IS NOT NULL),0)::int AS tables_gross_cents
-         FROM orders o WHERE o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL`, [klub]),   // guest lista (035, I24) ni prodaja: ne v bruto, tickets_sold, stevilo narocil
+         FROM orders o WHERE o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}`, [klub]),   // guest lista (035, I24) ni prodaja: ne v bruto, tickets_sold, stevilo narocil; testno narocilo (#236, I39) tudi ne (glej test_summary)
       pool.query(
         `SELECT e.id, e.title, e.start_at, e.poster_url, e.status, e.ticket_price_cents, e.capacity, e.sold_count,
-                COALESCE(SUM(o.total_cents) FILTER (WHERE o.status IN ('paid','partially_refunded')),0)::int AS gross_cents,
-                COALESCE(SUM(o.quantity) FILTER (WHERE o.status IN ('paid','partially_refunded') AND o.table_id IS NULL),0)::int AS tickets_sold,
-                COUNT(o.id) FILTER (WHERE o.status IN ('paid','partially_refunded') AND o.table_id IS NOT NULL)::int AS tables_sold,
-                COALESCE(SUM(o.total_cents) FILTER (WHERE o.status IN ('paid','partially_refunded') AND o.table_id IS NOT NULL),0)::int AS tables_gross_cents,
+                -- #236 (I39): samo PRAVI promet. Pogoj je v FILTER (ne v ON): dogodek brez pravega prometa ostane v seznamu z nicelami.
+                COALESCE(SUM(o.total_cents) FILTER (WHERE o.status IN ('paid','partially_refunded') AND ${SQL_PRAVO_NAROCILO}),0)::int AS gross_cents,
+                COALESCE(SUM(o.quantity) FILTER (WHERE o.status IN ('paid','partially_refunded') AND ${SQL_PRAVO_NAROCILO} AND o.table_id IS NULL),0)::int AS tickets_sold,
+                COUNT(o.id) FILTER (WHERE o.status IN ('paid','partially_refunded') AND ${SQL_PRAVO_NAROCILO} AND o.table_id IS NOT NULL)::int AS tables_sold,
+                COALESCE(SUM(o.total_cents) FILTER (WHERE o.status IN ('paid','partially_refunded') AND ${SQL_PRAVO_NAROCILO} AND o.table_id IS NOT NULL),0)::int AS tables_gross_cents,
                 (SELECT COUNT(*)::int FROM tickets t WHERE t.event_id = e.id AND t.status = 'used') AS checked_in,
                 -- Koliko oseb je oznacilo "I'm in" na tem dogodku (migracija 020). DODANO polje.
                 (SELECT COUNT(*)::int FROM event_interest ei WHERE ei.event_id = e.id) AS interested_count
          FROM events e LEFT JOIN orders o ON o.event_id = e.id AND o.guest_list_id IS NULL
          WHERE e.club_id = $1 GROUP BY e.id ORDER BY e.start_at DESC LIMIT 100`, [klub]),
       pool.query(
-        `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
+        // test_payment (#236, DODANO polje): testno naročilo (lažni način ALI Stripe sandbox, SQL_TESTNO_NAROCILO). is_test ostane v starem pomenu (lažni način brez plačila).
+        `SELECT ${STOLPCI_NAROCILA}, ${SQL_TESTNO_NAROCILO} AS test_payment, e.title AS event_title, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
          FROM orders o JOIN events e ON e.id = o.event_id LEFT JOIN users u ON u.id = o.user_id
          WHERE o.club_id = $1 AND o.guest_list_id IS NULL ORDER BY o.created_at DESC LIMIT 30`, [klub]),
       // Zadnjih 14 dni po dnevih (tudi dnevi brez prodaje), za graf v nadzorni plosci.
@@ -6241,11 +6248,17 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
                 COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets
          FROM generate_series((CURRENT_DATE - INTERVAL '13 days')::date, CURRENT_DATE, '1 day') AS d(dan)
-         LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL
+         LEFT JOIN orders o ON o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}
               AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
          GROUP BY d.dan ORDER BY d.dan`, [klub]),
       // Novo, samo ce je ?range= navedеn — DODANO polje, star odjemalec (brez range) ga ne dobi.
       range ? serijaProdaje(klub, range) : Promise.resolve(null),
+      // test_summary (#236, DODANO polje): ves testni promet TEGA kluba od zacetka (ni pravi denar, ni v summary/events/grafih). Brez miz v tickets_sold kot summary.
+      pool.query(
+        `SELECT COUNT(*)::int AS orders,
+                COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
+                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold
+         FROM orders o WHERE o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}`, [klub]),
     ]);
     // Provizija TEGA kluba (031), ce jo je admin nastavil; sicer privzeta. Lastnik vidi svojo pogodbeno provizijo.
     const kp = (await pool.query(`SELECT commission_bps, is_demo, ${sqlStripePripravljen()} AS stripe_pripravljen, ${STOLPCI_PRODAJALCA}, contact_phone, contact_email FROM clubs WHERE id=$1`, [klub])).rows[0];
@@ -6258,7 +6271,8 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
       // Zakaj je "unavailable" (DODANO polje, lastnik in manager): "demo_club" (050) | "seller_incomplete" | "stripe_not_ready" | "payments_not_configured" | null (payment_mode ni "unavailable").
       payment_unavailable_reason: kp && kp.is_demo ? "demo_club" : razlogNerazpolozljivosti(nacinKluba, kp || {}, 1, false),
       fee_percent: kp && kp.commission_bps !== null ? kp.commission_bps / 100 : PROVIZIJA_ODSTOTEK,
-      summary: povzetek.rows[0],
+      summary: povzetek.rows[0],   // #236: samo pravi promet (testni je v test_summary)
+      test_summary: testno.rows[0],
       events: poDogodkih.rows,
       recent_orders: zadnja.rows,
       sales_by_day: poDnevih.rows,

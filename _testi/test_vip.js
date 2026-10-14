@@ -492,6 +492,8 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
   assert(r.body.tables.find(t => t.id === M1) && r.body.tables.find(t => t.id === M1).available === false, "javno: arhivirana miza z prodajo na tem dogodku ostane na seznamu kot zasedena", r.body.tables.map(t => [t.id, t.available]));
   await pool.query("UPDATE club_tables SET archived_at=NULL WHERE id=$1", [M1]);
 
+  // #236 (I39): v laznem nacinu (test_<uuid>) so narocila TESTNA in jih GET /business/sales ne steje med prodajo; za preverjanje prodaje jih oznacimo kot prava (Stripe zivo).
+  await pool.query("UPDATE orders SET stripe_payment_intent_id = 'pi_zivo_' || id, stripe_checkout_session_id = 'cs_live_' || id WHERE stripe_payment_intent_id LIKE 'test\\_%'");
   console.log("\n# Prodaja: tables_sold, tickets_sold brez miz, gross z mizami");
   r = await api("GET", "/business/sales", T.lastnik);
   const sold = r.body.events.find(e => e.id === E1);

@@ -323,6 +323,8 @@ let srv = null;
   r = await api("GET", `/events/${evA}`, null);
   assert(r.status === 200 && r.body.sold_count === 3, "GET /events/:id sold_count 3", r.body.sold_count);
 
+  // Backend tece v lazni nacin (test_<uuid>), a finance (#230) in klubska prodaja (#236) stejeta testni promet loceno: kupcevo narocilo oznacimo kot pravo (Stripe zivo), da preverimo izlocitev guest liste.
+  await pool.query("UPDATE orders SET stripe_payment_intent_id='pi_live_gl', stripe_checkout_session_id='cs_live_gl' WHERE id = $1", [kupecNarociloId]);
   r = await api("GET", "/business/sales", T.lastnik);
   assert(r.status === 200, "GET /business/sales", r.status);
   const s = r.body.summary;
@@ -337,8 +339,6 @@ let srv = null;
     const x = await api("GET", `/business/sales?range=${range}`, T.lastnik);
     assert(x.body.series.reduce((a, d) => a + d.tickets, 0) === 3 && x.body.series.reduce((a, d) => a + d.gross_cents, 0) === 3000, `sales.series (${range}): 3 vstopnice, brez guest liste`, x.body.series.slice(-2));
   }
-  // Backend tece v lazni nacin (test_<uuid>), a finance steje testni promet ločeno (#230): kupcevo narocilo oznacimo kot pravo (Stripe zivo), da preverimo izlocitev guest liste.
-  await pool.query("UPDATE orders SET stripe_payment_intent_id='pi_live_gl', stripe_checkout_session_id='cs_live_gl' WHERE id = $1", [kupecNarociloId]);
   r = await api("GET", "/admin/api/finance", T.admin);
   assert(r.status === 200, "GET /admin/api/finance", r.status);
   assert(r.body.summary.orders === 1 && r.body.summary.tickets_sold === 3 && r.body.summary.gross_cents === 3000 && r.body.summary.buyers === 1, "finance.summary: orders 1, tickets_sold 3, gross 3000, buyers 1", r.body.summary);
