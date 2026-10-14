@@ -3635,7 +3635,7 @@ admin.patch("/events/:id", async (req, res) => {
 // --- vracila in spori (#190, migracija 047) ---
 // GET /admin/api/refunds?state=ni_uspelo|rocno|potrditev|caka|v_teku|opravljeno|preklicano&event_id=&limit= : vrsta vracil (brez e-naslovov kupcev). `attention` = vracila, ki so
 // ostala brez denarja za kupca (ni_uspelo, rocno) ali visijo (v_teku): jih je treba pogledati. Tudi v dnevniku: `[vracila] POZOR`.
-// `stripe_state` = Stripovo stanje vracila (pending|succeeded|failed|canceled|…, lahko null). `failed`/`canceled`: retry je zavrnjen (409, vracilo.ponovi), panel gumba ne ponuja.
+// `stripe_state` = Stripovo stanje vracila (pending|succeeded|failed|canceled|…, lahko null). `failed`/`canceled`: retry je zavrnjen (409, vracilo.ponovi), panel gumba ne ponuja. `requires_action` NI zavrnitev (kupec dobi navodila, vracilo se nadaljuje): vrstica je v `potrditev` kot pri pending.
 admin.get("/refunds", async (req, res) => {
   try {
     const STANJA = ["caka", "v_teku", "potrditev", "opravljeno", "ni_uspelo", "rocno", "preklicano"];
