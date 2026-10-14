@@ -158,9 +158,14 @@ async function api(method, path, token, body) {
     const t2 = await api("GET", "/business/sales", T.admin);
     assert(t2.status === 200 && t2.body.test_summary && t2.body.test_summary.orders === 1 && t2.body.test_summary.gross_cents === 1000, "drug klub vidi samo svoj testni promet (1 narocilo, 1000)", t2.body.test_summary);
     assert(t2.body.summary.gross_cents === 0 && t2.body.summary.orders === 0, "drug klub: pravega prometa 0", t2.body.summary);
+    const KLJUCI_SUMMARY = "buyers,fee_cents,gross_7d_cents,gross_cents,net_cents,orders,tables_gross_cents,tables_sold,tickets_7d,tickets_sold";   // sortirano
+    const samoNicle = (x) => !!x && Object.keys(x).sort().join() === KLJUCI_SUMMARY && Object.values(x).every(v => v === 0);   // stevilo 0, ne null/niz
+    assert(samoNicle(t2.body.summary), "drug klub samo s testnim prometom: vseh 10 polj summary je stevilo 0 (ne null), natanko pricakovani kljuci", t2.body.summary);
+    assert(t2.body.test_summary.tickets_sold === 1, "drug klub: test_summary.tickets_sold = 1", t2.body.test_summary);
     await pool.query("DELETE FROM orders WHERE club_id = 2");
     const t3 = await api("GET", "/business/sales", T.admin);
     assert(t3.status === 200 && t3.body.test_summary && t3.body.test_summary.orders === 0 && t3.body.test_summary.gross_cents === 0 && t3.body.test_summary.tickets_sold === 0, "brez testnega prometa: test_summary prisoten z nicelami", t3.body.test_summary);
+    assert(samoNicle(t3.body.summary), "prazen klub: vseh 10 polj summary je stevilo 0 (ne null), natanko pricakovani kljuci", t3.body.summary);
 
     console.log("\n# GET /admin/api/events — paid_* pravi, test_paid_* testni");
     r = await api("GET", "/admin/api/events", T.admin);
