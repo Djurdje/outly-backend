@@ -107,7 +107,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte nal
 
 ## Nakup brez računa (od 5. 10. 2026; ARCHITECTURE »Nakup brez računa«, I22, DECISIONS 5. 10.)
 
-- **Stikalo `GOST_NAKUP_LIVE=1`** za pravi denar vklopi Martin; iOS nakupa brez računa nima (Martin). Po vrnitvi s Stripa je naročilo lahko še `pending` (stran poizveduje do `paid`). Poti in žeton v `#t=`: ARCHITECTURE »Nakup brez računa«.
+- **Stikalo `GOST_NAKUP_LIVE=1`** za pravi denar vklopi Martin; iOS nakupa brez računa nima (Martin). **Splet:** pogoji 1.1.2 in zasebnost 2.4.4 nakup brez računa opisujeta (od 15. 10.), a `GOST_NAKUP_JAVNO` (`webapp/js/gost.js`) ostane `false` do `sk_live_` (Martin 15. 10., #249: na `sk_test_` gost brez potrditve maila dobi brezplačne veljavne vstopnice); ekipa: `?gost=1`. Po vrnitvi s Stripa je naročilo lahko še `pending` (stran poizveduje do `paid`). Poti in žeton v `#t=`: ARCHITECTURE »Nakup brez računa«.
   **Past:** če je kupec prijavljen z istim e-naslovom, `GET /me` (zagon aplikacije) naročilo prevzame in PRESEKA žeton: `GET /guest/order` da 404 — stran naj ob 404 s sejo odpre My tickets.
 - **Past:** gost, ki izgubi stran med plačilom, ne dobi `checkout_url` nazaj (409 »unfinished payment« do ~35 min) razen s ponovitvijo z istim `Idempotency-Key`; mail pride šele po plačilu.
 - **Past:** v vseh poslovnih pogledih je gost »Guest« (`is_guest`), lastnik/manager vidita `buyer_email` kot pri vseh; vratar ga ne vidi nikjer, tudi ne v `POST /business/tickets/scan` (8. 10. 2026: `buyer_email`/`holder_email` se pri vlogi `doorman` zbrišeta na vrstici pred vsemi vejami odgovora; nova veja skena z `ticket: t` je pokrita sama; iOS `ScanTicketInfo` in splet `posel-skener.js` e-naslovov ne berejo).
