@@ -94,11 +94,19 @@ const PG_CONNECT_TIMEOUT_MS = okoljeCelo("PG_CONNECT_TIMEOUT_MS", 10000, 100, 60
 // Sken: kratek rok (telefon ob 503 hitro preklopi na preverjanje brez povezave), ne 10 s.
 const PG_SKEN_CONNECT_TIMEOUT_MS = okoljeCelo("PG_SKEN_CONNECT_TIMEOUT_MS", 2500, 100, 60000);
 
+// JIT izklopljen na povezavah glavnega poola, skenPool in omejevalnika (#265; skenPool od 17. 10.). PG16 ima jit=on; plan nad
+// jit_above_cost (100 000) prevaja LLVM ob VSAKEM klicu. Izmerjeno lokalno (klub s 50 000 narocili / 100 000 vstopnicami):
+// prodaja po dnevih v GET /business/sales (strosek ~195 000) jit=on 27 ms (od tega JIT 15 ms, nova povezava do 107 ms), jit=off 12-14 ms;
+// na Renderjevi bazi (0,1 CPU) vec kot 10-krat toliko. Nasih poizvedb (OLTP, kratke) JIT ne pospesi. Zagonski parameter
+// `options` ohrani PGOPTIONS okolja (testi). zdraviPool (/healthz) ga namenoma NIMA: pooler, ki bi zavrnil `options`, podre vse
+// ostale poole, /healthz pa ostane zelen -> to ujame GET /healthz/sken (Nadzor produkcije).
+const PG_OPTIONS = [process.env.PGOPTIONS, "-c jit=off"].filter(Boolean).join(" ");
 function novPool(max, connectMs, dodatno = {}) {
   const p = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
     max,
+    options: PG_OPTIONS,
     // Varovalka: če zahtevek čaka na prosto povezavo (pool je zaseden ali se je zaklenil), dobi napako
     // namesto večnega čakanja. Brez tega bi en hrošč tipa "pool.query med držanjem odjemalca" obesil cel strežnik.
     connectionTimeoutMillis: connectMs,
@@ -135,10 +143,23 @@ const pool = novPool(PG_POOL_MAX, PG_CONNECT_TIMEOUT_MS);
 const PG_SKEN_LOCK_TIMEOUT_MS = okoljeCelo("PG_SKEN_LOCK_TIMEOUT_MS", 1000, 0, 60000);
 const PG_SKEN_STATEMENT_TIMEOUT_MS = okoljeCelo("PG_SKEN_STATEMENT_TIMEOUT_MS", 5000, 0, 60000);
 const PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS = okoljeCelo("PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS", 10000, 0, 60000);
+// ODJEMALSKI rok poizvedbe skenPool (#265, `query_timeout`): polodprt TCP (baza ali omrezje odgovora nikoli ne poslje in povezave ne
+// zapre) ujame samo odjemalec; statement_timeout/lock_timeout tecejo na strezniku in tu ne pomagata. Brez roka bi taka povezava
+// visela za vedno, po PG_SKEN_POOL_MAX takih bi sken dobival 503 do restarta (zastoj, /healthz po 60 s). Ob izteku pg poizvedbo
+// zavrne z "Query read timeout" (jeNapakaPovezave -> 503 + Retry-After), pool.query povezavo UNICI (release(err)), skenBranje tudi.
+// Rok mora biti VECJI od najvecje streznisko meje skenPool (scan-list 10 s prek SET LOCAL), da ne prekine zakonite poizvedbe:
+// najmanj ta meja + 2 s (tudi ce je v okolju nastavljeno manj). 0 = izklop.
+const PG_SKEN_QUERY_TIMEOUT_MS = (() => {
+  const v = okoljeCelo("PG_SKEN_QUERY_TIMEOUT_MS", 12000, 0, 120000);
+  if (v === 0) return 0;
+  return Math.max(v, Math.max(PG_SKEN_STATEMENT_TIMEOUT_MS, PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS) + 2000);
+})();
 const skenPool = novPool(PG_SKEN_POOL_MAX, PG_SKEN_CONNECT_TIMEOUT_MS, {
   lock_timeout: PG_SKEN_LOCK_TIMEOUT_MS, statement_timeout: PG_SKEN_STATEMENT_TIMEOUT_MS,
-  options: [process.env.PGOPTIONS, "-c jit=off"].filter(Boolean).join(" "),
+  query_timeout: PG_SKEN_QUERY_TIMEOUT_MS || undefined,
 });
+console.log(`[skenPool] max ${PG_SKEN_POOL_MAX}, lock_timeout ${PG_SKEN_LOCK_TIMEOUT_MS} ms, statement_timeout ${PG_SKEN_STATEMENT_TIMEOUT_MS} ms, ` +
+  `scan-list ${PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS} ms, query_timeout ${PG_SKEN_QUERY_TIMEOUT_MS} ms, jit=off`);
 // Meja seznama nikoli ni nizja od obicajne meje stavka skenPool; 0 = brez SET LOCAL (velja meja povezave).
 const SKEN_SEZNAM_MEJA_MS = PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS > 0 && PG_SKEN_STATEMENT_TIMEOUT_MS > 0
   ? Math.max(PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS, PG_SKEN_STATEMENT_TIMEOUT_MS) : PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS;
@@ -156,7 +177,11 @@ async function skenBranje(fn) {
     await c.query("COMMIT");
     return r;
   } catch (e) {
-    await c.query("ROLLBACK").catch(() => { pokvarjen = true; });
+    // Baza je odgovorila z napako (SQLSTATE, npr. 57014/55P03): povezava je ziva, ROLLBACK jo pocisti. Brez SQLSTATE (query_timeout,
+    // prekinjena povezava): povezava je mrtva ali visi - ROLLBACK bi cakal za obviselo poizvedbo se en rok, zato jo takoj zavrzemo.
+    const koda = String((e && e.code) || "");
+    if (/^[0-9A-Z]{5}$/.test(koda) && /[0-9]/.test(koda)) await c.query("ROLLBACK").catch(() => { pokvarjen = true; });
+    else pokvarjen = true;
     throw e;
   } finally { c.release(pokvarjen); }
 }
@@ -173,7 +198,7 @@ let skenSeznamovTece = 0;
 // `query_timeout` je ODJEMALSKI rok: ce povezava obvisi (polodprt TCP, baza je ne zapre), `statement_timeout` na strezniku
 // nikoli ne steče; ob izteku pg poizvedbo zavrne, pool.query pa povezavo UNICI (release(err)), zato naslednji klic dobi novo.
 // Brez tega bi edina povezava obvisela za vedno in /healthz bi ostal 503 tudi po okrevanju (pregled PR #127).
-const zdraviPool = novPool(1, 2000, { statement_timeout: 2500, query_timeout: 2500, idleTimeoutMillis: 30000 });
+const zdraviPool = novPool(1, 2000, { statement_timeout: 2500, query_timeout: 2500, idleTimeoutMillis: 30000, options: undefined });   // brez jit=off: glej PG_OPTIONS (undefined = PGOPTIONS okolja, kot prej)
 
 // ZASTOJ poola (puscanje povezav, obvisele transakcije) JE nezdrava instanca: restart ga popravi. PREOBREMENITEV ni: ob dolgem
 // navalu pool normalno krozi (povezave se ves cas vracajo), cakalna vrsta je lahko vseskozi neprazna - restart sredi navala
@@ -327,6 +352,7 @@ const limiterPool = new Pool({
   connectionTimeoutMillis: 2000,
   statement_timeout: 1500,
   idleTimeoutMillis: 30000,
+  options: PG_OPTIONS,   // jit=off (#265)
 });
 limiterPool.on("error", (e) => console.error("[omejevalnik] mirujoca povezava s bazo prekinjena:", e && e.message));
 limiterPool.on("connect", (odjemalec) => {
@@ -1106,6 +1132,35 @@ app.get("/healthz", async (req, res) => {
   } finally {
     clearTimeout(casovnik);
   }
+});
+
+// GET /healthz/sken (#265): ali povezave skenPool delujejo (sken na vratih). /healthz gre prek zdraviPool BREZ zagonskih `options`,
+// zato ostane zelen, tudi ce baza ali pooler (PgBouncer ipd.) zavrne `-c jit=off` in pade VSAK sken (503). To pot preveri Nadzor
+// produkcije po deployu. Brez avtentikacije in brez podatkov v odgovoru ({ ok }). Ni Renderjev Health Check (ta ostane /healthz).
+// Zloraba ne sme izcrpati skenPool: v procesu tece najvec ENA preverba (SELECT 1) naenkrat, rezultat velja 1 s (vsi klici v tem
+// casu dobijo zadnji rezultat brez baze). Obvisela preverba drzi najvec eno povezavo, dokler je ne sprosti query_timeout skenPool;
+// medtem nova preverba ne zacne (klici po 3 s dobijo 503). Torej: najvec 1 povezava skenPool in najvec ~1 SELECT 1 na sekundo.
+const SKEN_ZDRAVJE_VELJA_MS = 1000, SKEN_ZDRAVJE_ROK_MS = 3000;
+let skenZdravjeZadnje = null;    // { ok, cas }
+let skenZdravjePoizvedba = null; // tekoca preverba (Promise<boolean>), dokler se poizvedba res ne konca
+function preveriSkenPool() {
+  if (skenZdravjePoizvedba) return skenZdravjePoizvedba;
+  skenZdravjePoizvedba = skenPool.query("SELECT 1").then(() => true, (e) => {
+    console.error("[zdravje] skenPool ni dosegljiv ->", 503, e && e.message);
+    return false;
+  }).then((ok) => { skenZdravjeZadnje = { ok, cas: Date.now() }; skenZdravjePoizvedba = null; return ok; });
+  return skenZdravjePoizvedba;
+}
+app.get("/healthz/sken", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  let ok;
+  if (skenZdravjeZadnje && Date.now() - skenZdravjeZadnje.cas < SKEN_ZDRAVJE_VELJA_MS) ok = skenZdravjeZadnje.ok;
+  else {
+    let casovnik;
+    ok = await Promise.race([preveriSkenPool(), new Promise((r) => { casovnik = setTimeout(() => r(false), SKEN_ZDRAVJE_ROK_MS); })]);
+    clearTimeout(casovnik);
+  }
+  res.status(ok ? 200 : 503).json({ ok });
 });
 
 // Admin panel: statična stran v mapi admin/ (en HTML + JS, brez ogrodja).
