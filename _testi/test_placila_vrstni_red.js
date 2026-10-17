@@ -233,7 +233,6 @@ const placi = (sejaId, pi) => Object.assign(S.seje[sejaId], { status: "complete"
     assert(w.status === 200 && (await pool.query("SELECT 1 FROM vracila WHERE order_id=$1", [g.id])).rows.length === 1, "ponovna dostava: se vedno ena vrstica vracila");
 
     console.log("\n# Gostujoce narocilo (guest_email) ostane normalno");
-    await pool.query("UPDATE orders SET user_id = NULL WHERE id = $1", [c.id]);   // samo da obstaja; tega ne uporabljamo
     const h = await kupi("hana", 1);
     await pool.query(`UPDATE orders SET user_id = NULL, guest_email = 'gost@example.com', guest_terms_version = 'v1', guest_terms_accepted_at = NOW() WHERE id = $1`, [h.id]);
     placi(h.seja, "pi_h");
