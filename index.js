@@ -3641,6 +3641,7 @@ admin.patch("/events/:id", async (req, res) => {
 // --- vracila in spori (#190, migracija 047) ---
 // GET /admin/api/refunds?state=ni_uspelo|rocno|potrditev|caka|v_teku|opravljeno|preklicano&event_id=&limit= : vrsta vracil (brez e-naslovov kupcev). `attention` = vracila, ki so
 // ostala brez denarja za kupca (ni_uspelo, rocno) ali visijo (v_teku): jih je treba pogledati. Tudi v dnevniku: `[vracila] POZOR`.
+// `not_completed_mail_sent_at` (#251) = kdaj je kupec dobil mail `ni_izvedeno` (Stripe je vracilo zavrnil, uredimo rocno), sicer null.
 // `stripe_state` = Stripovo stanje vracila (pending|succeeded|failed|canceled|…, lahko null). `failed`/`canceled`: retry je zavrnjen (409, vracilo.ponovi), panel gumba ne ponuja. `requires_action` NI zavrnitev (kupec dobi navodila, vracilo se nadaljuje): vrstica je v `potrditev` kot pri pending.
 admin.get("/refunds", async (req, res) => {
   try {
@@ -3657,7 +3658,8 @@ admin.get("/refunds", async (req, res) => {
       `SELECT v.id, v.order_id, o.public_ref, v.event_id, e.title AS event_title, v.razlog AS reason, v.stanje AS state, v.znesek_cents AS amount_cents, o.currency,
               v.poskusi AS attempts, v.napaka AS error, v.brez_stripa AS no_stripe, v.stripe_vracilo_id AS stripe_refund_id,
               v.provizija_za_vrnitev_cents AS fee_refund_cents, v.provizija_vracilo_id AS stripe_fee_refund_id, v.stripe_pristojbina_cents AS stripe_fee_cents,
-              v.stripe_stanje AS stripe_state, v.created_at, v.naslednji_poskus_at AS next_attempt_at, v.opravljeno_at AS done_at, v.mail_poslano_at AS mail_sent_at
+              v.stripe_stanje AS stripe_state, v.created_at, v.naslednji_poskus_at AS next_attempt_at, v.opravljeno_at AS done_at, v.mail_poslano_at AS mail_sent_at,
+              v.mail_ni_izvedeno_poslano_at AS not_completed_mail_sent_at
          FROM vracila v JOIN orders o ON o.id = v.order_id JOIN events e ON e.id = v.event_id
         WHERE ($1::text IS NULL OR v.stanje = $1) AND ($2::int IS NULL OR v.event_id = $2)
         ORDER BY v.id DESC LIMIT $3`, [stanje, ev, limit]);
@@ -5718,6 +5720,7 @@ async function potrdiloPosljiNeposlane() {
 // ---------------------------
 // VRACILA IN SPORI — OBVESTILA (issue #190, migracija 047, vracila_stripe.js)
 // ---------------------------
+// Trije maili kupcu (vsak natanko enkrat): `odpoved` (»na poti«), `vrnjeno` (»vrnili smo«) in od #251 (migracija 051) `ni_izvedeno` (Stripe je vracilo zavrnil, kupec denarja ni dobil).
 // Kupec ob ODPOVEDI DOGODKA dobi mail, ko je vracilo opravljeno (besedilo mora biti resnicno: »vrnjeno«, ne »bomo vrnili«). Vzorec kot gostov mail in potrdilo kupcu:
 //   * natanko enkrat OB USPEHU: UPDATE ... RETURNING si rezervira poskus (vracila.mail_poskusi, mail_prevzeto_at), mail_poslano_at po uspehu Resenda;
 //   * Resend ob napaki NE vrze ({ error }): zapis v dnevnik brez e-naslova, ponovi obdelovalec z narascajocim premorom (GOST_POSTA_PREMORI, 8 poskusov);
@@ -5725,10 +5728,16 @@ async function potrdiloPosljiNeposlane() {
 // Prejemnik je orders.buyer_email (kupec z racunom: naslov racuna; gost: naslov nakupa). Izbrisan racun / anonimiziran gost (*@outly.invalid) ne dobi maila.
 // Brezplacno (0 EUR) in testno narocilo: mail pove, da se ni zaracunalo nic. Mail ne vsebuje kod QR ali povezave do vstopnic (vstopnice po odpovedi ne veljajo).
 const VRACILA_MAIL_RAZMAK_MS = okoljeCelo("VRACILA_MAIL_RAZMAK_MS", 550, 0, 60000);
+// Mail `ni_izvedeno` (#251) gre sele, ko je Stripe vracilo zavrnil in je vrstica v ni_uspelo/rocno vsaj toliko casa (ni_izvedeno_od_at). Samo blazilnik
+// (pravnik 17. 10. 2026: zavrnjenega Stripovega vracila admin ne more ponoviti, retry je 409, zato dolgo cakanje nima smisla).
+const VRACILA_NI_IZVEDENO_PO_MS = okoljeCelo("VRACILA_NI_IZVEDENO_PO_MS", 3600 * 1000, 0, 30 * 24 * 3600 * 1000);
 const VRACILA_MAIL_PAKET = 20;
 const vraciloMailVTeku = new Set();
 // vrsta: 'odpoved' (takoj po zamiku odpovedi: »dogodek odpovedan, vracilo je na poti«; 0 EUR/test: »nic ni bilo zaracunano«) | 'vrnjeno' (Stripe je vracilo IZVEDEL: »vrnili smo«;
 // razlog inactive_order: »placilo smo vrnili, naroceno ni bilo zakljuceno«). Martin 12. 10. 2026: oba maila, natanko enkrat vsak.
+// | 'ni_izvedeno' (#251, besedilo pravnik 17. 10. 2026: Stripe je vracilo ZAVRNIL (failed/canceled), vrstica je v ni_uspelo/rocno, kupec denarja NI dobil;
+// po VRACILA_NI_IZVEDENO_PO_MS, pri event_cancelled sele po mailu 'odpoved'; tudi kot popravek, ce je kupec prej dobil »vrnili smo«, Stripe pa je vracilo nato zavrnil).
+// »celoten znesek / the full amount« samo, kadar je znesek vracila enak placanemu (total_cents); pri delno ze vrnjenem narocilu samo »znesek / the amount«.
 function vraciloMailBesedilo(o, vrsta) {
   return izrisiDvojezicno((jez) => {
     const T = (sl, en) => (jez === "sl" ? sl : en);
@@ -5737,6 +5746,33 @@ function vraciloMailBesedilo(o, vrsta) {
       : T(`${o.quantity} ${o.quantity === 1 ? "vstopnica" : "vstopnice"}`, `${o.quantity} ${o.quantity === 1 ? "ticket" : "tickets"}`);
     const zn = znesek(o.znesek_cents, o.currency, jez);
     const koncno = vrsta === "vrnjeno";
+    if (vrsta === "ni_izvedeno") {
+      const ec = o.razlog !== "inactive_order";
+      return {
+        naslovBesedila: T(`Vračilo še ni izvedeno - naročilo ${o.public_ref}`, `Refund not completed yet - order ${o.public_ref}`),
+        naslovHtml: T("Vračilo še ni izvedeno", "Refund not completed yet"),
+        razdelki: [
+          ...(ec ? [{ naslov: T("Dogodek", "Event"), vrstice: [
+            T(`Dogodek »${o.event_title}« (${ljDatum(o.start_at, jez)}) je odpovedan.`, `The event "${o.event_title}" (${ljDatum(o.start_at, jez)}) has been cancelled.`),
+            T(`Naročilo ${o.public_ref}: ${kaj}.`, `Order ${o.public_ref}: ${kaj}.`)] }] : []),
+          { naslov: T("Vračilo", "Refund"), krepko: true, vrstice: ec ? [
+            T(`Ob odpovedi dogodka smo v imenu organizatorja sprožili vračilo ${zn} na način plačila, s katerim ste plačali. Ponudnik plačilnih storitev vračila ni izvedel, zato denarja še niste prejeli.`,
+              `When the event was cancelled, we started a refund of ${zn} to the payment method you used, on the organiser's behalf. The payment provider did not complete the refund, so you have not received the money yet.`),
+            T("Do vračila ste še vedno upravičeni. Uredili ga bomo ročno, skupaj z organizatorjem.",
+              "You are still entitled to the refund. We will arrange it manually, together with the organiser.")] : [
+            T(`Vračila vašega plačila ${zn} za naročilo ${o.public_ref} (dogodek »${o.event_title}«), ki ni bilo zaključeno, ponudnik plačilnih storitev ni izvedel, zato denarja še niste prejeli.`,
+              `The payment provider did not complete the refund of your payment of ${zn} for order ${o.public_ref} (event "${o.event_title}"), which was not completed, so you have not received the money yet.`),
+            T("Do vračila ste še vedno upravičeni. Uredili ga bomo ročno.", "You are still entitled to the refund. We will arrange it manually.")] },
+          { naslov: T("Kaj lahko storite", "What you can do"), vrstice: [
+            T("Zdaj vam ni treba storiti ničesar. Če ste kartico ali račun, s katerim ste plačali, medtem zaprli ali zamenjali, nam to sporočite z odgovorom na to sporočilo. Če bomo za vračilo potrebovali kakšen podatek, vam pišemo na ta elektronski naslov. Za vračilo vas nikoli ne bomo prosili za številko kartice, kodo ali geslo.",
+              "You don't need to do anything right now. If you have closed or replaced the card or account you paid with, let us know by replying to this email. If we need any details to complete the refund, we will write to you at this email address. We will never ask for your card number, a code or a password for a refund.")] },
+          { naslov: T("Vprašanja", "Questions"), vrstice: [
+            T(`Glede vračila odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR} in navedite naročilo ${o.public_ref}. Glede dogodka se obrnite na klub (${o.club_name}).`,
+              `About the refund, reply to this email or write to ${POSTA_ODGOVOR} and quote order ${o.public_ref}. About the event, contact the club (${o.club_name}).`)] },
+        ],
+      };
+    }
+    const celoten = o.znesek_cents === o.total_cents;   // delno ze vrnjeno narocilo: vracamo ostanek, ne »celoten znesek«
     if (o.razlog === "inactive_order") {
       return {
         naslovBesedila: T(`Plačilo vrnjeno - naročilo ${o.public_ref}`, `Payment refunded - order ${o.public_ref}`), naslovHtml: T("Plačilo vrnjeno", "Payment refunded"),
@@ -5753,12 +5789,12 @@ function vraciloMailBesedilo(o, vrsta) {
       ? [T("Za to naročilo ni bilo zaračunano nič (brezplačno ali testno naročilo), zato vračilo ni potrebno. Vstopnice zanj ne veljajo več.",
            "Nothing was charged for this order (free or test order), so no refund is needed. The tickets no longer apply.")]
       : koncno
-        ? [T(`Vrnili smo vam celoten znesek ${zn} na način plačila, s katerim ste plačali. Banka ga običajno knjiži v 5 do 10 delovnih dneh.`,
-             `We have refunded the full amount of ${zn} to the payment method you used. Your bank usually posts it within 5 to 10 business days.`),
+        ? [T(`Vrnili smo vam ${celoten ? "celoten znesek" : "znesek"} ${zn} na način plačila, s katerim ste plačali. Banka ga običajno knjiži v 5 do 10 delovnih dneh.`,
+             `We have refunded ${celoten ? "the full amount" : "the amount"} of ${zn} to the payment method you used. Your bank usually posts it within 5 to 10 business days.`),
            T("Vstopnice za ta dogodek ne veljajo več.", "The tickets for this event are no longer valid.")]
-        : [T(`Celoten znesek ${zn} vam vrnemo na način plačila, s katerim ste plačali. Vračilo je v teku; ko bo opravljeno, vam pošljemo še eno sporočilo. Banka ga običajno knjiži v 5 do 10 delovnih dneh.`,
-             `We are refunding the full amount of ${zn} to the payment method you used. The refund is in progress; we will send you another email when it is done. Your bank usually posts it within 5 to 10 business days.`),
-           T("Vstopnice za ta dogodek ne veljajo več. Vam ni treba storiti ničesar.", "The tickets for this event are no longer valid. You don't need to do anything.")];
+        : [T(`${celoten ? "Celoten znesek" : "Znesek"} ${zn} vam vrnemo na način plačila, s katerim ste plačali. Vračilo je v teku; ko bo opravljeno, vam pošljemo še eno sporočilo. Banka ga običajno knjiži v 5 do 10 delovnih dneh.`,
+             `We are refunding ${celoten ? "the full amount" : "the amount"} of ${zn} to the payment method you used. The refund is in progress; we will send you another email when it is done. Your bank usually posts it within 5 to 10 business days.`),
+           T("Vstopnice za ta dogodek ne veljajo več. Vračilo sprožimo samodejno. Če bo ponudnik plačilnih storitev za izvedbo vračila potreboval dodaten korak ali vaše podatke, vam bo poslal navodila; sledite jim, sicer vračilo morda ne bo izvedeno. Za vračilo vas nikoli ne bomo prosili za številko kartice ali geslo.", "The tickets for this event are no longer valid. We start the refund automatically. If the payment provider needs an extra step or your details to complete the refund, it will send you instructions; please follow them, otherwise the refund may not go through. We will never ask for your card number or password for a refund.")];
     return {
       naslovBesedila: koncno ? T(`Vračilo opravljeno - naročilo ${o.public_ref}`, `Refund completed - order ${o.public_ref}`) : T(`Dogodek je odpovedan - naročilo ${o.public_ref}`, `Event cancelled - order ${o.public_ref}`),
       naslovHtml: koncno ? T("Vračilo opravljeno", "Refund completed") : T("Dogodek je odpovedan", "Event cancelled"),
@@ -5781,6 +5817,16 @@ const VRACILO_MAIL = {
     // tudi `rocno` / `ni_uspelo` po USPELEM koraku A (npr. vracila provizije ni mogoce izracunati): kupec je denar dobil, mail mu pripada
     pogoj: "NOT v.brez_stripa AND (v.stanje = 'opravljeno' OR (v.stanje IN ('rocno', 'ni_uspelo') AND v.stripe_vracilo_id IS NOT NULL AND v.stripe_stanje = 'succeeded'))",
     zadeva: "Vračilo / Refund" },
+  // #251 (pogoj pravnik 17. 10. 2026): SAMO ob znani Stripovi zavrnitvi (stripe_stanje failed/canceled) v ni_uspelo/rocno. Brez stripe_stanje (rocno po sesutju, napaka API)
+  // ne vemo, ali je denar odsel: samo obstojeci alarm. Ne pending/requires_action/succeeded (`potrditev`, `vrnjeno`), ne brez_stripa / 0 EUR / testno (test_ PI) / preklicano.
+  // Vsaj VRACILA_NI_IZVEDENO_PO_MS od ni_izvedeno_od_at; pri event_cancelled sele po poslanem mailu `odpoved` (inactive_order ga nima).
+  // Pogoj vsebuje pogoj indeksa vracila_mail_ni_izvedeno_idx (051: NOT brez_stripa, stanje, stripe_stanje, mail_ni_izvedeno_poslano_at IS NULL); ob spremembi uskladi oba.
+  ni_izvedeno: { poskusi: "mail_ni_izvedeno_poskusi", prevzeto: "mail_ni_izvedeno_prevzeto_at", poslano: "mail_ni_izvedeno_poslano_at",
+    pogoj: `NOT v.brez_stripa AND v.stanje IN ('ni_uspelo', 'rocno') AND v.stripe_stanje IN ('failed', 'canceled')
+      AND v.ni_izvedeno_od_at <= NOW() - (${VRACILA_NI_IZVEDENO_PO_MS}::bigint * INTERVAL '1 millisecond')
+      AND (v.razlog = 'inactive_order' OR v.mail_odpoved_poslano_at IS NOT NULL) AND NOT COALESCE(v.payment_intent_id LIKE 'test_%', FALSE)
+      AND EXISTS (SELECT 1 FROM orders zo WHERE zo.id = v.order_id AND zo.total_cents > 0 AND NOT COALESCE(zo.stripe_payment_intent_id LIKE 'test_%', FALSE))`,
+    zadeva: "Vračilo še ni izvedeno / Refund not completed yet" },
 };
 async function posljiVraciloKupcu(vid, vrsta) {
   if (!resend) return false;
@@ -5797,7 +5843,7 @@ async function posljiVraciloKupcu(vid, vrsta) {
     if (!k.rows.length) return false;
     const v = k.rows[0];
     const r0 = await pool.query(
-      `SELECT o.public_ref, o.buyer_email, o.quantity, o.currency, o.table_label, o.total_cents, e.title AS event_title, e.start_at, cl.name AS club_name,
+      `SELECT o.public_ref, o.buyer_email, o.quantity, o.currency, o.table_label, o.total_cents, o.refunded_cents, e.title AS event_title, e.start_at, cl.name AS club_name,
               (o.total_cents = 0 OR COALESCE(o.stripe_payment_intent_id LIKE 'test_%', FALSE)) AS brez_placila
          FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = e.club_id WHERE o.id = $1`, [v.order_id]);
     const o = r0.rows[0];
@@ -5806,7 +5852,8 @@ async function posljiVraciloKupcu(vid, vrsta) {
       await pool.query(`UPDATE vracila SET ${m.poskusi} = $2 WHERE id = $1 AND ${m.poslano} IS NULL`, [vid, GOST_POSTA_POSKUSOV]);   // naslova ni vec: ne ponavljaj
       return false;
     }
-    const zn = v.znesek_cents !== null && v.znesek_cents !== undefined ? v.znesek_cents : o.total_cents;   // pred prvim poskusom znesek se ni zamrznjen: placano
+    // pred prvim poskusom znesek se ni zamrznjen: kar je se placano (obdelovalec bo vrnil ostanek, vracila_stripe.js izvedi())
+    const zn = v.znesek_cents !== null && v.znesek_cents !== undefined ? v.znesek_cents : Math.max(0, o.total_cents - (o.refunded_cents || 0));
     const { besedilo, html } = vraciloMailBesedilo({ ...o, razlog: v.razlog, znesek_cents: zn }, vrsta);
     const r = await gostResendPosli({ to: o.buyer_email, subject: `${m.zadeva}: ${o.event_title} (${o.public_ref})`.slice(0, 200), html, text: besedilo });
     if (r && r.error) {
@@ -5912,7 +5959,7 @@ async function posljiSporLastniku(did) {
 async function vracilaObvestilaNeposlana() {
   if (!resend) return;
   const pocakaj = (ms) => new Promise((r) => setTimeout(r, ms));
-  for (const vrsta of ["odpoved", "vrnjeno"]) {
+  for (const vrsta of ["odpoved", "vrnjeno", "ni_izvedeno"]) {   // `ni_izvedeno` za `odpoved`: v istem teku sele po poslanem mailu odpoved
     const m = VRACILO_MAIL[vrsta];
     const r = await pool.query(
       `SELECT v.id FROM vracila v WHERE ${m.pogoj} AND v.${m.poslano} IS NULL AND v.${m.poskusi} < $1

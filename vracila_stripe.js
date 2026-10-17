@@ -19,6 +19,8 @@
 //
 // Stanja: caka -> v_teku -> opravljeno | potrditev (Stripe je vracilo sprejel kot `pending` ali `requires_action` (kupec dobi navodila, vracilo se nadaljuje); izid pride z webhookom refund.* / charge.refund.updated ali ga prebere tek) |
 // ni_uspelo (alarm, admin ponovi) | rocno (alarm; drug nacin Stripa, brez kljuca, nepricakovano stanje) | preklicano (dogodek obnovljen; ponovna odpoved ga vrne v `caka`).
+// Vsak prehod v ni_uspelo/rocno (in Stripova zavrnitev vrstice, ki je ze v enem od njiju) nastavi `ni_izvedeno_od_at = NOW()` (051, #251), admin retry ga
+// pocisti: iz njega index.js steje rok za mail kupcu `ni_izvedeno` (VRACILA_NI_IZVEDENO_PO_MS).
 //
 // Vrstni red v izvedi(): A) vracilo kupcu (idempotentni kljuc) -> lokalno stanje narocila -> B) vracilo provizije (po A, da kupec ne caka na racunovodske podatke) -> zakljucek.
 // Ko je `stripe_vracilo_id` zapisan, se korak A in njegove preverbe NIKOLI ne ponovijo (webhook je naroceno medtem lahko ze oznacil `refunded`): nadaljuje se s korakom B.
@@ -106,7 +108,8 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
 
   const kratko = (e) => `${e && e.type ? e.type : "Error"}${e && e.code ? " " + e.code : ""}: ${e && e.message ? e.message : String(e)}`.replace(/\s+/g, " ").slice(0, 300);
   const zapri = (id, stanje, napaka) => pool.query(
-    `UPDATE vracila SET stanje = $2, napaka = $3, opravljeno_at = CASE WHEN $2 = 'opravljeno' THEN NOW() ELSE opravljeno_at END WHERE id = $1 AND stanje = 'v_teku'`, [id, stanje, napaka || null]);
+    `UPDATE vracila SET stanje = $2, napaka = $3, opravljeno_at = CASE WHEN $2 = 'opravljeno' THEN NOW() ELSE opravljeno_at END,
+            ni_izvedeno_od_at = CASE WHEN $2 IN ('ni_uspelo', 'rocno') THEN NOW() ELSE ni_izvedeno_od_at END WHERE id = $1 AND stanje = 'v_teku'`, [id, stanje, napaka || null]);
 
   // Lokalno stanje narocila po vracilu (isto kot webhook charge.refunded: placila.uveljaviVracilo), idempotentno. Odpoved dogodka vrne VSE (kupec dobi celoten znesek).
   // Za inactive_order narocila ne spreminjamo (ostane cancelled/failed, vstopnic ni).
@@ -313,9 +316,11 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
         console.log(`[vracila] opravljeno (Stripe je vracilo izvedel): vracilo ${x.id}`);
       } else if ((re.status === "failed" || re.status === "canceled") && ["rocno", "ni_uspelo"].includes(x.stanje) && ["pending", "requires_action", "succeeded"].includes(x.prej)) {
         // Vrstica je ze v rocni obravnavi/ni_uspelo (stanje ostane), Stripe pa je vracilo pozneje zavrnil: admin mora vedeti, da kupec NI dobil denarja.
+        // Rok za mail kupcu `ni_izvedeno` (#251) steje od zavrnitve, ne od prejsnjega vstopa v stanje.
+        await pool.query("UPDATE vracila SET ni_izvedeno_od_at = NOW() WHERE id = $1 AND stanje IN ('rocno', 'ni_uspelo')", [x.id]);
         console.error(`[vracila] POZOR: Stripe vracilo ${re.id} (vracilo ${x.id}) je ${re.status}${re.failure_reason ? ", razlog " + re.failure_reason : ""}: kupec NI dobil denarja (vrstica je ze v stanju ${x.stanje}, stanje ni spremenjeno; prej Stripe: ${x.prej}); retry je zavrnjen (409), vrni rocno v Stripu.`);
       } else if ((re.status === "failed" || re.status === "canceled") && ["potrditev", "opravljeno", "v_teku", "caka"].includes(x.stanje)) {
-        await pool.query("UPDATE vracila SET stanje = 'ni_uspelo', napaka = $2, opravljeno_at = NULL WHERE id = $1", [x.id, `Stripe vracilo ${re.id}: ${re.status}${re.failure_reason ? " (" + String(re.failure_reason).slice(0, 60) + ")" : ""}`]);
+        await pool.query("UPDATE vracila SET stanje = 'ni_uspelo', napaka = $2, opravljeno_at = NULL, ni_izvedeno_od_at = NOW() WHERE id = $1", [x.id, `Stripe vracilo ${re.id}: ${re.status}${re.failure_reason ? " (" + String(re.failure_reason).slice(0, 60) + ")" : ""}`]);
         console.error(`[vracila] POZOR: Stripe vracilo ${re.id} (vracilo ${x.id}) je ${re.status}${re.failure_reason ? ", razlog " + re.failure_reason : ""}: kupec NI dobil denarja; naroceno je v bazi ze vrnjeno, vrni rocno v Stripu.`);
       }
     }
@@ -507,7 +512,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
       return false;
     }
     const u = await pool.query(
-      `UPDATE vracila SET stanje = 'caka', poskusi = 0, naslednji_poskus_at = NOW(), napaka = NULL, kljuc_gen = kljuc_gen + 1,
+      `UPDATE vracila SET stanje = 'caka', poskusi = 0, naslednji_poskus_at = NOW(), napaka = NULL, kljuc_gen = kljuc_gen + 1, ni_izvedeno_od_at = NULL,
               stripe_vracilo_id = COALESCE(stripe_vracilo_id, $2), stripe_stanje = COALESCE($3, stripe_stanje),
               znesek_cents = CASE WHEN razlog = 'event_cancelled' AND stripe_vracilo_id IS NULL AND $2::text IS NULL THEN NULL ELSE znesek_cents END,
               application_fee_id = NULL, provizija_za_vrnitev_cents = CASE WHEN provizija_vracilo_id IS NOT NULL THEN provizija_za_vrnitev_cents ELSE NULL END,
