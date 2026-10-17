@@ -47,6 +47,9 @@ jobs:
           preveri "backend /events"  "https://outly-backend-roy3.onrender.com/events"  200
           preveri "backend admin"    "https://outly-backend-roy3.onrender.com/admin/"  200
           preveri "backend auth"     "https://outly-backend-roy3.onrender.com/me/invites" 401
+          # Povezave skenPool (sken vstopnic na vratih; zagonski options -c jit=off, #265). /healthz jih NE preveri (zdraviPool je brez
+          # options): pooler ali baza, ki options zavrne, podre vsak sken, /healthz pa ostane 200. Pot vrne samo {"ok":true|false}.
+          preveri "backend sken"     "https://outly-backend-roy3.onrender.com/healthz/sken" 200 '"ok":true'
           preveri "outly.si"         "https://outly.si/"                                200 'Outly'
           preveri "outly.si /terms"  "https://outly.si/terms"                           200
           # javni (publishable) kljuc, isti kot v kodi aplikacije in spletne strani
@@ -113,7 +116,7 @@ jobs:
       # Pogoj je namenoma "napake == ''", ne samo success(): pri rocnem zagonu z test=true
       # ali test=routine korak "Preveri produkcijo" NE pade, tudi ce je produkcija res podrta
       # (exit 1 je pogojen s TEST=false). Z golim success() bi tak zagon poslal ping "vse OK"
-      # sredi resnicnega izpada in Healthchecks bi molcal. Prazen "napake" pomeni: vseh sedem
+      # sredi resnicnega izpada in Healthchecks bi molcal. Prazen "napake" pomeni: vseh osem
       # preverb je bilo zelenih in to ni bil testni zagon.
       - name: Ping Healthchecks.io (mrtev cloveka drzalo)
         if: success() && steps.preveri.outputs.napake == ''
