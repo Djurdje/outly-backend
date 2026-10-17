@@ -11,6 +11,7 @@
  *       Stripe vidi vec hkratnih klicev, kot je dovoljenj; pool z 4 povezavami ne zastane.
  *   S3  Stripe zavrne: 502, narocilo `failed`, zaloga sproscena, dovoljenje sproscena (naslednji nakup gre takoj).
  *   S4  idempotenca (I18): ponovitev istega kljuca med klicem Stripa vrne isto narocilo, en sam klic Stripa.
+ *   S6  503 semaforja za vse tri poti: ponovitev z istim Idempotency-Key je 201 (neuspeh se ne zapomni). (S3 isto za 502.)
  *   S5  lasten semafor za Stripe (STRIPE_VZPOREDNO=2, STRIPE_CAKANJE_MS=1000): vec kot 2 hkratna klica Stripa nikoli;
  *       presezek dobi 503 Retry-After, narocilo `failed`, zaloga sproscena.
  */
@@ -173,7 +174,22 @@ async function ustavi() { if (!srv) return; const s = srv; srv = null; await new
     assert(await sold(E5) === 0, "zaloga sproscena (sold_count 0)", await sold(E5));
     const po = await api("POST", `/events/${E2}/orders`, kupci[4], { quantity: 1 });
     assert(po.status === 201 && po.ms < 1000, "po neuspehu dovoljenje ni zaprto: naslednji nakup 201 takoj", { s: po.status, ms: Math.round(po.ms) });
+    // VIP miza in gost: isto (502, failed, zaloga/miza sproscena) in ponovitev z ISTIM kljucem po neuspehu je nov nakup (neuspeh se ne zapomni)
+    const kV = crypto.randomUUID(), kG = crypto.randomUUID(), kO = crypto.randomUUID();
+    const zv = await Promise.all([
+      api("POST", `/events/${E5}/tables/1/orders`, kupci[10], {}, { "idempotency-key": kV }),
+      api("POST", `/guest/events/${E5}/orders`, null, { email: "gost3@example.com", quantity: 1, ...TERMS }, { "idempotency-key": kG }),
+      api("POST", `/events/${E5}/orders`, kupci[11], { quantity: 1 }, { "idempotency-key": kO }),
+    ]);
+    assert(zv.every(r => r.status === 502), "VIP miza, gost, vstopnice s kljucem: 502", zv.map(r => r.status));
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE event_id=$1 AND status='failed' AND idempotency_key IS NULL AND created_at > NOW() - interval '1 minute'", [E5])).rows[0].n >= 7, "failed narocila nimajo vec kljuca");
     NAPAKA = false;
+    const pon = await Promise.all([
+      api("POST", `/events/${E5}/tables/1/orders`, kupci[10], {}, { "idempotency-key": kV }),
+      api("POST", `/guest/events/${E5}/orders`, null, { email: "gost3@example.com", quantity: 1, ...TERMS }, { "idempotency-key": kG }),
+      api("POST", `/events/${E5}/orders`, kupci[11], { quantity: 1 }, { "idempotency-key": kO }),
+    ]);
+    assert(pon.every(r => r.status === 201 && r.body.mode === "stripe"), "ponovitev z istim kljucem po 502: 201 (ne 409 order_not_active)", pon.map(r => [r.status, r.body && r.body.error]));
 
     console.log("\n# S4: idempotenca med klicem Stripa");
     ZAMIK = 1500; klicov = 0;
@@ -200,6 +216,24 @@ async function ustavi() { if (!srv) return; const s = srv; srv = null; await new
     const st7 = (await pool.query("SELECT status, COUNT(*)::int AS n FROM orders WHERE event_id=$1 GROUP BY status ORDER BY status", [E7])).rows;
     assert(JSON.stringify(st7) === JSON.stringify([{ status: "failed", n: 2 }, { status: "pending", n: 2 }]), "2 pending + 2 failed", st7);
     assert(await sold(E7) === 2, "zaloga: samo 2 rezervirani", await sold(E7));
+
+    console.log("\n# S6: 503 semaforja Stripa za vse tri poti in ponovitev z istim kljucem");
+    najvecVLetu = 0;
+    const kO6 = crypto.randomUUID(), kV6 = crypto.randomUUID(), kG6 = crypto.randomUUID();
+    const drzalca = [kupci[12], kupci[13]].map(t => api("POST", `/events/${E7}/orders`, t, { quantity: 1 }));
+    await cakajPogoj(() => vLetu >= 2, 5000);
+    const zas = await Promise.all([
+      api("POST", `/events/${E7}/orders`, kupci[14], { quantity: 1 }, { "idempotency-key": kO6 }),
+      api("POST", `/events/${E7}/tables/1/orders`, kupci[15], {}, { "idempotency-key": kV6 }),
+      api("POST", `/guest/events/${E7}/orders`, null, { email: "gost4@example.com", quantity: 1, ...TERMS }, { "idempotency-key": kG6 }),
+    ]);
+    assert(zas.every(r => r.status === 503 && r.retryAfter === "5" && /too many purchases/i.test(String(r.body))), "vse tri poti: 503 »Too many purchases« + Retry-After", zas.map(r => [r.status, r.body]));
+    await Promise.all(drzalca);
+    const pon6 = [];   // zaporedoma: STRIPE_VZPOREDNO=2 in cakanje 1 s bi tri hkratne spet zavrnilo
+    pon6.push(await api("POST", `/events/${E7}/orders`, kupci[14], { quantity: 1 }, { "idempotency-key": kO6 }));
+    pon6.push(await api("POST", `/events/${E7}/tables/1/orders`, kupci[15], {}, { "idempotency-key": kV6 }));
+    pon6.push(await api("POST", `/guest/events/${E7}/orders`, null, { email: "gost4@example.com", quantity: 1, ...TERMS }, { "idempotency-key": kG6 }));
+    assert(pon6.every(r => r.status === 201 && r.body.checkout_url), "ponovitev z istim kljucem po 503: 201 s povezavo", pon6.map(r => [r.status, r.body && r.body.error]));
   } finally {
     await ustavi(); stripeServer.close(); jwksServer.close(); await pool.end();
   }

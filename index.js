@@ -273,7 +273,7 @@ function nakupIzstopi() {
 // Drzalec dovoljenja in povezave nakupa (#274): enkratno sprostitev (povezava + dovoljenje) lahko sprozi nakupStripeSeja takoj po COMMIT-u,
 // `finally` poti jo ponovi brez ucinka (dvojni c.release() bi vrgel, dvojni nakupIzstopi() bi pokvaril stevec dovoljenj).
 function nakupDrzalec(c) {
-  const d = { drzi: true, sprosti() { if (!d.drzi) return; d.drzi = false; try { c.release(); } finally { nakupIzstopi(); } } };
+  const d = { c, drzi: true, sprosti() { if (!d.drzi) return; d.drzi = false; try { c.release(); } finally { nakupIzstopi(); } } };
   return d;
 }
 // Klic Stripa (checkout.sessions.create, rok 15 s, do 3 poskusi) NE sme drzati dovoljenja nakupa ne povezave z bazo: pocasen Stripe bi sicer
@@ -4327,34 +4327,55 @@ async function omejitevBrezplacnih(c, { userId = null, gostEmail = null, eventId
 // odgovora pa na ENI kratkotrajni povezavi iz poola (drzimo eno povezavo in ne cakamo na drugo, zato pool ne zastane; glej opombo pri
 // POST /events/:id/orders). Neuspeh Stripa, zapisa ali semaforja = narocilo `failed` (sprozilec sprosti zalogo).
 async function nakupStripeSeja(res, d, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale }) {
-  d.sprosti();
-  const neuspeh = async (koda, sporocilo) => {
-    await pool.query("UPDATE orders SET status='failed', cancelled_at=NOW() WHERE id=$1 AND status='pending'", [oid]).catch(() => {});
+  // Neuspeh: narocilo `failed` (sprozilec sprosti zalogo) in `idempotency_key = NULL`: neuspeh se ne zapomni (I18, test_idempotenca §6), sicer bi
+  // ponovitev z istim kljucem dobila 409 order_not_active. Zapis ne sme tiho odpasti (narocilo bi ostalo `pending` brez seje ~35 min, I20): 2 poskusa + dnevnik.
+  const neuspeh = async (db, koda, sporocilo) => {
+    for (let poskus = 1; poskus <= 2; poskus++) {
+      try {
+        await db.query("UPDATE orders SET status='failed', cancelled_at=NOW(), idempotency_key=NULL WHERE id=$1 AND status='pending'", [oid]);
+        break;
+      } catch (e) {
+        console.error(`[stripe] narocila ${oid} ni uspelo oznaciti kot failed (poskus ${poskus}):`, e && (e.message || e));
+        db = pool;
+      }
+    }
     if (koda === 503) res.set("Retry-After", "5");
     res.status(koda).send(sporocilo);
     return null;
   };
+  // Branje narocila na SE DRZANI povezavi, PRED sprostitvijo: po sprostitvi bi pool.query ob zasedenem poolu lahko padel in pustil narocilo brez seje.
+  let nr;
+  try {
+    nr = (await d.c.query("SELECT id, public_ref, currency, application_fee_cents FROM orders WHERE id=$1", [oid])).rows[0];
+  } catch (e) {
+    console.error(`[stripe] branje narocila ${oid} ni uspelo:`, e && (e.message || e));
+    const r = await neuspeh(d.c, 502, "Payment provider is unavailable. Please try again.");
+    d.sprosti();
+    return r;
+  }
+  d.sprosti();
   let c2 = null;
   try {
-    const nr = await pool.query("SELECT id, public_ref, currency, application_fee_cents FROM orders WHERE id=$1", [oid]);
     if (!(await stripeVstopi())) {
       console.error(`[stripe] narocilo ${oid}: semafor za Stripe poln ${STRIPE_CAKANJE_MS} ms`);
-      return await neuspeh(503, "Too many payments at once. Please try again.");
+      return await neuspeh(pool, 503, "Too many purchases at once. Please try again.");
     }
     let seja;
     try {
-      seja = await placilaStripe.ustvariCheckout({ narocilo: nr.rows[0], opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale });
+      seja = await placilaStripe.ustvariCheckout({ narocilo: nr, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale });
     } finally { stripeIzstopi(); }
     c2 = await pool.connect();
-    await c2.query(
-      "UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4) WHERE id=$1",
-      [oid, seja.id, seja.url, seja.expires_at]);
+    try {
+      await c2.query(
+        "UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4) WHERE id=$1",
+        [oid, seja.id, seja.url, seja.expires_at]);
+    } catch (e) { c2.release(e); c2 = null; throw e; }   // pokvarjene povezave ne vracamo v pool
   } catch (e) {
     if (c2) c2.release();
     console.error(`[stripe] Checkout seja za narocilo ${oid} ni uspela:`, e && (e.message || e));
-    return neuspeh(502, "Payment provider is unavailable. Please try again.");
+    return neuspeh(pool, 502, "Payment provider is unavailable. Please try again.");
   }
-  try { return await odgovorNarocila(c2, oid); } finally { c2.release(); }
+  try { return await odgovorNarocila(c2, oid); } catch (e) { c2.release(e); c2 = null; throw e; } finally { if (c2) c2.release(); }
 }
 
 // Koda QR: podpisan JSON, da jo skener preveri tudi brez omrežja (opomba 3 v 002).
