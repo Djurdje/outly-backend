@@ -131,13 +131,29 @@ function idNarocilaIzSeje(seja) {
   return /^\d+$/.test(String(v || "")) ? Number(v) : null;
 }
 
+// Placilo za narocilo, ki ga ne smemo vknjiziti (preklicano/neuspelo, ali brez imetnika): kupec dobi VSE nazaj samodejno (razlog `inactive_order`, #190),
+// sicer samo alarm za rocno vracilo. Vrstica gre v vrsto v ISTI transakciji kot zapis webhooka (idempotentno: UNIQUE (order_id, razlog)).
+async function vrniNeaktivno(c, o, seja) {
+  const pi = typeof seja.payment_intent === "string" ? seja.payment_intent : (seja.payment_intent && seja.payment_intent.id) || null;
+  const znesek = Number.isInteger(seja.amount_total) ? seja.amount_total : 0;
+  if (pi && znesek > 0 && ["cancelled", "failed"].includes(o.status)) {
+    const v = await c.query(
+      `INSERT INTO vracila (order_id, event_id, razlog, znesek_cents, payment_intent_id, checkout_session_id, stripe_livemode)
+       VALUES ($1, $2, 'inactive_order', $3, $4, $5, $6) ON CONFLICT (order_id, razlog) DO NOTHING RETURNING id`,
+      [o.id, o.event_id, znesek, pi, seja.id, typeof seja.livemode === "boolean" ? seja.livemode : null]);
+    console.error(`[stripe] POZOR: placilo za neaktivno narocilo ${o.public_ref} (stanje ${o.status}, seja ${seja.id}): ${v.rows.length ? "vracilo v vrsti (samodejno)" : "vracilo je ze v vrsti"}.`);
+  } else {
+    console.error(`[stripe] POZOR: placilo za neaktivno narocilo ${o.public_ref} (stanje ${o.status}, seja ${seja.id}) - vrni rocno v Stripu.`);
+  }
+}
+
 // Placilo uspelo: pending -> paid, nastanejo vstopnice. Idempotentno (drugic ne naredi nicesar).
 // Vrne id narocila, ki je PRAVKAR postalo placano (sicer null): klicatelj po COMMIT-u sprozi stranske ucinke (mail gostu).
 async function zakljuci(c, seja) {
   const id = idNarocilaIzSeje(seja);
   if (!id) { console.error(`[stripe] seja ${seja.id} brez narocila`); return null; }
   const r = await c.query(
-    `SELECT id, public_ref, status, total_cents, currency, quantity, table_id, table_seats, event_id, stripe_checkout_session_id
+    `SELECT id, public_ref, status, total_cents, currency, quantity, table_id, table_seats, event_id, stripe_checkout_session_id, user_id, guest_email
        FROM orders WHERE id = $1 FOR UPDATE`, [id]);
   if (!r.rows.length) { console.error(`[stripe] seja ${seja.id}: narocila ${id} ni`); return null; }
   const o = r.rows[0];
@@ -149,18 +165,19 @@ async function zakljuci(c, seja) {
       // Placilo za ze preklicano/neuspelo narocilo (zaloga je bila sproscena). Ne vknjizimo ga (lahko bi presegli zalogo, vstopnic ni): kupec dobi VSE nazaj
       // po isti poti kot odpoved dogodka (vracila_stripe.js), razlog `inactive_order` (nasa napaka: Stripovo pristojbino nosi Outly, provizija se vrne, #190).
       // Vrstica gre v vrsto v ISTI transakciji kot zapis webhooka (idempotentno: UNIQUE (order_id, razlog)); obdelovalec jo opravi v ozadju.
-      const pi = typeof seja.payment_intent === "string" ? seja.payment_intent : (seja.payment_intent && seja.payment_intent.id) || null;
-      const znesek = Number.isInteger(seja.amount_total) ? seja.amount_total : 0;
-      if (pi && znesek > 0 && ["cancelled", "failed"].includes(o.status)) {
-        const v = await c.query(
-          `INSERT INTO vracila (order_id, event_id, razlog, znesek_cents, payment_intent_id, checkout_session_id, stripe_livemode)
-           VALUES ($1, $2, 'inactive_order', $3, $4, $5, $6) ON CONFLICT (order_id, razlog) DO NOTHING RETURNING id`,
-          [o.id, o.event_id, znesek, pi, seja.id, typeof seja.livemode === "boolean" ? seja.livemode : null]);
-        console.error(`[stripe] POZOR: placilo za neaktivno narocilo ${o.public_ref} (stanje ${o.status}, seja ${seja.id}): ${v.rows.length ? "vracilo v vrsti (samodejno)" : "vracilo je ze v vrsti"}.`);
-      } else {
-        console.error(`[stripe] POZOR: placilo za neaktivno narocilo ${o.public_ref} (stanje ${o.status}, seja ${seja.id}) - vrni rocno v Stripu.`);
-      }
+      await vrniNeaktivno(c, o, seja);
     }
+    return null;
+  }
+  // #276 S4: naroceno brez imetnika (user_id IN guest_email NULL: racun izbrisan med odprtim Checkoutom) ne sme postati placano: vstopnice bi bile brez lastnika,
+  // potrdila in maila ni. DELETE /me taka narocila ob izbrisu preklice, to je varovalo za tiste, ki so ze anonimizirana, in za tekmo z izbrisom.
+  // Narocilo -> cancelled (sprozilec sprosti zalogo), PI zapisan (webhook charge.refunded ga najde), kupec dobi vse nazaj (`inactive_order`, I37).
+  if (o.user_id === null && !o.guest_email) {
+    const pi0 = typeof seja.payment_intent === "string" ? seja.payment_intent : (seja.payment_intent && seja.payment_intent.id) || null;
+    await c.query(
+      `UPDATE orders SET status = 'cancelled', cancelled_at = NOW(), stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, $2),
+              stripe_checkout_session_id = COALESCE(stripe_checkout_session_id, $3) WHERE id = $1`, [o.id, pi0, seja.id]);
+    await vrniNeaktivno(c, { ...o, status: "cancelled" }, seja);
     return null;
   }
   if (seja.amount_total !== o.total_cents || String(seja.currency || "").toUpperCase() !== String(o.currency).toUpperCase()) {
@@ -176,6 +193,16 @@ async function zakljuci(c, seja) {
       WHERE id = $1`, [o.id, pi, seja.id]);
   const stevilo = o.table_id ? o.table_seats : o.quantity;
   await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [o.id, o.event_id, stevilo]);
+  // #276 S2: spor je lahko prisel PREJ kot `checkout.session.completed` (narocila po PaymentIntentu se ni bilo): vrstica v `spori` je brez order_id, vstopnice
+  // na vratih bi veljale. Zdaj ko je narocilo placano, spor povezemo z njim (sken ga bere po order_id; mail lastniku in povrnitev ob `lost` ujame obdelovalec).
+  if (pi) {
+    const sp = await c.query(
+      `UPDATE spori SET order_id = $1, posodobljen_at = NOW(),
+              povrnitev_stanje = CASE WHEN stanje = 'lost' AND povrnitev_stanje = 'rocno' AND povrnitev_napaka LIKE 'spor brez narocila%' THEN 'caka' ELSE povrnitev_stanje END,
+              povrnitev_napaka = CASE WHEN stanje = 'lost' AND povrnitev_stanje = 'rocno' AND povrnitev_napaka LIKE 'spor brez narocila%' THEN NULL ELSE povrnitev_napaka END
+        WHERE order_id IS NULL AND payment_intent_id = $2 RETURNING id`, [o.id, pi]);
+    if (sp.rows.length) console.error(`[spori] POZOR: spor ${sp.rows.map((x) => x.id).join(", ")} je prisel pred placilom, povezan z narocilom ${o.public_ref}.`);
+  }
   console.log(`[stripe] placano: narocilo ${o.public_ref}, ${stevilo} vstopnic`);
   return o.id;
 }
@@ -232,7 +259,22 @@ async function vracilo(c, charge) {
   const pi = typeof charge.payment_intent === "string" ? charge.payment_intent : (charge.payment_intent && charge.payment_intent.id);
   if (!pi) return;
   const r = await c.query("SELECT id, public_ref, total_cents, refunded_cents, status FROM orders WHERE stripe_payment_intent_id = $1 FOR UPDATE", [pi]);
-  if (!r.rows.length) return;
+  if (!r.rows.length) {
+    // #276 S2: PaymentIntent se zapise na narocilo sele v zakljuci() (checkout.session.completed). Ce je vracilo prislo PREJ (completed je padel/zamujen), bi ga tiho
+    // izgubili (dogodek bi bil zabelezen kot obdelan), narocilo pa bi pozneje postalo `paid` z veljavnimi vstopnicami, denar pa je vrnjen. Zato: naboj nosi
+    // metadata.order_id (PaymentIntent metadata se prekopira); ce to narocilo obstaja in se caka na placilo (`pending`), VRZI napako (transakcija se vrne, dogodek se NE zabelezi,
+    // Stripe ponavlja do 3 dni) - ob ponovitvi je narocilo ze `paid`. Vse ostalo (tuj PI, brez metadata, narocilo je ze preklicano/neuspelo) se ne bo nikoli ujemalo:
+    // zanemari, da ne nastanejo neskoncne ponovitve.
+    const oid = charge.metadata && /^\d+$/.test(String(charge.metadata.order_id || "")) ? Number(charge.metadata.order_id) : null;
+    const cakajoce = oid ? (await c.query("SELECT 1 FROM orders WHERE id = $1 AND status = 'pending'", [oid])).rows.length > 0 : false;
+    if (cakajoce) {
+      const e = new Error(`vracilo ${charge.id} je prislo pred placilom narocila ${oid}`);
+      e.ponovi = true;
+      throw e;
+    }
+    console.log(`[stripe] vracilo ${charge.id}: narocila za PaymentIntent ni${oid ? ` (metadata narocilo ${oid} ni v cakanju)` : " (brez metadata.order_id)"} - zanemarjeno`);
+    return;
+  }
   const o = r.rows[0];
   if (!["paid", "partially_refunded", "refunded"].includes(o.status)) return;
   const u = await uveljaviVracilo(c, o, Number(charge.amount_refunded) || 0, charge.id);
@@ -361,6 +403,7 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu }) {
       return res.json({ received: true });
     } catch (e) {
       await c.query("ROLLBACK").catch(() => {});
+      if (e && e.ponovi) { console.log(`[stripe] webhook ${d.type} ${d.id}: ${e.message} - Stripe ponovi`); return res.status(503).send("Try again."); }
       console.error(`[stripe] webhook ${d.type} ${d.id} ni uspel:`, e);
       return res.status(500).send("Webhook processing failed.");
     } finally { c.release(); }
