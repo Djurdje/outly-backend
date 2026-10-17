@@ -98,8 +98,8 @@ const PG_SKEN_CONNECT_TIMEOUT_MS = okoljeCelo("PG_SKEN_CONNECT_TIMEOUT_MS", 2500
 // jit_above_cost (100 000) prevaja LLVM ob VSAKEM klicu. Izmerjeno lokalno (klub s 50 000 narocili / 100 000 vstopnicami):
 // prodaja po dnevih v GET /business/sales (strosek ~195 000) jit=on 27 ms (od tega JIT 15 ms, nova povezava do 107 ms), jit=off 12-14 ms;
 // na Renderjevi bazi (0,1 CPU) vec kot 10-krat toliko. Nasih poizvedb (OLTP, kratke) JIT ne pospesi. Zagonski parameter
-// `options` ohrani PGOPTIONS okolja (testi). zdraviPool (/healthz) ga namenoma NIMA: pooler, ki bi zavrnil `options`, podre vse
-// ostale poole, /healthz pa ostane zelen -> to ujame GET /healthz/sken (Nadzor produkcije).
+// `options` ohrani PGOPTIONS okolja (testi). Ima ga tudi zdraviPool (/healthz): baza ali pooler (PgBouncer ipd.), ki zavrne `options`,
+// podre VSE poole; /healthz mora biti tedaj 503, da Render tak deploy zavrne in obdrzi staro instanco (pregled #271, S2).
 const PG_OPTIONS = [process.env.PGOPTIONS, "-c jit=off"].filter(Boolean).join(" ");
 function novPool(max, connectMs, dodatno = {}) {
   const p = new Pool({
@@ -148,18 +148,25 @@ const PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS = okoljeCelo("PG_SKEN_SEZNAM_STATEMENT
 // visela za vedno, po PG_SKEN_POOL_MAX takih bi sken dobival 503 do restarta (zastoj, /healthz po 60 s). Ob izteku pg poizvedbo
 // zavrne z "Query read timeout" (jeNapakaPovezave -> 503 + Retry-After), pool.query povezavo UNICI (release(err)), skenBranje tudi.
 // Rok mora biti VECJI od najvecje streznisko meje skenPool (scan-list 10 s prek SET LOCAL), da ne prekine zakonite poizvedbe:
-// najmanj ta meja + 2 s (tudi ce je v okolju nastavljeno manj). 0 = izklop.
+// najmanj ta meja + 2 s (tudi ce je v okolju nastavljeno manj). 0 = izklop. Ob PG_SKEN_STATEMENT_TIMEOUT_MS=0 je to edina meja stavka.
 const PG_SKEN_QUERY_TIMEOUT_MS = (() => {
   const v = okoljeCelo("PG_SKEN_QUERY_TIMEOUT_MS", 12000, 0, 120000);
   if (v === 0) return 0;
   return Math.max(v, Math.max(PG_SKEN_STATEMENT_TIMEOUT_MS, PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS) + 2000);
 })();
+// Streznisko varovalo za polodprt TCP sredi transakcije (pregled #271, S1): query_timeout odjemalca povezavo zavrze, baza pa o tem
+// ne izve in seja skenBranje (REPEATABLE READ) ostane `idle in transaction` z AccessShareLock na tickets/orders in starim xmin do TCP
+// keepalive (ure) -> migracija z ACCESS EXCLUSIVE ob naslednjem deployu obvisi. idle_in_transaction_session_timeout tako sejo
+// zapre na strezniku. Transakcije skenPool med stavki ne mirujejo (BEGIN+SET v enem Query, en stavek, COMMIT), zato 15 s nikoli
+// ne prekine zakonitega dela. 0 = izklop.
+const PG_SKEN_IDLE_TX_TIMEOUT_MS = okoljeCelo("PG_SKEN_IDLE_TX_TIMEOUT_MS", 15000, 0, 600000);
 const skenPool = novPool(PG_SKEN_POOL_MAX, PG_SKEN_CONNECT_TIMEOUT_MS, {
   lock_timeout: PG_SKEN_LOCK_TIMEOUT_MS, statement_timeout: PG_SKEN_STATEMENT_TIMEOUT_MS,
   query_timeout: PG_SKEN_QUERY_TIMEOUT_MS || undefined,
+  idle_in_transaction_session_timeout: PG_SKEN_IDLE_TX_TIMEOUT_MS || undefined,
 });
 console.log(`[skenPool] max ${PG_SKEN_POOL_MAX}, lock_timeout ${PG_SKEN_LOCK_TIMEOUT_MS} ms, statement_timeout ${PG_SKEN_STATEMENT_TIMEOUT_MS} ms, ` +
-  `scan-list ${PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS} ms, query_timeout ${PG_SKEN_QUERY_TIMEOUT_MS} ms, jit=off`);
+  `scan-list ${PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS} ms, query_timeout ${PG_SKEN_QUERY_TIMEOUT_MS} ms, idle_in_transaction ${PG_SKEN_IDLE_TX_TIMEOUT_MS} ms, jit=off`);
 // Meja seznama nikoli ni nizja od obicajne meje stavka skenPool; 0 = brez SET LOCAL (velja meja povezave).
 const SKEN_SEZNAM_MEJA_MS = PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS > 0 && PG_SKEN_STATEMENT_TIMEOUT_MS > 0
   ? Math.max(PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS, PG_SKEN_STATEMENT_TIMEOUT_MS) : PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS;
@@ -198,7 +205,8 @@ let skenSeznamovTece = 0;
 // `query_timeout` je ODJEMALSKI rok: ce povezava obvisi (polodprt TCP, baza je ne zapre), `statement_timeout` na strezniku
 // nikoli ne steče; ob izteku pg poizvedbo zavrne, pool.query pa povezavo UNICI (release(err)), zato naslednji klic dobi novo.
 // Brez tega bi edina povezava obvisela za vedno in /healthz bi ostal 503 tudi po okrevanju (pregled PR #127).
-const zdraviPool = novPool(1, 2000, { statement_timeout: 2500, query_timeout: 2500, idleTimeoutMillis: 30000, options: undefined });   // brez jit=off: glej PG_OPTIONS (undefined = PGOPTIONS okolja, kot prej)
+// Isti zagonski `options` kot ostali pooli (PG_OPTIONS): /healthz tako preveri tudi, da baza parametre povezave SPREJME.
+const zdraviPool = novPool(1, 2000, { statement_timeout: 2500, query_timeout: 2500, idleTimeoutMillis: 30000 });
 
 // ZASTOJ poola (puscanje povezav, obvisele transakcije) JE nezdrava instanca: restart ga popravi. PREOBREMENITEV ni: ob dolgem
 // navalu pool normalno krozi (povezave se ves cas vracajo), cakalna vrsta je lahko vseskozi neprazna - restart sredi navala
@@ -1134,9 +1142,10 @@ app.get("/healthz", async (req, res) => {
   }
 });
 
-// GET /healthz/sken (#265): ali povezave skenPool delujejo (sken na vratih). /healthz gre prek zdraviPool BREZ zagonskih `options`,
-// zato ostane zelen, tudi ce baza ali pooler (PgBouncer ipd.) zavrne `-c jit=off` in pade VSAK sken (503). To pot preveri Nadzor
-// produkcije po deployu. Brez avtentikacije in brez podatkov v odgovoru ({ ok }). Ni Renderjev Health Check (ta ostane /healthz).
+// GET /healthz/sken (#265): ali povezave skenPool (sken na vratih) delujejo: ima svoje zagonske meje (lock/statement/idle timeout),
+// ki jih /healthz (zdraviPool) ne preveri, in svoj zastoj/izcrpanje povezav. Namenjena Nadzoru produkcije (preverbo dodaja PR #272;
+// dokler ni mergan, je pot samo za rocno preverbo po deployu). Brez avtentikacije, brez podatkov v odgovoru ({ ok }). Ni Renderjev
+// Health Check (ta ostane /healthz).
 // Zloraba ne sme izcrpati skenPool: v procesu tece najvec ENA preverba (SELECT 1) naenkrat, rezultat velja 1 s (vsi klici v tem
 // casu dobijo zadnji rezultat brez baze). Obvisela preverba drzi najvec eno povezavo, dokler je ne sprosti query_timeout skenPool;
 // medtem nova preverba ne zacne (klici po 3 s dobijo 503). Torej: najvec 1 povezava skenPool in najvec ~1 SELECT 1 na sekundo.

@@ -7,10 +7,13 @@
  *   H1  GET /healthz/sken brez zetona: 200 { ok: true } (samo `ok`), Cache-Control no-store; povezave skenPool imajo jit=off.
  *   H2  baza nedosegljiva: 503 { ok: false } v < 5 s, proces tece.
  *   H3  zloraba: 60 hkratnih + 60 zaporednih klicev -> baza dobi najvec nekaj SELECT 1 (ena preverba naenkrat, rezultat velja 1 s).
- *   H4  pooler zavrne zagonski parameter `options` (posrednik posnema PgBouncer): /healthz 200, /healthz/sken 503, glavni pool 5xx.
+ *   H4  pooler zavrne zagonski parameter `options` (posrednik posnema PgBouncer): /healthz 503 (Render deploy zavrne), /healthz/sken 503;
+ *       vse povezave backenda (tudi zdraviPool) posljejo -c jit=off.
  *   Q1  polodprt TCP (posrednik neha posredovati, povezava ostane odprta) na IZPOSOJENI povezavi skenPool:
  *       sken (POST /business/tickets/scan) dobi 503 + Retry-After v roku query_timeout (ne visi), po okrevanju omrezja spet dela
  *       (obvisela povezava je zavrzena, ne vrnjena v pool). Na kodi brez query_timeout sken visi in skenPool (max 1) ostane mrtev.
+ *   Q3  polodprt TCP sredi transakcije scan-list: seja v bazi `idle in transaction` se zapre sama (idle_in_transaction_session_timeout),
+ *       zaklepi na tickets/orders se sprostijo; na kodi brez te meje seja ostane odprta.
  *   Q2  query_timeout ni nikoli ozji od najvecje streznisko meje skenPool + 2 s (scan-list ne sme pasti zaradi odjemalskega roka).
  */
 const crypto = require("crypto");
@@ -66,7 +69,7 @@ async function klic(port, method, pot, token, body, rokMs = 15000) {
 // `zavrniOptions` posnema pooler (PgBouncer brez ignore_startup_parameters): zagonski paket s parametrom `options` zavrne s FATAL.
 // Steje stavke "SELECT 1" (protokol v3: 'Q' preprost stavek, 'P' Parse), ki jih backend poslje bazi.
 function posrednik() {
-  const st = { zamrznjeno: false, zavrniOptions: false, select1: 0, zavrnjenih: 0 };
+  const st = { zamrznjeno: false, zavrniOptions: false, zamrzniPoBegin: false, select1: 0, zavrnjenih: 0, zagoni: [] };
   const srvP = net.createServer((odj) => {
     const u = new URL(DB);
     const gor = net.connect(Number(u.port) || 5432, u.hostname);
@@ -79,6 +82,7 @@ function posrednik() {
         const n = buf.readInt32BE(0);
         const deli = buf.subarray(8, n).toString("utf8").split("\0"); const par = {};
         for (let i = 0; i + 1 < deli.length; i += 2) if (deli[i]) par[deli[i]] = deli[i + 1];
+        st.zagoni.push(par);
         if (st.zavrniOptions && par.options) {
           st.zavrnjenih++;
           const polja = Buffer.from("SFATAL\0C08P01\0Munsupported startup parameter: options\0\0", "utf8");
@@ -90,7 +94,10 @@ function posrednik() {
       for (;;) {
         if (buf.length < 5) break;
         const n = buf.readInt32BE(1); if (buf.length < n + 1) break;
-        if ((buf[0] === 0x51 || buf[0] === 0x50) && /SELECT 1(\0|$)/.test(buf.subarray(5, n + 1).toString("utf8"))) st.select1++;
+        const stavek = buf.subarray(5, n + 1).toString("utf8");
+        if ((buf[0] === 0x51 || buf[0] === 0x50) && /SELECT 1(\0|$)/.test(stavek)) st.select1++;
+        // Polodprt TCP SREDI transakcije: BEGIN (skenBranje) baza se dobi, vse za njim (in odgovor) izgine.
+        if (st.zamrzniPoBegin && buf[0] === 0x51 && stavek.startsWith("BEGIN ISOLATION LEVEL REPEATABLE READ")) st.zamrznjeno = true;
         buf = buf.subarray(n + 1);
       }
     });
@@ -116,7 +123,7 @@ function posrednik() {
     assert(r.status === 200, "GET /healthz/sken brez zetona -> 200", r);
     assert(r.body && r.body.ok === true && Object.keys(r.body).join() === "ok", "telo je samo { ok: true } (brez podatkov)", r.body);
     assert(r.cache === "no-store", "Cache-Control: no-store", r.cache);
-    assert(/\[skenPool\] .*query_timeout 12000 ms, jit=off/.test(b.log()), "zagon izpise query_timeout 12000 ms (privzeto) in jit=off", b.log().split("\n").find((l) => l.includes("[skenPool]")));
+    assert(/\[skenPool\] .*query_timeout 12000 ms, idle_in_transaction 15000 ms, jit=off/.test(b.log()), "zagon izpise query_timeout 12000 ms, idle_in_transaction 15000 ms (privzeto) in jit=off", b.log().split("\n").find((l) => l.includes("[skenPool]")));
   } finally { await b.ustavi(); }
 
   // ---------------------------------------------------------------- Q2
@@ -158,18 +165,17 @@ function posrednik() {
   } finally { await b.ustavi(); pp.zapri(); }
 
   // ---------------------------------------------------------------- H4
-  console.log("\n# H4: pooler zavrne zagonski parameter options -> /healthz ostane 200, /healthz/sken 503");
+  console.log("\n# H4: baza/pooler zavrne zagonski parameter options -> /healthz 503 (Render deploy zavrne), /healthz/sken 503");
   pp = await posrednik();
   pp.st.zavrniOptions = true;
   b = await zazeni(3496, pp.url, { PGOPTIONS: "" });
   try {
     const h = await klic(3496, "GET", "/healthz");
     const s = await klic(3496, "GET", "/healthz/sken");
-    assert(h.status === 200, "/healthz (zdraviPool brez options) -> 200: Render health check tega NE vidi", h);
-    assert(s.status === 503 && s.body && s.body.ok === false, "/healthz/sken -> 503 { ok: false }: Nadzor to ujame", s);
-    assert(pp.st.zavrnjenih >= 1, `posrednik je zavrnil povezavo z options (${pp.st.zavrnjenih})`);
-    const g = await klic(3496, "GET", "/events");
-    assert(g.status >= 500, `glavni pool (jit=off v options) pade enako (GET /events ${g.status})`, g.status);
+    assert(h.status === 503 && h.body && h.body.ok === false, "/healthz -> 503: zdraviPool ima iste options, Render instance ne spusti v promet", h);
+    assert(s.status === 503 && s.body && s.body.ok === false, "/healthz/sken -> 503 { ok: false }", s);
+    assert(pp.st.zavrnjenih >= 2, `posrednik je zavrnil povezave z options (${pp.st.zavrnjenih})`);
+    assert(pp.st.zagoni.every((z) => /-c jit=off/.test(z.options || "")), "VSE povezave backenda (tudi zdraviPool) posljejo -c jit=off", pp.st.zagoni.map((z) => z.options));
   } finally { await b.ustavi(); pp.zapri(); }
 
   // ---------------------------------------------------------------- Q1
@@ -200,6 +206,41 @@ function posrednik() {
     const h = await klic(3497, "GET", "/healthz/sken");
     assert(h.status === 200, "po okrevanju /healthz/sken 200", h);
     assert(/query read timeout/i.test(b.log()), "dnevnik: Query read timeout", b.log().slice(-600));
+  } finally { await b.ustavi(); pp.zapri(); }
+
+  // ---------------------------------------------------------------- Q3
+  console.log("\n# Q3: polodprt TCP sredi transakcije scan-list -> baza sejo `idle in transaction` sama zapre (zaklepi se sprostijo)");
+  // Brez idle_in_transaction_session_timeout seja drzi AccessShareLock na tickets/orders do TCP keepalive (ure) in naslednja
+  // migracija (ACCESS EXCLUSIVE) obvisi. Rok 1000 ms za hiter test.
+  const IDLE = 1000;
+  pp = await posrednik();
+  b = await zazeni(3498, pp.url, { PG_SKEN_IDLE_TX_TIMEOUT_MS: process.env.TEST_SKEN_IDLE_TX_TIMEOUT_MS || String(IDLE) });
+  try {
+    const T = zeton("lastnik@outly.si", "00000000-0000-4000-8000-000000000001");
+    let r = await klic(3498, "GET", "/me", T);
+    assert(r.status === 200, "GET /me", r);
+    await pool.query("UPDATE users SET role='business' WHERE email='lastnik@outly.si'");
+    await pool.query("INSERT INTO clubs (owner_user_id, name, city) VALUES ((SELECT id FROM users WHERE email='lastnik@outly.si'), 'Zdravje Klub', 'Ljubljana')");
+    const ev = (await pool.query("INSERT INTO events (club_id, title, start_at, ticket_price_cents, capacity, min_age, status) VALUES ((SELECT max(id) FROM clubs), 'Q3', NOW() + INTERVAL '1 day', 0, 10, 0, 'published') RETURNING id")).rows[0].id;
+    r = await klic(3498, "GET", `/business/events/${ev}/scan-list`, T);
+    assert(r.status === 200, "scan-list pred zamrznitvijo -> 200", r.status);
+    const skenZagon = pp.st.zagoni.find((z) => z.lock_timeout);
+    assert(skenZagon && skenZagon.idle_in_transaction_session_timeout === String(IDLE), "zagonski paket skenPool nosi idle_in_transaction_session_timeout", skenZagon);
+    pp.st.zamrzniPoBegin = true;
+    const visi = klic(3498, "GET", `/business/events/${ev}/scan-list`, T, null, 20000);
+    const sejeVTx = async () => (await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE state = 'idle in transaction' AND query LIKE 'BEGIN ISOLATION LEVEL REPEATABLE READ%'")).rows[0].n;
+    let videna = false;
+    for (const konec = Date.now() + 5000; Date.now() < konec;) { if (await sejeVTx() > 0) { videna = true; break; } await spi(50); }
+    assert(videna, "seja skenBranje je v bazi `idle in transaction` (odjemalec je ne vidi vec)");
+    const t0 = Date.now(); let zaprta = false;
+    for (const konec = Date.now() + IDLE + 5000; Date.now() < konec;) { if (await sejeVTx() === 0) { zaprta = true; break; } await spi(100); }
+    assert(videna && zaprta, `baza je sejo zaprla sama (po ${Date.now() - t0} ms, rok ${IDLE} ms)`);
+    const z = await visi;
+    assert(z.status === 503, "obviseli scan-list -> 503 (query_timeout), ne visi", z);
+    pp.st.zamrznjeno = false; pp.st.zamrzniPoBegin = false;
+    let r2 = null;
+    for (let i = 0; i < 10; i++) { r2 = await klic(3498, "GET", `/business/events/${ev}/scan-list`, T, null, 8000); if (r2.status === 200) break; await spi(300); }
+    assert(r2 && r2.status === 200, "po okrevanju scan-list spet 200", r2 && r2.status);
   } finally { await b.ustavi(); pp.zapri(); }
 
   console.log(`\n${ok} ok, ${fail} napak`);
