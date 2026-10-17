@@ -35,8 +35,9 @@ function zeton(email, sub) {
 function uuid(n) { return `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`; }
 let ok = 0, fail = 0;
 function assert(cond, msg, extra) { if (cond) { ok++; console.log("  ✓", msg); } else { fail++; console.log("  ✗", msg, extra !== undefined ? JSON.stringify(extra) : ""); } }
+let xff = 0;   // omejevalnik prenosov (30/h/IP): vsak zahtevek z druge »IP« (trust proxy 1), sicer test sam sebe omeji
 async function api(method, path, token, body) {
-  const r = await fetch(BASE + path, { method, headers: { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(BASE + path, { method, headers: { "content-type": "application/json", "x-forwarded-for": `10.8.${Math.floor(++xff / 250)}.${xff % 250 + 1}`, ...(token ? { authorization: "Bearer " + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
   const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = t; }
   return { status: r.status, body: j };
 }
@@ -342,6 +343,7 @@ async function api(method, path, token, body) {
   await pool.query("UPDATE spori SET stanje='lost' WHERE id='dp_t278'");
   r = await api("POST", `/tickets/${vSpor3}/transfer`, T.ana, { user_id: idCenePr });
   assert(r.status === 409 && r.body.result === "payment_disputed", "izgubljen spor: prenos 409", r);
+  assert(await mojeTransferable(vSpor3) === false, "izgubljen spor (lost): transferable false");
   await pool.query("UPDATE spori SET stanje='won' WHERE id='dp_t278'");
   assert(await mojeTransferable(vSpor1) === true, "zakljucen spor (won): transferable spet true");
   r = await api("POST", `/tickets/${vSpor1}/transfer`, T.ana, { user_id: idCenePr });

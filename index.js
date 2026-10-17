@@ -6578,8 +6578,8 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     if (t.status === "used") { await c.query("ROLLBACK"); return res.status(409).send("Ticket was already used."); }
     if (t.status !== "valid") { await c.query("ROLLBACK"); return res.status(409).send(`Ticket is ${t.status}.`); }
     if (new Date(t.start_at).getTime() <= Date.now()) { await c.query("ROLLBACK"); return res.status(409).send("Event has already started."); }
-    // Spor (chargeback, #278): vstopnica s sporom na vratih ne velja (sken: payment_disputed), zato je tudi prenos (prijatelju ali gostu) zavrnjen -
-    // sicer bi se vstopnica z novim serialom »oprala« in bi jo prejemnik kupil/dobil, na vratih pa bi bila neveljavna. Ista koda in besedilo kot pri skenu.
+    // Spor (chargeback, #278): vstopnica s sporom na vratih ne velja (sken: payment_disputed); prejemnik (prijatelj ali gost) ne sme dobiti
+    // vstopnice, ki je ob prihodu neveljavna. Ista koda in besedilo kot pri skenu.
     if (t.payment_disputed) { await c.query("ROLLBACK"); return res.status(409).json({ error: "payment_disputed", result: "payment_disputed", message: "The payment for this ticket is disputed (chargeback). It can't be transferred." }); }
 
     // Starost: vstopnica mize s paketom pijace ima mejo najmanj 18 (#102), pri strozji meji dogodka velja ta.
