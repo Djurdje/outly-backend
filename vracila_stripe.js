@@ -44,6 +44,9 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   const ZAMIK_S = celo("VRACILA_ZAMIK_S", 60, 0, 86400);              // odlog zacetka vracil po odpovedi (zmota lastnika: dogodek se obnovi, preden steče denar)
   const SWEEP_MS = celo("VRACILA_SWEEP_MS", 60000, 0, 3600000);
   const POTRDITEV_MS = celo("VRACILA_POTRDITEV_MS", 3600000, 100, 86400000);   // kako pogosto tek sprasuje Stripe po vracilih v stanju `potrditev`
+  const PREVERB_NA_TEK = celo("VRACILA_PREVERB_NA_TEK", 5, 1, 100);   // najvec preverb Stripa pred mailom ni_izvedeno na en tek (tek ne sme stati)
+  const PREVERBA_ROK_MS = celo("VRACILA_PREVERBA_ROK_MS", 4000, 100, 30000);   // rok enega klica te preverbe (brez ponovitev)
+  let preverbTek = 0;
   const PRORACUN_MS = 45000;                                           // najdlje en tek (potem mail in nov tek)
   const ZASTARELO_MIN = 10;                                            // prevzeto vracilo brez zakljucka (proces ugasnjen) se vrne v vrsto
 
@@ -122,16 +125,24 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   }
 
   // Zakljucek vrstice (stanje `opravljeno`) + lokalno stanje v ENI transakciji.
-  async function opravi(v, znesek, opomba, brezStripa) {   // brezStripa: samo stanje (0 EUR, testni nacin)
-    await vTransakciji(async (c) => {
+  // samoIzStanj: zapri SAMO, ce je vrstica (zaklenjena v isti transakciji) se v enem od teh stanj; sicer nic in vrne false.
+  async function opravi(v, znesek, opomba, brezStripa, samoIzStanj) {   // brezStripa: samo stanje (0 EUR, testni nacin)
+    const ok = await vTransakciji(async (c) => {
       const o = (await c.query("SELECT id, public_ref, total_cents, refunded_cents, status FROM orders WHERE id = $1 FOR UPDATE", [v.order_id])).rows[0];
+      if (samoIzStanj) {
+        const z = await c.query("SELECT 1 FROM vracila WHERE id = $1 AND stanje = ANY($2::text[]) FOR UPDATE", [v.id, samoIzStanj]);
+        if (!z.rowCount) return false;
+      }
       if (v.razlog === "event_cancelled" && o && ["paid", "partially_refunded", "refunded"].includes(o.status)) await placila.uveljaviVracilo(c, o, o.total_cents, null);
       await c.query(
-        `UPDATE vracila SET stanje = 'opravljeno', opravljeno_at = NOW(), napaka = $2, znesek_cents = $3, brez_stripa = $4 WHERE id = $1`,
+        `UPDATE vracila SET stanje = 'opravljeno', opravljeno_at = NOW(), napaka = $2, znesek_cents = $3, brez_stripa = $4${samoIzStanj ? ", ni_izvedeno_od_at = NULL" : ""} WHERE id = $1`,
         [v.id, opomba || null, znesek, !!brezStripa]);
+      return true;
     });
+    if (!ok) return false;
     console.log(`[vracila] opravljeno: narocilo ${v.public_ref} (${v.razlog}), ${znesek} c${brezStripa ? ", brez Stripa" : ""}${opomba ? " [" + opomba + "]" : ""}`);
     if (naKoncano) { try { Promise.resolve(naKoncano(v.id)).catch((e) => console.error("[vracila] obvestilo:", e && e.message)); } catch (e) { console.error("[vracila] obvestilo:", e && e.message); } }
+    return true;
   }
 
   // Stripov napaka: trajna (ponovitev ne pomaga) ali prehodna (omrezje, 5xx, omejitev hitrosti).
@@ -475,6 +486,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   async function tek() {
     if (tece) return;
     tece = true;
+    preverbTek = 0;
     try {
       await pomeni();
       await sprostiZastarele();
@@ -499,10 +511,15 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
 
   // Tik PRED mailom kupcu `ni_izvedeno` (#251, pregled PR #261): je kupec denar medtem vseeno dobil? Po alarmu »vrni rocno v Stripu« admin vrne v Stripovi
   // nadzorni plosci (novo vracilo brez nasega metadata.vracilo_id, uskladiVracilo ga ne poveze), vrstica pa ostane ni_uspelo/failed.
-  // Vsota USPELIH vracil (succeeded) na PaymentIntentu >= placano (event_cancelled: total narocila; inactive_order: znesek vrstice) -> vrstico zapremo kot
-  // rocno vrnjeno (ista pot kot rocnoVrnjeno v izvedi(): opravi(... 'rocno_vrnjeno_v_stripu'), kupec dobi »vrnili smo«) in maila `ni_izvedeno` NE posljemo.
-  // Vrne: 'poslji' (kupec res ni vrnjen) | 'vrnjeno' (vrstica zaprta) | 'ne' (trajno ne posiljaj: brez kljuca, drug nacin I36, testno, vrstica ni vec v stanju)
-  //       | 'preskoci' (vrstica medtem ni vec v ni_uspelo/rocno) | 'neznano' (Stripe ni dosegljiv / napaka: ta obhod NE posiljaj, poskusi pozneje; raje zamuda kot napacen mail).
+  // Vsota USPELIH vracil (succeeded) na PaymentIntentu >= placano (event_cancelled: znesek NABOJA, ne total_cents; inactive_order: znesek vrstice) -> vrstico
+  // zapremo kot rocno vrnjeno (ista pot kot rocnoVrnjeno v izvedi(): opravi(... 'rocno_vrnjeno_v_stripu'), kupec dobi »vrnili smo«), maila `ni_izvedeno` NE posljemo.
+  // Uspela + na poti (pending/requires_action) >= placano -> 'neznano' (pocakaj na izid). Delno rocno vracilo -> 'poslji' (kupec res ni dobil vsega).
+  // Vrne: 'poslji' | 'vrnjeno' (vrstica zaprta) | 'ne' (trajno ne posiljaj: drug nacin I36, testno, brez PI, trajna Stripova napaka 4xx)
+  //       | 'preskoci' (vrstica ni vec v ni_uspelo/rocno) | 'neznano' (brez kljuca, Stripe ni dosegljiv, vracilo na poti: ta obhod NE posiljaj, poskusi pozneje).
+  // Ne sme blokirati obdelovalca (tek() caka nanj, vmes ne tecejo prevzemi/preveriPotrditve): kratek rok klica, brez ponovitev, najvec PREVERB_NA_TEK na tek.
+  const STRIPE_PREVERBA = { timeout: PREVERBA_ROK_MS, maxNetworkRetries: 0 };
+  let zadnjiBrezKljuca = 0;
+  const preverbaNaVoljo = () => preverbTek < PREVERB_NA_TEK;
   async function kupecVrnjenPredMailom(id) {
     const r = await pool.query(
       `SELECT v.*, o.public_ref, o.total_cents, o.stripe_payment_intent_id AS o_pi, o.stripe_checkout_session_id AS o_seja
@@ -510,21 +527,51 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     const v = r.rows[0];
     if (!v || !["ni_uspelo", "rocno"].includes(v.stanje)) return "preskoci";   // vrstica je medtem drugje (retry, webhook): mail ne velja vec, poskusov ne zakljenemo
     const pi = v.payment_intent_id || v.o_pi || null;
+    if (!pi || /^test_/.test(pi)) {
+      if (!pi) console.error(`[vracila] POZOR: narocilo ${v.public_ref} (vracilo ${id}): brez PaymentIntenta, mail »vracilo se ni izvedeno« NI poslan; obvesti kupca rocno.`);
+      return "ne";
+    }
     const s = placila.stripe();
-    if (!pi || /^test_/.test(pi) || !s) return "ne";
+    if (!s) {   // kljuc lahko manjka zacasno (nastavitev okolja): ne zakleni poskusov, poskusi pozneje
+      if (Date.now() - zadnjiBrezKljuca > 600000) { zadnjiBrezKljuca = Date.now(); console.error(`[vracila] POZOR: STRIPE_SECRET_KEY manjka: mail »vracilo se ni izvedeno« (npr. vracilo ${id}, narocilo ${v.public_ref}) je odlozen, dokler kljuca ni.`); }
+      return "neznano";
+    }
     const seja = v.checkout_session_id || v.o_seja || "";
     const jeTestno = /^cs_test_/.test(seja) || v.stripe_livemode === false, jeZivo = /^cs_live_/.test(seja) || v.stripe_livemode === true;
-    if ((placila.jeLive() && jeTestno) || (!placila.jeLive() && jeZivo)) return "ne";   // I36: nikoli klic Stripa z napacnim kljucem
-    let sez;
-    try { sez = await s.refunds.list({ payment_intent: pi, limit: 100 }); }
-    catch (e) { console.error(`[vracila] preverba pred mailom ni_izvedeno (vracilo ${id}): Stripe ni odgovoril (${kratko(e)}), mail odlozen`); return "neznano"; }
-    const vrnjeno = (sez.data || []).filter((x) => x.status === "succeeded").reduce((a, x) => a + (Number(x.amount) || 0), 0);
-    const placano = v.razlog === "event_cancelled" ? v.total_cents : (v.znesek_cents || 0);
-    if (placano <= 0 || vrnjeno < placano) return "poslji";
-    const z = await pool.query("UPDATE vracila SET ni_izvedeno_od_at = NULL WHERE id = $1 AND stanje IN ('ni_uspelo', 'rocno') RETURNING id", [id]);
-    if (!z.rowCount) return "preskoci";
-    console.error(`[vracila] POZOR: narocilo ${v.public_ref}: nase vracilo je Stripe zavrnil, a je placilo v Stripu ze v celoti vrnjeno (${vrnjeno} c, rocno vracilo v nadzorni plosci): vrstica zaprta kot rocno_vrnjeno_v_stripu, mail »se ni izvedeno« NI poslan; vracilo provizije klubu preveri rocno.`);
-    await opravi(v, v.znesek_cents !== null && v.znesek_cents !== undefined ? v.znesek_cents : vrnjeno, "rocno_vrnjeno_v_stripu", false);
+    if ((placila.jeLive() && jeTestno) || (!placila.jeLive() && jeZivo)) {   // I36: nikoli klic Stripa z napacnim kljucem
+      console.error(`[vracila] POZOR: narocilo ${v.public_ref} (vracilo ${id}) je iz drugega nacina Stripa (I36): izida ni mogoce preveriti, mail »vracilo se ni izvedeno« NI poslan; preveri in obvesti kupca rocno.`);
+      return "ne";
+    }
+    preverbTek++;
+    let sez, placano;
+    try {
+      sez = await s.refunds.list({ payment_intent: pi, limit: 100 }, STRIPE_PREVERBA);
+      const vsota = (st) => (sez.data || []).filter((x) => st.includes(x.status)).reduce((a, x) => a + (Number(x.amount) || 0), 0);
+      const uspelo = vsota(["succeeded"]), naPoti = vsota(["pending", "requires_action"]);
+      if (uspelo + naPoti <= 0) return "poslji";
+      if (v.razlog === "event_cancelled" || v.znesek_cents === null || v.znesek_cents === undefined) {
+        const p = await s.paymentIntents.retrieve(pi, { expand: ["latest_charge"] }, STRIPE_PREVERBA);
+        const ch = p.latest_charge && typeof p.latest_charge === "object" ? p.latest_charge : null;
+        placano = ch ? Number(ch.amount) || 0 : Number(p.amount_received) || 0;
+      } else placano = v.znesek_cents;
+      if (placano <= 0) return "poslji";
+      if (uspelo < placano) {
+        if (uspelo + naPoti >= placano) { console.log(`[vracila] vracilo ${id}: v Stripu je vracilo na poti (${naPoti} c), mail ni_izvedeno odlozen`); return "neznano"; }
+        return "poslji";
+      }
+      v._vrnjeno = uspelo;
+    } catch (e) {
+      const st = Number(e && e.statusCode) || 0;
+      if (jeTrajna(e) || (st >= 400 && st < 500 && st !== 429)) {
+        console.error(`[vracila] POZOR: preverba pred mailom ni_izvedeno (vracilo ${id}, narocilo ${v.public_ref}): trajna Stripova napaka (${kratko(e)}); mail NI poslan, preveri v Stripu in obvesti kupca rocno.`);
+        return "ne";
+      }
+      console.error(`[vracila] preverba pred mailom ni_izvedeno (vracilo ${id}): Stripe ni odgovoril (${kratko(e)}), mail odlozen`);
+      return "neznano";
+    }
+    const zaprto = await opravi(v, v.znesek_cents !== null && v.znesek_cents !== undefined ? v.znesek_cents : v._vrnjeno, "rocno_vrnjeno_v_stripu", false, ["ni_uspelo", "rocno"]);
+    if (!zaprto) return "preskoci";
+    console.error(`[vracila] POZOR: narocilo ${v.public_ref}: nase vracilo je Stripe zavrnil, a je placilo v Stripu ze v celoti vrnjeno (${v._vrnjeno} c, rocno vracilo v nadzorni plosci): vrstica zaprta kot rocno_vrnjeno_v_stripu, mail »se ni izvedeno« NI poslan; vracilo provizije klubu preveri rocno.`);
     return "vrnjeno";
   }
 
@@ -560,7 +607,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     return u.rowCount > 0;
   }
 
-  return { vrstiZaDogodek, pomeni, tek, zazeni, zbudi, ponovi, ponoviSpor, uskladiVracilo, kupecVrnjenPredMailom };
+  return { vrstiZaDogodek, pomeni, tek, zazeni, zbudi, ponovi, ponoviSpor, uskladiVracilo, kupecVrnjenPredMailom, preverbaNaVoljo };
 }
 
 module.exports = { ustvari };

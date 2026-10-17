@@ -5835,6 +5835,7 @@ async function posljiVraciloKupcu(vid, vrsta) {
   const m = VRACILO_MAIL[vrsta];
   const kljuc = `${vid}:${vrsta}`;
   if (vraciloMailVTeku.has(kljuc)) return false;
+  if (vrsta === "ni_izvedeno" && !vracilaStripe.preverbaNaVoljo()) return false;   // preverba pri Stripu je omejena na tek: ostale v naslednjem teku (brez claima)
   vraciloMailVTeku.add(kljuc);
   try {
     const k = await pool.query(
@@ -5858,7 +5859,8 @@ async function posljiVraciloKupcu(vid, vrsta) {
     const zn = v.znesek_cents !== null && v.znesek_cents !== undefined ? v.znesek_cents : Math.max(0, o.total_cents - (o.refunded_cents || 0));
     if (vrsta === "ni_izvedeno") {   // je kupec medtem vseeno dobil denar (rocno vracilo v Stripovi plosci)? Raje zamuda kot napacen mail.
       const izid = await vracilaStripe.kupecVrnjenPredMailom(vid);
-      if (izid === "neznano") { await pool.query(`UPDATE vracila SET ${m.poskusi} = GREATEST(${m.poskusi} - 1, 0) WHERE id = $1 AND ${m.poslano} IS NULL`, [vid]); return false; }   // claim sprosti, poskusi pozneje
+      // claim sprosti brez porabe poskusa, a NE pod 1: premor GOST_POSTA_PREMORI[1] (2 min) od prevzema, ne klic Stripa vsak tek
+      if (izid === "neznano") { await pool.query(`UPDATE vracila SET ${m.poskusi} = GREATEST(${m.poskusi} - 1, 1) WHERE id = $1 AND ${m.poslano} IS NULL`, [vid]); return false; }
       if (izid !== "poslji") {
         if (izid === "ne") await pool.query(`UPDATE vracila SET ${m.poskusi} = $2 WHERE id = $1 AND ${m.poslano} IS NULL`, [vid, GOST_POSTA_POSKUSOV]);   // trajno: ne ponavljaj
         return false;
