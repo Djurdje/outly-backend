@@ -1575,6 +1575,14 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       //     povabljenec, so void in mesto se sprosti. Brez tega bi vstopnica z izbrisanim imetnikom (holder_user_id SET NULL) zdrsnila na gostitelja.
       await guestListaPocistiUporabnika(odjemalec, req.user.userId);
 
+      // 1c. #276 S4: cakajoca (neplacana) narocila se prekliceta, SAMO v tej transakciji. Brez tega bi anonimizacija (user_id -> NULL) pustila odprt Checkout:
+      //     kupec bi ga lahko se placal, zakljuci() bi naredil vstopnice brez imetnika, brez potrdila, vracila bi ne bilo (denar bi sel klubu). Preklic sprozi
+      //     sprosti_zalogo; ce placilo kljub temu prispe (tekma, odlozeno placilo), zakljuci() vidi `cancelled` in kupcu vrne vse (`inactive_order`, I37).
+      //     UPDATE zaklene vrstice: hkratni zakljuci() pocaka in vidi `cancelled`; ze placano ostane placano (ne ujema WHERE).
+      const preklicana = (await odjemalec.query(
+        `UPDATE orders SET status = 'cancelled', cancelled_at = NOW()
+          WHERE user_id = $1 AND status = 'pending' RETURNING id, event_id, stripe_checkout_session_id`, [req.user.userId])).rows;
+
       // 2. Osebni podatki na naracilih se odvezejo. Znesek, datum in dogodek
       //    ostanejo, ker so racunovodski podatek; e-naslov ni.
       //    Prevzeta gostujoca narocila (migracija 033): tudi guest_email in zetoni pogleda (kdor ima povezavo, ne vidi vec nicesar).
@@ -1606,6 +1614,17 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 
       await odjemalec.query("COMMIT");
       if (supabase) izbrisaniSub.set(req.user.supabaseSub, req.user.supabaseExp);
+      // Po COMMIT-u: odprte Checkout seje zapremo pri Stripu (kupec ne more vec placati). Napaka ni usodna (seja je ze `complete`/potekla, Stripe nedosegljiv):
+      // racun je izbrisan, narocilo je `cancelled`, morebitno placilo pa vrne zakljuci() (varovalo). Ne cakamo odgovora uporabniku. Sandbox seja ob zivem kljucu: Stripe je ne pozna.
+      for (const n of preklicana) razprodanoPozabi("v:" + n.event_id);
+      const sStripe = preklicana.length ? placilaStripe.stripe() : null;
+      if (sStripe) {
+        for (const n of preklicana) {
+          if (!n.stripe_checkout_session_id || (placilaStripe.jeLive() && /^cs_test_/.test(n.stripe_checkout_session_id))) continue;
+          Promise.resolve().then(() => sStripe.checkout.sessions.expire(n.stripe_checkout_session_id))
+            .catch((e) => console.log(`[me] izbris racuna: seja ${n.stripe_checkout_session_id} ni zaprta (${e && e.message}); ce bo placana, vrne zakljuci()`));
+        }
+      }
       return res.status(200).json({ message: "Account deleted." });
     } catch (e) {
       await odjemalec.query("ROLLBACK").catch(() => {});
@@ -6088,7 +6107,7 @@ async function posljiSporMail(did, vrsta) {
     if (!k.rows.length) return false;
     const sp = k.rows[0];
     if (sp.order_id === null) {   // spora ni mogoce povezati z narocilom: lastnika ne poznamo, alarm je ze v dnevniku (POZOR ob zapisu spora)
-      await pool.query(`UPDATE spori SET ${cPoskusi} = $2 WHERE id = $1 AND ${cPoslano} IS NULL`, [did, GOST_POSTA_POSKUSOV]);
+      await pool.query(`UPDATE spori SET ${cPoskusi} = $2 WHERE id = $1 AND ${cPoslano} IS NULL AND order_id IS NULL`, [did, GOST_POSTA_POSKUSOV]);   // order_id IS NULL: ne povozi ponastavitve iz zakljuci() (spor je medtem dobil narocilo)
       return false;
     }
     const r0 = await pool.query(
