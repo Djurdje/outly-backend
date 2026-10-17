@@ -865,6 +865,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     const n3 = r.body.order.id;
     assert(r.status === 201 && r.body.tickets.length === 1, "3. nakup: 201 z vstopnico");
     assert(await cakaj(async () => (await pool.query("SELECT guest_mail_attempts FROM orders WHERE id=$1", [n3])).rows[0].guest_mail_attempts >= 8), "preko dnevne meje: testni mail izpuscen (poskusi izcrpani)");
+    await cakaj(() => /dnevna meja gostujocih mailov/.test(d.log));   // zapis v dnevnik sledi gostPostaIzcrpaj (poskusi v bazi) - na pocasnem CI ga se ni
     assert(poslanoNa("dnevno3@example.com").length === 0 && R.poslano.length === prejD + 2 && /dnevna meja gostujocih mailov/.test(d.log) && !/dnevno3@example\.com/.test(d.log), "mail se ne poslje, zapis v dnevniku brez e-naslova", R.poslano.length - prejD);
     const nOdl = await vstavi(null, "placan-nad-mejo@example.com", null);   // placano (ne testno), meja (2) je ze presezena: potrdilo vseeno gre
     assert(await cakaj(() => poslanoNa("placan-nad-mejo@example.com").length === 1), "resnicno placano narocilo NAD dnevno mejo: potrdilo je poslano");
