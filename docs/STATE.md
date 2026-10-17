@@ -148,6 +148,10 @@ Pogodba polj in poti za odjemalca (`ios-dev` #184, `web-dev`) je opravljena in v
 - **Past:** migracija 050 UPDATE-a samo kluba, ki ima še ime in `<ime>@example.com` iz 022; klub, ki mu je kdo po 022 spremenil ime ali e-naslov, ostane `is_demo = FALSE` → admin ga označi ročno (panel, Klubi, »Demo«). Preveri po deployu: `GET /clubs` mora imeti `is_demo: true` pri petih demo klubih. Pred pravim zagonom (ko pravi klubi zamenjajo demo) oznako ugasni ali klub izbriši.
 - **Past:** `payment_mode` ne zavisi od uporabnika (I17), zato admin v odgovoru vidi `unavailable`, a nakup uspe; pri testiranju toka na demo klubu uporabi račun z vlogo `admin`.
 
+## Maili kot rele (#275, I42)
+
+- **web-dev (odprto):** `creator.js` `showDone()` po oddaji piše »We sent a confirmation to <email>«. To od #275 ne drži: potrdilo dobi samo prijavljen uporabnik, in to na naslov računa (ne na naslov iz obrazca); anonimen prosilec ne dobi nobenega maila. Besedilo naj bo nevtralno (»We'll get back to you at <email>«), po potrebi z vabilom k prijavi. Odziv API-ja je nespremenjen. iOS (`ReguestForCreatorView`) obljublja le mail ob odobritvi, to še drži.
+
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 
 - **Prijatelji (20. 9., backend #45; čaka Martina v [#47](https://github.com/Djurdje/outly-backend/issues/47)):** iskanje po uporabniškem imenu (`GET /users/search`, predpona, samo potrjeni, največ 10, 120/h); `users.share_plans_with_friends` privzeto IZKLOPLJENO za nove uporabnike od 12. 10. (migracija 045; obstoječe vrstice ostanejo, kar so bile — ločen korak čaka Martinov DA; ios-dev/web-dev: stikalo v nastavitvah mora kazati `share_plans_with_friends` iz `/me` (nov račun = false), razdelek »Your friends' plans« je zato pri novih računih prazen, dokler prijatelji deljenja ne vklopijo); »Invite more« deli `https://outly.si` brez `?ref=`. Drugačna odločitev = tri majhne spremembe + popravek politike.

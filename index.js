@@ -3200,6 +3200,12 @@ async function neobveznaPrijava(req, res, next) {
 // aplikacija uporabljata isto pot, zato maili tu. Napaka pri pošiljanju NE
 // podre prošnje (ta je že shranjena).
 function ubeziHtml(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+// Zadeva maila (#275): nove vrstice in kontrolni znaki ven (glave), presledki strnjeni, dolzina omejena. Uporabniski vnos v zadevi
+// je dovoljen samo, kjer ga bere ekipa ali lastnik racuna; prejemniku, ki ga vnos ni sam sprozil, gre nevtralna zadeva.
+function zadevaMaila(s, najvec = 200) {
+  const t = String(s ?? "").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
+  return t.length > najvec ? t.slice(0, najvec - 1) + "…" : t;
+}
 async function posljiMailProsnja(p) {
   if (!resend) return;
   const from = process.env.EMAIL_FROM || "onboarding@resend.dev";
@@ -3209,7 +3215,7 @@ async function posljiMailProsnja(p) {
   try {
     const r1 = await resend.emails.send({
       from, to: ekipa, replyTo: p.email,
-      subject: `Nova prošnja ustvarjalca: ${p.businessName}`,
+      subject: zadevaMaila(`Nova prošnja ustvarjalca: ${p.businessName}`),
       html: `
     <div style="font-family: Arial, sans-serif; line-height:1.5">
       <h2>${appName} – nova prošnja ustvarjalca (#${p.id})</h2>
@@ -3218,9 +3224,12 @@ async function posljiMailProsnja(p) {
     </div>`,
     });
     if (r1 && r1.error) console.error("Resend napaka (prošnja, ekipa):", JSON.stringify(r1.error));
+    // Potrdilo samo prijavljenemu na preverjen naslov njegovega racuna (p.potrdiloNa), nikoli na naslov iz telesa in nikoli
+    // anonimnemu klicatelju (#275 S1): sicer je pot rele za ribarjenje pod domeno outly.si in izcrpa dnevno kvoto Resenda.
+    if (!p.potrdiloNa) return;
     const r2 = await resend.emails.send({
-      from, to: p.email,
-      subject: `We received your application, ${p.contactName}`,
+      from, to: p.potrdiloNa,
+      subject: "We received your application",
       html: `
     <div style="font-family: Arial, sans-serif; line-height:1.5">
       <h2>${appName} – application received</h2>
@@ -3274,7 +3283,7 @@ app.post("/creator-applications", omeji({ kljuc: "prosnja", najvec: 5, oknoSekun
     );
     console.log("Nova prošnja ustvarjalca:", r.rows[0].id);   // brez imena podjetja in e-naslova (osebni podatek, N1 17. 10. 2026)
     posljiMailProsnja({
-      id: r.rows[0].id, userId: req.user ? req.user.userId : null, businessName, contactName, email, phone: phoneRaw,
+      id: r.rows[0].id, userId: req.user ? req.user.userId : null, potrdiloNa: req.user ? email : null, businessName, contactName, email, phone: phoneRaw,
       businessType: besedilo(b.businessType ?? b.business_type, 80), businessAddress: besedilo(b.businessAddress ?? b.business_address, 200),
       city: besedilo(b.city, 80), licenceId: besedilo(b.licenceId ?? b.licence_id, 80), contactRole: besedilo(b.contactRole ?? b.contact_role, 80),
       message: besedilo(b.message, 2000),
@@ -5585,6 +5594,7 @@ async function prilogeVstopnic(ev, kode, imePdf) {
 // Vrne { data } ali { error } (Resend ob napaki ne vrze). Brez sledenja: Resend ga nastavlja na domeni, ne na mailu (glej STATE).
 async function gostResendPosli({ to, subject, html, text, attachments }) {
   let timer;
+  subject = zadevaMaila(subject);
   const poslano = resend.emails.send({
     from: process.env.EMAIL_FROM || "onboarding@resend.dev", to, reply_to: POSTA_ODGOVOR, subject, html, text, ...(attachments && attachments.length ? { attachments } : {}),
   });
@@ -8381,12 +8391,12 @@ async function posljiVabiloEkipi(toEmail, clubName, role) {
   try {
     const r = await resend.emails.send({
       from, to: toEmail,
-      subject: `${clubName} invited you to their team on ${appName}`,
+      subject: zadevaMaila(`${clubName} invited you to their team on ${appName}`),
       html: `
     <div style="font-family: Arial, sans-serif; line-height:1.5">
-      <h2>${appName} – Club team</h2>
-      <p><b>${clubName}</b> has invited you to work with them as <b>${vloga}</b>.</p>
-      <p>Open the ${appName} app, go to <b>Profile → My clubs</b> and tap the bell to accept or reject the invitation.</p>
+      <h2>${ubeziHtml(appName)} – Club team</h2>
+      <p><b>${ubeziHtml(clubName)}</b> has invited you to work with them as <b>${vloga}</b>.</p>
+      <p>Open the ${ubeziHtml(appName)} app, go to <b>Profile → My clubs</b> and tap the bell to accept or reject the invitation.</p>
       <p>If you don't know this club, simply reject the invitation or ignore this email.</p>
     </div>`,
     });
@@ -8422,7 +8432,7 @@ app.get("/business/team", requireAuth, requireClub("owner", "manager"), async (r
 // POST /business/team — telo: { email, role }. Od migracije 013 ustvari VABILO
 // (status pending); član nastane šele, ko uporabnik vabilo sprejme
 // (POST /me/invites/:id/accept). Vrne posodobljen seznam (members + invites).
-app.post("/business/team", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+app.post("/business/team", requireAuth, requireClub("owner", "manager"), omeji({ kljuc: "ekipa", najvec: 30, oknoSekund: 3600, poUporabniku: true }), async (req, res) => {
   try {
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
