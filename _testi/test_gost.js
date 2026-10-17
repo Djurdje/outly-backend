@@ -740,13 +740,20 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
        VALUES ('OUT-H'||floor(random()*1e9)::text, $4, $1, 1, 1, 1500, 1500, $2, $3, CASE WHEN $2 IN ('paid','refunded') THEN NOW() END, CASE WHEN $2 IN ('cancelled','failed') THEN NOW() - $5::int * INTERVAL '1 hour' END,
                NOW() - $5::int * INTERVAL '1 hour', $3, 'x', NOW()) RETURNING id`, [evMail, status, email, user, dniPo])).rows[0].id;
     const hSveza = await mk("sveza-preklic@example.com", "cancelled", 2);
-    const hStara = await mk("stara-preklic@example.com", "failed", 30);
+    // Issue #264: narocilo je za anonimizacijo zrelo sele, ko zeton ze obstaja (preklic se "postara" z UPDATE po vpisu zetona).
+    // Prej je bilo zrelo ze ob vpisu in pospravljalec (tek vsako sekundo) ga je lahko anonimiziral MED vpisom narocila in zetona -> zeton je ostal.
+    const hStara = await mk("stara-preklic@example.com", "failed", 0);
     const hPlacana = await mk("placana-vsa@example.com", "paid", 1);
-    await pool.query("INSERT INTO gost_zetoni (token_hash, order_id) VALUES ($1, $2)", [crypto.randomBytes(32).toString("hex"), hStara]);
+    const zetonHash = () => crypto.randomBytes(32).toString("hex");
+    await pool.query("INSERT INTO gost_zetoni (token_hash, order_id) VALUES ($1, $2)", [zetonHash(), hStara]);
+    await pool.query("UPDATE orders SET created_at = NOW() - INTERVAL '30 hours', cancelled_at = NOW() - INTERVAL '30 hours' WHERE id=$1", [hStara]);
     assert(await cakaj(async () => (await pool.query("SELECT guest_email FROM orders WHERE id=$1", [hStara])).rows[0].guest_email === null, 8000), "preklicano neplacano narocilo (> 24 h): e-naslov anonimiziran");
     let h = (await pool.query("SELECT buyer_email, guest_email, status, total_cents FROM orders WHERE id=$1", [hStara])).rows[0];
     assert(h.buyer_email === `izbrisan-${hStara}@outly.invalid` && h.total_cents === 1500, "buyer_email -> izbrisan-<id>@outly.invalid, znesek ostane", h);
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni WHERE order_id=$1", [hStara])).rows[0].n === 0, "zetoni anonimiziranega narocila izbrisani");
+    // Zeton, ki se je vpisal ZA anonimizacijo (kovanje, ki je e-naslov prebralo tik pred anonimizacijo in potrdilo po njej): pospravljalec ga pobere v naslednjem teku.
+    await pool.query("INSERT INTO gost_zetoni (token_hash, order_id) VALUES ($1, $2)", [zetonHash(), hStara]);
+    assert(await cakaj(async () => (await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni WHERE order_id=$1", [hStara])).rows[0].n === 0, 8000), "zeton, vpisan po anonimizaciji, pospravljalec izbrise (#264)");
     h = (await pool.query("SELECT guest_email FROM orders WHERE id=$1", [hSveza])).rows[0];
     assert(h.guest_email === "sveza-preklic@example.com", "preklic pred < 24 h: e-naslov se ostane");
     assert((await pool.query("SELECT guest_email FROM orders WHERE id=$1", [hPlacana])).rows[0].guest_email === "placana-vsa@example.com", "placano narocilo, dogodek se ni koncan: e-naslov ostane");

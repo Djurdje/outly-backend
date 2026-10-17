@@ -6013,6 +6013,12 @@ async function pocistiGostZetone() {
               FROM k WHERE o.id = k.id RETURNING o.id)
        DELETE FROM gost_zetoni WHERE order_id IN (SELECT id FROM u)`, [GOST_HRAMBA_DNI]);
     if (an.rowCount > 0) console.log(`[gost] anonimiziranih gostujocih narocil: zetonov ${an.rowCount}`);
+    // Issue #264: zgornji DELETE vidi samo zetone, potrjene pred zacetkom ukaza. Kovanje (gostKujZeton) e-naslov in user_id prebere brez zaklepa
+    // (FK vzame le KEY SHARE, ki se z UPDATE ne tepe): ce je bralo tik pred anonimizacijo/prevzemom in se potrdilo po njem, zeton ostane ob
+    // narocilu, ki ni vec gostujoce (neuporaben, poizvedba zahteva e-naslov in user_id NULL, a bi lezal do konca dogodka + 30 dni). Pobere ga naslednji tek.
+    const sir = await pool.query(
+      `DELETE FROM gost_zetoni z USING orders o WHERE o.id = z.order_id AND (o.guest_email IS NULL OR o.user_id IS NOT NULL)`);
+    if (sir.rowCount > 0) console.log(`[gost] pospravljenih zetonov narocil, ki niso vec gostujoca: ${sir.rowCount}`);
     // Vstopnice, poslane gostu (034): zetoni potecejo in e-naslov imetnika se izbrise konec dogodka + 30 dni (GOST_ZETON_DNI; pravna presoja 1.4).
     // holder_is_guest OSTANE (vstopnica ne sme spet postati kupceva); zapis prenosa dobi neosebno oznako.
     // Anonimizacija e-naslova in brisanje zetonov sta ENA transakcija (issue #240). Prej sta bila dva loceni ukaza (najprej DELETE zetonov, nato UPDATE
