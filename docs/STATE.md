@@ -76,6 +76,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte nal
 ## Stripe plačila (od 3. 10. 2026; issue #19, `placila_stripe.js`, DECISIONS 3. 10., I19)
 
 - Sandbox račun »Outly sandbox« (Martinov Stripe), Connect kot marketplace; ključa na Renderju `STRIPE_SECRET_KEY` (`sk_test_…`) in `STRIPE_WEBHOOK_SECRET` (`whsec_…`) nastavi Martin. Brez webhook skrivnosti Stripe nakupi vrnejo 503.
+- **Klic Stripa po COMMIT-u (#274, I16):** `nakupStripeSeja` sprosti dovoljenje nakupa in povezavo takoj; Stripe tece pod lastnim semaforjem `STRIPE_VZPOREDNO` (24) / `STRIPE_CAKANJE_MS` (20 s). Pasti: po sprostitvi `c` ni vec nas (ROLLBACK v catch samo ob `d.drzi`), na Renderju spremenljivki nista nastavljeni (veljata privzeti). `test_obremenitev` Stripa ne meri (testni nacin); Stripe pot meri `test_nakup_stripe.js`.
 - Webhook endpoint `https://outly-backend-roy3.onrender.com/stripe/webhook`, dogodki: `checkout.session.completed`,
   `checkout.session.expired`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`,
   `charge.refunded`, `account.updated`, od 12. 10. (#190) še `charge.dispute.created`, `charge.dispute.updated`, `charge.dispute.closed`, `refund.updated`, `refund.failed`, `charge.refund.updated`.
