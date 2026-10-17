@@ -5861,6 +5861,12 @@ async function posljiVraciloKupcu(vid, vrsta) {
       const izid = await vracilaStripe.kupecVrnjenPredMailom(vid);
       // claim sprosti brez porabe poskusa, a NE pod 1: premor GOST_POSTA_PREMORI[1] (2 min) od prevzema, ne klic Stripa vsak tek
       if (izid === "neznano") { await pool.query(`UPDATE vracila SET ${m.poskusi} = GREATEST(${m.poskusi} - 1, 1) WHERE id = $1 AND ${m.poslano} IS NULL`, [vid]); return false; }
+      // vracilo na poti: prvih 24 h kot 'neznano' (premor 2 min); potem poskus OSTANE porabljen (premor raste po GOST_POSTA_PREMORI do ~24 h), a nikoli do max (mail ostane mogoc)
+      if (izid === "na_poti") {
+        await pool.query(`UPDATE vracila SET ${m.poskusi} = CASE WHEN ni_izvedeno_od_at < NOW() - INTERVAL '24 hours' THEN LEAST(${m.poskusi}, $2::int - 1) ELSE GREATEST(${m.poskusi} - 1, 1) END
+                           WHERE id = $1 AND ${m.poslano} IS NULL`, [vid, GOST_POSTA_POSKUSOV]);
+        return false;
+      }
       if (izid !== "poslji") {
         if (izid === "ne") await pool.query(`UPDATE vracila SET ${m.poskusi} = $2 WHERE id = $1 AND ${m.poslano} IS NULL`, [vid, GOST_POSTA_POSKUSOV]);   // trajno: ne ponavljaj
         return false;

@@ -513,12 +513,14 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   // nadzorni plosci (novo vracilo brez nasega metadata.vracilo_id, uskladiVracilo ga ne poveze), vrstica pa ostane ni_uspelo/failed.
   // Vsota USPELIH vracil (succeeded) na PaymentIntentu >= placano (event_cancelled: znesek NABOJA, ne total_cents; inactive_order: znesek vrstice) -> vrstico
   // zapremo kot rocno vrnjeno (ista pot kot rocnoVrnjeno v izvedi(): opravi(... 'rocno_vrnjeno_v_stripu'), kupec dobi »vrnili smo«), maila `ni_izvedeno` NE posljemo.
-  // Uspela + na poti (pending/requires_action) >= placano -> 'neznano' (pocakaj na izid). Delno rocno vracilo -> 'poslji' (kupec res ni dobil vsega).
-  // Vrne: 'poslji' | 'vrnjeno' (vrstica zaprta) | 'ne' (trajno ne posiljaj: drug nacin I36, testno, brez PI, trajna Stripova napaka 4xx)
-  //       | 'preskoci' (vrstica ni vec v ni_uspelo/rocno) | 'neznano' (brez kljuca, Stripe ni dosegljiv, vracilo na poti: ta obhod NE posiljaj, poskusi pozneje).
+  // Uspela + na poti (pending/requires_action) >= placano -> 'na_poti' (pocakaj na izid). Delno rocno vracilo -> 'poslji' (kupec res ni dobil vsega).
+  // Vrne: 'poslji' | 'vrnjeno' (vrstica zaprta) | 'ne' (trajno ne posiljaj: drug nacin I36, testno, brez PI, trajna Stripova napaka 400/404)
+  //       | 'preskoci' (vrstica ni vec v ni_uspelo/rocno) | 'neznano' (brez kljuca, Stripe ni dosegljiv: ta obhod NE posiljaj, poskusi pozneje)
+  //       | 'na_poti' (rocno vracilo pending: pocakaj; po 24 h POZOR in narascajoc premor).
   // Ne sme blokirati obdelovalca (tek() caka nanj, vmes ne tecejo prevzemi/preveriPotrditve): kratek rok klica, brez ponovitev, najvec PREVERB_NA_TEK na tek.
   const STRIPE_PREVERBA = { timeout: PREVERBA_ROK_MS, maxNetworkRetries: 0 };
   let zadnjiBrezKljuca = 0;
+  const NA_POTI_ALARM_MS = 24 * 3600 * 1000, naPotiAlarm = new Map();
   const preverbaNaVoljo = () => preverbTek < PREVERB_NA_TEK;
   async function kupecVrnjenPredMailom(id) {
     const r = await pool.query(
@@ -556,13 +558,24 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
       } else placano = v.znesek_cents;
       if (placano <= 0) return "poslji";
       if (uspelo < placano) {
-        if (uspelo + naPoti >= placano) { console.log(`[vracila] vracilo ${id}: v Stripu je vracilo na poti (${naPoti} c), mail ni_izvedeno odlozen`); return "neznano"; }
+        if (uspelo + naPoti >= placano) {
+          console.log(`[vracila] vracilo ${id}: v Stripu je vracilo na poti (${naPoti} c), mail ni_izvedeno odlozen`);
+          // na poti predolgo (> 24 h od zavrnitve): admin mora vedeti; redceno 1x na vrstico na 24 h (v pomnilniku procesa). Premor preverbe raste (index.js, izid 'na_poti').
+          const star = v.ni_izvedeno_od_at && Date.now() - new Date(v.ni_izvedeno_od_at).getTime() > NA_POTI_ALARM_MS;
+          if (star && Date.now() - (naPotiAlarm.get(String(id)) || 0) > NA_POTI_ALARM_MS) {
+            naPotiAlarm.set(String(id), Date.now());
+            console.error(`[vracila] POZOR: narocilo ${v.public_ref} (vracilo ${id}): rocno vracilo v Stripu je na poti (pending) ze vec kot 24 h od zavrnitve nasega; mail kupcu je odlozen, preveri v Stripu.`);
+          }
+          return "na_poti";
+        }
         return "poslji";
       }
       v._vrnjeno = uspelo;
     } catch (e) {
       const st = Number(e && e.statusCode) || 0;
-      if (jeTrajna(e) || (st >= 400 && st < 500 && st !== 429)) {
+      // Trajno SAMO 400 in 404 (napacen zahtevek / ni objekta). 401/403 (menjava ali preklic kljuca), 409, 424, 429, 5xx in omrezje: odlozi, sicer bi
+      // zacasna tezava z racunom vsem kupcem trajno odvzela mail.
+      if (st === 400 || st === 404) {
         console.error(`[vracila] POZOR: preverba pred mailom ni_izvedeno (vracilo ${id}, narocilo ${v.public_ref}): trajna Stripova napaka (${kratko(e)}); mail NI poslan, preveri v Stripu in obvesti kupca rocno.`);
         return "ne";
       }
