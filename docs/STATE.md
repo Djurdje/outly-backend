@@ -5,7 +5,7 @@ Zadnja posodobitev: 2026-10-14 (podjetje TIP&TAP namesto NEXT DIMENSIONS; prej 2
 Ta datoteka hrani **samo tisto, česar se ne da prebrati drugje** (pasti, predpostavke agenta, kar nobeno orodje ne ve). Drugje: odprte naloge → GitHub Issues (`agent` / `martin`); testi → Actions `Testi`; produkcija → `Nadzor produkcije` + `/clubs`;
 kaj se je spremenilo → PR-ji; zakaj → `DECISIONS.md`; kaj se ne sme zgoditi → `ARCHITECTURE.md` »Poslovne invariante«; kaj je že padlo → `INCIDENTI.md`. Tega ne prepisuj sem.
 
-**Zgodovina** (zaključeni sklopi, dnevniki sej, stari načrti, pogodbe polj, ki jih odjemalca že imata) je v `docs/arhiv/` (`STATE-do-2026-10-02*.md`, `STATE-do-2026-10-11.md`) — ni merodajna. Ta datoteka ima **največ 200 vrstic** (outly-hq pravilo 5);
+**Zgodovina** (zaključeni sklopi, dnevniki sej, stari načrti, pogodbe polj, ki jih odjemalca že imata) je v `docs/arhiv/` (`STATE-do-2026-10-02*.md`, `STATE-do-2026-10-11.md`, `STATE-do-2026-10-17.md`) — ni merodajna. Ta datoteka ima **največ 200 vrstic** (outly-hq pravilo 5);
 kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte naloge so v [GitHub Issues](https://github.com/Djurdje/outly-backend/issues); zagon (komercialna uporaba): glavni seznam [#198](https://github.com/Djurdje/outly-backend/issues/198)** — preberi ga pred vsako nalogo, povezano s plačili, pravom, App Store ali zanesljivostjo.
 
 ## Podjetje TIP&TAP (od 14. 10. 2026, DECISIONS)
@@ -72,9 +72,6 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte nal
   lastnik z drugim klubom v glavi `X-Outly-Club` dobi 404. Danes ima vsak lastnik en klub - ob drugem klubu to popraviti.
 - **Past (splet):** `PATCH /me` vrne samo `POLJA_UPORABNIKA` (brez `clubs`, `pending_*`) - odjemalec mora zdruziti s
   trenutnim profilom ali znova poklicati `GET /me` (iOS po avatarju klice `GET /me`).
-- **Odprte najdbe pregleda faze 1** (29. 9., še brez Issueja): CSP velja samo za `/app` (seja v localStorage je skupna z vsem
-  outly.si); `img-src https:` (poljuben https plakat/logo); `ticket_url`, `website`/`logo_url` brez preverbe `^https://` na strežniku
-  (splet filtrira z `varenUrl`, iOS ne).
 
 ## Stripe plačila (od 3. 10. 2026; issue #19, `placila_stripe.js`, DECISIONS 3. 10., I19)
 
@@ -96,7 +93,6 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte nal
 
 ## Vračila in spori (12. 10. 2026; #190 prva faza, migracija 047, I37/I38, DECISIONS 12. 10.)
 
-- Delano po `outly-backend` `main` `e7aa0d2`; prebrano: DECISIONS (vračilo ob odpovedi, način Stripe računa), ARCHITECTURE (I9, I34, I36), STATE, INCIDENTI na tem commitu.
 - **Zgrajeno:** odpoved dogodka (`DELETE /events/:id`) vstavi `vracila` (polje `refunds_queued`), obdelovalec v ozadju (`vracila_stripe.js`) vrne VSE (`reverse_transfer`, vračilo provizije − Stripova pristojbina); sweep (30 dni) ujame odpoved po drugi poti, SAMO za dogodke iz `odpovedi_dogodkov`; `inactive_order` vrača plačilo po preklicu; dva maila kupcu (»na poti« po 60 s, »vrnili smo« ob `succeeded`); `charge.dispute.*` → `spori`, vstopnice neveljavne med sporom, ob `lost` transfer reversal od kluba. Admin API: `GET /admin/api/refunds`, `POST …/retry`, `GET /admin/api/disputes`, `POST /admin/api/disputes/:id/retry`, polja v summary, `paid_orders`/`paid_cents` v `GET /admin/api/events`. Admin panel (od 13. 10., #233): zavihek »Vračila in spori« (seznam z retry, spori z retry povrnitve), trije števci na pregledu; `GET /admin/api/refunds` sprejme tudi `state=potrditev`.
 - **Za agenta iOS in splet (samo dodajanje):** (1) sken (`POST /business/tickets/scan`) lahko vrne **`409 { result: "payment_disputed", message, ticket }`** (pravi spor na plačilu, ne poizvedba `warning_*`; vratar naj ne spusti); `scan-batch` `result: "payment_disputed"`; (2) vsak pogled vstopnic ima **novo polje `payment_disputed: boolean`** (status vstopnice ostane `valid`): `GET /me/tickets`, `GET /business/events/:id/tickets` (od 13. 10., #233; prej ga ni bilo), `GET /guest/ticket` in `GET /guest/order` (`ticket`/`tickets[]`; `/guest/ticket` ga je prej izpuščal), `tickets[]` v `GET /me/orders` in odgovoru nakupa (od 13. 10.), `ticket` v odgovorih skena; `scan-list` kaže take vstopnice kot `unpaid` + `payment_disputed: true`; (3) `DELETE /events/:id` ima polje `refunds_queued`. Odjemalec z neznanim `result` naj ga pokaže kot zavrnitev.
 - **Past (NI preverjeno proti pravemu Stripu):** testi uporabljajo lažni Stripe. Pred prvim pravim vračilom preveri v sandboxu: (1) `reverse_transfer` + `refund_application_fee: false` obrne CEL transfer in `applicationFees.createRefund` vrne klubu provizijo; (2) `latest_charge.balance_transaction.fee_details` ima `stripe_fee` (valuta!); (3) `refund_application_fee: true` ob naboju brez provizije ne vrne napake; (4) `dispute.balance_transactions[].fee` je Stripova pristojbina spora in `charge.transfer` je `tr_…` (destination charge); (5) kartična vračila so običajno takoj `succeeded` (`pending` ob pomanjkanju stanja platforme).
@@ -158,7 +154,6 @@ Pogodba polj in poti za odjemalca (`ios-dev` #184, `web-dev`) je opravljena in v
 - **Več ekip na osebo (018):** brez glave `X-Outly-Club` poslovni klici dobijo **prvo (najstarejše) članstvo** — dve ekipi in manjkajoča glava = tiho urejanje napačnega kluba (iOS nastavi `APIClient.currentClubId` ob vstopu v klub). `DELETE /business/team/me` brez glave zapusti VSE ekipe.
 - **Pogoji/politika:** sprememba pogojev = dvigni `TERMS_VERSION` v `outly_webpage/auth.js` (zdaj 1.1); iOS registracija `terms_version` ne zapiše. Nakup z računom (vstopnice, VIP) od migracije 044 (#215) shrani `orders.terms_version`/`terms_accepted_at`, ČE jo odjemalec pošlje; star iOS/splet polja ne pošljeta → NULL (ni dokaza sprejema), nakup še vedno uspe. Nova funkcija, ki zbira ali kaže osebne podatke, = popravek politike zasebnosti.
 - **iOS »My preferences« in filtri domačega zaslona so samo na napravi** (@AppStorage); strežniško = nova pot/stolpec na `/me` (samo dodajanje). Histogram razdalje je brez dovoljenja za lokacijo prazen — ni hrošč.
-- **`event_favorites`**: pot v backendu ostane, iOS je od outly-app #23 ne kliče več — kandidat za odstranitev (API samo dodajanje).
 
 ## Znane pasti (aktivne)
 
