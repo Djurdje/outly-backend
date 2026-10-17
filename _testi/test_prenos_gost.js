@@ -502,6 +502,20 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     assert(r.status === 404 && /friends/.test(r.body), "user_id (ni prijatelj) + allow_guest: 404 kot prej", r.body);
 
     // ============================================================
+    console.log("\n# Spor (chargeback) na naroceno: prenos gostu zavrnjen (#278)");
+    {
+      const [vs] = await kupi(T.kupec4, E0, 1);
+      const nar = (await pool.query("SELECT order_id FROM tickets WHERE id=$1", [vs.id])).rows[0].order_id;
+      await pool.query("INSERT INTO spori (id, order_id, stanje) VALUES ('dp_g278', $1, 'under_review')", [nar]);
+      const rs = await prenesi(B, vs.id, T.kupec4, { email: "spor278@example.com", allow_guest: true, age_confirmed: true });
+      assert(rs.status === 409 && rs.body.error === "payment_disputed" && rs.body.result === "payment_disputed", "spor odprt: prenos gostu 409 payment_disputed", rs);
+      const vv = await vstopnica(vs.id);
+      assert(vv.holder_is_guest === false && vv.serial === vs.serial, "spor odprt: vstopnica in serial nespremenjena");
+      await pool.query("UPDATE spori SET stanje='won' WHERE id='dp_g278'");
+      const rs2 = await prenesi(B, vs.id, T.kupec4, { email: "spor278@example.com", allow_guest: true, age_confirmed: true });
+      assert(rs2.status === 200, "spor zakljucen (won): prenos gostu spet dela", rs2);
+    }
+
     console.log("\n# 10. QA 1. krog (PR #161): sockasnost meje na naslov, normalizacija, dnevna meja, starost, brisanje, zanka dogodkov");
     const D = `http://127.0.0.1:${PORT_D}`, E = `http://127.0.0.1:${PORT_E}`;
     const d = zagon(PORT_D, { PRENOS_BREZ_RACUNA: "vsi", GOST_PRENOS_NA_DAN: "1000", GOST_PRENOS_NA_NASLOV: "2" }); dodatni.push(d);
@@ -779,20 +793,6 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     } finally {
       await pool.query("DROP TRIGGER IF EXISTS test_pocasna_priprava ON gost_zetoni_vstopnic");
       await pool.query("DROP FUNCTION IF EXISTS test_pocasna_priprava()");
-    }
-
-    console.log("\n# Spor (chargeback) na naroceno: prenos gostu zavrnjen (#278)");
-    {
-      const [vs] = await kupi(T.kupec4, E0, 1);
-      const nar = (await pool.query("SELECT order_id FROM tickets WHERE id=$1", [vs.id])).rows[0].order_id;
-      await pool.query("INSERT INTO spori (id, order_id, stanje) VALUES ('dp_g278', $1, 'under_review')", [nar]);
-      const rs = await prenesi(B, vs.id, T.kupec4, { email: "spor278@example.com", allow_guest: true, age_confirmed: true });
-      assert(rs.status === 409 && rs.body.error === "payment_disputed" && rs.body.result === "payment_disputed", "spor odprt: prenos gostu 409 payment_disputed", rs);
-      const vv = await vstopnica(vs.id);
-      assert(vv.holder_is_guest === false && vv.serial === vs.serial, "spor odprt: vstopnica in serial nespremenjena");
-      await pool.query("UPDATE spori SET stanje='won' WHERE id='dp_g278'");
-      const rs2 = await prenesi(B, vs.id, T.kupec4, { email: "spor278@example.com", allow_guest: true, age_confirmed: true });
-      assert(rs2.status === 200, "spor zakljucen (won): prenos gostu spet dela", rs2);
     }
 
     console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
