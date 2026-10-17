@@ -934,7 +934,7 @@ function zeljeniKlub(req) {
 // Vratar (doorman) sme SAMO skenirati in gledati vstopnice dogodka. Natakar (bartender, 038) sme SAMO strezbo VIP miz
 // (GET/PUT .../table-service) in nikoli poti s podatki kupcev (vstopnice, skener, VIP rezervacije; I27).
 const INT4_MAX = 2147483647;
-const { jeVOknuSkena, SKEN_OKNO_PRED_MS } = require("./sken_okno");   // casovno okno skena (I25)
+const { jeVOknuSkena, jeDogodekMinil, SKEN_OKNO_PRED_MS } = require("./sken_okno");   // casovno okno skena (I25), varovalo odpovedi (I42)
 const { jeZacasnaNapaka, odgovoriNaNapako } = require("./napaka_povezave");   // 503 samo za zacasne napake baze (povezava, 55P03), ostalo 500
 function requireClubNa(db, vloge) {
   return async (req, res, next) => {
@@ -2991,6 +2991,38 @@ async function dogodekZaUrejanje(req, res) {
   return d;
 }
 
+// #255 (invarianta I42): odpoved dogodka s placanimi narocili vrne denar VSEM kupcem (vracila_stripe.js, I37). Lastnik/manager tega ne sme sprozit za dogodek,
+// ki je ze MINIL (jeDogodekMinil, sken_okno.js) ali ima vsaj eno UNOVCENO vstopnico (`used`: gost je ze vstopil) - vracila takrat ureja Outly (admin panel ali
+// vloga admin na isti poti). Isto velja za premik datuma minilega dogodka (sicer: premakni v prihodnost, nato odpovej). Brez placanih narocil se nic ne spremeni.
+// Sporocilo vsebuje »already started«: star iOS (APIErrorMessages) in splet (napake.js PRAVILA) ga po tem nizu prevedeta v »This event has already started.«
+// (brez tega bi 409 pokazal »This is already in use.«). Nov odjemalec naj bere `error`.
+const NAPAKA_DOGODEK_MINIL = { error: "event_finished", message: "This event has already started or taken place, so it can't be cancelled. Contact Outly for refunds." };
+const NAPAKA_DOGODEK_MINIL_DATUM = { error: "event_finished", message: "This event has already started or taken place, so its date can't be changed. Contact Outly." };
+const jeAdminDogodka = (req) => (req.klub && req.klub.role === "admin") || (req.user && req.user.role === "admin");   // vloga iz baze (I5)
+// V TRANSAKCIJI: zaklene vrstico dogodka (FOR UPDATE; zaporedi DELETE/PATCH istega dogodka in nakupe, ki zaklenejo isto vrstico) in presteje narocila.
+// Sken vrstice dogodka NE zaklepa (I16, sken ostane hiter): sken, ki se zgodi v istih milisekundah kot odpoved (med to poizvedbo in COMMIT), lahko unovci
+// vstopnico, ki jo odpoved nato vrne. Okno je sprejeto in dokumentirano v I42 (dolzina transakcije; prva unovcena vstopnica pred odpovedjo jo ze blokira).
+async function zaklepDogodkaZaOdpoved(c, id) {
+  const r = await c.query(
+    `SELECT e.id, e.status, e.start_at, e.end_at,
+            (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = e.id AND o.status IN ('paid','partially_refunded')) AS placanih,
+            -- samo narocila, ki bi ob odpovedi res dobila DENAR nazaj (pogoj VSTAVI_VRACILA + znesek > 0): guest lista in 0 EUR odpovedi ne zaklenejo (pregled #262 N1)
+            (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = e.id AND ${SQL_NAROCILO_ZA_ODPOVED} AND o.total_cents > o.refunded_cents) AS za_vracilo,
+            (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = e.id) AS narocil,
+            EXISTS (SELECT 1 FROM tickets t WHERE t.event_id = e.id AND t.status = 'used') AS unovceno
+       FROM events e WHERE e.id = $1 FOR UPDATE OF e`, [id]);
+  return r.rows[0] || null;
+}
+const { SQL_NAROCILO_ZA_ODPOVED } = require("./vracila_stripe");
+const odpovedZaklenjena = (z) => z.za_vracilo > 0 && (jeDogodekMinil(z.start_at, z.end_at) || z.unovceno);
+// Ali PATCH datum res spreminja (na minuto natancno: obrazca iOS in splet ob vsakem shranjevanju poslje startAt/endAt, iz izbirnika brez sekund).
+const istiCas = (nov, star) => {
+  if (nov === null || nov === "") return star === null;
+  if (star === null) return false;
+  const t = new Date(nov).getTime();
+  return Number.isFinite(t) && Math.floor(t / 60000) === Math.floor(new Date(star).getTime() / 60000);
+};
+
 app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   try {
     const d = await dogodekZaUrejanje(req, res);
@@ -3073,10 +3105,34 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
     if (sets.length === 0) return res.status(400).send("Nothing to update.");
 
     vrednosti.push(d.id);
-    const r = await pool.query(
-      `UPDATE events SET ${sets.join(", ")} WHERE id = $${vrednosti.length} RETURNING *`,
-      vrednosti
-    );
+    const sqlPosodobi = `UPDATE events SET ${sets.join(", ")} WHERE id = $${vrednosti.length} RETURNING *`;
+    let r;
+    // #255 (I42): odpoved (status -> cancelled) ali premik datuma gre skozi zaklep vrstice in preverbo; vse drugo kot doslej. Admin sme vedno.
+    const odpoved = dovoljeno.status === "cancelled";
+    const datum = dovoljeno.start_at !== undefined || dovoljeno.end_at !== undefined;
+    if (!jeAdminDogodka(req) && (odpoved || datum)) {
+      const c = await pool.connect();
+      try {
+        await c.query("BEGIN");
+        const z = await zaklepDogodkaZaOdpoved(c, d.id);
+        if (!z) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+        if (odpoved && z.status !== "cancelled" && odpovedZaklenjena(z)) {
+          await c.query("ROLLBACK");
+          return res.status(409).json(NAPAKA_DOGODEK_MINIL);
+        }
+        if (datum && z.za_vracilo > 0 && jeDogodekMinil(z.start_at, z.end_at) &&
+            ((dovoljeno.start_at !== undefined && !istiCas(dovoljeno.start_at, z.start_at)) ||
+             (dovoljeno.end_at !== undefined && !istiCas(dovoljeno.end_at, z.end_at)))) {
+          await c.query("ROLLBACK");
+          return res.status(409).json(NAPAKA_DOGODEK_MINIL_DATUM);
+        }
+        r = await c.query(sqlPosodobi, vrednosti);
+        await c.query("COMMIT");
+      } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
+      finally { c.release(); }
+    } else {
+      r = await pool.query(sqlPosodobi, vrednosti);
+    }
     razprodanoPozabi("v:" + d.id);   // capacity ali status se je morda spremenil
 
     // Dogodek je sele zdaj postal objavljen -> sledilci kluba dobijo obvestilo (migracija 019).
@@ -3097,39 +3153,48 @@ app.delete("/events/:id", requireAuth, requireClub("owner", "manager"), async (r
     const d = await dogodekZaUrejanje(req, res);
     if (!d) return;
 
-    // Ce so na dogodek prodane vstopnice, se NE brise. Kupci imajo vstopnice,
-    // ki morajo ostati veljavne kot dokazilo, in narocilo je racunovodski
-    // dokument. Dogodek se v tem primeru odpove, ne izbrise.
-    if (obstajajoNarocila) {
-      const n = await pool.query(
-        "SELECT COUNT(*)::int AS n FROM orders WHERE event_id=$1 AND status IN ('paid','partially_refunded')",
-        [d.id]
-      );
-      if (n.rows[0].n > 0) {
-        // Odpoved + vrsta vracil v ISTI transakciji (#190): dogodek je odpovedan natanko tedaj, ko so vracila v vrsti. Samo vstavljanje (en stavek, brez Stripa);
-        // denar vrne obdelovalec v ozadju (vracila_stripe.js, I37), zato odpoved ostane hitra tudi pri tisocih naročilih. Ponovni DELETE ne podvoji (UNIQUE order_id, razlog).
-        const c = await pool.connect();
-        let r, vVrsti;
-        try {
-          await c.query("BEGIN");
-          r = await c.query("UPDATE events SET status='cancelled' WHERE id=$1 RETURNING *", [d.id]);
-          vVrsti = await vracilaStripe.vrstiZaDogodek(c, d.id);
-          await c.query("COMMIT");
-        } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
-        finally { c.release(); }
-        razprodanoPozabi("v:" + d.id);
-        vracilaStripe.zbudi();
-        return res.status(200).json({
-          message: "Event has sold tickets and was cancelled instead of deleted.",
-          orders: n.rows[0].n,
-          refunds_queued: vVrsti,
-          event: r.rows[0],
-        });
-      }
+    if (!obstajajoNarocila) {   // pred migracijo 002 narocil ni
+      await pool.query("DELETE FROM events WHERE id=$1", [d.id]);
+      return res.status(200).json({ message: "Event deleted." });
     }
 
-    await pool.query("DELETE FROM events WHERE id=$1", [d.id]);
-    return res.status(200).json({ message: "Event deleted." });
+    // Vse v ENI transakciji z zaklepom vrstice dogodka (zaklepDogodkaZaOdpoved): preverba #255, stetje narocil in izbris/odpoved vidijo isto sliko.
+    // - Brez narocil: izbris kot doslej.
+    // - S katerimkoli narocilom: dogodek se NE brise (narocilo je racunovodski dokument; FK orders_event_id_fkey je RESTRICT, prej je to dalo 500, #258 N2),
+    //   ampak odpove. Placana narocila (paid/partially_refunded) gredo v vrsto vracil v ISTI transakciji (#190, I37): denar vrne obdelovalec v ozadju
+    //   (vracila_stripe.js), odpoved ostane hitra tudi pri tisocih narocilih. Ponovni DELETE ne podvoji (UNIQUE order_id, razlog). Brez placanih
+    //   (samo pending/preklicana/vrnjena) vrstiZaDogodek vstavi 0 vrstic, a dogodek zabelezi v odpovedi_dogodkov: ce se cakajoce narocilo placa
+    //   po odpovedi, ga sweep vrne (I37).
+    // - Lastnik/manager: odpoved s placanimi narocili minilega dogodka ali dogodka z unovceno vstopnico -> 409 event_finished (#255, I42). Admin sme.
+    const c = await pool.connect();
+    let r, vVrsti, z;
+    try {
+      await c.query("BEGIN");
+      z = await zaklepDogodkaZaOdpoved(c, d.id);
+      if (!z) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+      if (z.narocil === 0) {
+        await c.query("DELETE FROM events WHERE id=$1", [d.id]);
+        await c.query("COMMIT");
+        return res.status(200).json({ message: "Event deleted." });
+      }
+      if (!jeAdminDogodka(req) && odpovedZaklenjena(z)) {
+        await c.query("ROLLBACK");
+        return res.status(409).json(NAPAKA_DOGODEK_MINIL);
+      }
+      r = await c.query("UPDATE events SET status='cancelled' WHERE id=$1 RETURNING *", [d.id]);
+      vVrsti = await vracilaStripe.vrstiZaDogodek(c, d.id);
+      await c.query("COMMIT");
+    } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
+    finally { c.release(); }
+    razprodanoPozabi("v:" + d.id);
+    if (vVrsti > 0) vracilaStripe.zbudi();
+    if (z.placanih > 0 && jeAdminDogodka(req)) console.log(`Admin ${req.user.userId} je odpovedal dogodek ${d.id} (${z.placanih} placanih narocil)`);
+    return res.status(200).json({
+      message: z.placanih > 0 ? "Event has sold tickets and was cancelled instead of deleted." : "Event has orders and was cancelled instead of deleted.",
+      orders: z.placanih,
+      refunds_queued: vVrsti,
+      event: r.rows[0],
+    });
   } catch (e) {
     console.error(e);
     return res.status(500).send("Server error.");
@@ -5115,13 +5180,17 @@ function gostDatumRojstva(v) {
   return dt.getUTCFullYear() === l && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d ? v : null;
 }
 
-// Stikalo za pravi denar (GOST_NAKUP_LIVE=1): pogoji in politika zasebnosti morata biti objavljeni, preden gostje placujejo pravi denar.
-// Sandbox (sk_test_) in testni nacin delata brez stikala.
+// Stikalo nakupa brez racuna (I22). Privzeto ZAPRTO v vseh nacinih (503); velja SAMO za nakup (POST /guest/events/:id/orders), ogled, preklic in
+// prevzem obstojecih gostujocih narocil (GET /guest/order, POST /guest/order/cancel, GET /guest/ticket, prevzem ob GET /me) delajo naprej.
+// - zivi kljuc (sk_live_): GOST_NAKUP_LIVE=1 - pogoji in politika zasebnosti morata biti objavljeni, preden gostje placujejo pravi denar;
+// - sandbox (sk_test_), testni nacin (TEST_PLACILA) ali brez kljuca: GOST_NAKUP_TEST=1 (za ekipo). Brez tega bi kdorkoli prek javne poti dobil
+//   brezplacne VELJAVNE vstopnice brez potrditve maila (sandbox kartica 4242 ali testni nacin brez placila; 10 nakupov/h/IP -> razprodan dogodek, #249).
+// Spremenljivki se ne prekrivata: GOST_NAKUP_LIVE ne odpre sandboxa in GOST_NAKUP_TEST ne zivega nacina.
 function gostStikalo(req, res, next) {
   res.set("Cache-Control", "no-store");
-  // TEST_PLACILA=true ob sk_live_ nima ucinka (#191): stikalo ostane v veljavi, gostje ne kupujejo brez placila.
-  const live = placilaStripe.jeLive();
-  if (live && process.env.GOST_NAKUP_LIVE !== "1") return res.status(503).send("Guest checkout is not available yet.");
+  // TEST_PLACILA=true ob sk_live_ nima ucinka (#191): velja zivo stikalo, gostje ne kupujejo brez placila.
+  const vklopljen = placilaStripe.jeLive() ? process.env.GOST_NAKUP_LIVE === "1" : process.env.GOST_NAKUP_TEST === "1";
+  if (!vklopljen) return res.status(503).send("Guest checkout is not available yet.");
   next();
 }
 // Preverba telesa PRED omejevalnikom in bazo (brez poizvedbe): neveljaven zahtevek ne porabi nakupnega poskusa.

@@ -267,7 +267,7 @@ async function telo() {
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   // TZ namerno ni UTC: izvoz in obnova tečeta v istem pasu kot Martinov računalnik (Europe/Ljubljana).
   // Brez tega je test za DATE stolpce okoljsko odvisen (na UTC runnerju je zelen tudi ob napaki).
-  srv = spawn("node", ["index.js"], { env: { ...process.env, TZ: TZ_TESTA, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
+  srv = spawn("node", ["index.js"], { env: { ...process.env, GOST_NAKUP_TEST: "1", TZ: TZ_TESTA, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
   srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
   for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
 

@@ -101,7 +101,7 @@ async function webhook(baza, tip, objekt) {
 }
 
 function zagon(port, okolje) {
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test",
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, GOST_NAKUP_TEST: "1", PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test",
     APP_URL: "https://outly.test", STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_POSPRAVI_MS: "3600000", TEST_PLACILA: "", STRIPE_SECRET_KEY: "", STRIPE_WEBHOOK_SECRET: "",
     GOST_NAKUP_LIVE: "", GOST_PREVZEM_MS: "0", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
   const s = { srv, log: "" };

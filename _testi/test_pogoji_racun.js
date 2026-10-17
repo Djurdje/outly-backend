@@ -71,7 +71,7 @@ const mailiNa = (email) => poslano.filter(m => m.to === email || (Array.isArray(
   await pool.query("TRUNCATE omejitve, stripe_events, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   await new Promise(r => resendServer.listen(RESEND_PORT, r));
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, GOST_NAKUP_TEST: "1", PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
     TEST_PLACILA: "", GOST_PREVZEM_MS: "0", RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>",
     GOST_POSTA_PONOVI_MS: "200", GOST_POSTA_TIMEOUT_MS: "2000", GOST_POSTA_REZERVA_MS: "0", GOST_POSTA_PREMOR_MS: "100" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
