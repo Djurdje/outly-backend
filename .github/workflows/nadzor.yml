@@ -47,6 +47,16 @@ jobs:
           preveri "backend /events"  "https://outly-backend-roy3.onrender.com/events"  200
           preveri "backend admin"    "https://outly-backend-roy3.onrender.com/admin/"  200
           preveri "backend auth"     "https://outly-backend-roy3.onrender.com/me/invites" 401
+          # Povezave skenPool (sken vstopnic na vratih, #265): svoje meje (lock/statement/idle timeout, query_timeout) in zastoj, ki jih
+          # /healthz ne preveri. Pot vrne samo {"ok":true|false}. Ob navalu skenov (skenPool poln) je lahko 503 trenutno, zato alarm
+          # sele po DVEH neuspelih krogih: curl ze sam ponovi 503 (--retry 3, 10 s), nato se en krog po 30 s.
+          PRED="$NAPAKE"
+          preveri "backend sken"     "https://outly-backend-roy3.onrender.com/healthz/sken" 200 '"ok":true'
+          if [ "$NAPAKE" != "$PRED" ]; then
+            echo "backend sken: prvi krog neuspel, ponovitev cez 30 s"
+            NAPAKE="$PRED"; sleep 30
+            preveri "backend sken"     "https://outly-backend-roy3.onrender.com/healthz/sken" 200 '"ok":true'
+          fi
           preveri "outly.si"         "https://outly.si/"                                200 'Outly'
           preveri "outly.si /terms"  "https://outly.si/terms"                           200
           # javni (publishable) kljuc, isti kot v kodi aplikacije in spletne strani
@@ -113,7 +123,7 @@ jobs:
       # Pogoj je namenoma "napake == ''", ne samo success(): pri rocnem zagonu z test=true
       # ali test=routine korak "Preveri produkcijo" NE pade, tudi ce je produkcija res podrta
       # (exit 1 je pogojen s TEST=false). Z golim success() bi tak zagon poslal ping "vse OK"
-      # sredi resnicnega izpada in Healthchecks bi molcal. Prazen "napake" pomeni: vseh sedem
+      # sredi resnicnega izpada in Healthchecks bi molcal. Prazen "napake" pomeni: vseh osem
       # preverb je bilo zelenih in to ni bil testni zagon.
       - name: Ping Healthchecks.io (mrtev cloveka drzalo)
         if: success() && steps.preveri.outputs.napake == ''

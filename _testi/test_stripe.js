@@ -453,8 +453,10 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
       Object.assign(s5, placana(s5, "pi_neujemanje"), { amount_total: placal });
       r = await webhook("checkout.session.completed", { id: s5.id, object: "checkout.session" });
       assert(r.status === 200, "N3: webhook z napacnim zneskom -> 200", r);
-      o = (await pool.query("SELECT status, cancelled_at, paid_at FROM orders WHERE id=$1", [n5.id])).rows[0];
+      o = (await pool.query("SELECT status, cancelled_at, paid_at, stripe_payment_intent_id FROM orders WHERE id=$1", [n5.id])).rows[0];
       assert(o.status === "cancelled" && o.cancelled_at && o.paid_at === null, "N3: narocilo cancelled (ne visi vec v pending), ni placano", o);
+      // Kot I44(4) (narocilo brez imetnika): PI se zapise, da ga charge.refunded/spor najdeta po PI (narocilo ni placano, vracilo() ga pusti).
+      assert(o.stripe_payment_intent_id === "pi_neujemanje", "N3: PI zapisan na preklicanem narocilu (kot I44)", o);
       vst = (await pool.query("SELECT COUNT(*)::int AS n FROM tickets WHERE order_id=$1", [n5.id])).rows[0].n;
       assert(vst === 0, "N3: brez vstopnic", vst);
       assert(await sold() === soldN, "N3: zaloga sproscena");
