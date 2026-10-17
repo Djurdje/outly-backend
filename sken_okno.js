@@ -22,4 +22,17 @@ function jeVOknuSkena(startAt, endAt, cas = Date.now()) {
   return t >= zacetek - SKEN_OKNO_PRED_MS && t <= konec + SKEN_OKNO_PO_MS;
 }
 
-module.exports = { jeVOknuSkena, SKEN_OKNO_PRED_MS, SKEN_OKNO_PO_MS, SKEN_PRIVZETO_TRAJANJE_MS };
+// Ali je dogodek ze MINIL (#255, invarianta I42: lastnik/manager ga potem ne more odpovedati in s tem vrniti denarja vsem kupcem).
+// Minil = zdaj > konec; konec = end_at, ce obstaja in je po zacetku, sicer zacetek + 12 h + 6 h (= konec okna skena brez end_at, I25).
+// Z end_at se steje sam end_at (ne +6 h): dogodek, ki se je koncal, ni vec za odpoved, tudi ce vratar se sme skenirati zamudnike.
+// Neberljiv zacetek -> false (v bazi je start_at NOT NULL).
+function jeDogodekMinil(startAt, endAt, cas = Date.now()) {
+  const zacetek = startAt === null || startAt === undefined ? NaN : new Date(startAt).getTime();
+  const t = new Date(cas).getTime();
+  if (!Number.isFinite(zacetek) || !Number.isFinite(t)) return false;
+  const k = endAt === null || endAt === undefined ? NaN : new Date(endAt).getTime();
+  const konec = Number.isFinite(k) && k > zacetek ? k : zacetek + SKEN_PRIVZETO_TRAJANJE_MS + SKEN_OKNO_PO_MS;
+  return t > konec;
+}
+
+module.exports = { jeVOknuSkena, jeDogodekMinil, SKEN_OKNO_PRED_MS, SKEN_OKNO_PO_MS, SKEN_PRIVZETO_TRAJANJE_MS };

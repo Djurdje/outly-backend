@@ -122,7 +122,7 @@ async function webhook(tip, objekt, id) {
 const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", payment_intent: pi });
 
 function zagon(port, okolje) {
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, GOST_NAKUP_TEST: "1", PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
     TEST_PLACILA: "", GOST_PREVZEM_MS: "0", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
   const s = { srv, log: "" };
   srv.stdout.on("data", d => s.log += d); srv.stderr.on("data", d => s.log += d);
@@ -840,7 +840,35 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     r = await nakup(evA, "live@example.com", {}, {}, `http://127.0.0.1:${PORT_E}`);
     assert(r.status === 409 && /does not accept online payments/.test(r.body), "z GOST_NAKUP_LIVE=1 gre naprej (klub brez Stripa: obstojece pravilo 409)", r);
     c2.srv.kill();
-    assert(true, "sandbox/testni nacin deluje brez stikala (instanca A, sekcije 1-12)");
+    assert(true, "sandbox z GOST_NAKUP_TEST=1 deluje (instanca A, sekcije 1-12)");
+
+    console.log("\n# 13b. Stikalo GOST_NAKUP_TEST (#249): sandbox in testni nacin sta privzeto ZAPRTA");
+    const PORT_S1 = 3186, PORT_S2 = 3187, PORT_S3 = 3188;
+    const okoljeSandbox = { RESEND_API_KEY: "", STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, GOST_POSTA_PONOVI_MS: "0" };
+    const zaprto = async (port, okolje, opis) => {
+      const x = zagon(port, okolje);
+      await cakajStreznik(`http://127.0.0.1:${port}`);
+      const sejPrej = Object.keys(S.seje || {}).length;
+      const rr = await nakup(evA, "sandbox@example.com", {}, { "idempotency-key": "gost-zaprto-" + port }, `http://127.0.0.1:${port}`);
+      assert(rr.status === 503 && rr.body === "Guest checkout is not available yet.", `${opis}: 503 »Guest checkout is not available yet.«`, rr);
+      assert((await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE guest_email='sandbox@example.com'")).rows[0].n === 0, `${opis}: narocilo ni nastalo`);
+      assert(Object.keys(S.seje || {}).length === sejPrej, `${opis}: Stripe seje ni`);
+      return x;
+    };
+    let z1 = await zaprto(PORT_S1, { ...okoljeSandbox, GOST_NAKUP_TEST: "" }, "sandbox (sk_test_) brez spremenljivk");
+    // ogled obstojecega gostujocega narocila dela naprej (stikalo velja samo za nakup)
+    r = await zahtevek(`http://127.0.0.1:${PORT_S1}`, "GET", "/guest/order", null, undefined, { "x-guest-token": "neveljaven-zeton" });
+    assert(r.status === 404, "zaprto stikalo: GET /guest/order ni za stikalom (neveljaven zeton -> 404, ne 503)", r.status);
+    z1.srv.kill();
+    z1 = await zaprto(PORT_S2, { ...okoljeSandbox, GOST_NAKUP_TEST: "", GOST_NAKUP_LIVE: "1" }, "sandbox z GOST_NAKUP_LIVE=1 (zivo stikalo ne odpre sandboxa)");
+    z1.srv.kill();
+    z1 = await zaprto(PORT_S3, { RESEND_API_KEY: "", STRIPE_SECRET_KEY: "", STRIPE_WEBHOOK_SECRET: "", TEST_PLACILA: "true", GOST_NAKUP_TEST: "" }, "testni nacin (TEST_PLACILA) brez GOST_NAKUP_TEST");
+    z1.srv.kill();
+    c2 = zagon(PORT_C, { ...okoljeLive, GOST_NAKUP_TEST: "1" });
+    await cakajStreznik(`http://127.0.0.1:${PORT_C}`);
+    r = await nakup(evA, "live@example.com", {}, {}, `http://127.0.0.1:${PORT_C}`);
+    assert(r.status === 503 && r.body === "Guest checkout is not available yet.", "sk_live_ z GOST_NAKUP_TEST=1 (testno stikalo ne odpre zivega nacina): 503", r);
+    c2.srv.kill();
 
     console.log("\n# 14. Globalna dnevna meja mailov (GOST_POSTA_DNEVNO)");
     a.srv.kill(); await pocakaj(500);

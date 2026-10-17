@@ -247,12 +247,9 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
 
     console.log("\n# Webhook: placilo uspelo");
     const s1 = S.seje.cs_test_1;
-    Object.assign(s1, placana(s1, "pi_test_1"), { amount_total: 2999 });   // webhook objekt prebere svez iz Stripa
-    r = await webhook("checkout.session.completed", { id: s1.id, object: "checkout.session" });
-    assert(r.status === 200, "napacen znesek -> 200 (zabelezeno)", r);
-    let o = (await pool.query("SELECT status FROM orders WHERE id=$1", [n1.id])).rows[0];
-    assert(o.status === "pending", "napacen znesek: narocilo ostane pending", o);
-    s1.amount_total = 3000;
+    // Neujemanje zneska (#258 N3) je od zdaj na lastnem narocilu na koncu (narocilo se preklice, zato tu ne bi moglo postati placano).
+    Object.assign(s1, placana(s1, "pi_test_1"));
+    let o;
     r = await webhook("checkout.session.completed", s1, { id: "evt_placilo_1" });
     assert(r.status === 200 && r.body.received, "checkout.session.completed -> 200", r);
     o = (await pool.query("SELECT status, paid_at, stripe_payment_intent_id FROM orders WHERE id=$1", [n1.id])).rows[0];
@@ -442,6 +439,47 @@ const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", 
     assert(r.status === 200 && r.body.commission_bps === null, "prazno -> spet privzeta", r.body);
     const fee38 = (await pool.query("SELECT application_fee_cents FROM orders ORDER BY id DESC LIMIT 1")).rows[0].application_fee_cents;
     assert(fee38 === 38, "sprememba provizije ne spremeni ze ustvarjenega narocila", fee38);
+
+    console.log("\n# Neujemanje zneska/valute seje (#258 N3): narocilo preklicano + vracilo inactive_order");
+    {
+      const sejaNarocila = async (id) => S.seje[(await pool.query("SELECT stripe_checkout_session_id FROM orders WHERE id=$1", [id])).rows[0].stripe_checkout_session_id];
+      const vracilaN = async (id) => (await pool.query("SELECT razlog, znesek_cents, payment_intent_id, checkout_session_id FROM vracila WHERE order_id=$1", [id])).rows;
+      const soldN = await sold();
+      r = await api("POST", `/events/${ev}/orders`, T.ana, { quantity: 1 });
+      assert(r.status === 201 && r.body.mode === "stripe", "N3: nakup (stripe)", r.body);
+      const n5 = r.body.order;
+      const s5 = await sejaNarocila(n5.id);
+      const placal = s5.amount_total - 1;   // kupec je placal drug znesek kot narocilo
+      Object.assign(s5, placana(s5, "pi_neujemanje"), { amount_total: placal });
+      r = await webhook("checkout.session.completed", { id: s5.id, object: "checkout.session" });
+      assert(r.status === 200, "N3: webhook z napacnim zneskom -> 200", r);
+      o = (await pool.query("SELECT status, cancelled_at, paid_at FROM orders WHERE id=$1", [n5.id])).rows[0];
+      assert(o.status === "cancelled" && o.cancelled_at && o.paid_at === null, "N3: narocilo cancelled (ne visi vec v pending), ni placano", o);
+      vst = (await pool.query("SELECT COUNT(*)::int AS n FROM tickets WHERE order_id=$1", [n5.id])).rows[0].n;
+      assert(vst === 0, "N3: brez vstopnic", vst);
+      assert(await sold() === soldN, "N3: zaloga sproscena");
+      let vr = await vracilaN(n5.id);
+      assert(vr.length === 1 && vr[0].razlog === "inactive_order" && vr[0].znesek_cents === placal && vr[0].payment_intent_id === "pi_neujemanje" && vr[0].checkout_session_id === s5.id,
+        "N3: v isti transakciji vracilo inactive_order za PLACANI znesek seje", vr);
+      assert(new RegExp(`\\[stripe\\] POZOR: znesek seje ${s5.id} \\(${placal} eur\\) != narocilo ${n5.public_ref}.*narocilo preklicano: vracilo v vrsti \\(samodejno\\)`).test(log), "N3: alarm POZOR v dnevniku");
+      r = await webhook("checkout.session.completed", { id: s5.id, object: "checkout.session" });
+      vr = await vracilaN(n5.id);
+      o = (await pool.query("SELECT status FROM orders WHERE id=$1", [n5.id])).rows[0];
+      assert(r.status === 200 && vr.length === 1 && o.status === "cancelled", "N3: ponovljen webhook ne podvoji vracila in ne obudi narocila", [vr.length, o.status]);
+
+      // Pospravljalec (izgubljen webhook), napacna valuta: prej je narocilo ostalo pending in ga je obdeloval vsakih 5 min v nedogled
+      r = await api("POST", `/events/${ev}/orders`, T.ana, { quantity: 1 });
+      assert(r.status === 201, "N3: nakup 2 (stripe)", r);
+      const n6 = r.body.order;
+      const s6 = await sejaNarocila(n6.id);
+      Object.assign(s6, placana(s6, "pi_valuta"), { currency: "usd" });
+      await pool.query("UPDATE orders SET checkout_expires_at = NOW() - INTERVAL '10 minutes' WHERE id = $1", [n6.id]);
+      let o6;
+      for (let i = 0; i < 40; i++) { await pocakaj(150); o6 = (await pool.query("SELECT status FROM orders WHERE id=$1", [n6.id])).rows[0]; if (o6.status !== "pending") break; }
+      vr = await vracilaN(n6.id);
+      assert(o6.status === "cancelled" && vr.length === 1 && vr[0].razlog === "inactive_order" && vr[0].znesek_cents === s6.amount_total && vr[0].payment_intent_id === "pi_valuta",
+        "N3: pospravljalec, napacna valuta -> cancelled + vracilo inactive_order", [o6, vr]);
+    }
 
     console.log("\n# Neznan dogodek");
     r = await webhook("payment_intent.created", { id: "pi_x", object: "payment_intent" });
