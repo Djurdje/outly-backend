@@ -760,7 +760,8 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
       r = await zahtevek(H, "POST", `/tickets/${tidX}/transfer`, T.kupec, { email: "izbris-tekma@example.com", allow_guest: true });
       assert(r.status === 200, "14: prenos prijatelju 200", r.body);
       assert(await cakaj(async () => (await pool.query("SELECT holder_guest_mail_claimed_at AS t FROM tickets WHERE id=$1", [tidX])).rows[0].t !== null, 5000), "14: mail je vstopnico prevzel (kovanje v teku)");
-      await pocakaj(300);   // kovanje je ze v INSERT-u in drzi zaklep vrstice
+      // kovanje je ze v INSERT-u (spi v pg_sleep) in drzi zaklep vrstice: cakamo na pogoj, ne na cas
+      assert(await cakaj(async () => (await pool.query("SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND query LIKE '%gost_zetoni_vstopnic%'")).rowCount > 0, 5000), "14: INSERT zetona spi v prozilcu (drzi zaklep vrstice)");
       const stanjeX = async () => (await pool.query(
         "SELECT (SELECT holder_guest_email FROM tickets WHERE id=$1) AS email, (SELECT COUNT(*)::int FROM gost_zetoni_vstopnic WHERE ticket_id=$1) AS zetoni", [tidX])).rows[0];
       let koncano = false, prekrsitevX = null;

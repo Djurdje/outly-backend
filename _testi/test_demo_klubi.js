@@ -125,16 +125,17 @@ const SQL_OZNAKA = brezTransakcije("050_demo_klubi_oznaka.sql");
   assert(t.o === 1 && t.t === 1 && t.e === predDogodkov, "narocila, vstopnice in obstojeci dogodki ostanejo", t);
 
   console.log("\n# Drugi zagon ne doda nicesar");
-  // Migracija je idempotentna, dokler so njeni fiksni datumi v prihodnosti. Ko minejo, »prihajajoci« po prvem zagonu spet manjkajo in drugi zagon
-  // doda nove (v produkciji tece migracija samo enkrat, evidenca schema_migrations). Takrat primerjamo samo koncane (fiksni datumi sept. 2026).
-  const stDogodkov = async (samoKoncani) => (await pool.query(
-    `SELECT COUNT(*)::int AS n FROM events WHERE ${samoKoncani ? "COALESCE(end_at, start_at + INTERVAL '8 hours') <= NOW()" : "TRUE"}`)).rows[0].n;
-  const vsiPrihodnji = (await pool.query(
-    "SELECT COUNT(*)::int AS n FROM clubs c WHERE c.id <= 5 AND (SELECT COUNT(*) FROM events e WHERE e.club_id = c.id AND e.status='published' AND e.start_at > NOW()) < 3")).rows[0].n === 0;
-  const n1 = await stDogodkov(!vsiPrihodnji);
+  // Migracija je idempotentna, dokler so njeni fiksni datumi v prihodnosti. Ko minejo, »prihajajoci« po prvem zagonu spet manjkajo in drugi zagon jih
+  // dopolni (doda dogodek s fiksnim datumom, ki je ze v preteklosti; v produkciji migracija tece samo enkrat, evidenca schema_migrations). Zato ne
+  // pricakujemo »nic novega«, ampak natanko toliko novih dogodkov, kot jih do 3 prihajajocih manjka po klubih (koncani so ze polni): vsota max(0, 3 - prihodnji).
+  const prihodnjiKluba = async (id) => (await pool.query("SELECT COUNT(*)::int AS n FROM events WHERE club_id=$1 AND status='published' AND start_at > NOW()", [id])).rows[0].n;
+  let pricakovanoNovih = 0;
+  for (const c of klubi.filter(c => c.id <= 5)) pricakovanoNovih += Math.max(0, 3 - await prihodnjiKluba(c.id));
+  const n1 = (await pool.query("SELECT COUNT(*)::int AS n FROM events")).rows[0].n;
   await pool.query("BEGIN"); await pool.query(SQL); await pool.query("COMMIT");
-  const n2 = await stDogodkov(!vsiPrihodnji);
-  assert(n1 === n2, `stevilo ${vsiPrihodnji ? "dogodkov" : "koncanih dogodkov (prihajajoce fiksni datumi ze minevajo)"} enako po drugem zagonu`, [n1, n2]);
+  const n2 = (await pool.query("SELECT COUNT(*)::int AS n FROM events")).rows[0].n;
+  assert(n2 - n1 === pricakovanoNovih, `drugi zagon doda natanko toliko dogodkov, kot jih do 3 prihajajocih manjka (${pricakovanoNovih}; 0, dokler so fiksni datumi v prihodnosti)`, [n1, n2]);
+  if (Date.now() < PRVI_FIKSNI_DATUM) assert(pricakovanoNovih === 0, "dokler prvi fiksni datum ni minil, je migracija idempotentna (drugi zagon ne doda nicesar)", pricakovanoNovih);
 
   console.log("\n# Migracija 023: logotipi");
   await pool.query("UPDATE clubs SET logo_url='https://example.com/star.png'");
@@ -175,7 +176,10 @@ const SQL_OZNAKA = brezTransakcije("050_demo_klubi_oznaka.sql");
     r = await api(`/events?clubId=${id}&popular=true`);
     assert(r.status === 200 && r.body.length === 3, `GET /events?clubId=${id}&popular=true -> 3`, r.body.length);
     r = await api(`/events?clubId=${id}&upcoming=true`);
-    assert(r.status === 200 && r.body.length >= 3, `GET /events?clubId=${id}&upcoming=true -> >= 3`, r.body.length);
+    // Pricakovano = kar je v bazi res prihajajoce (isti pogoj kot pot: objavljen, start_at > NOW()); fiksno »3« bi z minevanjem datumov migracije 022 padlo.
+    const vBazi = await prihodnjiKluba(id);
+    assert(r.status === 200 && r.body.length === vBazi, `GET /events?clubId=${id}&upcoming=true -> kolikor je prihajajocih v bazi (${vBazi})`, r.body.length);
+    if (Date.now() < PRVI_FIKSNI_DATUM) assert(r.body.length >= 3, `GET /events?clubId=${id}&upcoming=true -> >= 3 (dokler prvi fiksni datum migracije ni minil)`, r.body.length);
   }
 
   srv.kill();
