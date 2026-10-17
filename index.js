@@ -5957,15 +5957,24 @@ async function pocistiGostZetone() {
     if (an.rowCount > 0) console.log(`[gost] anonimiziranih gostujocih narocil: zetonov ${an.rowCount}`);
     // Vstopnice, poslane gostu (034): zetoni potecejo in e-naslov imetnika se izbrise konec dogodka + 30 dni (GOST_ZETON_DNI; pravna presoja 1.4).
     // holder_is_guest OSTANE (vstopnica ne sme spet postati kupceva); zapis prenosa dobi neosebno oznako.
+    // Anonimizacija e-naslova in brisanje zetonov sta ENA transakcija (issue #240): mail, ki je vstopnico prevzel pred iztekom roka, kuje zeton
+    // sele po pripravi priloge. UPDATE tickets pocaka na njegovo zaklepanje vrstice (gostKujZetonVstopnice: FOR UPDATE), DELETE zetonov je nov ukaz
+    // (nov posnetek) in zeton vidi; zunanji opazovalec nikoli ne vidi »e-naslov izbrisan, zeton obstaja«.
     const konec = `COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') + INTERVAL '${GOST_ZETON_DNI} days' < NOW()`;
-    await pool.query(`DELETE FROM gost_zetoni_vstopnic z USING tickets t, events e WHERE t.id = z.ticket_id AND e.id = t.event_id AND ${konec}`);
-    const at = await pool.query(
-      `WITH k AS (SELECT t.id FROM tickets t JOIN events e ON e.id = t.event_id WHERE t.holder_guest_email IS NOT NULL AND ${konec} LIMIT 1000),
-            u AS (UPDATE tickets t SET holder_guest_email = NULL FROM k WHERE t.id = k.id RETURNING t.id),
-            p AS (UPDATE ticket_transfers x SET to_email = 'izbrisan-' || x.id || '@outly.invalid', to_email_norm = NULL
-                   WHERE x.to_guest AND x.to_user_id IS NULL AND x.ticket_id IN (SELECT id FROM u) RETURNING 1)
-       SELECT (SELECT COUNT(*)::int FROM u) AS n`);
-    if (at.rows[0].n > 0) console.log(`[gost] anonimiziranih prenesenih gostujocih vstopnic: ${at.rows[0].n}`);
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      const at = await c.query(
+        `WITH k AS (SELECT t.id FROM tickets t JOIN events e ON e.id = t.event_id WHERE t.holder_guest_email IS NOT NULL AND ${konec} LIMIT 1000),
+              u AS (UPDATE tickets t SET holder_guest_email = NULL FROM k WHERE t.id = k.id RETURNING t.id),
+              p AS (UPDATE ticket_transfers x SET to_email = 'izbrisan-' || x.id || '@outly.invalid', to_email_norm = NULL
+                     WHERE x.to_guest AND x.to_user_id IS NULL AND x.ticket_id IN (SELECT id FROM u) RETURNING 1)
+         SELECT (SELECT COUNT(*)::int FROM u) AS n`);
+      await c.query(`DELETE FROM gost_zetoni_vstopnic z USING tickets t, events e WHERE t.id = z.ticket_id AND e.id = t.event_id AND ${konec}`);
+      await c.query("COMMIT");
+      if (at.rows[0].n > 0) console.log(`[gost] anonimiziranih prenesenih gostujocih vstopnic: ${at.rows[0].n}`);
+    } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
+    finally { c.release(); }
   } catch (e) { console.error("[gost] pospravljanje ni uspelo:", e && e.message); }
 }
 
@@ -5990,8 +5999,16 @@ function naslovKljuc(email) {
 
 async function gostKujZetonVstopnice(db, tid) {
   const zeton = crypto.randomBytes(32).toString("base64url");
-  const r = await db.query("INSERT INTO gost_zetoni_vstopnic (token_hash, ticket_id) SELECT $1, t.id FROM tickets t WHERE t.id = $2 AND t.holder_is_guest", [gostZetonHash(zeton), tid]);
-  if (!r.rowCount) return null;   // vstopnica ni (vec) gostujoca (prevzeta v racun): zetonov od prevzema naprej ni vec
+  // Po roku hrambe (konec dogodka + GOST_ZETON_DNI) ali po anonimizaciji e-naslova zetona NE kujemo (issue #240: mail, ki je vstopnico prevzel pred iztekom
+  // roka, bi sicer skoval zeton PO pospravljalcu). FOR UPDATE OF t: pospravljalec (UPDATE tickets v isti transakciji kot brisanje zetonov) pocaka, da se zeton
+  // vstavi in ga nato izbrise; kdor pride za njim, vidi e-naslov NULL (ponovno preverjanje po cakanju) in zetona ne dobi.
+  const r = await db.query(
+    `INSERT INTO gost_zetoni_vstopnic (token_hash, ticket_id)
+       SELECT $1, t.id FROM tickets t JOIN events e ON e.id = t.event_id
+        WHERE t.id = $2 AND t.holder_is_guest AND t.holder_guest_email IS NOT NULL
+          AND COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') + INTERVAL '${GOST_ZETON_DNI} days' > NOW()
+          FOR UPDATE OF t`, [gostZetonHash(zeton), tid]);
+  if (!r.rowCount) return null;   // vstopnica ni (vec) gostujoca (prevzeta v racun), e-naslov je izbrisan ali rok hrambe je potekel: zetona ni
   await db.query(
     `DELETE FROM gost_zetoni_vstopnic WHERE ticket_id = $1
        AND token_hash NOT IN (SELECT token_hash FROM gost_zetoni_vstopnic WHERE ticket_id = $1 ORDER BY created_at DESC LIMIT ${GOST_ZETONOV_NA_NAROCILO})`, [tid]);

@@ -15,6 +15,7 @@
  *   7  prevzem v racun: potrjen e-naslov -> vstopnica njegova, zeton preklican, serial isti; nepotrjen se ne prevzame
  *   8  mail: napaka Resenda -> pospravljalec poslje (enkrat); hramba: konec dogodka + 30 dni anonimizacija
  *   9  zloraba: meja na posiljatelja in na naslov (429), hkratni prenos iste vstopnice (en uspe)
+ *  12  hramba: mail v teku ob izteku roka (konec dogodka + 30 dni) ne sme skovati zetona po anonimizaciji (issue #240)
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -669,6 +670,49 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
       assert(poslanoNa("pocasna-priprava@example.com").length === 1, "11: priprava dlje od spodnje meje premora: mail natanko enkrat zaradi mnozice v teku", poslanoNa("pocasna-priprava@example.com").length);
       const aT = (await pool.query("SELECT holder_guest_mail_attempts AS n FROM tickets WHERE id=$1", [zVst[0].id])).rows[0];
       assert(aT.n === 1, "11: en sam prevzem v bazi", aT);
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS test_pocasna_priprava ON gost_zetoni_vstopnic");
+      await pool.query("DROP FUNCTION IF EXISTS test_pocasna_priprava()");
+    }
+
+    // ============================================================
+    console.log("\n# 12. Zeton se po roku hrambe ne kuje (issue #240): mail v teku, ko pospravljalec anonimizira");
+    // Pospravljalec (konec dogodka + 30 dni) izbrise zetone in e-naslov imetnika. Mail, ki je vstopnico ze PREVZEL (e-naslov se je takrat se bral),
+    // pa zeton kuje sele po pripravi priloge (slika, PDF). Ce pospravljalec vmes poteka, se je zeton po starem pojavil PO anonimizaciji in zivel do
+    // naslednjega teka (lazna napaka v razdelku 8 »zetoni izbrisani«). Testna prozilca uspava vstavljanje zetona 2,5 s SAMO za to vstopnico in SAMO po prevzemu.
+    // Invarianta: nikoli ne obstaja stanje »e-naslov izbrisan, zeton obstaja«, tudi trenutno ne (vzorcimo vsakih 30 ms).
+    for (const x of dodatni) x.srv.kill();   // G iz razdelka 11
+    dodatni.length = 0;
+    await pocakaj(500);
+    await pool.query(`CREATE OR REPLACE FUNCTION test_pocasna_priprava() RETURNS trigger LANGUAGE plpgsql AS $f$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM tickets t WHERE t.id = NEW.ticket_id AND t.holder_guest_mail_claimed_at IS NOT NULL AND t.holder_guest_email = 'retencija@example.com') THEN PERFORM pg_sleep(2.5); END IF;
+        RETURN NEW;
+      END $f$`);
+    await pool.query("CREATE TRIGGER test_pocasna_priprava BEFORE INSERT ON gost_zetoni_vstopnic FOR EACH ROW EXECUTE FUNCTION test_pocasna_priprava()");
+    try {
+      const PORT_H = 3203, H = `http://127.0.0.1:${PORT_H}`;
+      const eR = (await pool.query(
+        `INSERT INTO events (club_id, title, poster_url, start_at, status, ticket_price_cents, capacity, min_age, vip_enabled)
+         VALUES (1,'Prenos Retencija','https://example.com/p.jpg', NOW() + INTERVAL '2 days', 'published', 1500, 200, 0, FALSE) RETURNING id`)).rows[0].id;
+      const hr = zagon(PORT_H, { PRENOS_BREZ_RACUNA: "vsi", GOST_PRENOS_NA_DAN: "1000", GOST_PRENOS_NA_NASLOV: "1000", GOST_POSTA_PONOVI_MS: "100", GOST_POSTA_PREMOR_MS: "200",
+        GOST_POSTA_TIMEOUT_MS: "1000", GOST_POSTA_REZERVA_MS: "0" }); dodatni.push(hr);
+      await cakajStreznik(H);
+      const kr = await zahtevek(H, "POST", `/events/${eR}/orders`, T.kupec, { quantity: 1 });
+      assert(kr.status === 201, "12: nakup 201", kr.body);
+      const tidR = kr.body.tickets[0].id;
+      r = await zahtevek(H, "POST", `/tickets/${tidR}/transfer`, T.kupec, { email: "retencija@example.com", allow_guest: true });
+      assert(r.status === 200, "12: prenos prijatelju 200", r.body);
+      assert(await cakaj(async () => (await pool.query("SELECT holder_guest_mail_claimed_at AS t FROM tickets WHERE id=$1", [tidR])).rows[0].t !== null, 5000), "12: mail je vstopnico prevzel (priprava v teku)");
+      // rok hrambe poteche, medtem ko mail se pripravlja
+      await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '40 days', end_at = NOW() - INTERVAL '39 days' WHERE id=$1", [eR]);
+      const stanje = async () => (await pool.query(
+        "SELECT (SELECT holder_guest_email FROM tickets WHERE id=$1) AS email, (SELECT COUNT(*)::int FROM gost_zetoni_vstopnic WHERE ticket_id=$1) AS zetoni", [tidR])).rows[0];
+      assert(await cakaj(async () => (await stanje()).email === null, 15000), "12: pospravljalec je izbrisal e-naslov imetnika");
+      let prekrsitev = null; const do12 = Date.now() + 5000;
+      while (Date.now() < do12) { const s12 = await stanje(); if (s12.email === null && s12.zetoni > 0) { prekrsitev = s12; break; } await pocakaj(30); }
+      assert(prekrsitev === null, "12: nikoli »e-naslov izbrisan, a zeton obstaja« (zeton se po roku hrambe ne kuje)", prekrsitev);
+      assert(await cakaj(async () => (await stanje()).zetoni === 0, 4000), "12: na koncu zetonov ni");
     } finally {
       await pool.query("DROP TRIGGER IF EXISTS test_pocasna_priprava ON gost_zetoni_vstopnic");
       await pool.query("DROP FUNCTION IF EXISTS test_pocasna_priprava()");
