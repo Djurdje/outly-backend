@@ -4476,6 +4476,26 @@ function pogojiIzTela(b) {
   if (typeof v !== "string" || !TERMS_VERZIJA_RE.test(v)) return { napaka: "terms_version is invalid." };
   return { verzija: v };
 }
+// Trenutna razlicica pogojev uporabe (#260 N2). OB NOVI RAZLICICI POGOJEV posodobi skupaj s spletom (TERMS_VERSION) in iOS (LegalLinks.termsVersion);
+// glej docs/ARCHITECTURE.md »Razlicica pogojev«. Streznik nakupa zaradi druge razlicice NE zavrne (star iOS v rokah uporabnikov poslje starejso
+// ali nobene) in shrani, kar je poslal odjemalec (kar je kupec dejansko videl); samo zapise opozorilo v dnevnik.
+const TRENUTNI_POGOJI = "1.1.2";
+const POGOJI_OPOZORILO_MS = Math.max(0, Number(process.env.POGOJI_OPOZORILO_MS) || 60_000);   // najvec eno opozorilo na (pot, razlicico) v tem oknu
+const POGOJI_OPOZORILO_KLJUCEV = 200;   // meja pomnilnika: razlicic je lahko poljubno (vsak niz do 40 znakov)
+const pogojiOpozorjeno = new Map();     // "pot|razlicica" -> cas zadnjega opozorila
+// Brez osebnih podatkov: samo pot, poslana razlicica (ze preverjena z TERMS_VERZIJA_RE) in javna referenca narocila.
+function opozoriPogoje(pot, verzija, ref) {
+  if (verzija === TRENUTNI_POGOJI) return;
+  const zdaj = Date.now(), k = pot + "|" + (verzija ?? "");
+  const zadnjic = pogojiOpozorjeno.get(k);
+  if (zadnjic !== undefined && zdaj - zadnjic < POGOJI_OPOZORILO_MS) return;
+  if (zadnjic === undefined && pogojiOpozorjeno.size >= POGOJI_OPOZORILO_KLJUCEV) {
+    for (const [kk, t] of pogojiOpozorjeno) if (zdaj - t >= POGOJI_OPOZORILO_MS) pogojiOpozorjeno.delete(kk);
+    if (pogojiOpozorjeno.size >= POGOJI_OPOZORILO_KLJUCEV) return;   // poplava razlicnih razlicic: ne pisi vec, dokler okno ne potece
+  }
+  pogojiOpozorjeno.set(k, zdaj);
+  console.warn(`[pogoji] ${pot}: terms_version ${verzija == null ? "manjka" : JSON.stringify(verzija)} (trenutna ${TRENUTNI_POGOJI}), narocilo ${ref}; nakup sprejet`);
+}
 function idemIstaVsebina(a, b) {
   return a.event_id === b.event_id && a.quantity === b.quantity
     && (a.table_id ?? null) === (b.table_id ?? null) && (a.package_id ?? null) === (b.package_id ?? null);
@@ -4732,6 +4752,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
       );
     }
     await c.query("COMMIT");
+    opozoriPogoje("POST /events/:id/orders", pogoji.verzija, ref);
 
     if (!placanoTakoj && !(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – ${q === 1 ? "1 ticket" : q + " tickets"}`,
       kolicina: q, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: u.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) }))) return;
@@ -5160,6 +5181,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     }
     const zeton = await gostKujZeton(c, oid);   // v isti transakciji: zeton velja takoj, ko je narocilo vidno
     await c.query("COMMIT");
+    opozoriPogoje("POST /guest/events/:id/orders", g.terms, ref);
 
     if (!placanoTakoj) {
         const povratna = { success_url: gostPovezava(zeton), cancel_url: gostPovezava(zeton) };   // stran naroclia: »Complete payment« / »Cancel order«
@@ -8234,6 +8256,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     const oid = or.rows[0].id;
     if (placanoTakoj) await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, miza.seats]);
     await c.query("COMMIT");
+    opozoriPogoje("POST /events/:id/tables/:tableId/orders", pogoji.verzija, ref);
 
     if (!placanoTakoj && !(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – VIP ${miza.label}${paket ? " + " + paket.name : ""}`,
       kolicina: 1, cenaEnoteCents: cena, racunKluba: e.stripe_account_id, email: starost.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) }))) return;
