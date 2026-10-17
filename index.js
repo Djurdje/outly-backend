@@ -5819,12 +5819,14 @@ const VRACILO_MAIL = {
     zadeva: "Vračilo / Refund" },
   // #251 (pogoj pravnik 17. 10. 2026): SAMO ob znani Stripovi zavrnitvi (stripe_stanje failed/canceled) v ni_uspelo/rocno. Brez stripe_stanje (rocno po sesutju, napaka API)
   // ne vemo, ali je denar odsel: samo obstojeci alarm. Ne pending/requires_action/succeeded (`potrditev`, `vrnjeno`), ne brez_stripa / 0 EUR / testno (test_ PI) / preklicano.
-  // Vsaj VRACILA_NI_IZVEDENO_PO_MS od ni_izvedeno_od_at; pri event_cancelled sele po poslanem mailu `odpoved` (inactive_order ga nima).
+  // Vsaj VRACILA_NI_IZVEDENO_PO_MS od ni_izvedeno_od_at; pri event_cancelled sele po poslanem mailu `odpoved` (inactive_order ga nima) in samo, ce je dogodek se odpovedan.
+  // Tik pred Resendom posljiVraciloKupcu vprasa Stripe (vracilaStripe.kupecVrnjenPredMailom), ali je kupec medtem rocno vrnjen v nadzorni plosci.
   // Pogoj vsebuje pogoj indeksa vracila_mail_ni_izvedeno_idx (051: NOT brez_stripa, stanje, stripe_stanje, mail_ni_izvedeno_poslano_at IS NULL); ob spremembi uskladi oba.
   ni_izvedeno: { poskusi: "mail_ni_izvedeno_poskusi", prevzeto: "mail_ni_izvedeno_prevzeto_at", poslano: "mail_ni_izvedeno_poslano_at",
     pogoj: `NOT v.brez_stripa AND v.stanje IN ('ni_uspelo', 'rocno') AND v.stripe_stanje IN ('failed', 'canceled')
       AND v.ni_izvedeno_od_at <= NOW() - (${VRACILA_NI_IZVEDENO_PO_MS}::bigint * INTERVAL '1 millisecond')
-      AND (v.razlog = 'inactive_order' OR v.mail_odpoved_poslano_at IS NOT NULL) AND NOT COALESCE(v.payment_intent_id LIKE 'test_%', FALSE)
+      AND (v.razlog = 'inactive_order' OR (v.mail_odpoved_poslano_at IS NOT NULL AND EXISTS (SELECT 1 FROM events ev WHERE ev.id = v.event_id AND ev.status = 'cancelled')))
+      AND NOT COALESCE(v.payment_intent_id LIKE 'test_%', FALSE)
       AND EXISTS (SELECT 1 FROM orders zo WHERE zo.id = v.order_id AND zo.total_cents > 0 AND NOT COALESCE(zo.stripe_payment_intent_id LIKE 'test_%', FALSE))`,
     zadeva: "Vračilo še ni izvedeno / Refund not completed yet" },
 };
@@ -5854,6 +5856,14 @@ async function posljiVraciloKupcu(vid, vrsta) {
     }
     // pred prvim poskusom znesek se ni zamrznjen: kar je se placano (obdelovalec bo vrnil ostanek, vracila_stripe.js izvedi())
     const zn = v.znesek_cents !== null && v.znesek_cents !== undefined ? v.znesek_cents : Math.max(0, o.total_cents - (o.refunded_cents || 0));
+    if (vrsta === "ni_izvedeno") {   // je kupec medtem vseeno dobil denar (rocno vracilo v Stripovi plosci)? Raje zamuda kot napacen mail.
+      const izid = await vracilaStripe.kupecVrnjenPredMailom(vid);
+      if (izid === "neznano") { await pool.query(`UPDATE vracila SET ${m.poskusi} = GREATEST(${m.poskusi} - 1, 0) WHERE id = $1 AND ${m.poslano} IS NULL`, [vid]); return false; }   // claim sprosti, poskusi pozneje
+      if (izid !== "poslji") {
+        if (izid === "ne") await pool.query(`UPDATE vracila SET ${m.poskusi} = $2 WHERE id = $1 AND ${m.poslano} IS NULL`, [vid, GOST_POSTA_POSKUSOV]);   // trajno: ne ponavljaj
+        return false;
+      }
+    }
     const { besedilo, html } = vraciloMailBesedilo({ ...o, razlog: v.razlog, znesek_cents: zn }, vrsta);
     const r = await gostResendPosli({ to: o.buyer_email, subject: `${m.zadeva}: ${o.event_title} (${o.public_ref})`.slice(0, 200), html, text: besedilo });
     if (r && r.error) {

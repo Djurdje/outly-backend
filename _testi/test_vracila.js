@@ -148,6 +148,7 @@ const stripeServer = http.createServer((req, res) => {
     if (req.method === "GET" && (m = u.match(/^\/v1\/disputes\/(dp_\w+)$/))) return S.spori[m[1]] ? odg(200, S.spori[m[1]]) : napaka(404, "invalid_request_error", "resource_missing", "No such dispute");
     if (req.method === "GET" && u === "/v1/refunds") {
       const pi = url.searchParams.get("payment_intent");
+      if (S.listNapaka && S.listNapaka === pi) return napaka(500, "api_error", null, "Stripe je trenutno nedosegljiv");
       return odg(200, { object: "list", has_more: false, data: S.refundi.filter(r => r.payment_intent === pi) });
     }
     if (req.method === "POST" && u === "/v1/refunds") {
@@ -1069,6 +1070,9 @@ async function webhook(tip, objekt, id) {
     const Qi = await narocilo({ ev: evQc, uporabnik: U.ana, status: "cancelled" });
     await pool.query(`INSERT INTO vracila (order_id, event_id, razlog, stanje, znesek_cents, payment_intent_id, stripe_vracilo_id, stripe_stanje, ni_izvedeno_od_at, naslednji_poskus_at)
                       VALUES ($1, $2, 'inactive_order', 'rocno', 1700, $3, 're_qi', 'canceled', NOW() - INTERVAL '2 hours', NOW() + INTERVAL '1 hour')`, [Qi.id, evQc, Qi.pi]);
+    // dogodek obnovljen (ni vec odpovedan): mail »... je odpovedan« ne sme oditi (pregled #261, NIZKO 2)
+    const evQn = await dogodek("Zaplet obnovljen", 2000), Qn = await narocilo({ ev: evQn, uporabnik: U.ana });
+    await vnesiVrsto(Qn, evQn, { stanje: "ni_uspelo", ...zavrnjeno(11) });
     // anonimiziran gost: poskusi na max, brez maila in brez ponavljanja
     const Qx = await narocilo({ ev: evQc, gostEmail: "izbrisan-99@outly.invalid" });
     await vnesiVrsto(Qx, evQc, { stanje: "ni_uspelo", ...zavrnjeno(8) });
@@ -1101,6 +1105,7 @@ async function webhook(tip, objekt, id) {
     const Qp1 = await narocilo({ ev: evQc, uporabnik: U.bor }), Qp2 = await narocilo({ ev: evQc, uporabnik: U.bor });
     const idQp1 = await vnesiVrsto(Qp1, evQc, { stanje: "ni_uspelo", ...zavrnjeno(9), ni_izvedeno_od_at: new Date() });
     const idQp2 = await vnesiVrsto(Qp2, evQc, { stanje: "ni_uspelo", ...zavrnjeno(10), ni_izvedeno_od_at: new Date() });
+    await pool.query("UPDATE events SET status='cancelled' WHERE id=$1", [evQc]);   // kontrolne vrstice so zdaj na odpovedanem dogodku: izloci jih SAMO njihov pogoj (vse vrstice ze obstajajo, sweep jih ne podvoji)
     let zahtevkiQ3 = 0;
     R.hook = (m) => (m.subject.includes(Q3.ref) ? (++zahtevkiQ3, { napaka: true }) : null);
     await zapadi(vz3.id);
@@ -1124,6 +1129,7 @@ async function webhook(tip, objekt, id) {
     assert(nizZa(Qe0).length === 0 && nizZa(QeT).length === 0 && nizZa(QeB).length === 0, "Z(e): 0 EUR, testno (test_ PI) in brez_stripa: brez maila");
     assert(Qc.every(a => nizZa(a).length === 0), "Z(c): succeeded / pending / requires_action / brez stripe_stanje / preklicano / potrditev: brez maila", Qc.map(a => nizZa(a).length));
     assert(nizZa(Qo).length === 0, "Z: event_cancelled brez poslanega maila »odpovedan«: brez maila");
+    assert(nizZa(Qn).length === 0, "Z: dogodek ni vec odpovedan (obnovljen): brez maila (pregled #261)");
     const vx = await vracilo(Qx.id);
     assert(!R.poslano.some(m => m.to === "izbrisan-99@outly.invalid") && vx.mail_ni_izvedeno_poskusi === 8 && !vx.mail_ni_izvedeno_poslano_at, "Z: @outly.invalid: brez maila, poskusi na max (8)", vx.mail_ni_izvedeno_poskusi);
     assert(await cakaj(() => vrnMaili().some(m => m.subject.includes(Qc[0].ref))), "Z(c): kupec rocno+succeeded dobi »vrnili smo«");
@@ -1149,12 +1155,42 @@ async function webhook(tip, objekt, id) {
     assert(await koncano(Qr1.id, ["opravljeno"]) && await koncano(Qr2.id, ["opravljeno"]) && await cakaj(() => vrnMaili().some(m => m.subject.includes(Qr1.ref)) && vrnMaili().some(m => m.subject.includes(Qr2.ref))), "Zr: opravljeno, oba dobita »vrnili smo«");
     const vr1 = await vracilo(Qr1.id), vr2 = await vracilo(Qr2.id);
     await pool.query("UPDATE vracila SET stanje='rocno', ni_izvedeno_od_at = NOW() - INTERVAL '3 hours' WHERE id=$1", [vr2.id]);   // Qr2: vrstica je bila ze v rocni obravnavi (npr. provizija), kupec vrnjen
-    for (const v0 of [vr1, vr2]) { S.reById[v0.stripe_vracilo_id].status = "failed"; S.reById[v0.stripe_vracilo_id].failure_reason = "expired_or_canceled_card"; await webhook("refund.failed", { id: v0.stripe_vracilo_id }); }
+    for (const v0 of [vr1, vr2]) {   // Stripe: zavrnjeno vracilo se vrne platformi (seznam vracil in amount_refunded naboja to pokazeta)
+      const re0 = S.reById[v0.stripe_vracilo_id]; re0.status = "failed"; re0.failure_reason = "expired_or_canceled_card";
+      for (const x of S.refundi) if (x.id === re0.id) x.status = "failed";
+      S.ch[re0.charge].amount_refunded -= re0.amount;
+      await webhook("refund.failed", { id: v0.stripe_vracilo_id });
+    }
     assert(await cakaj(async () => (await vracilo(Qr1.id)).stanje === "ni_uspelo" && (await vracilo(Qr2.id)).stripe_stanje === "failed"), "Zr: opravljeno -> ni_uspelo; rocno ostane rocno, stripe_stanje failed");
     const vr2b = await vracilo(Qr2.id);
     assert(vr2b.stanje === "rocno" && new Date(vr2b.ni_izvedeno_od_at) > new Date(Date.now() - 600e3), "Zr: rok za rocno vrstico steje od zavrnitve (ni_izvedeno_od_at osvezen)", vr2b.ni_izvedeno_od_at);
     await zapadi(vr1.id); await zapadi(vr2.id);
     assert(await cakaj(() => nizZa(Qr1).length === 1 && nizZa(Qr2).length === 1), "Zr: po zavrnitvi uspelega vracila kupec dobi `ni_izvedeno` kot popravek (oba primera)", [nizZa(Qr1).length, nizZa(Qr2).length]);
+
+    // Pregled #261 SREDNJE: Stripe vracilo zavrne, admin po alarmu vrne ROCNO v Stripovi plosci (vracilo brez nasega metadata) PRED rokom -> po roku NI `ni_izvedeno`,
+    // vrstica zaprta kot rocno vrnjena, kupec dobi »vrnili smo«. In: Stripe ob preverbi ni dosegljiv -> ta obhod brez maila (poskus sproscen), naslednji obhod poslje.
+    const evQm = await dogodek("Zaplet rocno", 2000), Qm = await narocilo({ ev: evQm, uporabnik: U.ana }), Qs = await narocilo({ ev: evQm, uporabnik: U.bor });
+    S.takoj[Qm.pi] = "failed"; S.takoj[Qs.pi] = "failed";
+    await api("DELETE", `/events/${evQm}`, T.lastnik);
+    assert(await koncano(Qm.id, ["ni_uspelo"]) && await koncano(Qs.id, ["ni_uspelo"]) && await cakaj(async () => !!(await vracilo(Qm.id)).mail_odpoved_poslano_at && !!(await vracilo(Qs.id)).mail_odpoved_poslano_at), "M: Stripe zavrnil, ni_uspelo, mail »odpovedan« poslan");
+    const chQm = S.pi[Qm.pi].latest_charge;
+    S.refundi.push({ id: "re_plosca_m", object: "refund", amount: 2000, status: "succeeded", payment_intent: Qm.pi, charge: chQm, metadata: {}, params: {}, kljuc: "plosca" });
+    S.ch[chQm].amount_refunded = 2000;
+    const vmId = await vid(Qm);
+    await zapadi(vmId);
+    assert(await cakaj(async () => { const q = await vracilo(Qm.id); return q.stanje === "opravljeno" && q.napaka === "rocno_vrnjeno_v_stripu"; }), "M1: po roku vrstica zaprta kot rocno_vrnjeno_v_stripu", await vracilo(Qm.id));
+    assert(await cakaj(() => vrnMaili().some(m => m.subject.includes(Qm.ref))) && nizZa(Qm).length === 0, "M1: kupec dobi »vrnili smo«, NE »vracilo se ni izvedeno«", nizZa(Qm).length);
+    assert(log.includes(`[vracila] POZOR: narocilo ${Qm.ref}: nase vracilo je Stripe zavrnil, a je placilo v Stripu ze v celoti vrnjeno`) && (await vrsticaN(Qm.id)).status === "refunded", "M1: alarm in naroceno refunded");
+    const vsId = await vid(Qs);
+    S.listNapaka = Qs.pi;
+    await zapadi(vsId);
+    assert(await cakaj(() => log.includes(`preverba pred mailom ni_izvedeno (vracilo ${vsId}): Stripe ni odgovoril`)), "M2: Stripe ob preverbi ni dosegljiv (v dnevniku)");
+    assert(await cakaj(async () => (await vracilo(Qs.id)).mail_ni_izvedeno_poskusi === 0, 3000), "M2: poskus sproscen");
+    const vs0 = await vracilo(Qs.id);
+    assert(nizZa(Qs).length === 0 && vs0.mail_ni_izvedeno_poskusi <= 1 && !vs0.mail_ni_izvedeno_poslano_at && vs0.stanje === "ni_uspelo", "M2: brez maila, poskus sproscen (0)", [vs0.mail_ni_izvedeno_poskusi, vs0.stanje]);
+    S.listNapaka = null;
+    assert(await cakaj(() => nizZa(Qs).length === 1), "M2: naslednji obhod (Stripe spet dela) poslje `ni_izvedeno`");
+    assert((await vracilo(Qs.id)).mail_ni_izvedeno_poskusi === 1, "M2: en poskus porabljen");
 
     // (g) delno ze vrnjeno naroceno: mail »odpovedan« (znesek se ni zamrznjen) = total - refunded, brez »celoten / full amount«
     const evQg = await dogodek("Zaplet delno", 2000), Qg = await narocilo({ ev: evQg, uporabnik: U.bor });

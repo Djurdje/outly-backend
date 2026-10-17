@@ -303,11 +303,18 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   async function uskladiVracilo(re) {
     if (!re || !re.id) return;
     const status = String(re.status || "").slice(0, 20);
-    let r = await pool.query("UPDATE vracila v SET stripe_stanje = $2 FROM (SELECT id, stripe_stanje AS prej FROM vracila WHERE stripe_vracilo_id = $1 FOR UPDATE) p WHERE v.id = p.id RETURNING v.id, v.stanje, p.prej", [re.id, status]);
+    // Stripova zavrnitev vrstice, ki je ze v rocno/ni_uspelo: rok za mail kupcu `ni_izvedeno` (#251) steje od zavrnitve, v ISTEM zapisu kot stripe_stanje
+    // (obdelovalec mailov sicer vmes vidi `failed` s starim rokom in poslje takoj).
+    let r = await pool.query(
+      `UPDATE vracila v SET stripe_stanje = $2,
+              ni_izvedeno_od_at = CASE WHEN $2 IN ('failed', 'canceled') AND v.stanje IN ('rocno', 'ni_uspelo') AND p.prej IS DISTINCT FROM $2 THEN NOW() ELSE v.ni_izvedeno_od_at END
+         FROM (SELECT id, stripe_stanje AS prej FROM vracila WHERE stripe_vracilo_id = $1 FOR UPDATE) p WHERE v.id = p.id RETURNING v.id, v.stanje, p.prej`, [re.id, status]);
     // Webhook je prehitel zapis stripe_vracilo_id (vracilo je ze narejeno, vrstica ga se ne pozna): poisci vrstico po metadata iz SVEZEGA vracila in vracilo posvoji.
     const md = re.metadata || {};
     if (!r.rows.length && /^\d{1,15}$/.test(String(md.vracilo_id || "")) && /^\d{1,15}$/.test(String(md.order_id || ""))) {
-      r = await pool.query("UPDATE vracila SET stripe_vracilo_id = $2, stripe_stanje = $3 WHERE id = $1 AND order_id = $4 AND stripe_vracilo_id IS NULL RETURNING id, stanje",
+      r = await pool.query(`UPDATE vracila SET stripe_vracilo_id = $2, stripe_stanje = $3,
+              ni_izvedeno_od_at = CASE WHEN $3 IN ('failed', 'canceled') AND stanje IN ('rocno', 'ni_uspelo') THEN NOW() ELSE ni_izvedeno_od_at END
+         WHERE id = $1 AND order_id = $4 AND stripe_vracilo_id IS NULL RETURNING id, stanje`,
         [md.vracilo_id, re.id, status, md.order_id]);
     }
     for (const x of r.rows) {
@@ -316,8 +323,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
         console.log(`[vracila] opravljeno (Stripe je vracilo izvedel): vracilo ${x.id}`);
       } else if ((re.status === "failed" || re.status === "canceled") && ["rocno", "ni_uspelo"].includes(x.stanje) && ["pending", "requires_action", "succeeded"].includes(x.prej)) {
         // Vrstica je ze v rocni obravnavi/ni_uspelo (stanje ostane), Stripe pa je vracilo pozneje zavrnil: admin mora vedeti, da kupec NI dobil denarja.
-        // Rok za mail kupcu `ni_izvedeno` (#251) steje od zavrnitve, ne od prejsnjega vstopa v stanje.
-        await pool.query("UPDATE vracila SET ni_izvedeno_od_at = NOW() WHERE id = $1 AND stanje IN ('rocno', 'ni_uspelo')", [x.id]);
+        // Rok za mail kupcu `ni_izvedeno` (#251) je ze nastavljen v zgornjem UPDATE (od zavrnitve, ne od prejsnjega vstopa v stanje).
         console.error(`[vracila] POZOR: Stripe vracilo ${re.id} (vracilo ${x.id}) je ${re.status}${re.failure_reason ? ", razlog " + re.failure_reason : ""}: kupec NI dobil denarja (vrstica je ze v stanju ${x.stanje}, stanje ni spremenjeno; prej Stripe: ${x.prej}); retry je zavrnjen (409), vrni rocno v Stripu.`);
       } else if ((re.status === "failed" || re.status === "canceled") && ["potrditev", "opravljeno", "v_teku", "caka"].includes(x.stanje)) {
         await pool.query("UPDATE vracila SET stanje = 'ni_uspelo', napaka = $2, opravljeno_at = NULL, ni_izvedeno_od_at = NOW() WHERE id = $1", [x.id, `Stripe vracilo ${re.id}: ${re.status}${re.failure_reason ? " (" + String(re.failure_reason).slice(0, 60) + ")" : ""}`]);
@@ -491,6 +497,37 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   }
   const zbudi = () => { if (TICK_MS > 0) setTimeout(() => { tek(); }, 50).unref(); };
 
+  // Tik PRED mailom kupcu `ni_izvedeno` (#251, pregled PR #261): je kupec denar medtem vseeno dobil? Po alarmu »vrni rocno v Stripu« admin vrne v Stripovi
+  // nadzorni plosci (novo vracilo brez nasega metadata.vracilo_id, uskladiVracilo ga ne poveze), vrstica pa ostane ni_uspelo/failed.
+  // Vsota USPELIH vracil (succeeded) na PaymentIntentu >= placano (event_cancelled: total narocila; inactive_order: znesek vrstice) -> vrstico zapremo kot
+  // rocno vrnjeno (ista pot kot rocnoVrnjeno v izvedi(): opravi(... 'rocno_vrnjeno_v_stripu'), kupec dobi »vrnili smo«) in maila `ni_izvedeno` NE posljemo.
+  // Vrne: 'poslji' (kupec res ni vrnjen) | 'vrnjeno' (vrstica zaprta) | 'ne' (trajno ne posiljaj: brez kljuca, drug nacin I36, testno, vrstica ni vec v stanju)
+  //       | 'preskoci' (vrstica medtem ni vec v ni_uspelo/rocno) | 'neznano' (Stripe ni dosegljiv / napaka: ta obhod NE posiljaj, poskusi pozneje; raje zamuda kot napacen mail).
+  async function kupecVrnjenPredMailom(id) {
+    const r = await pool.query(
+      `SELECT v.*, o.public_ref, o.total_cents, o.stripe_payment_intent_id AS o_pi, o.stripe_checkout_session_id AS o_seja
+         FROM vracila v JOIN orders o ON o.id = v.order_id WHERE v.id = $1`, [id]);
+    const v = r.rows[0];
+    if (!v || !["ni_uspelo", "rocno"].includes(v.stanje)) return "preskoci";   // vrstica je medtem drugje (retry, webhook): mail ne velja vec, poskusov ne zakljenemo
+    const pi = v.payment_intent_id || v.o_pi || null;
+    const s = placila.stripe();
+    if (!pi || /^test_/.test(pi) || !s) return "ne";
+    const seja = v.checkout_session_id || v.o_seja || "";
+    const jeTestno = /^cs_test_/.test(seja) || v.stripe_livemode === false, jeZivo = /^cs_live_/.test(seja) || v.stripe_livemode === true;
+    if ((placila.jeLive() && jeTestno) || (!placila.jeLive() && jeZivo)) return "ne";   // I36: nikoli klic Stripa z napacnim kljucem
+    let sez;
+    try { sez = await s.refunds.list({ payment_intent: pi, limit: 100 }); }
+    catch (e) { console.error(`[vracila] preverba pred mailom ni_izvedeno (vracilo ${id}): Stripe ni odgovoril (${kratko(e)}), mail odlozen`); return "neznano"; }
+    const vrnjeno = (sez.data || []).filter((x) => x.status === "succeeded").reduce((a, x) => a + (Number(x.amount) || 0), 0);
+    const placano = v.razlog === "event_cancelled" ? v.total_cents : (v.znesek_cents || 0);
+    if (placano <= 0 || vrnjeno < placano) return "poslji";
+    const z = await pool.query("UPDATE vracila SET ni_izvedeno_od_at = NULL WHERE id = $1 AND stanje IN ('ni_uspelo', 'rocno') RETURNING id", [id]);
+    if (!z.rowCount) return "preskoci";
+    console.error(`[vracila] POZOR: narocilo ${v.public_ref}: nase vracilo je Stripe zavrnil, a je placilo v Stripu ze v celoti vrnjeno (${vrnjeno} c, rocno vracilo v nadzorni plosci): vrstica zaprta kot rocno_vrnjeno_v_stripu, mail »se ni izvedeno« NI poslan; vracilo provizije klubu preveri rocno.`);
+    await opravi(v, v.znesek_cents !== null && v.znesek_cents !== undefined ? v.znesek_cents : vrnjeno, "rocno_vrnjeno_v_stripu", false);
+    return "vrnjeno";
+  }
+
   // Admin: vracilo v stanju ni_uspelo / rocno ponovno v vrsto (po popravku vzroka). Vrne true, ce je bilo kaj ponovljeno.
   // Idempotentni kljuc ima isti odgovor 24 h (tudi napako), zato ponovitev POVECA GENERACIJO kljuca in zamrznjene vrednosti (znesek, provizija) izracuna znova.
   // Prej preveri pri Stripu, da nasega vracila (metadata.vracilo_id) se ni: ce obstaja, ga posvoji (nikoli drugo vracilo istemu naroceno).
@@ -508,7 +545,8 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     // Nase vracilo pri Stripu ze obstaja in je zavrnjeno (vrstica tega ni vedela: zapis ni uspel ali je starejsa): zapisemo stanje in NE posvojimo v novo vrsto
     // (sicer bi izvedi() z aOpravljen oznacil naroceno `refunded`, kupec pa denarja ni dobil). Admin dobi 409 in rocno razlago.
     if (najdeno && STRIPE_NEDOKONCNO.includes(najdeno.status)) {
-      await pool.query("UPDATE vracila SET stripe_vracilo_id = COALESCE(stripe_vracilo_id, $2), stripe_stanje = $3 WHERE id = $1", [id, najdeno.id, najdeno.status]);
+      await pool.query(`UPDATE vracila SET stripe_vracilo_id = COALESCE(stripe_vracilo_id, $2), stripe_stanje = $3,
+              ni_izvedeno_od_at = CASE WHEN stripe_stanje IS DISTINCT FROM $3 THEN NOW() ELSE ni_izvedeno_od_at END WHERE id = $1`, [id, najdeno.id, najdeno.status]);
       return false;
     }
     const u = await pool.query(
@@ -522,7 +560,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     return u.rowCount > 0;
   }
 
-  return { vrstiZaDogodek, pomeni, tek, zazeni, zbudi, ponovi, ponoviSpor, uskladiVracilo };
+  return { vrstiZaDogodek, pomeni, tek, zazeni, zbudi, ponovi, ponoviSpor, uskladiVracilo, kupecVrnjenPredMailom };
 }
 
 module.exports = { ustvari };
