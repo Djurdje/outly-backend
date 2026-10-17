@@ -33,6 +33,10 @@ const PREMORI_MS = [30e3, 120e3, 600e3, 1800e3, 7200e3, 21600e3, 43200e3];
 // Napaka, ki zahteva cloveka (ne ponavljamo): drug nacin Stripa, brez kljuca, nepricakovano stanje.
 class Rocno extends Error {}
 
+// Narocila (alias `o`), ki ob odpovedi dogodka dobijo vrstico v `vracila` (VSTAVI_VRACILA, sweep). Isti pogoj uporabi varovalo odpovedi v index.js (I42),
+// tam dodatno samo z denarjem (total_cents > refunded_cents; 0 EUR dobi vrstico brez Stripa, a nicesar ne vrne). Ob spremembi preveri oba.
+const SQL_NAROCILO_ZA_ODPOVED = "o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL";
+
 function ustvari({ pool, naKoncano, posljiNeposlane }) {
   const TICK_MS = celo("VRACILA_TICK_MS", 10000, 0, 3600000);          // 0 = obdelovalec izklopljen (testi)
   const RAZMAK_MS = celo("VRACILA_RAZMAK_MS", 250, 0, 60000);          // premor med naroceni (omejitev hitrosti: ~4 vracila/s)
@@ -53,7 +57,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   // Ponovna odpoved (odpoved -> obnova v zamiku -> `preklicano` -> nova odpoved): vrstica `preklicano` se vrne v `caka`; druga stanja se ne dotaknejo (UNIQUE order_id, razlog).
   const VSTAVI_VRACILA = `INSERT INTO vracila (order_id, event_id, razlog, naslednji_poskus_at, mail_odpoved_po_at)
        SELECT o.id, o.event_id, 'event_cancelled', t.cas, t.cas FROM (SELECT NOW() + ($2::int * INTERVAL '1 second') AS cas) t, orders o
-        WHERE o.event_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL
+        WHERE o.event_id = $1 AND ${SQL_NAROCILO_ZA_ODPOVED}
        ON CONFLICT (order_id, razlog) DO UPDATE SET stanje = 'caka', poskusi = 0, napaka = NULL, naslednji_poskus_at = EXCLUDED.naslednji_poskus_at,
               mail_odpoved_po_at = EXCLUDED.mail_odpoved_po_at WHERE vracila.stanje = 'preklicano'`;
   async function vrstiZaDogodek(c, eventId, zamikS = ZAMIK_S) {
@@ -73,7 +77,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
       `INSERT INTO vracila (order_id, event_id, razlog, naslednji_poskus_at, mail_odpoved_po_at)
        SELECT o.id, o.event_id, 'event_cancelled', t.cas, t.cas
          FROM (SELECT NOW() + ($1::int * INTERVAL '1 second') AS cas) t, odpovedi_dogodkov od JOIN events e ON e.id = od.event_id AND e.status = 'cancelled'
-         JOIN orders o ON o.event_id = e.id AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL
+         JOIN orders o ON o.event_id = e.id AND ${SQL_NAROCILO_ZA_ODPOVED}
         WHERE od.odpovedan_at > NOW() - INTERVAL '30 days'
           AND NOT EXISTS (SELECT 1 FROM vracila v WHERE v.order_id = o.id AND v.razlog = 'event_cancelled' AND v.stanje <> 'preklicano')
         LIMIT 2000
@@ -520,4 +524,4 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   return { vrstiZaDogodek, pomeni, tek, zazeni, zbudi, ponovi, ponoviSpor, uskladiVracilo };
 }
 
-module.exports = { ustvari };
+module.exports = { ustvari, SQL_NAROCILO_ZA_ODPOVED };

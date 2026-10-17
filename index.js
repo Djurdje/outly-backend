@@ -2841,12 +2841,15 @@ async function zaklepDogodkaZaOdpoved(c, id) {
   const r = await c.query(
     `SELECT e.id, e.status, e.start_at, e.end_at,
             (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = e.id AND o.status IN ('paid','partially_refunded')) AS placanih,
+            -- samo narocila, ki bi ob odpovedi res dobila DENAR nazaj (pogoj VSTAVI_VRACILA + znesek > 0): guest lista in 0 EUR odpovedi ne zaklenejo (pregled #262 N1)
+            (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = e.id AND ${SQL_NAROCILO_ZA_ODPOVED} AND o.total_cents > o.refunded_cents) AS za_vracilo,
             (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = e.id) AS narocil,
             EXISTS (SELECT 1 FROM tickets t WHERE t.event_id = e.id AND t.status = 'used') AS unovceno
        FROM events e WHERE e.id = $1 FOR UPDATE OF e`, [id]);
   return r.rows[0] || null;
 }
-const odpovedZaklenjena = (z) => z.placanih > 0 && (jeDogodekMinil(z.start_at, z.end_at) || z.unovceno);
+const { SQL_NAROCILO_ZA_ODPOVED } = require("./vracila_stripe");
+const odpovedZaklenjena = (z) => z.za_vracilo > 0 && (jeDogodekMinil(z.start_at, z.end_at) || z.unovceno);
 // Ali PATCH datum res spreminja (na minuto natancno: obrazca iOS in splet ob vsakem shranjevanju poslje startAt/endAt, iz izbirnika brez sekund).
 const istiCas = (nov, star) => {
   if (nov === null || nov === "") return star === null;
@@ -2952,7 +2955,7 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
           await c.query("ROLLBACK");
           return res.status(409).json(NAPAKA_DOGODEK_MINIL);
         }
-        if (datum && z.placanih > 0 && jeDogodekMinil(z.start_at, z.end_at) &&
+        if (datum && z.za_vracilo > 0 && jeDogodekMinil(z.start_at, z.end_at) &&
             ((dovoljeno.start_at !== undefined && !istiCas(dovoljeno.start_at, z.start_at)) ||
              (dovoljeno.end_at !== undefined && !istiCas(dovoljeno.end_at, z.end_at)))) {
           await c.query("ROLLBACK");

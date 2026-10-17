@@ -11,6 +11,7 @@
  *   3  Premik datuma minilega dogodka s placanimi narocili -> 409 (sicer: premakni v prihodnost, nato odpovej); isti datum (obrazec ga poslje vedno) in druga polja delajo
  *   4  Prihodnji dogodek: odpoved kot prej (refunds_queued); ze odpovedan dogodek PATCH status cancelled (splet ga poslje znova) -> 200
  *   5  Admin (vloga iz baze) sme: DELETE /events/:id in admin panel PATCH /admin/api/events/:id
+ *   7  #262 S1: end_at 2099 ali vecdnevni dogodek -> po start + 18 h samo admin; N1: guest lista in 0 EUR odpovedi ne zakleneta
  *   6  Brez placanih narocil: prazen dogodek se izbrise kot doslej (tudi minil); #258 N2: samo pending/preklicana/vrnjena narocila -> 200 odpoved
  *      brez vracil (prej 500, FK orders_event_id_fkey), dogodek zabelezen v odpovedi_dogodkov (sweep vrne pozno placilo)
  */
@@ -83,13 +84,13 @@ const URA = 3600 * 1000;
       return r.body.id;
     };
     let stRef = 0;
-    const narocilo = async (ev, status = "paid") => {
+    const narocilo = async (ev, status = "paid", cena = 2000) => {
       const ref = "OUT-OD" + String(++stRef).padStart(4, "0");
       const r = await pool.query(
         `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency, application_fee_cents, status, stripe_payment_intent_id, buyer_email, paid_at, cancelled_at, refunded_cents)
-         VALUES ($1, $2, $3, 1, 1, 2000, 2000, 'EUR', 200, $4, $5, 'ana@outly.si', CASE WHEN $4 IN ('paid','refunded') THEN NOW() - INTERVAL '3 days' END,
-                 CASE WHEN $4 IN ('cancelled','failed') THEN NOW() END, CASE WHEN $4 = 'refunded' THEN 2000 ELSE 0 END) RETURNING id`,
-        [ref, U.ana, ev, status, "test_" + ref.replace("-", "")]);
+         VALUES ($1, $2, $3, 1, 1, $6, $6, 'EUR', $6 / 10, $4, $5, 'ana@outly.si', CASE WHEN $4 IN ('paid','refunded') THEN NOW() - INTERVAL '3 days' END,
+                 CASE WHEN $4 IN ('cancelled','failed') THEN NOW() END, CASE WHEN $4 = 'refunded' THEN $6 ELSE 0 END) RETURNING id`,
+        [ref, U.ana, ev, status, cena > 0 ? "test_" + ref.replace("-", "") : null, cena]);
       const id = r.rows[0].id;
       if (status === "paid") await pool.query("INSERT INTO tickets (order_id, event_id) VALUES ($1, $2)", [id, ev]);
       if (status === "refunded") await pool.query("INSERT INTO tickets (order_id, event_id, status) VALUES ($1, $2, 'refunded')", [id, ev]);
@@ -213,6 +214,46 @@ const URA = 3600 * 1000;
     assert(r.status === 200 && r.body.event && r.body.event.status === "cancelled" && r.body.refunds_queued === 0, "minil dogodek s samo preklicanimi narocili: 200 odpoved (nicesar ni za vrniti)", r.body);
     r = await api("PATCH", `/events/${await dogodek("Minila brez narocil PATCH", -72 * URA)}`, T.lastnik, { status: "cancelled" });
     assert(r.status === 200 && r.body.status === "cancelled", "minil dogodek brez placanih: PATCH cancelled 200 kot doslej", r.body);
+
+    // ================================================================
+    console.log("\n# 7. Pregled #262 S1: end_at dalec v prihodnosti ne obide varovala; vecdnevni dogodek po prvih 18 h samo admin");
+    const ev2099 = await dogodek("Konec 2099", 24 * URA, 30 * URA);
+    await narocilo(ev2099);
+    r = await api("PATCH", `/events/${ev2099}`, T.lastnik, { endAt: "2099-12-31T23:00:00.000Z" });
+    assert(r.status === 200, "pred dogodkom: lastnik nastavi endAt 2099 (dovoljeno)", r.body);
+    await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '19 hours' WHERE id = $1", [ev2099]);   // cas je minil: start pred 19 h, end_at ostane 2099
+    r = await api("DELETE", `/events/${ev2099}`, T.lastnik);
+    assert(jeZavrnjeno(r), "endAt 2099, start pred 19 h: DELETE lastnik 409 (start + 18 h velja vedno)", r);
+    r = await api("PATCH", `/events/${ev2099}`, T.manager, { status: "cancelled" });
+    assert(jeZavrnjeno(r), "endAt 2099: PATCH cancelled manager 409", r);
+    await nedotaknjen(ev2099, "endAt 2099");
+    const evVecdnevni = await dogodek("Festival 4 dni", -20 * URA, 72 * URA);
+    await narocilo(evVecdnevni);
+    r = await api("DELETE", `/events/${evVecdnevni}`, T.lastnik);
+    assert(jeZavrnjeno(r), "vecdnevni (end_at cez 3 dni), 1. dan po start + 18 h: DELETE lastnik 409", r);
+    await nedotaknjen(evVecdnevni, "vecdnevni");
+    r = await api("DELETE", `/events/${evVecdnevni}`, T.admin);
+    assert(r.status === 200 && r.body.event && r.body.event.status === "cancelled" && r.body.refunds_queued === 1, "vecdnevni: admin sme (vracilo v vrsti)", r.body);
+    const evVecdnevni17 = await dogodek("Festival 4 dni, 17 h", -17 * URA, 72 * URA);
+    await narocilo(evVecdnevni17);
+    r = await api("DELETE", `/events/${evVecdnevni17}`, T.lastnik);
+    assert(r.status === 200 && r.body.refunds_queued === 1, "vecdnevni pred start + 18 h: lastnik sme kot doslej", r.body);
+
+    // ================================================================
+    console.log("\n# 8. Pregled #262 N1: guest lista in 0 EUR ne zakleneta odpovedi minilega dogodka");
+    const evGl = await dogodek("Minila z guest listo", 24 * URA);
+    const gl = await api("POST", "/admin/api/guest-lists", T.admin, { event_id: evGl, user_id: U.ana, spots: 2 });
+    assert(gl.status === 201, "guest lista na dogodku", gl.body);
+    await narocilo(evGl, "paid", 0);   // brezplacna vstopnica (0 EUR)
+    const plGl = (await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE event_id=$1 AND status='paid'", [evGl])).rows[0].n;
+    assert(plGl === 2, "na dogodku sta placani narocili guest liste in 0 EUR", plGl);
+    await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '3 days', end_at = NULL WHERE id = $1", [evGl]);
+    r = await api("DELETE", `/events/${evGl}`, T.lastnik);
+    assert(r.status === 200 && r.body.event && r.body.event.status === "cancelled", "minil dogodek s samo guest listo + 0 EUR: lastnik ga odpove (nicesar ni za vrniti)", r.body);
+    const evGl2 = await dogodek("Minila 0 EUR + placana", -72 * URA);
+    await narocilo(evGl2, "paid", 0); await narocilo(evGl2, "paid", 1500);
+    r = await api("DELETE", `/events/${evGl2}`, T.lastnik);
+    assert(jeZavrnjeno(r), "minil dogodek z 0 EUR IN placanim narocilom: 409", r);
 
     assert(!/Server error|TypeError|ReferenceError|Unhandled/.test(log), "dnevnik brez nepricakovanih napak");
   } catch (e) { fail++; console.log("  ✗ NEPRICAKOVANA NAPAKA:", e); }
