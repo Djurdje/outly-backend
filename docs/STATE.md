@@ -150,7 +150,7 @@ Pogodba polj in poti za odjemalca (`ios-dev` #184, `web-dev`) je opravljena in v
 
 ## Maili kot rele (#275, I43)
 
-- **web-dev (odprto):** `creator.js` `showDone()` po oddaji piše »We sent a confirmation to <email>«. To od #275 ne drži: potrdilo dobi samo prijavljen uporabnik, in to na naslov računa (ne na naslov iz obrazca); anonimen prosilec ne dobi nobenega maila. Besedilo naj bo nevtralno (»We'll get back to you at <email>«), po potrebi z vabilom k prijavi. Odziv API-ja je nespremenjen. iOS (`ReguestForCreatorView`) obljublja le mail ob odobritvi, to še drži.
+- **web-dev (narejeno):** `creator.js` »We sent a confirmation« popravljen v outly_webpage#81 (a0de059, v produkciji). Od #275 potrdilo dobi samo prijavljen uporabnik, na naslov računa; anonimen prosilec maila ne dobi. iOS obljublja le mail ob odobritvi, to še drži.
 
 ## Predpostavke agenta (še veljajo; Martin jih ni izrecno potrdil)
 
