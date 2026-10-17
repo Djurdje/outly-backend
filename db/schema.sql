@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–050, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–051, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict A7al3tQW9l7EfcQhS71545JOurLdkA7v9lkxA143MA5Ie7W4TquBenUVPVgWpYJ
+\restrict W5PpiqCcBIqbMAxxxOMr97uBX44AeuLfZTWCb9hdVxQbcuRi1jQjhNrmKctqjvK
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -1603,6 +1603,10 @@ CREATE TABLE public.vracila (
     mail_poslano_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     opravljeno_at timestamp with time zone,
+    ni_izvedeno_od_at timestamp with time zone,
+    mail_ni_izvedeno_poskusi smallint DEFAULT 0 NOT NULL,
+    mail_ni_izvedeno_prevzeto_at timestamp with time zone,
+    mail_ni_izvedeno_poslano_at timestamp with time zone,
     CONSTRAINT vracila_provizija_chk CHECK (((provizija_za_vrnitev_cents IS NULL) OR (provizija_za_vrnitev_cents >= 0))),
     CONSTRAINT vracila_razlog_chk CHECK ((razlog = ANY (ARRAY['event_cancelled'::text, 'inactive_order'::text]))),
     CONSTRAINT vracila_stanje_chk CHECK ((stanje = ANY (ARRAY['caka'::text, 'v_teku'::text, 'potrditev'::text, 'opravljeno'::text, 'ni_uspelo'::text, 'rocno'::text, 'preklicano'::text]))),
@@ -1615,6 +1619,20 @@ CREATE TABLE public.vracila (
 --
 
 COMMENT ON TABLE public.vracila IS 'Vrsta vracil (047, #190): odpoved dogodka in placilo za neaktivno naroceno. Obdelovalec vracila_stripe.js; Stripe reverse_transfer, idempotentni kljuc outly-vracilo-<id> (I37).';
+
+
+--
+-- Name: COLUMN vracila.ni_izvedeno_od_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.vracila.ni_izvedeno_od_at IS 'Kdaj je vrstica vstopila v ni_uspelo/rocno ali je Stripe zavrnil vracilo vrstice v teh stanjih (051). Admin retry pocisti. Mail kupcu `ni_izvedeno` gre sele VRACILA_NI_IZVEDENO_PO_MS po tem.';
+
+
+--
+-- Name: COLUMN vracila.mail_ni_izvedeno_poslano_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.vracila.mail_ni_izvedeno_poslano_at IS 'Mail kupcu `ni_izvedeno` (Stripe je vracilo zavrnil, kupec denarja se ni dobil, uredimo rocno) poslan (051). Natanko enkrat.';
 
 
 --
@@ -2669,6 +2687,13 @@ CREATE INDEX vracila_mail_idx ON public.vracila USING btree (id) WHERE ((NOT bre
 
 
 --
+-- Name: vracila_mail_ni_izvedeno_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX vracila_mail_ni_izvedeno_idx ON public.vracila USING btree (id) WHERE ((NOT brez_stripa) AND (mail_ni_izvedeno_poslano_at IS NULL) AND (stanje = ANY (ARRAY['ni_uspelo'::text, 'rocno'::text])) AND (stripe_stanje = ANY (ARRAY['failed'::text, 'canceled'::text])));
+
+
+--
 -- Name: vracila_mail_odpoved_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3281,5 +3306,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict A7al3tQW9l7EfcQhS71545JOurLdkA7v9lkxA143MA5Ie7W4TquBenUVPVgWpYJ
+\unrestrict W5PpiqCcBIqbMAxxxOMr97uBX44AeuLfZTWCb9hdVxQbcuRi1jQjhNrmKctqjvK
 
