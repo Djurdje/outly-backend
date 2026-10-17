@@ -14,7 +14,7 @@ const Stripe = require("stripe");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const PORT = 4531, JWKS_PORT = 4532, STRIPE_PORT = 4533;
+const PORT = 4531, JWKS_PORT = 4532, STRIPE_PORT = 4533, RESEND_PORT = 4534;
 const BASE = `http://127.0.0.1:${PORT}`;
 const WHSEC = "whsec_test_outly";
 const stripeLokalno = new Stripe("sk_test_lokalno");
@@ -48,6 +48,17 @@ async function api(method, path, token, body, glave = {}) {
 const pocakaj = (ms) => new Promise(r => setTimeout(r, ms));
 async function cakaj(fn, ms = 8000) { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await fn()) return true; await pocakaj(50); } return false; }
 
+// ---------- lazni Resend ----------
+const R = { poslano: [] };
+const resendServer = http.createServer((req, res) => {
+  let d = ""; req.on("data", x => d += x);
+  req.on("end", () => {
+    if (req.method === "POST" && req.url === "/emails") { R.poslano.push(JSON.parse(d)); res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ id: "mail_" + R.poslano.length })); }
+    res.writeHead(404, { "content-type": "application/json" }); res.end("{}");
+  });
+});
+const mailiNa = (email) => R.poslano.filter(m => m.to === email || (Array.isArray(m.to) && m.to.includes(email)));
+
 // ---------- lazni Stripe ----------
 const S = { seje: {}, naboji: {}, spori: {}, stSej: 0, potekle: [], expireNapaka: false };
 function telo(req) { return new Promise(r => { let d = ""; req.on("data", x => d += x); req.on("end", () => r(d)); }); }
@@ -80,8 +91,8 @@ const stripeServer = http.createServer(async (req, res) => {
 });
 
 let stDogodka = 0;
-async function webhook(tip, objekt, { id } = {}) {
-  const d = { id: id || `evt_test_${++stDogodka}`, object: "event", type: tip, data: { object: objekt }, created: Math.floor(Date.now() / 1000) };
+async function webhook(tip, objekt, { id, created } = {}) {
+  const d = { id: id || `evt_test_${++stDogodka}`, object: "event", type: tip, data: { object: objekt }, created: created || Math.floor(Date.now() / 1000) };
   const payload = JSON.stringify(d);
   const glava = stripeLokalno.webhooks.generateTestHeaderString({ payload, secret: WHSEC });
   const r = await fetch(BASE + "/stripe/webhook", { method: "POST", headers: { "content-type": "application/json", "stripe-signature": glava }, body: payload });
@@ -95,14 +106,16 @@ const placi = (sejaId, pi) => Object.assign(S.seje[sejaId], { status: "complete"
   await pool.query("TRUNCATE omejitve, stripe_events, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   await new Promise(r => stripeServer.listen(STRIPE_PORT, r));
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test",
+  await new Promise(r => resendServer.listen(RESEND_PORT, r));
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>", GOST_POSTA_PONOVI_MS: "0",
+    VRACILA_TICK_MS: "250", VRACILA_RAZMAK_MS: "10", VRACILA_ZAMIK_S: "0", VRACILA_SWEEP_MS: "400", VRACILA_MAIL_RAZMAK_MS: "0", QR_SECRET: "test",
     STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_POSPRAVI_MS: "3600000",
     APP_URL: "https://outly.test", TEST_PLACILA: "" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
   for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); break; } catch { await pocakaj(100); } }
 
   try {
-    const imena = ["lastnik", "ana", "bor", "cene", "dar", "eva", "fra", "gal", "hana"];
+    const imena = ["lastnik", "ana", "bor", "cene", "dar", "eva", "fra", "gal", "hana", "ivo", "jan"];
     const T = {}; imena.forEach((n, i) => { T[n] = zeton(`${n}@outly.si`, uuid(i + 1)); });
     for (const k of imena) { const r = await api("GET", "/me", T[k]); assert(r.status === 200, `GET /me ${k}`, r.body); }
     await pool.query("UPDATE users SET role='business' WHERE email='lastnik@outly.si'");
@@ -130,6 +143,9 @@ const placi = (sejaId, pi) => Object.assign(S.seje[sejaId], { status: "complete"
     assert(w.status === 503, "vracilo pred vknjizbo placila: 503 (Stripe ponovi)", w);
     assert(!(await dogodekZapisan("evt_vracilo_a")), "dogodek NI zabelezen kot obdelan");
     assert((await narocilo(a.id)).status === "pending", "narocilo ostane pending");
+    assert(!/POZOR: charge\.refunded evt_vracilo_a/.test(log), "sveze zamujeno vracilo: brez alarma (samo dnevnik)");
+    w = await webhook("charge.refunded", { id: "ch_a", object: "charge" }, { id: "evt_vracilo_stara", created: Math.floor(Date.now() / 1000) - 2 * 3600 });
+    assert(w.status === 503 && /POZOR: charge\.refunded evt_vracilo_stara caka na placilo ze 12\d min/.test(log), "vracilo, ki caka ze > 1 h: 503 + alarm (Sentry)", { w, log: log.slice(-300) });
     placi(a.seja, "pi_a");
     w = await webhook("checkout.session.completed", { id: a.seja, object: "checkout.session" }, { id: "evt_placilo_a" });
     assert(w.status === 200 && (await narocilo(a.id)).status === "paid", "completed (zamujen): narocilo paid", w);
@@ -178,6 +194,41 @@ const placi = (sejaId, pi) => Object.assign(S.seje[sejaId], { status: "complete"
     w = await webhook("charge.dispute.closed", { id: "dp_c" });
     sp = (await pool.query("SELECT order_id, stanje FROM spori WHERE id='dp_c'")).rows[0];
     assert(w.status === 200 && sp.stanje === "won" && String(sp.order_id) === String(c.id), "dispute.closed: won, povezava ostane", sp);
+
+    assert(await cakaj(() => mailiNa("lastnik@outly.si").some(m => /Payment dispute/.test(m.subject))), "S1: mail lastniku kluba o sporu PRIDE tudi, ce je spor prisel pred placilom", R.poslano.map(m => m.subject));
+    sp = (await pool.query("SELECT mail_odprt_poslano_at FROM spori WHERE id='dp_c'")).rows[0];
+    assert(sp.mail_odprt_poslano_at, "S1: mail_odprt_poslano_at zapisan");
+
+    console.log("\n# S2: izgubljen spor PRED placilom: povrnitev od kluba se po povezavi sprozi");
+    const iv = await kupi("ivo", 1);
+    S.naboji.ch_iv = { id: "ch_iv", object: "charge", payment_intent: "pi_iv", amount: 1500, amount_refunded: 0, metadata: { order_id: String(iv.id) } };
+    S.spori.dp_iv = { id: "dp_iv", object: "dispute", charge: "ch_iv", payment_intent: "pi_iv", amount: 1500, currency: "eur", reason: "fraudulent", status: "lost",
+      created: Math.floor(Date.now() / 1000), evidence_details: { due_by: Math.floor(Date.now() / 1000) + 7 * 86400 } };
+    w = await webhook("charge.dispute.closed", { id: "dp_iv" });
+    sp = (await pool.query("SELECT order_id, povrnitev_stanje, povrnitev_napaka FROM spori WHERE id='dp_iv'")).rows[0];
+    assert(w.status === 200 && sp.order_id === null && sp.povrnitev_stanje === "rocno" && /spor brez narocila/.test(sp.povrnitev_napaka), "lost brez narocila: rocno", sp);
+    placi(iv.seja, "pi_iv");
+    w = await webhook("checkout.session.completed", { id: iv.seja, object: "checkout.session" });
+    sp = (await pool.query("SELECT order_id, povrnitev_stanje, COALESCE(povrnitev_napaka, '') AS napaka FROM spori WHERE id='dp_iv'")).rows[0];
+    assert(w.status === 200 && String(sp.order_id) === String(iv.id) && !(sp.povrnitev_stanje === "rocno" && /spor brez narocila/.test(sp.napaka)),
+      "po povezavi: povrnitev ni vec »rocno: spor brez narocila« (caka / v teku / obdelana)", sp);
+    const refIv = (await pool.query("SELECT public_ref FROM orders WHERE id=$1", [iv.id])).rows[0].public_ref;
+    assert(await cakaj(() => mailiNa("lastnik@outly.si").some(m => m.subject.includes(refIv))), "mail o sporu lastniku tudi za lost-pred-placilom", R.poslano.map(m => m.subject));
+
+    console.log("\n# N1: vracilo se seka z zakljuci() (zaklep vrstice): ne izgubi se");
+    const jn = await kupi("jan", 1);
+    S.naboji.ch_jn = { id: "ch_jn", object: "charge", payment_intent: "pi_jn", amount: 1500, amount_refunded: 1500, metadata: { order_id: String(jn.id) } };
+    const drzi = await pool.connect();
+    await drzi.query("BEGIN");
+    await drzi.query("SELECT id FROM orders WHERE id = $1 FOR UPDATE", [jn.id]);
+    const vmes = webhook("charge.refunded", { id: "ch_jn" }, { id: "evt_vracilo_jn" });   // obvisi na zaklepu vrstice
+    await pocakaj(600);
+    await drzi.query("UPDATE orders SET status = 'paid', paid_at = NOW(), stripe_payment_intent_id = 'pi_jn' WHERE id = $1", [jn.id]);   // kot zakljuci(): placilo vknjizeno tik pred nami
+    await drzi.query("COMMIT"); drzi.release();
+    w = await vmes;
+    assert(w.status === 503 && !(await dogodekZapisan("evt_vracilo_jn")), "vracilo, ki je cakalo na zakljuci(): 503 (ne tiho 200), dogodek ni zabelezen", w);
+    w = await webhook("charge.refunded", { id: "ch_jn" }, { id: "evt_vracilo_jn" });
+    assert(w.status === 200 && (await narocilo(jn.id)).status === "refunded", "ponovitev: naroceno refunded", w);
 
     // ============ S4: DELETE /me med odprtim Checkoutom ============
     console.log("\n# S4: DELETE /me prekliče cakajoce narocilo");
@@ -241,7 +292,7 @@ const placi = (sejaId, pi) => Object.assign(S.seje[sejaId], { status: "complete"
   } catch (e) { fail++; console.error("NAPAKA TESTA:", e); }
   finally {
     console.log(`\n${ok} OK, ${fail} NAPAK`);
-    srv.kill(); jwksServer.close(); stripeServer.close();
+    srv.kill(); jwksServer.close(); stripeServer.close(); resendServer.close();
     await pool.end().catch(() => {});
     process.exit(fail ? 1 : 0);
   }
