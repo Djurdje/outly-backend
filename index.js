@@ -119,7 +119,53 @@ const pool = novPool(PG_POOL_MAX, PG_CONNECT_TIMEOUT_MS);
 // Sken vstopnic na vratih ne sme nikoli cakati v vrsti za drugim prometom (nakupi, branje seznamov): ima svoj majhen
 // pool, ki ga uporabljajo SAMO POST /business/tickets/scan, scan-batch, GET .../scan-list in scan-key, vkljucno
 // z requireAuthSken / requireClubSken (iskanje uporabnika in kluba gre prek istega poola). Issue #89.
-const skenPool = novPool(PG_SKEN_POOL_MAX, PG_SKEN_CONNECT_TIMEOUT_MS);
+// Casovni meji stavkov na skenPool (pregled 17. 10. 2026, S1; I16): migracija ob deployu (ACCESS EXCLUSIVE na tickets/orders do 120 s)
+// ali dolga transakcija, ki drzi vrstico vstopnice, sken NE sme zadrzati. NAMEN je lock_timeout: stavek, ki caka na zaklep dlje od
+// PG_SKEN_LOCK_TIMEOUT_MS (1 s), Postgres prekine (55P03); pot vrne 503 + Retry-After 5 (odgovoriNaNapako, jeZacasnaNapaka), telefon
+// preklopi na sken brez povezave. statement_timeout (57014) je samo varovalo proti obviselemu stavku in NE sme biti ozji od realnega
+// hladnega casa stavka na pocasni bazi ali od roka odjemalca (iOS POST /scan 4 s, iOS hitra pot scan-batch 2 s, odjava 5 s):
+// privzeto 5000 ms na stavek. scan-list in branje paketa scan-batch (en velik stavek) imata v svoji transakciji visjo mejo
+// PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS (privzeto 10000; splet caka scan-list 20 s, iOS 30 s) - glej skenBranje().
+// CI 17. 10. 2026: prvi scan-list 5000 vstopnic 3,5 s -> 57014 pri stari meji 2000 ms. Vzrok JIT (PG16 jit=on): plan scan-list ima
+// ocenjen strosek ~170 000 na 5000 vstopnic (EXISTS na spori za vsako vrstico), nad jit_above_cost (100 000) -> prevajanje LLVM
+// ob VSAKEM klicu (nova povezava se nalozi knjiznico LLVM); 20 000 vstopnic ~660 000 -> tudi inlining + optimizacija.
+// Izmerjeno lokalno (4 CPU): 20 000 vstopnic jit=on 431 ms (od tega JIT 389 ms), jit=off 31 ms. Na Renderjevi bazi (0,1 CPU) bi bil
+// JIT vec sekund na klic. Zato skenPool povezave tecejo z jit=off (zagonski parameter `options`, ohrani PGOPTIONS okolja).
+// 0 = meja izklopljena (velja nastavitev baze). Meje gredo v zagonski paket povezave (node-postgres `lock_timeout`/`statement_timeout`).
+const PG_SKEN_LOCK_TIMEOUT_MS = okoljeCelo("PG_SKEN_LOCK_TIMEOUT_MS", 1000, 0, 60000);
+const PG_SKEN_STATEMENT_TIMEOUT_MS = okoljeCelo("PG_SKEN_STATEMENT_TIMEOUT_MS", 5000, 0, 60000);
+const PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS = okoljeCelo("PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS", 10000, 0, 60000);
+const skenPool = novPool(PG_SKEN_POOL_MAX, PG_SKEN_CONNECT_TIMEOUT_MS, {
+  lock_timeout: PG_SKEN_LOCK_TIMEOUT_MS, statement_timeout: PG_SKEN_STATEMENT_TIMEOUT_MS,
+  options: [process.env.PGOPTIONS, "-c jit=off"].filter(Boolean).join(" "),
+});
+// Meja seznama nikoli ni nizja od obicajne meje stavka skenPool; 0 = brez SET LOCAL (velja meja povezave).
+const SKEN_SEZNAM_MEJA_MS = PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS > 0 && PG_SKEN_STATEMENT_TIMEOUT_MS > 0
+  ? Math.max(PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS, PG_SKEN_STATEMENT_TIMEOUT_MS) : PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS;
+// Branje za scan-list / scan-batch v kratki transakciji samo za branje z visjo mejo stavka (SET LOCAL velja samo v tej transakciji,
+// povezava se vrne v pool z obicajno mejo). lock_timeout ostane 1 s: med migracijo tudi seznam hitro dobi 503.
+// REPEATABLE READ: vstopnice in prenosi iz istega posnetka baze.
+async function skenBranje(fn) {
+  const c = await skenPool.connect();
+  let pokvarjen = false;
+  try {
+    // En preprost Query (ena krozna pot), ne dva.
+    await c.query(SKEN_SEZNAM_MEJA_MS > 0 ? `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${SKEN_SEZNAM_MEJA_MS}`
+      : "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const r = await fn(c);
+    await c.query("COMMIT");
+    return r;
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => { pokvarjen = true; });
+    throw e;
+  } finally { c.release(pokvarjen); }
+}
+// Hkratni scan-list (2. krog pregleda #263): scan-list drzi povezavo skenPool do PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS (10 s). Trije
+// hkratni veliki seznami po deployu (hladna baza) bi zasedli vse PG_SKEN_POOL_MAX (3) povezave in sken na vratih bi po
+// PG_SKEN_CONNECT_TIMEOUT_MS dobil 503. Zato v tem procesu tece najvec max(1, PG_SKEN_POOL_MAX - 1) scan-list hkrati; ostali TAKOJ
+// 503 + Retry-After (brez vrste: telefon obdrzi star seznam in poskusi kasneje), vsaj ena povezava ostane skenu.
+const SKEN_SEZNAM_HKRATI = Math.max(1, PG_SKEN_POOL_MAX - 1);
+let skenSeznamovTece = 0;
 // GET /healthz (Renderjev Health Check Path) ima LASTEN pool z eno povezavo: ob navali nakupov je glavni pool zaseden, zdravje
 // v njegovi vrsti ne dobi povezave v roku, vrne 503 in Render instanco ponovno zazene - ravno med navalom (issue #117).
 // Ena povezava je dovolj (en SELECT 1 naenkrat; ostali zahtevki za zdravje cakajo kratek rok) in steje proti max_connections
@@ -359,9 +405,12 @@ const OMEJEVALNIK_SQL = `
     okno_do = CASE WHEN o.okno_do <= now() THEN now() + make_interval(secs => $2::double precision) ELSE o.okno_do END
   RETURNING stevec, GREATEST(1, CEIL(EXTRACT(EPOCH FROM (o.okno_do - now()))))::int AS preostalo`;
 
-function omeji({ kljuc, najvec, oknoSekund, priNapaki = "zapri" }) {
+// poUporabniku: stej na prijavljenega uporabnika (za requireAuth), ne na IP - npr. podpis za Cloudinary (S2, 17. 10. 2026), kjer en racun
+// z mnogo IP-ji (mobilno omrezje) ne sme obiti meje in vec ljudi za istim NAT-om (klub, wifi) ne sme deliti ene meje.
+function omeji({ kljuc, najvec, oknoSekund, priNapaki = "zapri", poUporabniku = false }) {
   return async (req, res, next) => {
-    const id = kljucOmejitve(kljuc, najvec, oknoSekund, req.ip);
+    const kdo = poUporabniku && req.user && req.user.userId ? `uporabnik:${req.user.userId}` : req.ip;   // "uporabnik:N" ni IP: predponaIp ga pusti
+    const id = kljucOmejitve(kljuc, najvec, oknoSekund, kdo);
     const zdaj = Date.now();
     const blokiranDo = blokiraniKljuci.get(id);
     if (blokiranDo && blokiranDo > zdaj) {
@@ -827,8 +876,8 @@ function zeljeniKlub(req) {
 // Vratar (doorman) sme SAMO skenirati in gledati vstopnice dogodka. Natakar (bartender, 038) sme SAMO strezbo VIP miz
 // (GET/PUT .../table-service) in nikoli poti s podatki kupcev (vstopnice, skener, VIP rezervacije; I27).
 const INT4_MAX = 2147483647;
-const { jeVOknuSkena, jeDogodekMinil, SKEN_OKNO_PRED_MS } = require("./sken_okno");   // casovno okno skena (I25)
-const { jeNapakaPovezave, odgovoriNaNapako } = require("./napaka_povezave");   // 503 samo za napake povezave/baze, ostalo 500
+const { jeVOknuSkena, jeDogodekMinil, SKEN_OKNO_PRED_MS } = require("./sken_okno");   // casovno okno skena (I25), varovalo odpovedi (I42)
+const { jeZacasnaNapaka, odgovoriNaNapako } = require("./napaka_povezave");   // 503 samo za zacasne napake baze (povezava, 55P03), ostalo 500
 function requireClubNa(db, vloge) {
   return async (req, res, next) => {
     try {
@@ -853,7 +902,8 @@ function requireClubNa(db, vloge) {
       // Kot requireAuthNa (I10): napaka povezave/baze (izcrpan pool, prekinjena povezava, timeout) je zacasna tezava streznika,
       // ne napaka zahtevka. Na sken poteh (requireClubSken) mora vratar dobiti 503 + Retry-After (telefon preklopi na sken brez
       // povezave), ne 500 (issue #125). Vse drugo (programska/podatkovna napaka) ostane 500 s polnim skladom v dnevniku.
-      if (jeNapakaPovezave(e)) {
+      // Tudi 55P03 (lock_timeout skenPool med migracijo, S1 17. 10. 2026) je zacasna.
+      if (jeZacasnaNapaka(e)) {
         console.error("[klub] zacasna napaka pri iskanju kluba:", e && e.message);
         return res.status(503).set("Retry-After", "5").send("Service temporarily unavailable. Please try again.");
       }
@@ -2018,14 +2068,22 @@ async function izdajPodpis(req, res) {
   }
 }
 
+// Omejitev podpisov (S2, 17. 10. 2026): brez nje je vsak registriran uporabnik lahko v zanki nalagal datoteke na Outlyjev Cloudinary
+// (placljiv prostor in promet). En podpis = eno nalaganje; najvecji tok (galerija kluba 3 slike + logo + video + plakati dogodkov)
+// je dalec pod 60/h. Meja je na UPORABNIKA (I15, tabela omejitve), skupna obema potema. Okvara omejevalnika: lokalni stevec.
+// allowed_formats NI v podpisu: oba odjemalca (iOS APIClient.uploadToCloudinary, splet api.js naloziNaCloudinary) posljeta Cloudinaryju
+// samo vnaprej znana polja (api_key, timestamp, folder, public_id, signature), zato bi razsirjen podpis podrl nalaganje (Invalid Signature).
+const PODPIS_CLOUDINARY_NA_URO = okoljeCelo("PODPIS_CLOUDINARY_NA_URO", 60, 1, 10000);
+const omejiPodpis = omeji({ kljuc: "cloudinary-podpis", najvec: PODPIS_CLOUDINARY_NA_URO, oknoSekund: 3600, priNapaki: "lokalno", poUporabniku: true });
+
 // Kanonicna pot. Aplikacija je od zacetka klicala prav to, backend pa je
 // streg samo GET /cloudinary/signature -> nalaganje slik je vracalo 404.
 // Popravek najdbe P-01.
-app.post("/uploads/cloudinary-signature", requireAuth, izdajPodpis);
+app.post("/uploads/cloudinary-signature", requireAuth, omejiPodpis, izdajPodpis);
 
 // Stara pot. Ohranjena, da nic ne odpove med prehodom. Odstrani jo, ko bo
 // v obtoku samo se nova razlicica aplikacije.
-app.get("/cloudinary/signature", requireAuth, izdajPodpis);
+app.get("/cloudinary/signature", requireAuth, omejiPodpis, izdajPodpis);
 
 // ---------------------------
 // BUSINESS: my club (owner-only)
@@ -3215,7 +3273,7 @@ app.post("/creator-applications", omeji({ kljuc: "prosnja", najvec: 5, oknoSekun
         besedilo(b.message, 2000),
       ]
     );
-    console.log("Nova prošnja ustvarjalca:", r.rows[0].id, businessName, email);
+    console.log("Nova prošnja ustvarjalca:", r.rows[0].id);   // brez imena podjetja in e-naslova (osebni podatek, N1 17. 10. 2026)
     posljiMailProsnja({
       id: r.rows[0].id, userId: req.user ? req.user.userId : null, businessName, contactName, email, phone: phoneRaw,
       businessType: besedilo(b.businessType ?? b.business_type, 80), businessAddress: besedilo(b.businessAddress ?? b.business_address, 200),
@@ -7108,8 +7166,16 @@ app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken("owne
     if (ev.rows.length === 0 || Number(ev.rows[0].club_id) !== Number(klub)) {
       return res.status(404).json({ error: "not_found", message: "Event not found." });
     }
-    const [vst, prenosi] = await Promise.all([
-      skenPool.query(
+    // En velik stavek (do ~20 000 vstopnic): visja meja stavka v svoji transakciji (skenBranje), ne 503 na hladni pocasni bazi.
+    if (skenSeznamovTece >= SKEN_SEZNAM_HKRATI) {
+      console.error(`[sken] scan-list zavrnjen: ze ${skenSeznamovTece} hkrati (meja ${SKEN_SEZNAM_HKRATI}, povezava ostane skenu)`);
+      return res.status(503).set("Retry-After", "5").json({ error: "service_unavailable", message: "Service temporarily unavailable. Please try again." });
+    }
+    skenSeznamovTece++;
+    let vst, prenosi;
+    try {
+      [vst, prenosi] = await skenBranje(async (c) => [
+      await c.query(
         `SELECT t.serial,
                 CASE WHEN o.status IN ('paid','partially_refunded') OR t.status IN ('refunded','void') THEN
                        (CASE WHEN t.status = 'valid' AND ${SQL_SPOR_ODPRT} THEN 'unpaid' ELSE t.status END)   -- #190: spor na naroceno: stari odjemalci »unpaid« kazejo rdece
@@ -7119,10 +7185,11 @@ app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken("owne
          FROM tickets t JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK}
          WHERE t.event_id = $1
          ORDER BY t.id`, [id]),
-      skenPool.query(
+      await c.query(
         `SELECT tt.old_serial FROM ticket_transfers tt JOIN tickets t ON t.id = tt.ticket_id
          WHERE t.event_id = $1 ORDER BY tt.id`, [id]),
-    ]);
+      ]);
+    } finally { skenSeznamovTece--; }
     const kid = qrKljuci().kid;
     const tickets = vst.rows.map(t => ({
       serial: t.serial, status: t.status, payment_disputed: t.payment_disputed, used_at: t.used_at, is_vip: t.is_vip, table_label: t.table_label || null,
@@ -7148,7 +7215,15 @@ const SKEN_REZERVA_PRED_ZACETKOM_MS = SKEN_OKNO_PRED_MS; // vrata se odprejo pre
 const SKEN_ID_VZOREC = /^[A-Za-z0-9._:-]{1,64}$/;
 const SERIAL_VZOREC = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const jsonVelik = express.json({ limit: "1mb" });
+// Rok paketa ob zasedeni bazi (S1, 17. 10. 2026): ko je element ze padel z zacasno napako baze (zaklep vrstice -> lock_timeout) in paket
+// tece dlje od SKEN_BATCH_ROK_MS, se ostali elementi ne poskusajo vec (result "error", odjemalec jih obdrzi v vrsti in poslje znova).
+// Sicer bi 500 zaklenjenih vrstic pomenilo 500 x lock_timeout. Normalen paket (brez napak) roka nima. 0 = rok izklopljen (vsak element
+// se poskusi, tudi po napakah; kot drugje 0 = izklop).
+const SKEN_BATCH_ROK_MS = okoljeCelo("SKEN_BATCH_ROK_MS", 5000, 0, 120000);
+const SKEN_BATCH_MAJHEN = 20;   // do toliko razlicnih serialov se paket bere brez transakcije (glej beriPaket)
 app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken("owner", "manager", "doorman"), jsonVelik, async (req, res) => {
+  const zacetekPaketa = Date.now();
+  let zasedenaBaza = false;   // vsaj en element je padel z zacasno napako baze
   try {
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).json({ error: "not_found", message: "Club not found." });
@@ -7192,20 +7267,23 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken("owner
     const serijski = [...new Set(dela.map(d => d.serial))];
     const vrstice = new Map();
     const prenesene = new Map();
-    if (serijski.length) {
-      const r = await skenPool.query(
+    // Majhen paket (iOS hitra pot: 1 element, rok odjemalca 2 s): brez transakcije, stavka na skenPool z obicajno mejo (5 s) - vsaka
+    // dodatna krozna pot (BEGIN/SET/COMMIT) je cakanje na vratih. Velik paket (do 500 serialov): skenBranje z visjo mejo stavka.
+    const beriPaket = serijski.length > SKEN_BATCH_MAJHEN ? skenBranje : (fn) => fn(skenPool);
+    if (serijski.length) await beriPaket(async (c) => {
+      const r = await c.query(
         `SELECT t.id, t.serial, t.status, t.used_at, t.used_by_user_id, t.scan_device, t.event_id, t.created_at, e.club_id, e.start_at, e.end_at, e.status AS event_status, o.status AS order_status, ${SQL_SPOR_ODPRT} AS payment_disputed
          FROM tickets t JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = t.order_id
          WHERE t.serial = ANY($1::uuid[])`, [serijski]);
       for (const t of r.rows) vrstice.set(t.serial, t);
       const neznani = serijski.filter(s => !vrstice.has(s));
       if (neznani.length) {
-        const p = await skenPool.query(
+        const p = await c.query(
           `SELECT tt.old_serial, e.club_id FROM ticket_transfers tt JOIN tickets t ON t.id = tt.ticket_id JOIN events e ON e.id = t.event_id
            WHERE tt.old_serial = ANY($1::uuid[])`, [neznani]);
         for (const x of p.rows) prenesene.set(x.old_serial, x.club_id);
       }
-    }
+    });
 
     const iso = (d) => (d ? new Date(d).toISOString() : null);
     const strezbeZaPush = [];   // nove strezbe tega paketa; push (040) gre sele po odgovoru
@@ -7223,6 +7301,10 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken("owner
     const jePonovitev = (v, d) => v.scan_device === d.zaznamek && v.used_by_user_id !== null && Number(v.used_by_user_id) === Number(req.user.userId);
     for (const d of dela) {
       let rez;
+      if (zasedenaBaza && SKEN_BATCH_ROK_MS > 0 && Date.now() - zacetekPaketa > SKEN_BATCH_ROK_MS) {
+        rezultati[d.i] = { client_scan_id: d.cid, serial: d.serial, result: "error", used_at: null };
+        continue;
+      }
       try {
         const t = vrstice.get(d.serial);
         if (!t) {
@@ -7268,6 +7350,7 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken("owner
       } catch (e) {
         // Napaka pri enem elementu (npr. baza) ne podre paketa; odjemalec element obdrži v vrsti in ga poskusi znova.
         console.error("scan-batch element:", e.message);
+        if (jeZacasnaNapaka(e)) zasedenaBaza = true;
         rez = { result: "error", used_at: null };
       }
       rezultati[d.i] = { client_scan_id: d.cid, serial: d.serial, ...rez };

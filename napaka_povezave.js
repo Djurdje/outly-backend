@@ -16,6 +16,13 @@ function jeNapakaPovezave(e) {
   return /timeout|timed out|connect|terminated|ended|closed/i.test(String(e.message || ""));
 }
 
+// Zacasna napaka baze = napaka povezave ALI 55P03 lock_not_available (lock_timeout). skenPool ima lock_timeout (S1, 17. 10. 2026):
+// sken, ki med migracijo caka na zaklep tickets, dobi 503 (telefon preklopi na sken brez povezave), ne 500. 55P03 je namenoma
+// LOCENO od jeNapakaPovezave: napakaRocnik (asinhroni_rocniki.js) ga se vedno vrne kot 500 (_testi/test_connect_napaka.js S3).
+function jeZacasnaNapaka(e) {
+  return jeNapakaPovezave(e) || (!!e && e.code === "55P03");
+}
+
 // Skupen odgovor za lasten `catch (e)` poti (issue #132, I10): napaka povezave/baze (izcrpan pool, prekinjena povezava, timeout)
 // je zacasna tezava streznika -> 503 + Retry-After 5 (odjemalec poskusi znova, sken na vratih preklopi na nacin brez povezave);
 // vse drugo (programska/podatkovna napaka) -> 500 s polnim skladom v dnevniku. `kje` je oznaka poti za dnevnik (brez zetonov).
@@ -23,7 +30,7 @@ function jeNapakaPovezave(e) {
 function odgovoriNaNapako(res, e, kje) {
   const oznaka = kje ? ` (${kje})` : "";
   if (res.headersSent) { console.error(`[napaka] po poslanem odgovoru${oznaka}:`, (e && e.stack) || e); return; }
-  if (jeNapakaPovezave(e)) {
+  if (jeZacasnaNapaka(e)) {
     console.error(`[napaka] zacasna napaka povezave z bazo${oznaka}:`, (e && e.message) || e);
     return res.status(503).set("Retry-After", "5").json({ error: "service_unavailable", message: "Service temporarily unavailable. Please try again." });
   }
@@ -31,4 +38,4 @@ function odgovoriNaNapako(res, e, kje) {
   sentry.porociNapako(e, kje || "pot", null, res);
   return res.status(500).json({ error: "server_error", message: "Server error." });
 }
-module.exports = { jeNapakaPovezave, odgovoriNaNapako };
+module.exports = { jeNapakaPovezave, jeZacasnaNapaka, odgovoriNaNapako };
