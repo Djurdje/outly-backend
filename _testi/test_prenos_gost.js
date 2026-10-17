@@ -94,7 +94,7 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE omejitve, stripe_events, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE spori, omejitve, stripe_events, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   await new Promise(r => resendServer.listen(RESEND_PORT, r));
   const poslanoOb = async (tid) => (await pool.query("SELECT holder_guest_mail_sent_at AS t FROM tickets WHERE id=$1", [tid])).rows[0].t;
@@ -779,6 +779,20 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     } finally {
       await pool.query("DROP TRIGGER IF EXISTS test_pocasna_priprava ON gost_zetoni_vstopnic");
       await pool.query("DROP FUNCTION IF EXISTS test_pocasna_priprava()");
+    }
+
+    console.log("\n# Spor (chargeback) na naroceno: prenos gostu zavrnjen (#278)");
+    {
+      const [vs] = await kupi(T.kupec4, E0, 1);
+      const nar = (await pool.query("SELECT order_id FROM tickets WHERE id=$1", [vs.id])).rows[0].order_id;
+      await pool.query("INSERT INTO spori (id, order_id, stanje) VALUES ('dp_g278', $1, 'under_review')", [nar]);
+      const rs = await prenesi(B, vs.id, T.kupec4, { email: "spor278@example.com", allow_guest: true, age_confirmed: true });
+      assert(rs.status === 409 && rs.body.error === "payment_disputed" && rs.body.result === "payment_disputed", "spor odprt: prenos gostu 409 payment_disputed", rs);
+      const vv = await vstopnica(vs.id);
+      assert(vv.holder_is_guest === false && vv.serial === vs.serial, "spor odprt: vstopnica in serial nespremenjena");
+      await pool.query("UPDATE spori SET stanje='won' WHERE id='dp_g278'");
+      const rs2 = await prenesi(B, vs.id, T.kupec4, { email: "spor278@example.com", allow_guest: true, age_confirmed: true });
+      assert(rs2.status === 200, "spor zakljucen (won): prenos gostu spet dela", rs2);
     }
 
     console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);

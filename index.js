@@ -4924,7 +4924,7 @@ const SQL_VSTOPNICE_POGLED = `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNI
               e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
               cl.id AS club_id, cl.name AS club_name, ${PRIZORISCE_NASLOV}, cl.logo_url, ${PRIZORISCE_E},
               ${STOLPCI_IMETNIKA}, bu.username AS buyer_username,
-              (t.status = 'valid' AND e.start_at > NOW() AND o.guest_list_id IS NULL) AS transferable,   -- vstopnice guest liste se ne prenasajo (035)
+              (t.status = 'valid' AND e.start_at > NOW() AND o.guest_list_id IS NULL AND NOT ${SQL_SPOR_ODPRT}) AS transferable,   -- vstopnice guest liste se ne prenasajo (035); ob odprtem/izgubljenem sporu tudi ne (#278)
               ${SQL_SPOR_ODPRT} AS payment_disputed   -- #190: spor (chargeback) odprt ali izgubljen: na vratih ne velja (NOVO polje; status vstopnice ostane valid)
        FROM tickets t JOIN orders o ON o.id = t.order_id
        JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN}
@@ -6564,7 +6564,7 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     await nakupZacni(c);   // lock_timeout/statement_timeout kot pri nakupu: zaklepi vrstice vstopnice, posiljatelja in naslova ne cakajo v neskoncnost
     const tr = await c.query(
       `SELECT t.id, t.serial, t.status, t.event_id, ${IMETNIK} AS holder_id, o.status AS order_status,
-              e.title AS event_title, e.start_at, e.min_age, o.package_id, (o.guest_list_id IS NOT NULL) AS guest_lista
+              e.title AS event_title, e.start_at, e.min_age, o.package_id, (o.guest_list_id IS NOT NULL) AS guest_lista, ${SQL_SPOR_ODPRT} AS payment_disputed
        FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id
        WHERE t.id = $1 FOR UPDATE OF t`, [id]
     );
@@ -6578,6 +6578,9 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     if (t.status === "used") { await c.query("ROLLBACK"); return res.status(409).send("Ticket was already used."); }
     if (t.status !== "valid") { await c.query("ROLLBACK"); return res.status(409).send(`Ticket is ${t.status}.`); }
     if (new Date(t.start_at).getTime() <= Date.now()) { await c.query("ROLLBACK"); return res.status(409).send("Event has already started."); }
+    // Spor (chargeback, #278): vstopnica s sporom na vratih ne velja (sken: payment_disputed), zato je tudi prenos (prijatelju ali gostu) zavrnjen -
+    // sicer bi se vstopnica z novim serialom »oprala« in bi jo prejemnik kupil/dobil, na vratih pa bi bila neveljavna. Ista koda in besedilo kot pri skenu.
+    if (t.payment_disputed) { await c.query("ROLLBACK"); return res.status(409).json({ error: "payment_disputed", result: "payment_disputed", message: "The payment for this ticket is disputed (chargeback). It can't be transferred." }); }
 
     // Starost: vstopnica mize s paketom pijace ima mejo najmanj 18 (#102), pri strozji meji dogodka velja ta.
     const potrebnaStarost = starostZaPaket(t.min_age, t.package_id !== null);
