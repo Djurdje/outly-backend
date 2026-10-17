@@ -79,7 +79,7 @@ let srv = null;
   await pool.query("TRUNCATE omejitve, guest_list_members, guest_lists, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   await new Promise(r => resendServer.listen(RESEND_PORT, r));
-  srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "re_test",
+  srv = spawn("node", ["index.js"], { env: { ...process.env, GOST_NAKUP_TEST: "1", PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "re_test",
     RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>", QR_SECRET: "test", APP_URL: "https://outly.test",
     STRIPE_SECRET_KEY: "", STRIPE_WEBHOOK_SECRET: "", TEST_PLACILA: "", JAVNI_PREDPOMNILNIK_MS: "60000", GOST_NAKUP_NA_URO: "1000" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);

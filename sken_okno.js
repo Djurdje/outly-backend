@@ -22,4 +22,19 @@ function jeVOknuSkena(startAt, endAt, cas = Date.now()) {
   return t >= zacetek - SKEN_OKNO_PRED_MS && t <= konec + SKEN_OKNO_PO_MS;
 }
 
-module.exports = { jeVOknuSkena, SKEN_OKNO_PRED_MS, SKEN_OKNO_PO_MS, SKEN_PRIVZETO_TRAJANJE_MS };
+// Ali je dogodek ze MINIL za VAROVALO ODPOVEDI (#255, invarianta I42: lastnik/manager ga potem ne more odpovedati in s tem vrniti denarja vsem kupcem).
+// NI okno skena (I25). Minil = zdaj > min(end_at, zacetek + 12 h + 6 h); end_at velja samo, ce je po zacetku. Zgornja meja zacetek + 18 h velja VEDNO:
+// sicer bi lastnik z end_at daleč v prihodnosti (npr. 2099, nastavljen pred dogodkom) varovalo obsel (pregled #262 S1). Vecdnevni dogodek je zato po
+// prvih 18 h za lastnika/managerja ze »minil«: odpoved z vracili vsem po prvem dnevu je enako tveganje, naredi jo admin.
+// Neberljiv zacetek -> false (v bazi je start_at NOT NULL).
+function jeDogodekMinil(startAt, endAt, cas = Date.now()) {
+  const zacetek = startAt === null || startAt === undefined ? NaN : new Date(startAt).getTime();
+  const t = new Date(cas).getTime();
+  if (!Number.isFinite(zacetek) || !Number.isFinite(t)) return false;
+  const k = endAt === null || endAt === undefined ? NaN : new Date(endAt).getTime();
+  const najkasneje = zacetek + SKEN_PRIVZETO_TRAJANJE_MS + SKEN_OKNO_PO_MS;
+  const konec = Number.isFinite(k) && k > zacetek ? Math.min(k, najkasneje) : najkasneje;
+  return t > konec;
+}
+
+module.exports = { jeVOknuSkena, jeDogodekMinil, SKEN_OKNO_PRED_MS, SKEN_OKNO_PO_MS, SKEN_PRIVZETO_TRAJANJE_MS };

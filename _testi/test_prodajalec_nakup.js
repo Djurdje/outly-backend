@@ -85,7 +85,7 @@ const stripeServer = http.createServer((req, res) => {
 });
 
 function zagon(port, okolje) {
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test",
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, GOST_NAKUP_TEST: "1", PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test",
     APP_URL: "https://outly.test", TEST_PLACILA: "", STRIPE_SECRET_KEY: "", STRIPE_WEBHOOK_SECRET: "", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
   const o = { srv, log: "" };
   srv.stdout.on("data", d => o.log += d); srv.stderr.on("data", d => o.log += d);

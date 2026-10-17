@@ -122,7 +122,7 @@ async function webhook(tip, objekt, id) {
 const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", payment_intent: pi });
 
 function zagon(port, okolje) {
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, GOST_NAKUP_TEST: "1", PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
     TEST_PLACILA: "", GOST_PREVZEM_MS: "0", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
   const s = { srv, log: "" };
   srv.stdout.on("data", d => s.log += d); srv.stderr.on("data", d => s.log += d);
@@ -740,13 +740,20 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
        VALUES ('OUT-H'||floor(random()*1e9)::text, $4, $1, 1, 1, 1500, 1500, $2, $3, CASE WHEN $2 IN ('paid','refunded') THEN NOW() END, CASE WHEN $2 IN ('cancelled','failed') THEN NOW() - $5::int * INTERVAL '1 hour' END,
                NOW() - $5::int * INTERVAL '1 hour', $3, 'x', NOW()) RETURNING id`, [evMail, status, email, user, dniPo])).rows[0].id;
     const hSveza = await mk("sveza-preklic@example.com", "cancelled", 2);
-    const hStara = await mk("stara-preklic@example.com", "failed", 30);
+    // Issue #264: narocilo je za anonimizacijo zrelo sele, ko zeton ze obstaja (preklic se "postara" z UPDATE po vpisu zetona).
+    // Prej je bilo zrelo ze ob vpisu in pospravljalec (tek vsako sekundo) ga je lahko anonimiziral MED vpisom narocila in zetona -> zeton je ostal.
+    const hStara = await mk("stara-preklic@example.com", "failed", 0);
     const hPlacana = await mk("placana-vsa@example.com", "paid", 1);
-    await pool.query("INSERT INTO gost_zetoni (token_hash, order_id) VALUES ($1, $2)", [crypto.randomBytes(32).toString("hex"), hStara]);
+    const zetonHash = () => crypto.randomBytes(32).toString("hex");
+    await pool.query("INSERT INTO gost_zetoni (token_hash, order_id) VALUES ($1, $2)", [zetonHash(), hStara]);
+    await pool.query("UPDATE orders SET created_at = NOW() - INTERVAL '30 hours', cancelled_at = NOW() - INTERVAL '30 hours' WHERE id=$1", [hStara]);
     assert(await cakaj(async () => (await pool.query("SELECT guest_email FROM orders WHERE id=$1", [hStara])).rows[0].guest_email === null, 8000), "preklicano neplacano narocilo (> 24 h): e-naslov anonimiziran");
     let h = (await pool.query("SELECT buyer_email, guest_email, status, total_cents FROM orders WHERE id=$1", [hStara])).rows[0];
     assert(h.buyer_email === `izbrisan-${hStara}@outly.invalid` && h.total_cents === 1500, "buyer_email -> izbrisan-<id>@outly.invalid, znesek ostane", h);
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni WHERE order_id=$1", [hStara])).rows[0].n === 0, "zetoni anonimiziranega narocila izbrisani");
+    // Zeton, ki se je vpisal ZA anonimizacijo (kovanje, ki je e-naslov prebralo tik pred anonimizacijo in potrdilo po njej): pospravljalec ga pobere v naslednjem teku.
+    await pool.query("INSERT INTO gost_zetoni (token_hash, order_id) VALUES ($1, $2)", [zetonHash(), hStara]);
+    assert(await cakaj(async () => (await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni WHERE order_id=$1", [hStara])).rows[0].n === 0, 8000), "zeton, vpisan po anonimizaciji, pospravljalec izbrise (#264)");
     h = (await pool.query("SELECT guest_email FROM orders WHERE id=$1", [hSveza])).rows[0];
     assert(h.guest_email === "sveza-preklic@example.com", "preklic pred < 24 h: e-naslov se ostane");
     assert((await pool.query("SELECT guest_email FROM orders WHERE id=$1", [hPlacana])).rows[0].guest_email === "placana-vsa@example.com", "placano narocilo, dogodek se ni koncan: e-naslov ostane");
@@ -840,7 +847,35 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     r = await nakup(evA, "live@example.com", {}, {}, `http://127.0.0.1:${PORT_E}`);
     assert(r.status === 409 && /does not accept online payments/.test(r.body), "z GOST_NAKUP_LIVE=1 gre naprej (klub brez Stripa: obstojece pravilo 409)", r);
     c2.srv.kill();
-    assert(true, "sandbox/testni nacin deluje brez stikala (instanca A, sekcije 1-12)");
+    assert(true, "sandbox z GOST_NAKUP_TEST=1 deluje (instanca A, sekcije 1-12)");
+
+    console.log("\n# 13b. Stikalo GOST_NAKUP_TEST (#249): sandbox in testni nacin sta privzeto ZAPRTA");
+    const PORT_S1 = 3186, PORT_S2 = 3187, PORT_S3 = 3188;
+    const okoljeSandbox = { RESEND_API_KEY: "", STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, GOST_POSTA_PONOVI_MS: "0" };
+    const zaprto = async (port, okolje, opis) => {
+      const x = zagon(port, okolje);
+      await cakajStreznik(`http://127.0.0.1:${port}`);
+      const sejPrej = Object.keys(S.seje || {}).length;
+      const rr = await nakup(evA, "sandbox@example.com", {}, { "idempotency-key": "gost-zaprto-" + port }, `http://127.0.0.1:${port}`);
+      assert(rr.status === 503 && rr.body === "Guest checkout is not available yet.", `${opis}: 503 »Guest checkout is not available yet.«`, rr);
+      assert((await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE guest_email='sandbox@example.com'")).rows[0].n === 0, `${opis}: narocilo ni nastalo`);
+      assert(Object.keys(S.seje || {}).length === sejPrej, `${opis}: Stripe seje ni`);
+      return x;
+    };
+    let z1 = await zaprto(PORT_S1, { ...okoljeSandbox, GOST_NAKUP_TEST: "" }, "sandbox (sk_test_) brez spremenljivk");
+    // ogled obstojecega gostujocega narocila dela naprej (stikalo velja samo za nakup)
+    r = await zahtevek(`http://127.0.0.1:${PORT_S1}`, "GET", "/guest/order", null, undefined, { "x-guest-token": "neveljaven-zeton" });
+    assert(r.status === 404, "zaprto stikalo: GET /guest/order ni za stikalom (neveljaven zeton -> 404, ne 503)", r.status);
+    z1.srv.kill();
+    z1 = await zaprto(PORT_S2, { ...okoljeSandbox, GOST_NAKUP_TEST: "", GOST_NAKUP_LIVE: "1" }, "sandbox z GOST_NAKUP_LIVE=1 (zivo stikalo ne odpre sandboxa)");
+    z1.srv.kill();
+    z1 = await zaprto(PORT_S3, { RESEND_API_KEY: "", STRIPE_SECRET_KEY: "", STRIPE_WEBHOOK_SECRET: "", TEST_PLACILA: "true", GOST_NAKUP_TEST: "" }, "testni nacin (TEST_PLACILA) brez GOST_NAKUP_TEST");
+    z1.srv.kill();
+    c2 = zagon(PORT_C, { ...okoljeLive, GOST_NAKUP_TEST: "1" });
+    await cakajStreznik(`http://127.0.0.1:${PORT_C}`);
+    r = await nakup(evA, "live@example.com", {}, {}, `http://127.0.0.1:${PORT_C}`);
+    assert(r.status === 503 && r.body === "Guest checkout is not available yet.", "sk_live_ z GOST_NAKUP_TEST=1 (testno stikalo ne odpre zivega nacina): 503", r);
+    c2.srv.kill();
 
     console.log("\n# 14. Globalna dnevna meja mailov (GOST_POSTA_DNEVNO)");
     a.srv.kill(); await pocakaj(500);
@@ -858,6 +893,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     const n3 = r.body.order.id;
     assert(r.status === 201 && r.body.tickets.length === 1, "3. nakup: 201 z vstopnico");
     assert(await cakaj(async () => (await pool.query("SELECT guest_mail_attempts FROM orders WHERE id=$1", [n3])).rows[0].guest_mail_attempts >= 8), "preko dnevne meje: testni mail izpuscen (poskusi izcrpani)");
+    await cakaj(() => /dnevna meja gostujocih mailov/.test(d.log));   // zapis v dnevnik sledi gostPostaIzcrpaj (poskusi v bazi) - na pocasnem CI ga se ni
     assert(poslanoNa("dnevno3@example.com").length === 0 && R.poslano.length === prejD + 2 && /dnevna meja gostujocih mailov/.test(d.log) && !/dnevno3@example\.com/.test(d.log), "mail se ne poslje, zapis v dnevniku brez e-naslova", R.poslano.length - prejD);
     const nOdl = await vstavi(null, "placan-nad-mejo@example.com", null);   // placano (ne testno), meja (2) je ze presezena: potrdilo vseeno gre
     assert(await cakaj(() => poslanoNa("placan-nad-mejo@example.com").length === 1), "resnicno placano narocilo NAD dnevno mejo: potrdilo je poslano");

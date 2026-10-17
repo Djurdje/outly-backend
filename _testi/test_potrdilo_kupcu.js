@@ -111,7 +111,7 @@ async function webhook(baza, tip, objekt, id) {
 const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", payment_intent: pi });
 
 function zagon(port, okolje) {
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
+  const srv = spawn("node", ["index.js"], { env: { ...process.env, GOST_NAKUP_TEST: "1", PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
     STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_POSPRAVI_MS: "3600000", PREVERI_OKNO_MS: "0",
     TEST_PLACILA: "", GOST_PREVZEM_MS: "0", RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>",
     ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
@@ -130,7 +130,11 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
   // A: hitri ponovni poskusi (rok Resenda 400 ms, brez rezerve, premor 100 ms ali spodnja meja 400 ms), pospravljalec na 200 ms
   const A = zagon(PORT_A, { GOST_POSTA_PONOVI_MS: "200", GOST_POSTA_TIMEOUT_MS: "400", GOST_POSTA_REZERVA_MS: "0", GOST_POSTA_PREMOR_MS: "100", POTRDILO_BREZ_PLACILA_NA_DAN: "3", GOST_POSTA_ZASTONJ_DNEVNO: "5" });
   // B: rok Resenda 5 s (spodnja meja premora 5 s) in pospravljalec na 200 ms: pocasen Resend (1,5 s) se mora koncati z enim mailom
-  const B = zagon(PORT_B, { GOST_POSTA_PONOVI_MS: "200", GOST_POSTA_TIMEOUT_MS: "5000", GOST_POSTA_REZERVA_MS: "0", GOST_POSTA_PREMOR_MS: "100" });
+  // B mora imeti ISTE meje mailov kot A: oba pospravljalca tecata na isti bazi vsakih 200 ms in narocilo vzame tista instanca, ki je prva. Z drugacnimi
+  // mejami (privzeto 20 potrdil / 300 mailov za 0 EUR) je B-jev pospravljalec obcasno poslal mail, ki ga je test pricakoval izpuscenega (sekcija 5 in 7;
+  // CI PR #267, 17. 10. 2026). Zato tudi dnevnik meje iscemo v A.log + B.log (logAB).
+  const B = zagon(PORT_B, { GOST_POSTA_PONOVI_MS: "200", GOST_POSTA_TIMEOUT_MS: "5000", GOST_POSTA_REZERVA_MS: "0", GOST_POSTA_PREMOR_MS: "100", POTRDILO_BREZ_PLACILA_NA_DAN: "3", GOST_POSTA_ZASTONJ_DNEVNO: "5" });
+  const logAB = () => A.log + B.log;
   const api = (m, p, t, b, g) => zahtevek(BA, m, p, t, b, g);
   const apiB = (m, p, t, b, g) => zahtevek(BB, m, p, t, b, g);
   await cakajStreznik(BA); await cakajStreznik(BB);
@@ -317,7 +321,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     await pocakaj(600);
     v = await vrstica(oSkip);
     assert(v.guest_mail_sent_at === null && mailiVar().length === 3, "4. mail NI poslan (3 na naslov na 24 h)", [mailiVar().length]);
-    assert(/naslov je v 24 h ze dobil 3 maile/.test(A.log) && !/gost\.zastonj/i.test(A.log), "dnevnik zapise izpust brez e-naslova");
+    assert(/naslov je v 24 h ze dobil 3 maile/.test(logAB()) && !/gost\.zastonj/i.test(logAB()), "dnevnik zapise izpust brez e-naslova");
     // globalna dnevna meja za 0 EUR (instanca A: 5; trije mailu so ze poslani): drugi nov naslov je se OK, tretji izpuscen
     for (const e of ["zastonj.a@example.com", "zastonj.b@example.com"]) {
       r = await gostVar(evFree, e);
@@ -327,7 +331,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     const oC = r.body.order.id;
     assert(r.status === 201 && await cakaj(async () => (await vrstica(oC)).guest_mail_attempts >= 8), "globalna meja: 6. brezplacni mail izpuscen (nakup uspe)");
     await pocakaj(600);
-    assert(mailiNa("zastonj.c@example.com").length === 0 && /dnevna meja mailov gostom za 0 EUR \(5\)/.test(A.log), "globalna meja: mail ni poslan, dnevnik brez naslova");
+    assert(mailiNa("zastonj.c@example.com").length === 0 && /dnevna meja mailov gostom za 0 EUR \(5\)/.test(logAB()), "globalna meja: mail ni poslan, dnevnik brez naslova");
     // placano potrdilo (total > 0, ne-testno) NIKOLI ni izpuscen, tudi ko je meja za 0 EUR dosezena
     r = await gostVar(evPaid[2], "placnik.gost@example.com");
     const oPl = r.body.order.id, sPl = await sejaOd(oPl);
@@ -411,7 +415,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     await cakaj(async () => (await vrstica(o7d)).receipt_mail_attempts >= 8, 10000);   // dogodek, ne cas
     v = await vrstica(o7d);
     assert(r.status === 201 && mailiNa("kim@outly.si").length === 3 && v.receipt_mail_attempts === 8 && v.receipt_mail_sent_at === null, "4. testno narocilo: nakup uspe, potrdilo izpuscen (meja)", [mailiNa("kim@outly.si").length, v.receipt_mail_attempts]);
-    assert(/meja 3 potrdil na uporabnika/.test(A.log) && !/kim@outly\.si/.test(A.log), "meja zapisana v dnevnik brez e-naslova");
+    assert(/meja 3 potrdil na uporabnika/.test(logAB()) && !/kim@outly\.si/.test(logAB()), "meja zapisana v dnevnik brez e-naslova");
 
     // ================================================================
     console.log("\n# 8. Natanko enkrat ob pocasnem Resendu (druga instanca, pospravljalec tece med posiljanjem)");
