@@ -273,7 +273,7 @@ function nakupIzstopi() {
 // Drzalec dovoljenja in povezave nakupa (#274): enkratno sprostitev (povezava + dovoljenje) lahko sprozi nakupStripeSeja takoj po COMMIT-u,
 // `finally` poti jo ponovi brez ucinka (dvojni c.release() bi vrgel, dvojni nakupIzstopi() bi pokvaril stevec dovoljenj).
 function nakupDrzalec(c) {
-  const d = { c, drzi: true, sprosti() { if (!d.drzi) return; d.drzi = false; try { c.release(); } finally { nakupIzstopi(); } } };
+  const d = { c, drzi: true, sprosti(err) { if (!d.drzi) return; d.drzi = false; try { c.release(err); } finally { nakupIzstopi(); } } };
   return d;
 }
 // Klic Stripa (checkout.sessions.create, rok 15 s, do 3 poskusi) NE sme drzati dovoljenja nakupa ne povezave z bazo: pocasen Stripe bi sicer
@@ -4349,9 +4349,8 @@ async function nakupStripeSeja(res, d, { oid, opis, kolicina, cenaEnoteCents, ra
     nr = (await d.c.query("SELECT id, public_ref, currency, application_fee_cents FROM orders WHERE id=$1", [oid])).rows[0];
   } catch (e) {
     console.error(`[stripe] branje narocila ${oid} ni uspelo:`, e && (e.message || e));
-    const r = await neuspeh(d.c, 502, "Payment provider is unavailable. Please try again.");
-    d.sprosti();
-    return r;
+    d.sprosti(e);   // pokvarjena povezava ne v pool; sele nato oznaka prek poola (brez drzanja ene in cakanja na drugo)
+    return neuspeh(pool, 502, "Payment provider is unavailable. Please try again.");
   }
   d.sprosti();
   let c2 = null;
