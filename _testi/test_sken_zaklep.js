@@ -13,7 +13,11 @@
  *   Z3  zaklep VRSTICE vstopnice (SELECT ... FOR UPDATE): SELECT skena ni blokiran, UPDATE caka -> 503 (55P03), ne visi in ne 500.
  *   Z4  scan-batch, zaklenjenih vec vrstic: element na zaklenjeni vrstici -> "error" (odjemalec ga obdrzi), proste -> "ok";
  *       po prvi zacasni napaki in izteku roka paketa (SKEN_BATCH_ROK_MS) ostali elementi -> "error" brez cakanja.
- *   Z5  velik dogodek (5000 vstopnic): scan-list in scan-batch z najvecjim paketom (500) pod privzetima mejama -> 200, izmerjen cas.
+ *   Z5  najvecji dogodek (20 000 vstopnic): HLADEN prvi scan-list (nov proces backenda = nove povezave z bazo, kot po deployu) in
+ *       scan-batch z najvecjim paketom (500) pod privzetimi mejami -> 200. Backend tu tece prek prisluskovalnega posrednika
+ *       (TCP med backendom in Postgresom): ujame zagonske parametre povezav (skenPool posilja jit=off, lock_timeout, statement_timeout)
+ *       in PRAVI stavek scan-list (sporocilo Parse). Ta stavek z EXPLAIN (ANALYZE) na novi seji: z jit=off ima vsaj 10x rezerve do 2 s,
+ *       z jit=on (privzeto PG16) samo izpis (strosek plana preseze jit_above_cost). CI 17. 10. 2026: prvi scan-list 5000 vstopnic 3,5 s (JIT) -> 503 pri meji 2 s.
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -22,10 +26,10 @@ const { Pool } = require("pg");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const PORT = 3431, JWKS_PORT = 3432;
+const PORT = 3431, JWKS_PORT = 3432;   // posrednik Z5: 3435
 const BASE = `http://127.0.0.1:${PORT}`;
 // Privzeti meji v index.js (preverjamo privzeto vedenje, ne nastavljenega).
-const LOCK_MS = 1000, STMT_MS = 2000;
+const LOCK_MS = 1000, STMT_MS = 5000, SEZNAM_MS = 10000;
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
 const jwk = publicKey.export({ format: "jwk" });
@@ -60,6 +64,50 @@ async function api(method, path, token, body, rokMs = 15000) {
     const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = t; }
     return { status: r.status, body: j, retryAfter: r.headers.get("retry-after"), ms: Date.now() - t0 };
   } catch (e) { return { status: "visi", body: String(e.message), ms: Date.now() - t0 }; }
+}
+
+// Prisluskovalni posrednik (Z5): TCP med backendom in Postgresom, bere SAMO sporocila odjemalca (protokol v3): zagonski paket
+// (parametri povezave), Parse in Query (besedilo stavka). Promet posreduje nespremenjen. Gostitelj ostane "localhost" (SSL izklopljen).
+const net = require("net");
+const posrednik = { zagoni: [], stavki: [] };
+function zazeniPosrednika(port) {
+  const u = new URL(DB);
+  const srvP = net.createServer((odj) => {
+    const gor = net.connect(Number(u.port || 5432), u.hostname);
+    let buf = Buffer.alloc(0), zagon = true;
+    odj.on("data", (d) => {
+      gor.write(d);
+      buf = Buffer.concat([buf, d]);
+      for (;;) {
+        if (zagon) {
+          if (buf.length < 8) break;
+          const n = buf.readInt32BE(0); if (buf.length < n) break;
+          if (buf.readInt32BE(4) === 196608) {   // protokol 3.0: pari kljuc\0vrednost\0
+            const deli = buf.subarray(8, n).toString("utf8").split("\0"); const par = {};
+            for (let i = 0; i + 1 < deli.length; i += 2) if (deli[i]) par[deli[i]] = deli[i + 1];
+            posrednik.zagoni.push(par); zagon = false;
+          }
+          buf = buf.subarray(n); continue;
+        }
+        if (buf.length < 5) break;
+        const n = buf.readInt32BE(1); if (buf.length < n + 1) break;
+        if (buf[0] === 0x50) {   // 'P' Parse: ime\0 stavek\0 ...
+          const telo = buf.subarray(5, n + 1); const z = telo.indexOf(0);
+          posrednik.stavki.push(telo.subarray(z + 1, telo.indexOf(0, z + 1)).toString("utf8"));
+        } else if (buf[0] === 0x51) {   // 'Q' preprost stavek (brez parametrov): stavek\0
+          posrednik.stavki.push(buf.subarray(5, n).toString("utf8"));
+        }
+        buf = buf.subarray(n + 1);
+      }
+    });
+    gor.on("data", (d) => odj.write(d));
+    const zapri = () => { odj.destroy(); gor.destroy(); };
+    odj.on("error", zapri); gor.on("error", zapri); odj.on("close", zapri); gor.on("close", zapri);
+  });
+  return new Promise((r) => srvP.listen(port, "127.0.0.1", () => {
+    const v = new URL(DB); v.hostname = "localhost"; v.port = String(port);
+    r({ url: v.toString(), zapri: () => new Promise((z) => srvP.close(z)) });
+  }));
 }
 
 let srv = null, log = "";
@@ -106,8 +154,9 @@ let srv = null, log = "";
   await zZaklepom("LOCK TABLE tickets IN ACCESS EXCLUSIVE MODE", [], async () => {
     const s = await api("POST", "/business/tickets/scan", T.lastnik, { serial: anine[0] }, LOCK_MS + 4000);
     assert(meja503(s, LOCK_MS), `POST /business/tickets/scan med zaklepom -> 503 + Retry-After 5 v ${s.ms} ms (NE visi, NE 500)`, s);
-    const l = await api("GET", `/business/events/${dog}/scan-list`, T.lastnik, null, LOCK_MS + 4000);
-    assert(meja503(l, LOCK_MS), `GET scan-list med zaklepom -> 503 v ${l.ms} ms`, l);
+    const lp = api("GET", `/business/events/${dog}/scan-list`, T.lastnik, null, LOCK_MS + 4000);
+    const l = await lp;
+    assert(meja503(l, LOCK_MS), `GET scan-list med zaklepom -> 503 v ${l.ms} ms (lock_timeout velja tudi v transakciji seznama)`, l);
     const b = await api("POST", "/business/tickets/scan-batch", T.lastnik, { scans: [{ client_scan_id: "z1-1", device_id: "dev-z1", serial: anine[1] }] }, LOCK_MS + 4000);
     assert(meja503(b, LOCK_MS), `POST scan-batch med zaklepom -> 503 v ${b.ms} ms`, b);
     const z = await api("GET", "/healthz");
@@ -168,37 +217,65 @@ let srv = null, log = "";
   await ustavi();
 
   // ---------------------------------------------------------------- Z5
-  console.log("\n# Z5: velik dogodek (5000 vstopnic): scan-list in scan-batch (500) pod privzetima mejama");
-  // 2500 kupcev x 2 vstopnici neposredno v bazi (nakup prek API-ja bi trajal minute). Vsaka vstopnica ima svojega imetnika (JOIN users).
-  await pool.query(`INSERT INTO users (email, username, email_verified) SELECT 'k' || g || '@test.si', 'kupec' || g, true FROM generate_series(1, 2500) g`);
+  console.log("\n# Z5: najvecji dogodek (20 000 vstopnic): hladen prvi scan-list, scan-batch (500), pravi stavek brez JIT");
+  // 9996 kupcev x 2 vstopnici neposredno v bazi (+ 8 aninih = 20 000 = kapaciteta). Vsaka vstopnica ima svojega imetnika (JOIN users).
+  await pool.query(`INSERT INTO users (email, username, email_verified) SELECT 'k' || g || '@test.si', 'kupec' || g, true FROM generate_series(1, 9996) g`);
   await pool.query(`INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, status, buyer_email, paid_at)
     SELECT 'ZK' || u.id, u.id, $1, 1, 2, 1500, 3000, 'paid', u.email, NOW() FROM users u WHERE u.email LIKE 'k%@test.si'`, [dog]);
   await pool.query(`INSERT INTO tickets (order_id, event_id, created_at) SELECT o.id, o.event_id, NOW() - INTERVAL '2 days' FROM orders o, generate_series(1, 2) WHERE o.public_ref LIKE 'ZK%'`);
   await pool.query("ANALYZE tickets; ANALYZE orders; ANALYZE users");
   const st = (await pool.query("SELECT count(*)::int AS n FROM tickets WHERE event_id=$1", [dog])).rows[0].n;
-  assert(st >= 5000, `dogodek ima ${st} vstopnic`);
-  await zagon();
+  assert(st === 20000, `dogodek ima ${st} vstopnic`);
+  // Nov proces backenda: skenPool odpre NOVE povezave (nov streznik Postgresa na povezavo, brez nalozenega JIT/katalogov) = hladno kot po deployu.
+  const pos = await zazeniPosrednika(3435);
+  await zagon({ DATABASE_URL: pos.url });
   const casi = [];
   for (let i = 0; i < 5; i++) {
     const l = await api("GET", `/business/events/${dog}/scan-list`, T.lastnik, null, 30000);
-    if (i === 0) assert(l.status === 200 && l.body.tickets.length === st, `scan-list (5000) -> 200, ${l.body.tickets && l.body.tickets.length} vstopnic`, { status: l.status });
+    if (i === 0) {
+      assert(l.status === 200 && l.body.tickets && l.body.tickets.length === st, `HLADEN prvi scan-list (20 000) -> 200, ${l.body && l.body.tickets && l.body.tickets.length} vstopnic`, { status: l.status, ms: l.ms });
+      // Pod staro mejo stavka (2 s), ki jo je CI s JIT presegel ze pri 5000 vstopnicah; celoten HTTP zahtevek, ne le stavek.
+      assert(l.ms < 2000, `hladen prvi scan-list (20 000) v ${l.ms} ms < 2000 ms`, l.ms);
+    } else assert(l.status === 200, `scan-list ${i + 1}. klic -> 200`, { status: l.status });
     casi.push(l.ms);
   }
-  console.log(`  (scan-list 5000 vstopnic: ${casi.join(", ")} ms)`);
+  console.log(`  (scan-list 20 000 vstopnic: hladno ${casi[0]} ms, nato ${casi.slice(1).join(", ")} ms)`);
   const serijski = (await pool.query("SELECT serial FROM tickets t JOIN orders o ON o.id=t.order_id WHERE o.public_ref LIKE 'ZK%' ORDER BY t.id LIMIT 500")).rows.map(x => x.serial);
   const b = await api("POST", "/business/tickets/scan-batch", T.lastnik, { scans: serijski.map((s, i) => ({ client_scan_id: "z5-" + i, device_id: "dev-z5", serial: s })) }, 60000);
   assert(b.status === 200 && b.body.results.length === 500 && b.body.results.every(x => x.result === "ok"), `scan-batch 500 -> 200, vse ok (${b.ms} ms)`, { status: b.status, napake: b.body && b.body.results && b.body.results.filter(x => x.result !== "ok").length });
   const b2 = await api("POST", "/business/tickets/scan-batch", T.lastnik, { scans: serijski.map((s, i) => ({ client_scan_id: "z5-" + i, device_id: "dev-z5", serial: s })) }, 60000);
   assert(b2.status === 200 && b2.body.results.every(x => x.result === "ok"), `ponovitev paketa 500 (idempotentno) -> vse ok (${b2.ms} ms)`);
   console.log(`  (scan-batch 500: ${b.ms} ms, ponovitev ${b2.ms} ms)`);
-  // Najdaljsi posamezen stavek na skenPool: scan-list, merjen v bazi (brez HTTP in JSON).
-  const ex = await pool.query(`EXPLAIN (ANALYZE, FORMAT JSON) SELECT t.serial, t.status, t.used_at, (o.table_id IS NOT NULL) AS is_vip, o.table_label,
-      COALESCE(hu.username, 'x') AS holder_username, EXISTS (SELECT 1 FROM spori sp WHERE sp.order_id = o.id) AS d
-    FROM tickets t JOIN orders o ON o.id = t.order_id LEFT JOIN users hu ON hu.id = COALESCE(t.holder_user_id, o.user_id) WHERE t.event_id = $1 ORDER BY t.id`, [dog]);
-  const stavekMs = ex.rows[0]["QUERY PLAN"][0]["Execution Time"];
-  console.log(`  (stavek scan-list v bazi: ${stavekMs.toFixed(1)} ms; meja statement_timeout ${STMT_MS} ms)`);
-  assert(stavekMs * 10 < STMT_MS, `stavek scan-list ima vsaj 10x rezerve do statement_timeout (${stavekMs.toFixed(1)} ms x 10 < ${STMT_MS} ms)`);
+  // PRAVI stavek scan-list (ujet v Z1) v bazi, vsakic na NOVI povezavi (hladna seja): z jit=on (privzeto) in jit=off (kot skenPool).
+  async function razlozi(jit) {
+    const { Client } = require("pg");
+    const c = new Client({ connectionString: DB, options: `-c jit=${jit}` });
+    await c.connect();
+    try {
+      const t0 = Date.now();
+      const r = await c.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${stavekSeznama}`, [dog]);
+      const n = r.rows[0]["QUERY PLAN"][0];
+      return { ms: n["Execution Time"], skupaj: Date.now() - t0, strosek: n.Plan["Total Cost"], jit: n.JIT ? n.JIT.Timing.Total : null };
+    } finally { await c.end(); }
+  }
+  // Zagonski parametri povezav skenPool (prepoznane po lock_timeout) in pravi stavek scan-list, kot ju je poslal backend.
+  const skenZagoni = posrednik.zagoni.filter(p => p.lock_timeout === String(LOCK_MS));
+  assert(skenZagoni.length > 0 && skenZagoni.every(p => /(^|\s)-c jit=off(\s|$)/.test(p.options || "") && p.statement_timeout === String(STMT_MS)),
+    `povezave skenPool: jit=off, lock_timeout ${LOCK_MS}, statement_timeout ${STMT_MS} (zagonski paket)`, skenZagoni);
+  const stavekSeznama = posrednik.stavki.find(q => /FROM tickets t JOIN orders o/.test(q) && /WHERE t\.event_id = \$1/.test(q) && /ORDER BY t\.id/.test(q) && /holder_username/.test(q));
+  assert(!!stavekSeznama, "pravi stavek scan-list ujet (Parse)");
+  assert(posrednik.stavki.includes(`SET LOCAL statement_timeout = ${SEZNAM_MS}`), `scan-list v transakciji z SET LOCAL statement_timeout = ${SEZNAM_MS}`);
+  if (stavekSeznama) {
+    const zJit = await razlozi("on"), brezJit = await razlozi("off");
+    const pragJit = Number((await pool.query("SHOW jit_above_cost")).rows[0].jit_above_cost);
+    console.log(`  (pravi stavek scan-list, hladna seja: jit=on ${zJit.ms.toFixed(1)} ms (JIT ${zJit.jit === null ? "ni" : (typeof zJit.jit === "number" ? zJit.jit.toFixed(1) : JSON.stringify(zJit.jit)) + " ms"}), ` +
+      `jit=off ${brezJit.ms.toFixed(1)} ms; strosek plana ${Math.round(zJit.strosek)}, jit_above_cost ${pragJit})`);
+    assert(brezJit.jit === null, "z jit=off (kot skenPool) stavek scan-list ne prevaja JIT");
+    assert(brezJit.ms * 10 < 2000, `pravi stavek scan-list (20 000, jit=off) ima vsaj 10x rezerve do 2 s (${brezJit.ms.toFixed(1)} ms x 10 < 2000 ms)`);
+    assert(brezJit.ms * 10 < SEZNAM_MS, `... in do meje seznama ${SEZNAM_MS} ms`);
+  }
   await ustavi();
+  await pos.zapri();
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
   const sumljivo = log.split("\n").filter(l => /TypeError|Unhandled|ReferenceError/i.test(l));
