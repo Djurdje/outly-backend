@@ -47,9 +47,16 @@ jobs:
           preveri "backend /events"  "https://outly-backend-roy3.onrender.com/events"  200
           preveri "backend admin"    "https://outly-backend-roy3.onrender.com/admin/"  200
           preveri "backend auth"     "https://outly-backend-roy3.onrender.com/me/invites" 401
-          # Povezave skenPool (sken vstopnic na vratih; zagonski options -c jit=off, #265). /healthz jih NE preveri (zdraviPool je brez
-          # options): pooler ali baza, ki options zavrne, podre vsak sken, /healthz pa ostane 200. Pot vrne samo {"ok":true|false}.
+          # Povezave skenPool (sken vstopnic na vratih, #265): svoje meje (lock/statement/idle timeout, query_timeout) in zastoj, ki jih
+          # /healthz ne preveri. Pot vrne samo {"ok":true|false}. Ob navalu skenov (skenPool poln) je lahko 503 trenutno, zato alarm
+          # sele po DVEH neuspelih krogih: curl ze sam ponovi 503 (--retry 3, 10 s), nato se en krog po 30 s.
+          PRED="$NAPAKE"
           preveri "backend sken"     "https://outly-backend-roy3.onrender.com/healthz/sken" 200 '"ok":true'
+          if [ "$NAPAKE" != "$PRED" ]; then
+            echo "backend sken: prvi krog neuspel, ponovitev cez 30 s"
+            NAPAKE="$PRED"; sleep 30
+            preveri "backend sken"     "https://outly-backend-roy3.onrender.com/healthz/sken" 200 '"ok":true'
+          fi
           preveri "outly.si"         "https://outly.si/"                                200 'Outly'
           preveri "outly.si /terms"  "https://outly.si/terms"                           200
           # javni (publishable) kljuc, isti kot v kodi aplikacije in spletne strani
