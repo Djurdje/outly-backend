@@ -35,15 +35,16 @@ function zeton(email, sub) {
 function uuid(n) { return `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`; }
 let ok = 0, fail = 0;
 function assert(cond, msg, extra) { if (cond) { ok++; console.log("  ✓", msg); } else { fail++; console.log("  ✗", msg, extra !== undefined ? JSON.stringify(extra) : ""); } }
+let xff = 0;   // omejevalnik prenosov (30/h/IP): vsak zahtevek z druge »IP« (trust proxy 1), sicer test sam sebe omeji
 async function api(method, path, token, body) {
-  const r = await fetch(BASE + path, { method, headers: { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(BASE + path, { method, headers: { "content-type": "application/json", "x-forwarded-for": `10.8.${Math.floor(++xff / 250)}.${xff % 250 + 1}`, ...(token ? { authorization: "Bearer " + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
   const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = t; }
   return { status: r.status, body: j };
 }
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE spori, omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", d => log += d); srv.stderr.on("data", d => log += d);
@@ -326,6 +327,27 @@ async function api(method, path, token, body) {
   r = await api("POST", `/tickets/${vPoEposti}/transfer`, T.ana, { email: "Cene@Outly.si" });
   assert(r.status === 200 && r.body.ticket.holder_email === "cene@outly.si" && r.body.ticket.holder_username === "cene",
     "prenos po e-naslovu: holder_email je naslov, ki ga je vpisal posiljatelj", r.body.ticket);
+
+  console.log("\n# Spor (chargeback) na naroceno: prenos zavrnjen, transferable false (#278)");
+  r = await api("POST", `/events/${dogodekPoId}/orders`, T.ana, { quantity: 3 });
+  assert(r.status === 201 && r.body.tickets.length === 3, "ana kupi 3 vstopnice za sklop spor", r.body);
+  const [vSpor1, vSpor2, vSpor3] = r.body.tickets.map(t => t.id);
+  const narocilo = (await pool.query("SELECT order_id FROM tickets WHERE id=$1", [vSpor1])).rows[0].order_id;
+  const mojeTransferable = async (id) => { const m = await api("GET", "/me/tickets", T.ana); const l = Array.isArray(m.body) ? m.body : (m.body.tickets || []); return (l.find(x => x.id === id) || {}).transferable; };
+  assert(await mojeTransferable(vSpor1) === true, "brez spora: transferable true");
+  await pool.query("INSERT INTO spori (id, order_id, stanje) VALUES ('dp_t278', $1, 'needs_response')", [narocilo]);
+  assert(await mojeTransferable(vSpor1) === false, "odprt spor: transferable false");
+  r = await api("POST", `/tickets/${vSpor1}/transfer`, T.ana, { user_id: idCenePr });
+  assert(r.status === 409 && r.body.result === "payment_disputed" && r.body.error === "payment_disputed", "odprt spor: prenos prijatelju 409 payment_disputed", r);
+  assert((await pool.query("SELECT COUNT(*)::int n FROM ticket_transfers WHERE ticket_id=ANY($1)", [[vSpor1, vSpor2, vSpor3]])).rows[0].n === 0, "odprt spor: noben prenos ni zapisan");
+  await pool.query("UPDATE spori SET stanje='lost' WHERE id='dp_t278'");
+  r = await api("POST", `/tickets/${vSpor3}/transfer`, T.ana, { user_id: idCenePr });
+  assert(r.status === 409 && r.body.result === "payment_disputed", "izgubljen spor: prenos 409", r);
+  assert(await mojeTransferable(vSpor3) === false, "izgubljen spor (lost): transferable false");
+  await pool.query("UPDATE spori SET stanje='won' WHERE id='dp_t278'");
+  assert(await mojeTransferable(vSpor1) === true, "zakljucen spor (won): transferable spet true");
+  r = await api("POST", `/tickets/${vSpor1}/transfer`, T.ana, { user_id: idCenePr });
+  assert(r.status === 200, "zakljucen spor (won): prenos spet dela", r);
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
   const napake = log.split("\n").filter(l => /error|TypeError|Unhandled/i.test(l) && !/Server error\./.test(l) && !/Resend/i.test(l));
