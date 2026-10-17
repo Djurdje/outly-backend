@@ -5957,9 +5957,12 @@ async function pocistiGostZetone() {
     if (an.rowCount > 0) console.log(`[gost] anonimiziranih gostujocih narocil: zetonov ${an.rowCount}`);
     // Vstopnice, poslane gostu (034): zetoni potecejo in e-naslov imetnika se izbrise konec dogodka + 30 dni (GOST_ZETON_DNI; pravna presoja 1.4).
     // holder_is_guest OSTANE (vstopnica ne sme spet postati kupceva); zapis prenosa dobi neosebno oznako.
-    // Anonimizacija e-naslova in brisanje zetonov sta ENA transakcija (issue #240): mail, ki je vstopnico prevzel pred iztekom roka, kuje zeton
-    // sele po pripravi priloge. UPDATE tickets pocaka na njegovo zaklepanje vrstice (gostKujZetonVstopnice: FOR UPDATE), DELETE zetonov je nov ukaz
-    // (nov posnetek) in zeton vidi; zunanji opazovalec nikoli ne vidi »e-naslov izbrisan, zeton obstaja«.
+    // Anonimizacija e-naslova in brisanje zetonov sta ENA transakcija (issue #240). Prej sta bila dva loceni ukaza (najprej DELETE zetonov, nato UPDATE
+    // e-naslova): ce je rok hrambe potekel med njima (dogodek premaknjen / meja casa), je DELETE se videl veljaven dogodek, UPDATE pa potekel -> e-naslov
+    // izbrisan, zeton ostal do naslednjega teka (verjetni vzrok nestabilnega testa v razdelku 8). Poleg tega mail, ki je vstopnico PREVZEL (e-naslov se je
+    // takrat se bral), kuje zeton (gostKujZetonVstopnice) pred pripravo priloge, torej po prevzemu, a lahko po pospravljalcu. UPDATE tickets zato pocaka
+    // na zaklep vrstice, ki ga drzi kovanje (FOR UPDATE), DELETE zetonov je nov ukaz (nov posnetek) in zeton vidi. Zunanji opazovalec nikoli ne vidi
+    // »e-naslov izbrisan, zeton obstaja«; poizvedba po zetonu (gostVstopnicaPoZetonu) zahteva e-naslov se vpisan.
     const konec = `COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') + INTERVAL '${GOST_ZETON_DNI} days' < NOW()`;
     const c = await pool.connect();
     try {
@@ -5997,29 +6000,31 @@ function naslovKljuc(email) {
   return `${lok}@${dom}`;
 }
 
-async function gostKujZetonVstopnice(db, tid) {
+// naslov = e-naslov imetnika, ki ga je mail PREVZEL: ce se je vstopnica medtem prevzela v racun in prenesla drugemu gostu (drug e-naslov), stari mail
+// zetona za novega imetnika ne sme skovati (in ga poslati staremu naslovu).
+async function gostKujZetonVstopnice(db, tid, naslov) {
   const zeton = crypto.randomBytes(32).toString("base64url");
   // Po roku hrambe (konec dogodka + GOST_ZETON_DNI) ali po anonimizaciji e-naslova zetona NE kujemo (issue #240: mail, ki je vstopnico prevzel pred iztekom
-  // roka, bi sicer skoval zeton PO pospravljalcu). FOR UPDATE OF t: pospravljalec (UPDATE tickets v isti transakciji kot brisanje zetonov) pocaka, da se zeton
-  // vstavi in ga nato izbrise; kdor pride za njim, vidi e-naslov NULL (ponovno preverjanje po cakanju) in zetona ne dobi.
+  // roka, bi sicer skoval zeton PO pospravljalcu). FOR UPDATE OF t: pospravljalec in admin izbris (UPDATE tickets, nato DELETE zetonov v isti transakciji)
+  // pocakata, da se zeton vstavi, in ga nato izbrisejo; kdor pride za njim, vidi e-naslov NULL (ponovno preverjanje po cakanju) in zetona ne dobi.
   const r = await db.query(
     `INSERT INTO gost_zetoni_vstopnic (token_hash, ticket_id)
        SELECT $1, t.id FROM tickets t JOIN events e ON e.id = t.event_id
-        WHERE t.id = $2 AND t.holder_is_guest AND t.holder_guest_email IS NOT NULL
+        WHERE t.id = $2 AND t.holder_is_guest AND t.holder_guest_email = $3
           AND COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') + INTERVAL '${GOST_ZETON_DNI} days' > NOW()
-          FOR UPDATE OF t`, [gostZetonHash(zeton), tid]);
-  if (!r.rowCount) return null;   // vstopnica ni (vec) gostujoca (prevzeta v racun), e-naslov je izbrisan ali rok hrambe je potekel: zetona ni
+          FOR UPDATE OF t`, [gostZetonHash(zeton), tid, naslov]);
+  if (!r.rowCount) return null;   // vstopnica ni (vec) gostujoca (prevzeta v racun), imetnik/e-naslov se je spremenil ali izbrisal, ali rok hrambe je potekel: zetona ni
   await db.query(
     `DELETE FROM gost_zetoni_vstopnic WHERE ticket_id = $1
        AND token_hash NOT IN (SELECT token_hash FROM gost_zetoni_vstopnic WHERE ticket_id = $1 ORDER BY created_at DESC LIMIT ${GOST_ZETONOV_NA_NAROCILO})`, [tid]);
   return zeton;
 }
-// id vstopnice za zeton ali null (napacen, potekel, prevzet v racun, ponovno prenesen: vse enako, brez razlike). Indeksirano (PK) in poceni.
+// id vstopnice za zeton ali null (napacen, potekel, izbrisan (e-naslov NULL), prevzet v racun, ponovno prenesen: vse enako, brez razlike). Indeksirano (PK) in poceni.
 async function gostVstopnicaPoZetonu(db, zeton) {
   if (typeof zeton !== "string" || !GOST_ZETON_VZOREC.test(zeton)) return null;
   const r = await db.query(
     `SELECT t.id FROM gost_zetoni_vstopnic z JOIN tickets t ON t.id = z.ticket_id JOIN events e ON e.id = t.event_id
-      WHERE z.token_hash = $1 AND t.holder_is_guest
+      WHERE z.token_hash = $1 AND t.holder_is_guest AND t.holder_guest_email IS NOT NULL
         AND COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') + INTERVAL '${GOST_ZETON_DNI} days' > NOW()`, [gostZetonHash(zeton)]);
   return r.rows.length ? r.rows[0].id : null;
 }
@@ -6141,8 +6146,8 @@ async function prenosPosljiEnoPosto(tid) {
        FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN} WHERE t.id = $1`, [tid]);
   if (!ev.rows.length) return false;
   const x = ev.rows[0];
-  const zeton = await gostKujZetonVstopnice(pool, tid);
-  if (!zeton) return false;   // medtem prevzeto v racun
+  const zeton = await gostKujZetonVstopnice(pool, tid, t.holder_guest_email);
+  if (!zeton) return false;   // medtem prevzeto v racun / prenesenemu drugam / izbrisano / rok hrambe potekel
   const kode = [{ cid: "ticket-qr-1", oznaka: "", koda: qrVstopnice(t) }];
   const meja = starostZaPaket(x.min_age, x.package_id !== null);
   const vrsta = x.table_label ? `VIP table ${x.table_label}${x.package_name ? ` - ${x.package_name}` : ""}` : "Standard ticket";
@@ -6176,12 +6181,21 @@ admin.post("/guest-tickets/erase", async (req, res) => {
   try {
     const email = gostEmail((req.body || {}).email);
     if (!email) return res.status(400).json({ error: "invalid_email", message: "A valid email is required." });
-    const r = await pool.query(
-      `WITH t AS (UPDATE tickets SET holder_guest_email = NULL WHERE holder_is_guest AND holder_guest_email = $1 RETURNING id),
-            z AS (DELETE FROM gost_zetoni_vstopnic WHERE ticket_id IN (SELECT id FROM t) RETURNING 1),
-            x AS (UPDATE ticket_transfers SET to_email = 'izbrisan-' || id || '@outly.invalid', to_email_norm = NULL
-                   WHERE to_guest AND to_user_id IS NULL AND to_email = $1 RETURNING 1)
-       SELECT (SELECT COUNT(*)::int FROM t) AS tickets, (SELECT COUNT(*)::int FROM x) AS transfers`, [email]);
+    // UPDATE e-naslova, nato DELETE zetonov v isti transakciji kot pri pospravljalcu (#240): DELETE v CTE istega ukaza bi videl posnetek z zacetka ukaza in
+    // zeton, ki ga ravnokar kuje mail v teku (drzi zaklep vrstice), bi ostal veljaven.
+    const c = await pool.connect();
+    let r;
+    try {
+      await c.query("BEGIN");
+      const t = await c.query("UPDATE tickets SET holder_guest_email = NULL WHERE holder_is_guest AND holder_guest_email = $1 RETURNING id", [email]);
+      if (t.rows.length) await c.query("DELETE FROM gost_zetoni_vstopnic WHERE ticket_id = ANY($1::int[])", [t.rows.map(x => x.id)]);
+      const x = await c.query(
+        `UPDATE ticket_transfers SET to_email = 'izbrisan-' || id || '@outly.invalid', to_email_norm = NULL
+          WHERE to_guest AND to_user_id IS NULL AND to_email = $1`, [email]);
+      await c.query("COMMIT");
+      r = { rows: [{ tickets: t.rows.length, transfers: x.rowCount }] };
+    } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
+    finally { c.release(); }
     console.log(`[gost] admin ${req.user.userId}: izbris e-naslova gostujocih vstopnic: ${r.rows[0].tickets} vstopnic, ${r.rows[0].transfers} zapisov prenosa`);
     return res.json(r.rows[0]);
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }

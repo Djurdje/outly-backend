@@ -547,12 +547,12 @@ async function webhook(tip, objekt, id) {
     assert(bt.status === 200 && btD && btD.payment_disputed === true && btD.status === "valid" && btC && btC.payment_disputed === false, "GET /business/events/:id/tickets: payment_disputed true pri sporu, false brez (status ostane valid)", { btD, btC });
     const prejHolder = (await pool.query("SELECT id, holder_user_id, holder_is_guest FROM tickets WHERE id = ANY($1)", [[tDisp, tCist]])).rows;
     const zDisp = "d".repeat(43), zCist = "c".repeat(43);
-    await pool.query("UPDATE tickets SET holder_is_guest = TRUE, holder_user_id = NULL WHERE id = ANY($1)", [[tDisp, tCist]]);
+    await pool.query("UPDATE tickets SET holder_is_guest = TRUE, holder_user_id = NULL, holder_guest_email = 'gost-spor@example.com' WHERE id = ANY($1)", [[tDisp, tCist]]);   // gostujoci imetnik ima vpisan e-naslov (zeton brez njega ne velja, #240)
     await pool.query("INSERT INTO gost_zetoni_vstopnic (token_hash, ticket_id) VALUES ($1, $2), ($3, $4)", [crypto.createHash("sha256").update(zDisp).digest("hex"), tDisp, crypto.createHash("sha256").update(zCist).digest("hex"), tCist]);
     const gD = await api("GET", "/guest/ticket", null, undefined, { "X-Guest-Token": zDisp }), gC = await api("GET", "/guest/ticket", null, undefined, { "X-Guest-Token": zCist });
     assert(gD.status === 200 && gD.body.ticket.payment_disputed === true && gC.status === 200 && gC.body.ticket.payment_disputed === false, "GET /guest/ticket: payment_disputed true pri sporu, false brez", { d: gD.body.ticket && gD.body.ticket.payment_disputed, c: gC.body.ticket && gC.body.ticket.payment_disputed });
     await pool.query("DELETE FROM gost_zetoni_vstopnic WHERE ticket_id = ANY($1)", [[tDisp, tCist]]);
-    for (const x of prejHolder) await pool.query("UPDATE tickets SET holder_is_guest = $2, holder_user_id = $3 WHERE id = $1", [x.id, x.holder_is_guest, x.holder_user_id]);
+    for (const x of prejHolder) await pool.query("UPDATE tickets SET holder_is_guest = $2, holder_user_id = $3, holder_guest_email = NULL WHERE id = $1", [x.id, x.holder_is_guest, x.holder_user_id]);
     const sb = await api("POST", "/business/tickets/scan-batch", T.lastnik, { device_id: "dev-spor-1", scans: [{ client_scan_id: "cs-spor-0001", serial: r.body.ticket.serial }] });
     assert(sb.status === 200 && sb.body.results && sb.body.results[0].result === "payment_disputed", "scan-batch: payment_disputed", sb.body);
     const casiSkena = [];

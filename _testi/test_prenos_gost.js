@@ -16,6 +16,8 @@
  *   8  mail: napaka Resenda -> pospravljalec poslje (enkrat); hramba: konec dogodka + 30 dni anonimizacija
  *   9  zloraba: meja na posiljatelja in na naslov (429), hkratni prenos iste vstopnice (en uspe)
  *  12  hramba: mail v teku ob izteku roka (konec dogodka + 30 dni) ne sme skovati zetona po anonimizaciji (issue #240)
+ *  13  star mail (prevzet pred prevzemom v racun in ponovnim prenosom) ne sme skovati zetona za novega imetnika
+ *  14  admin izbris e-naslova med kovanjem zetona: povezava iz maila ne deluje (GDPR 21)
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -678,9 +680,11 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     // ============================================================
     console.log("\n# 12. Zeton se po roku hrambe ne kuje (issue #240): mail v teku, ko pospravljalec anonimizira");
     // Pospravljalec (konec dogodka + 30 dni) izbrise zetone in e-naslov imetnika. Mail, ki je vstopnico ze PREVZEL (e-naslov se je takrat se bral),
-    // pa zeton kuje sele po pripravi priloge (slika, PDF). Ce pospravljalec vmes poteka, se je zeton po starem pojavil PO anonimizaciji in zivel do
-    // naslednjega teka (lazna napaka v razdelku 8 »zetoni izbrisani«). Testna prozilca uspava vstavljanje zetona 2,5 s SAMO za to vstopnico in SAMO po prevzemu.
-    // Invarianta: nikoli ne obstaja stanje »e-naslov izbrisan, zeton obstaja«, tudi trenutno ne (vzorcimo vsakih 30 ms).
+    // zeton kuje v gostKujZetonVstopnice (po prevzemu, pred pripravo priloge, torej lahko PO pospravljalcu). Stara koda je imela ob tem dve vrzeli:
+    // (1) pospravljalec je izbrisal zetone in e-naslov v dveh LOCENIH ukazih (rok je lahko potekel med njima: DELETE videl veljaven dogodek, UPDATE potekel;
+    // verjetni vzrok lazne napake v razdelku 8 »zetoni izbrisani«), (2) kovanje ni preverjalo ne roka ne e-naslova, zato se je zeton pojavil PO
+    // anonimizaciji in zivel do naslednjega teka. Razdelek 12 izzove (2) deterministicno: testna prozilca uspava vstavljanje zetona 2,5 s SAMO za to
+    // vstopnico in SAMO po prevzemu. Invarianta: nikoli ne obstaja stanje »e-naslov izbrisan, zeton obstaja«, tudi trenutno ne (vzorcimo vsakih 30 ms).
     for (const x of dodatni) x.srv.kill();   // G iz razdelka 11
     dodatni.length = 0;
     await pocakaj(500);
@@ -711,8 +715,66 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
       assert(await cakaj(async () => (await stanje()).email === null, 15000), "12: pospravljalec je izbrisal e-naslov imetnika");
       let prekrsitev = null; const do12 = Date.now() + 5000;
       while (Date.now() < do12) { const s12 = await stanje(); if (s12.email === null && s12.zetoni > 0) { prekrsitev = s12; break; } await pocakaj(30); }
-      assert(prekrsitev === null, "12: nikoli »e-naslov izbrisan, a zeton obstaja« (zeton se po roku hrambe ne kuje)", prekrsitev);
+      assert(prekrsitev === null, "12: nikoli stanje e-naslov izbrisan + zeton obstaja (zeton se po roku hrambe ne kuje)", prekrsitev);
       assert(await cakaj(async () => (await stanje()).zetoni === 0, 4000), "12: na koncu zetonov ni");
+
+      // ============================================================
+      console.log("\n# 13. Star mail ne skuje zetona za novega imetnika (e-naslov, ki ga je mail prevzel, se je medtem zamenjal)");
+      // Mail prevzame vstopnico gosta A. Medtem ko caka (test zaklene tabelo clubs: poizvedba maila po podatkih dogodka obvisi), vstopnica preide h gostu B
+      // (UPDATE kot pri prenosu). Po sprostitvi star mail ne sme skovati zetona za B-jevo vstopnico in ga poslati A-ju.
+      const eN = (await pool.query(
+        `INSERT INTO events (club_id, title, poster_url, start_at, status, ticket_price_cents, capacity, min_age, vip_enabled)
+         VALUES (1,'Prenos Star mail','https://example.com/p.jpg', NOW() + INTERVAL '2 days', 'published', 1500, 200, 0, FALSE) RETURNING id`)).rows[0].id;
+      const n1 = await zahtevek(H, "POST", `/events/${eN}/orders`, T.kupec, { quantity: 2 });
+      assert(n1.status === 201, "13: nakup 201", n1.body);
+      const tidN = n1.body.tickets[0].id;
+      const zakl = await pool.connect();
+      try {
+        await zakl.query("BEGIN");
+        await zakl.query("LOCK TABLE clubs IN ACCESS EXCLUSIVE MODE");
+        r = await zahtevek(H, "POST", `/tickets/${tidN}/transfer`, T.kupec, { email: "gosta13@example.com", allow_guest: true });
+        assert(r.status === 200, "13: prenos gostu A 200", r.body);
+        assert(await cakaj(async () => (await pool.query("SELECT holder_guest_mail_claimed_at AS t FROM tickets WHERE id=$1", [tidN])).rows[0].t !== null, 5000), "13: mail je vstopnico prevzel (caka na clubs)");
+        // Prevzem v racun in ponovni prenos gostu B (HTTP bi obvisel na zaklenjeni tabeli clubs) posnemamo z enakim UPDATE-om kot POST /tickets/:id/transfer.
+        await pool.query(`UPDATE tickets SET holder_guest_email = 'gostb13@example.com', serial = gen_random_uuid(),
+          holder_guest_mail_sent_at = NULL, holder_guest_mail_claimed_at = NULL, holder_guest_mail_attempts = 0 WHERE id = $1`, [tidN]);
+        assert((await vstopnica(tidN)).holder_guest_email === "gostb13@example.com", "13: imetnik je gost B");
+      } finally { await zakl.query("COMMIT").catch(() => {}); zakl.release(); }
+      assert(await cakaj(() => poslanoNa("gostb13@example.com").length === 1, 10000), "13: mail gre gostu B");
+      await pocakaj(1000);
+      assert(poslanoNa("gosta13@example.com").length === 0, "13: star mail A-ju NE gre (zetona za novega imetnika ne skuje)", poslanoNa("gosta13@example.com").length);
+      assert((await pool.query("SELECT COUNT(*)::int AS n FROM gost_zetoni_vstopnic WHERE ticket_id=$1", [tidN])).rows[0].n === 1, "13: natanko en zeton (B-jev)");
+      r = await zahtevek(H, "GET", "/guest/ticket", null, undefined, { "x-guest-token": zetonIzMaila(poslanoNa("gostb13@example.com")[0] || {}) });
+      assert(r.status === 200, "13: B-jev zeton velja", r.status);
+
+      // ============================================================
+      console.log("\n# 14. Admin izbris e-naslova, medtem ko mail kuje zeton: povezava iz maila ne deluje (GDPR 21)");
+      // Stara koda: DELETE zetonov v CTE istega ukaza kot UPDATE e-naslova je videl posnetek z zacetka ukaza, zato je zeton, ki ga je kovanje ravnokar vstavilo
+      // (UPDATE je cakal na zaklep vrstice), ostal in povezava je delovala do konca dogodka + 30 dni.
+      await pool.query(`CREATE OR REPLACE FUNCTION test_pocasna_priprava() RETURNS trigger LANGUAGE plpgsql AS $f$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM tickets t WHERE t.id = NEW.ticket_id AND t.holder_guest_mail_claimed_at IS NOT NULL AND t.holder_guest_email = 'izbris-tekma@example.com') THEN PERFORM pg_sleep(2.5); END IF;
+          RETURN NEW;
+        END $f$`);
+      const tidX = n1.body.tickets[1].id;
+      r = await zahtevek(H, "POST", `/tickets/${tidX}/transfer`, T.kupec, { email: "izbris-tekma@example.com", allow_guest: true });
+      assert(r.status === 200, "14: prenos prijatelju 200", r.body);
+      assert(await cakaj(async () => (await pool.query("SELECT holder_guest_mail_claimed_at AS t FROM tickets WHERE id=$1", [tidX])).rows[0].t !== null, 5000), "14: mail je vstopnico prevzel (kovanje v teku)");
+      await pocakaj(300);   // kovanje je ze v INSERT-u in drzi zaklep vrstice
+      const stanjeX = async () => (await pool.query(
+        "SELECT (SELECT holder_guest_email FROM tickets WHERE id=$1) AS email, (SELECT COUNT(*)::int FROM gost_zetoni_vstopnic WHERE ticket_id=$1) AS zetoni", [tidX])).rows[0];
+      let koncano = false, prekrsitevX = null;
+      const izbris = zahtevek(H, "POST", "/admin/api/guest-tickets/erase", T.admin, { email: "izbris-tekma@example.com" }).finally(() => { koncano = true; });
+      const doX = Date.now() + 12000;
+      while (!koncano && Date.now() < doX) { const sx = await stanjeX(); if (sx.email === null && sx.zetoni > 0) { prekrsitevX = sx; break; } await pocakaj(30); }
+      r = await izbris;
+      { const sx2 = await stanjeX(); if (!prekrsitevX && sx2.email === null && sx2.zetoni > 0) prekrsitevX = sx2; }   // takoj po koncu izbrisa
+      assert(r.status === 200 && r.body.tickets === 1, "14: erase 200, 1 vstopnica", r.body);
+      assert(prekrsitevX === null, "14: nikoli stanje e-naslov izbrisan + zeton obstaja (erase)", prekrsitevX);
+      assert(await cakaj(() => poslanoNa("izbris-tekma@example.com").length >= 1, 10000), "14: mail v teku je bil poslan (kovanje je koncalo pred izbrisom)");
+      r = await zahtevek(H, "GET", "/guest/ticket", null, undefined, { "x-guest-token": zetonIzMaila(poslanoNa("izbris-tekma@example.com")[0] || {}) });
+      assert(r.status === 404, "14: povezava iz maila po izbrisu ne deluje (404)", r.status);
+      assert((await stanjeX()).zetoni === 0, "14: zetonov ni");
     } finally {
       await pool.query("DROP TRIGGER IF EXISTS test_pocasna_priprava ON gost_zetoni_vstopnic");
       await pool.query("DROP FUNCTION IF EXISTS test_pocasna_priprava()");
