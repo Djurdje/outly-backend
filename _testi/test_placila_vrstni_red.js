@@ -222,7 +222,8 @@ const placi = (sejaId, pi) => Object.assign(S.seje[sejaId], { status: "complete"
     await drzi.query("BEGIN");
     await drzi.query("SELECT id FROM orders WHERE id = $1 FOR UPDATE", [jn.id]);
     const vmes = webhook("charge.refunded", { id: "ch_jn" }, { id: "evt_vracilo_jn" });   // obvisi na zaklepu vrstice
-    await pocakaj(600);
+    assert(await cakaj(async () => (await pool.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%FROM orders WHERE id = $1 FOR UPDATE%' AND pid <> pg_backend_pid() AND pid <> $1", [drzi.processID])).rows.length > 0),
+      "zahtevek webhooka caka na zaklep vrstice (pg_stat_activity)");
     await drzi.query("UPDATE orders SET status = 'paid', paid_at = NOW(), stripe_payment_intent_id = 'pi_jn' WHERE id = $1", [jn.id]);   // kot zakljuci(): placilo vknjizeno tik pred nami
     await drzi.query("COMMIT"); drzi.release();
     w = await vmes;

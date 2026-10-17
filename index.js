@@ -6040,7 +6040,7 @@ async function posljiSporMail(did, vrsta) {
     if (!k.rows.length) return false;
     const sp = k.rows[0];
     if (sp.order_id === null) {   // spora ni mogoce povezati z narocilom: lastnika ne poznamo, alarm je ze v dnevniku (POZOR ob zapisu spora)
-      await pool.query(`UPDATE spori SET ${cPoskusi} = $2 WHERE id = $1 AND ${cPoslano} IS NULL`, [did, GOST_POSTA_POSKUSOV]);
+      await pool.query(`UPDATE spori SET ${cPoskusi} = $2 WHERE id = $1 AND ${cPoslano} IS NULL AND order_id IS NULL`, [did, GOST_POSTA_POSKUSOV]);   // order_id IS NULL: ne povozi ponastavitve iz zakljuci() (spor je medtem dobil narocilo)
       return false;
     }
     const r0 = await pool.query(
