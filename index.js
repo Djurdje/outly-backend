@@ -270,6 +270,30 @@ function nakupIzstopi() {
   const naslednji = nakupVrsta.shift();
   if (naslednji) naslednji.dodeli(); else nakupAktivnih--;
 }
+// Drzalec dovoljenja in povezave nakupa (#274): enkratno sprostitev (povezava + dovoljenje) lahko sprozi nakupStripeSeja takoj po COMMIT-u,
+// `finally` poti jo ponovi brez ucinka (dvojni c.release() bi vrgel, dvojni nakupIzstopi() bi pokvaril stevec dovoljenj).
+function nakupDrzalec(c) {
+  const d = { c, drzi: true, sprosti(err) { if (!d.drzi) return; d.drzi = false; try { c.release(err); } finally { nakupIzstopi(); } } };
+  return d;
+}
+// Klic Stripa (checkout.sessions.create, rok 15 s, do 3 poskusi) NE sme drzati dovoljenja nakupa ne povezave z bazo: pocasen Stripe bi sicer
+// ustavil nakupe vseh klubov, tudi brezplacne in testne (#274). Ima lasten, sirsi semafor: naval ne odpre stotin hkratnih klicev (Stripova
+// omejitev hitrosti, odprte vticnice). Cakalci cakajo v pomnilniku brez povezave; po STRIPE_CAKANJE_MS dobi kupec 503, narocilo pa `failed`.
+const STRIPE_VZPOREDNO = okoljeCelo("STRIPE_VZPOREDNO", 24, 1, 500);
+const STRIPE_CAKANJE_MS = okoljeCelo("STRIPE_CAKANJE_MS", 20000, 10, 120000);
+const stripeVrsta = []; let stripeAktivnih = 0;
+function stripeVstopi() {
+  if (stripeAktivnih < STRIPE_VZPOREDNO) { stripeAktivnih++; return Promise.resolve(true); }
+  return new Promise((resolve) => {
+    const cak = { dodeli: () => { clearTimeout(cak.timer); resolve(true); } };
+    cak.timer = setTimeout(() => { const i = stripeVrsta.indexOf(cak); if (i >= 0) stripeVrsta.splice(i, 1); resolve(false); }, STRIPE_CAKANJE_MS);
+    stripeVrsta.push(cak);
+  });
+}
+function stripeIzstopi() {
+  const naslednji = stripeVrsta.shift();
+  if (naslednji) naslednji.dodeli(); else stripeAktivnih--;
+}
 // Pridobi dovoljenje za nakup. true = dovoljenje drzimo (klicatelj MORA poklicati nakupIzstopi()); false = odgovor je
 // ze poslan (503) ali odjemalca ni vec, dovoljenja ne drzimo.
 async function nakupDovoljenje(req, res) {
@@ -1551,6 +1575,14 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       //     povabljenec, so void in mesto se sprosti. Brez tega bi vstopnica z izbrisanim imetnikom (holder_user_id SET NULL) zdrsnila na gostitelja.
       await guestListaPocistiUporabnika(odjemalec, req.user.userId);
 
+      // 1c. #276 S4: cakajoca (neplacana) narocila se prekliceta, SAMO v tej transakciji. Brez tega bi anonimizacija (user_id -> NULL) pustila odprt Checkout:
+      //     kupec bi ga lahko se placal, zakljuci() bi naredil vstopnice brez imetnika, brez potrdila, vracila bi ne bilo (denar bi sel klubu). Preklic sprozi
+      //     sprosti_zalogo; ce placilo kljub temu prispe (tekma, odlozeno placilo), zakljuci() vidi `cancelled` in kupcu vrne vse (`inactive_order`, I37).
+      //     UPDATE zaklene vrstice: hkratni zakljuci() pocaka in vidi `cancelled`; ze placano ostane placano (ne ujema WHERE).
+      const preklicana = (await odjemalec.query(
+        `UPDATE orders SET status = 'cancelled', cancelled_at = NOW()
+          WHERE user_id = $1 AND status = 'pending' RETURNING id, event_id, stripe_checkout_session_id`, [req.user.userId])).rows;
+
       // 2. Osebni podatki na naracilih se odvezejo. Znesek, datum in dogodek
       //    ostanejo, ker so racunovodski podatek; e-naslov ni.
       //    Prevzeta gostujoca narocila (migracija 033): tudi guest_email in zetoni pogleda (kdor ima povezavo, ne vidi vec nicesar).
@@ -1582,6 +1614,17 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 
       await odjemalec.query("COMMIT");
       if (supabase) izbrisaniSub.set(req.user.supabaseSub, req.user.supabaseExp);
+      // Po COMMIT-u: odprte Checkout seje zapremo pri Stripu (kupec ne more vec placati). Napaka ni usodna (seja je ze `complete`/potekla, Stripe nedosegljiv):
+      // racun je izbrisan, narocilo je `cancelled`, morebitno placilo pa vrne zakljuci() (varovalo). Ne cakamo odgovora uporabniku. Sandbox seja ob zivem kljucu: Stripe je ne pozna.
+      for (const n of preklicana) razprodanoPozabi("v:" + n.event_id);
+      const sStripe = preklicana.length ? placilaStripe.stripe() : null;
+      if (sStripe) {
+        for (const n of preklicana) {
+          if (!n.stripe_checkout_session_id || (placilaStripe.jeLive() && /^cs_test_/.test(n.stripe_checkout_session_id))) continue;
+          Promise.resolve().then(() => sStripe.checkout.sessions.expire(n.stripe_checkout_session_id))
+            .catch((e) => console.log(`[me] izbris racuna: seja ${n.stripe_checkout_session_id} ni zaprta (${e && e.message}); ce bo placana, vrne zakljuci()`));
+        }
+      }
       return res.status(200).json({ message: "Account deleted." });
     } catch (e) {
       await odjemalec.query("ROLLBACK").catch(() => {});
@@ -4307,20 +4350,59 @@ async function omejitevBrezplacnih(c, { userId = null, gostEmail = null, eventId
   return { error: "free_limit", message: `You can get at most ${ZASTONJ_NA_OSEBO} free tickets for this event${userId !== null && ostane > 0 ? ` (${ostane} left for you)` : ""}.` };
 }
 
-async function nakupStripeSeja(res, c, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale }) {
+// Po COMMIT-u pending Stripe narocila: ustvari Checkout sejo in vrne telo odgovora (null = odgovor 502/503 je ze poslan).
+// Dovoljenje nakupa in povezavo `d` sprosti TAKOJ (#274): od tu naprej `c` ni vec nas. Stripe tece pod lastnim semaforjem; zapis seje in branje
+// odgovora pa na ENI kratkotrajni povezavi iz poola (drzimo eno povezavo in ne cakamo na drugo, zato pool ne zastane; glej opombo pri
+// POST /events/:id/orders). Neuspeh Stripa, zapisa ali semaforja = narocilo `failed` (sprozilec sprosti zalogo).
+async function nakupStripeSeja(res, d, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale }) {
+  // Neuspeh: narocilo `failed` (sprozilec sprosti zalogo) in `idempotency_key = NULL`: neuspeh se ne zapomni (I18, test_idempotenca §6), sicer bi
+  // ponovitev z istim kljucem dobila 409 order_not_active. Zapis ne sme tiho odpasti (narocilo bi ostalo `pending` brez seje ~35 min, I20): 2 poskusa + dnevnik.
+  const neuspeh = async (db, koda, sporocilo) => {
+    for (let poskus = 1; poskus <= 2; poskus++) {
+      try {
+        await db.query("UPDATE orders SET status='failed', cancelled_at=NOW(), idempotency_key=NULL WHERE id=$1 AND status='pending'", [oid]);
+        break;
+      } catch (e) {
+        console.error(`[stripe] narocila ${oid} ni uspelo oznaciti kot failed (poskus ${poskus}):`, e && (e.message || e));
+        db = pool;
+      }
+    }
+    if (koda === 503) res.set("Retry-After", "5");
+    res.status(koda).send(sporocilo);
+    return null;
+  };
+  // Branje narocila na SE DRZANI povezavi, PRED sprostitvijo: po sprostitvi bi pool.query ob zasedenem poolu lahko padel in pustil narocilo brez seje.
+  let nr;
   try {
-    const nr = await c.query("SELECT id, public_ref, currency, application_fee_cents FROM orders WHERE id=$1", [oid]);
-    const seja = await placilaStripe.ustvariCheckout({ narocilo: nr.rows[0], opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale });
-    await c.query(
-      "UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4) WHERE id=$1",
-      [oid, seja.id, seja.url, seja.expires_at]);
-    return true;
+    nr = (await d.c.query("SELECT id, public_ref, currency, application_fee_cents FROM orders WHERE id=$1", [oid])).rows[0];
   } catch (e) {
-    console.error(`[stripe] Checkout seja za narocilo ${oid} ni uspela:`, e && (e.message || e));
-    await c.query("UPDATE orders SET status='failed', cancelled_at=NOW() WHERE id=$1 AND status='pending'", [oid]).catch(() => {});
-    res.status(502).send("Payment provider is unavailable. Please try again.");
-    return false;
+    console.error(`[stripe] branje narocila ${oid} ni uspelo:`, e && (e.message || e));
+    d.sprosti(e);   // pokvarjena povezava ne v pool; sele nato oznaka prek poola (brez drzanja ene in cakanja na drugo)
+    return neuspeh(pool, 502, "Payment provider is unavailable. Please try again.");
   }
+  d.sprosti();
+  let c2 = null;
+  try {
+    if (!(await stripeVstopi())) {
+      console.error(`[stripe] narocilo ${oid}: semafor za Stripe poln ${STRIPE_CAKANJE_MS} ms`);
+      return await neuspeh(pool, 503, "Too many purchases at once. Please try again.");
+    }
+    let seja;
+    try {
+      seja = await placilaStripe.ustvariCheckout({ narocilo: nr, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale });
+    } finally { stripeIzstopi(); }
+    c2 = await pool.connect();
+    try {
+      await c2.query(
+        "UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4) WHERE id=$1",
+        [oid, seja.id, seja.url, seja.expires_at]);
+    } catch (e) { c2.release(e); c2 = null; throw e; }   // pokvarjene povezave ne vracamo v pool
+  } catch (e) {
+    if (c2) c2.release();
+    console.error(`[stripe] Checkout seja za narocilo ${oid} ni uspela:`, e && (e.message || e));
+    return neuspeh(pool, 502, "Payment provider is unavailable. Please try again.");
+  }
+  try { return await odgovorNarocila(c2, oid); } catch (e) { c2.release(e); c2 = null; throw e; } finally { if (c2) c2.release(); }
 }
 
 // Koda QR: podpisan JSON, da jo skener preveri tudi brez omrežja (opomba 3 v 002).
@@ -4751,6 +4833,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+  const d = nakupDrzalec(c);
   if (req.idem) req.idem.vTransakciji = true;   // zaprtje zveze od tu naprej kljuca ne sprosti (commit se zgodi brez odjemalca)
   const idemV = req.idemKljuc ? vsebinaNakupaVstopnic(req) : null;
   try {
@@ -4827,19 +4910,20 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     await c.query("COMMIT");
     opozoriPogoje("POST /events/:id/orders", pogoji.verzija, ref);
 
-    if (!placanoTakoj && !(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – ${q === 1 ? "1 ticket" : q + " tickets"}`,
-      kolicina: q, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: u.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) }))) return;
-
-    // POZOR: tu še držimo odjemalca c. Branje po COMMIT-u gre prek c, NE prek
+    // Stripe (#274): nakupStripeSeja povezavo in dovoljenje sprosti takoj, Stripe tece brez njiju in vrne telo odgovora (null = odgovor ze poslan).
+    // POZOR: pri brezplacnem/testnem nakupu tu se drzimo odjemalca c. Branje po COMMIT-u gre prek c, NE prek
     // pool: pri 10+ hkratnih nakupih (pool ima privzeto 10 povezav) bi vsak
     // zahtevek držal svojo povezavo in čakal na enajsto -> celoten backend
-    // obvisi, dokler ga Render ne zažene znova (ugotovljeno s testom sočasnosti).
-    const telo = await odgovorNarocila(c, oid);
+    // obvisi, dokler ga Render ne zažene znova (ugotovljeno s testom sočasnosti). Stripe pot drzi najvec eno povezavo naenkrat (brez cakanja na drugo).
+    const telo = placanoTakoj ? await odgovorNarocila(c, oid)
+      : await nakupStripeSeja(res, d, { oid, opis: `${e.title} – ${q === 1 ? "1 ticket" : q + " tickets"}`,
+        kolicina: q, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: u.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) });
+    if (!telo) return;
     console.log(`Nakup (${placanoTakoj && !test ? "brezplacno" : nacin}): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, ${q}x ${e.ticket_price_cents} c`);
     if (placanoTakoj) posljiPotrdiloKupcu(oid);   // brez await: odgovor ne caka na Resend; napaka maila ne podre nakupa (pospravljalec ponovi)
     return res.status(201).json(telo);
   } catch (err) {
-    await c.query("ROLLBACK").catch(() => {});
+    if (d.drzi) await c.query("ROLLBACK").catch(() => {});   // po sprostitvi (nakupStripeSeja, #274) c ni vec nas
     if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
     // Unikatni indeks po kljucu je dokoncna resnica: zmagovalec je commitan, vrni njegovo narocilo (plast 3 to ze preprecuje).
     if (idemV && err && err.code === "23505" && err.constraint === "orders_idempotency_key" && await idemPoKonfliktu(req, res, c, idemV)) return;
@@ -4847,7 +4931,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     if (err && err.code === "23514") return res.status(409).send(/Ni dovolj/.test(err.message) ? "Not enough tickets left." : "Order rejected: " + (err.constraint || err.message));
     console.error(err);
     return res.status(500).send("Server error.");
-  } finally { try { c.release(); } finally { if (req.idem) req.idem.sprosti(); nakupIzstopi(); } }
+  } finally { try { d.sprosti(); } finally { if (req.idem) req.idem.sprosti(); } }
 });
 
 // GET /me/orders — moja naročila z vstopnicami.
@@ -4933,7 +5017,7 @@ const SQL_VSTOPNICE_POGLED = `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNI
               e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
               cl.id AS club_id, cl.name AS club_name, ${PRIZORISCE_NASLOV}, cl.logo_url, ${PRIZORISCE_E},
               ${STOLPCI_IMETNIKA}, bu.username AS buyer_username,
-              (t.status = 'valid' AND e.start_at > NOW() AND o.guest_list_id IS NULL) AS transferable,   -- vstopnice guest liste se ne prenasajo (035)
+              (t.status = 'valid' AND e.start_at > NOW() AND o.guest_list_id IS NULL AND NOT ${SQL_SPOR_ODPRT}) AS transferable,   -- vstopnice guest liste se ne prenasajo (035); ob odprtem/izgubljenem sporu tudi ne (#278)
               ${SQL_SPOR_ODPRT} AS payment_disputed   -- #190: spor (chargeback) odprt ali izgubljen: na vratih ne velja (NOVO polje; status vstopnice ostane valid)
        FROM tickets t JOIN orders o ON o.id = t.order_id
        JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN}
@@ -5175,6 +5259,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+  const d = nakupDrzalec(c);
   if (req.idem) req.idem.vTransakciji = true;   // zaprtje zveze od tu naprej kljuca ne sprosti (commit se zgodi brez odjemalca)
   try {
     await nakupZacni(c);
@@ -5256,20 +5341,21 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     await c.query("COMMIT");
     opozoriPogoje("POST /guest/events/:id/orders", g.terms, ref);
 
-    if (!placanoTakoj) {
-        const povratna = { success_url: gostPovezava(zeton), cancel_url: gostPovezava(zeton) };   // stran naroclia: »Complete payment« / »Cancel order«
-      if (!(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – ${g.quantity === 1 ? "1 ticket" : g.quantity + " tickets"}`,
+    let telo;
+    if (placanoTakoj) telo = await odgovorNarocila(c, oid);   // prek c (ne pool): glej opombo pri POST /events/:id/orders
+    else {
+      const povratna = { success_url: gostPovezava(zeton), cancel_url: gostPovezava(zeton) };   // stran naroclia: »Complete payment« / »Cancel order«
+      telo = await nakupStripeSeja(res, d, { oid, opis: `${e.title} – ${g.quantity === 1 ? "1 ticket" : g.quantity + " tickets"}`,
         kolicina: g.quantity, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: g.email, eventId: e.id,
-        odjemalec: "splet", povratna, locale: localeNakupa(req) }))) return;
+        odjemalec: "splet", povratna, locale: localeNakupa(req) });   // #274: povezavo in dovoljenje sprosti sama
+      if (!telo) return;
     }
-
-    const telo = await odgovorNarocila(c, oid);   // prek c (ne pool): glej opombo pri POST /events/:id/orders
     telo.guest_token = zeton;
     console.log(`Nakup gosta (${placanoTakoj && !test ? "brezplacno" : nacin}): naročilo ${ref}, dogodek ${e.id}, ${g.quantity}x ${e.ticket_price_cents} c`);
     if (placanoTakoj) posljiGostuVstopnice(oid);   // brez await: odgovor ne caka na Resend; napaka maila ne podre nakupa (pospravljalec ponovi)
     return res.status(201).json(telo);
   } catch (err) {
-    await c.query("ROLLBACK").catch(() => {});
+    if (d.drzi) await c.query("ROLLBACK").catch(() => {});   // po sprostitvi (nakupStripeSeja, #274) c ni vec nas
     if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
     if (err && err.code === "23505") {
       if (err.constraint === "orders_gost_idempotency_key" && req.idemKljuc) {
@@ -5285,7 +5371,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     if (err && err.code === "23514") return res.status(409).send(/Ni dovolj/.test(err.message) ? "Not enough tickets left." : "Order rejected: " + (err.constraint || err.message));
     console.error(err);
     return res.status(500).send("Server error.");
-  } finally { try { c.release(); } finally { if (req.idem) req.idem.sprosti(); nakupIzstopi(); } }
+  } finally { try { d.sprosti(); } finally { if (req.idem) req.idem.sprosti(); } }
 });
 
 // Neuspesen zahtevek (zeton ne velja): 404; nad mejo neuspesnih na IP 429. VELJAVEN zeton se obdela vedno (iskanje je indeksirano in poceni):
@@ -6031,7 +6117,7 @@ async function posljiSporMail(did, vrsta) {
     if (!k.rows.length) return false;
     const sp = k.rows[0];
     if (sp.order_id === null) {   // spora ni mogoce povezati z narocilom: lastnika ne poznamo, alarm je ze v dnevniku (POZOR ob zapisu spora)
-      await pool.query(`UPDATE spori SET ${cPoskusi} = $2 WHERE id = $1 AND ${cPoslano} IS NULL`, [did, GOST_POSTA_POSKUSOV]);
+      await pool.query(`UPDATE spori SET ${cPoskusi} = $2 WHERE id = $1 AND ${cPoslano} IS NULL AND order_id IS NULL`, [did, GOST_POSTA_POSKUSOV]);   // order_id IS NULL: ne povozi ponastavitve iz zakljuci() (spor je medtem dobil narocilo)
       return false;
     }
     const r0 = await pool.query(
@@ -6574,7 +6660,7 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     await nakupZacni(c);   // lock_timeout/statement_timeout kot pri nakupu: zaklepi vrstice vstopnice, posiljatelja in naslova ne cakajo v neskoncnost
     const tr = await c.query(
       `SELECT t.id, t.serial, t.status, t.event_id, ${IMETNIK} AS holder_id, o.status AS order_status,
-              e.title AS event_title, e.start_at, e.min_age, o.package_id, (o.guest_list_id IS NOT NULL) AS guest_lista
+              e.title AS event_title, e.start_at, e.min_age, o.package_id, (o.guest_list_id IS NOT NULL) AS guest_lista, ${SQL_SPOR_ODPRT} AS payment_disputed
        FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id
        WHERE t.id = $1 FOR UPDATE OF t`, [id]
     );
@@ -6588,6 +6674,9 @@ app.post("/tickets/:id/transfer", requireAuth, omeji({ kljuc: "prenos", najvec: 
     if (t.status === "used") { await c.query("ROLLBACK"); return res.status(409).send("Ticket was already used."); }
     if (t.status !== "valid") { await c.query("ROLLBACK"); return res.status(409).send(`Ticket is ${t.status}.`); }
     if (new Date(t.start_at).getTime() <= Date.now()) { await c.query("ROLLBACK"); return res.status(409).send("Event has already started."); }
+    // Spor (chargeback, #278): vstopnica s sporom na vratih ne velja (sken: payment_disputed); prejemnik (prijatelj ali gost) ne sme dobiti
+    // vstopnice, ki je ob prihodu neveljavna. Ista koda in besedilo kot pri skenu.
+    if (t.payment_disputed) { await c.query("ROLLBACK"); return res.status(409).json({ error: "payment_disputed", result: "payment_disputed", message: "The payment for this ticket is disputed (chargeback). It can't be transferred." }); }
 
     // Starost: vstopnica mize s paketom pijace ima mejo najmanj 18 (#102), pri strozji meji dogodka velja ta.
     const potrebnaStarost = starostZaPaket(t.min_age, t.package_id !== null);
@@ -8230,6 +8319,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+  const d = nakupDrzalec(c);
   if (req.idem) req.idem.vTransakciji = true;   // zaprtje zveze od tu naprej kljuca ne sprosti (commit se zgodi brez odjemalca)
   const idemV = req.idemKljuc ? vsebinaNakupaMize(req) : null;
   try {
@@ -8332,16 +8422,16 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     await c.query("COMMIT");
     opozoriPogoje("POST /events/:id/tables/:tableId/orders", pogoji.verzija, ref);
 
-    if (!placanoTakoj && !(await nakupStripeSeja(res, c, { oid, opis: `${e.title} – VIP ${miza.label}${paket ? " + " + paket.name : ""}`,
-      kolicina: 1, cenaEnoteCents: cena, racunKluba: e.stripe_account_id, email: starost.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) }))) return;
-
-    // Branje po COMMIT-u prek odjemalca c, NE prek pool (glej opombo pri POST /events/:id/orders).
-    const telo = await odgovorNarocila(c, oid);
+    // Branje po COMMIT-u prek odjemalca c, NE prek pool (glej opombo pri POST /events/:id/orders); Stripe pot (#274) sprosti c in dovoljenje takoj.
+    const telo = placanoTakoj ? await odgovorNarocila(c, oid)
+      : await nakupStripeSeja(res, d, { oid, opis: `${e.title} – VIP ${miza.label}${paket ? " + " + paket.name : ""}`,
+        kolicina: 1, cenaEnoteCents: cena, racunKluba: e.stripe_account_id, email: starost.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) });
+    if (!telo) return;
     console.log(`Nakup mize (${placanoTakoj && !test ? "brezplacno" : nacin}): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, miza ${miza.id}, ${miza.seats} vstopnic, ${cena} c`);
     if (placanoTakoj) posljiPotrdiloKupcu(oid);   // brez await (kot pri vstopnicah)
     return res.status(201).json(telo);
   } catch (err) {
-    await c.query("ROLLBACK").catch(() => {});
+    if (d.drzi) await c.query("ROLLBACK").catch(() => {});   // po sprostitvi (nakupStripeSeja, #274) c ni vec nas
     // Kljuc ima prednost pred »miza ze zasedena«: ce je mizo zasedlo ravno narocilo s TEM kljucem, je to ponovitev (ne 409, ne oznaka razprodano).
     if (idemV && err && err.code === "23505" && (err.constraint === "orders_idempotency_key" || err.constraint === "orders_miza_dogodek_key")
         && await idemPoKonfliktu(req, res, c, idemV)) return;
@@ -8352,7 +8442,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
     console.error(err);
     return res.status(500).send("Server error.");
-  } finally { try { c.release(); } finally { if (req.idem) req.idem.sprosti(); nakupIzstopi(); } }
+  } finally { try { d.sprosti(); } finally { if (req.idem) req.idem.sprosti(); } }
 });
 
 // ---------------------------
