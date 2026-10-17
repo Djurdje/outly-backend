@@ -384,7 +384,9 @@ async function api(method, path, token, body, signal) {
 
   // ---------------------------------------------------------------- S9
   console.log("\n# S9: zastoj skenPool -> /healthz 503 (PG_SKEN_POOL_MAX=1, ZDRAVJE_ZASICEN_MS=1500)");
-  await zagon(3149, { PG_SKEN_POOL_MAX: "1", PG_SKEN_CONNECT_TIMEOUT_MS: "300", ZDRAVJE_ZASICEN_MS: "1500" });
+  // Meji stavkov skenPool izklopljeni (S1, 17. 10. 2026): z njima zaklep tickets skena ne zadrzi (sken dobi 503 po 1 s, povezava
+  // se vrne) in zastoja ni. Tu simuliramo obviselo povezavo (puscanje, polodprt TCP), ki je casovni meji na strezniku ne ujameta.
+  await zagon(3149, { PG_SKEN_POOL_MAX: "1", PG_SKEN_CONNECT_TIMEOUT_MS: "300", ZDRAVJE_ZASICEN_MS: "1500", PG_SKEN_LOCK_TIMEOUT_MS: "0", PG_SKEN_STATEMENT_TIMEOUT_MS: "0" });
   const lkT9 = await pool.connect();
   await lkT9.query("BEGIN"); await lkT9.query("LOCK TABLE tickets IN ACCESS EXCLUSIVE MODE");   // sken obvisi na poizvedbi vstopnice
   const sken9 = api("POST", "/business/tickets/scan", U.lastnik, { qr: koda.qr });
