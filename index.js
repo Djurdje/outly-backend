@@ -149,8 +149,9 @@ async function skenBranje(fn) {
   const c = await skenPool.connect();
   let pokvarjen = false;
   try {
-    await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    if (SKEN_SEZNAM_MEJA_MS > 0) await c.query(`SET LOCAL statement_timeout = ${SKEN_SEZNAM_MEJA_MS}`);
+    // En preprost Query (ena krozna pot), ne dva.
+    await c.query(SKEN_SEZNAM_MEJA_MS > 0 ? `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${SKEN_SEZNAM_MEJA_MS}`
+      : "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     const r = await fn(c);
     await c.query("COMMIT");
     return r;
@@ -159,6 +160,12 @@ async function skenBranje(fn) {
     throw e;
   } finally { c.release(pokvarjen); }
 }
+// Hkratni scan-list (2. krog pregleda #263): scan-list drzi povezavo skenPool do PG_SKEN_SEZNAM_STATEMENT_TIMEOUT_MS (10 s). Trije
+// hkratni veliki seznami po deployu (hladna baza) bi zasedli vse PG_SKEN_POOL_MAX (3) povezave in sken na vratih bi po
+// PG_SKEN_CONNECT_TIMEOUT_MS dobil 503. Zato v tem procesu tece najvec max(1, PG_SKEN_POOL_MAX - 1) scan-list hkrati; ostali TAKOJ
+// 503 + Retry-After (brez vrste: telefon obdrzi star seznam in poskusi kasneje), vsaj ena povezava ostane skenu.
+const SKEN_SEZNAM_HKRATI = Math.max(1, PG_SKEN_POOL_MAX - 1);
+let skenSeznamovTece = 0;
 // GET /healthz (Renderjev Health Check Path) ima LASTEN pool z eno povezavo: ob navali nakupov je glavni pool zaseden, zdravje
 // v njegovi vrsti ne dobi povezave v roku, vrne 503 in Render instanco ponovno zazene - ravno med navalom (issue #117).
 // Ena povezava je dovolj (en SELECT 1 naenkrat; ostali zahtevki za zdravje cakajo kratek rok) in steje proti max_connections
@@ -7091,7 +7098,14 @@ app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken("owne
       return res.status(404).json({ error: "not_found", message: "Event not found." });
     }
     // En velik stavek (do ~20 000 vstopnic): visja meja stavka v svoji transakciji (skenBranje), ne 503 na hladni pocasni bazi.
-    const [vst, prenosi] = await skenBranje(async (c) => [
+    if (skenSeznamovTece >= SKEN_SEZNAM_HKRATI) {
+      console.error(`[sken] scan-list zavrnjen: ze ${skenSeznamovTece} hkrati (meja ${SKEN_SEZNAM_HKRATI}, povezava ostane skenu)`);
+      return res.status(503).set("Retry-After", "5").json({ error: "service_unavailable", message: "Service temporarily unavailable. Please try again." });
+    }
+    skenSeznamovTece++;
+    let vst, prenosi;
+    try {
+      [vst, prenosi] = await skenBranje(async (c) => [
       await c.query(
         `SELECT t.serial,
                 CASE WHEN o.status IN ('paid','partially_refunded') OR t.status IN ('refunded','void') THEN
@@ -7105,7 +7119,8 @@ app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken("owne
       await c.query(
         `SELECT tt.old_serial FROM ticket_transfers tt JOIN tickets t ON t.id = tt.ticket_id
          WHERE t.event_id = $1 ORDER BY tt.id`, [id]),
-    ]);
+      ]);
+    } finally { skenSeznamovTece--; }
     const kid = qrKljuci().kid;
     const tickets = vst.rows.map(t => ({
       serial: t.serial, status: t.status, payment_disputed: t.payment_disputed, used_at: t.used_at, is_vip: t.is_vip, table_label: t.table_label || null,
@@ -7136,6 +7151,7 @@ const jsonVelik = express.json({ limit: "1mb" });
 // Sicer bi 500 zaklenjenih vrstic pomenilo 500 x lock_timeout. Normalen paket (brez napak) roka nima. 0 = rok izklopljen (vsak element
 // se poskusi, tudi po napakah; kot drugje 0 = izklop).
 const SKEN_BATCH_ROK_MS = okoljeCelo("SKEN_BATCH_ROK_MS", 5000, 0, 120000);
+const SKEN_BATCH_MAJHEN = 20;   // do toliko razlicnih serialov se paket bere brez transakcije (glej beriPaket)
 app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken("owner", "manager", "doorman"), jsonVelik, async (req, res) => {
   const zacetekPaketa = Date.now();
   let zasedenaBaza = false;   // vsaj en element je padel z zacasno napako baze
@@ -7182,7 +7198,10 @@ app.post("/business/tickets/scan-batch", requireAuthSken, requireClubSken("owner
     const serijski = [...new Set(dela.map(d => d.serial))];
     const vrstice = new Map();
     const prenesene = new Map();
-    if (serijski.length) await skenBranje(async (c) => {   // do 500 serialov naenkrat: visja meja stavka kot scan-list
+    // Majhen paket (iOS hitra pot: 1 element, rok odjemalca 2 s): brez transakcije, stavka na skenPool z obicajno mejo (5 s) - vsaka
+    // dodatna krozna pot (BEGIN/SET/COMMIT) je cakanje na vratih. Velik paket (do 500 serialov): skenBranje z visjo mejo stavka.
+    const beriPaket = serijski.length > SKEN_BATCH_MAJHEN ? skenBranje : (fn) => fn(skenPool);
+    if (serijski.length) await beriPaket(async (c) => {
       const r = await c.query(
         `SELECT t.id, t.serial, t.status, t.used_at, t.used_by_user_id, t.scan_device, t.event_id, t.created_at, e.club_id, e.start_at, e.end_at, e.status AS event_status, o.status AS order_status, ${SQL_SPOR_ODPRT} AS payment_disputed
          FROM tickets t JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = t.order_id

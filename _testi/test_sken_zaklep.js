@@ -18,6 +18,7 @@
  *       (TCP med backendom in Postgresom): ujame zagonske parametre povezav (skenPool posilja jit=off, lock_timeout, statement_timeout)
  *       in PRAVI stavek scan-list (sporocilo Parse). Ta stavek z EXPLAIN (ANALYZE) na novi seji: z jit=off ima vsaj 10x rezerve do 2 s,
  *       z jit=on (privzeto PG16) samo izpis (strosek plana preseze jit_above_cost). CI 17. 10. 2026: prvi scan-list 5000 vstopnic 3,5 s (JIT) -> 503 pri meji 2 s.
+ *   Z6  hkratni scan-list: najvec max(1, PG_SKEN_POOL_MAX - 1) hkrati, ostali takoj 503; sken med njimi uspe (povezava ostane).
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -235,6 +236,8 @@ let srv = null, log = "";
     if (i === 0) {
       assert(l.status === 200 && l.body.tickets && l.body.tickets.length === st, `HLADEN prvi scan-list (20 000) -> 200, ${l.body && l.body.tickets && l.body.tickets.length} vstopnic`, { status: l.status, ms: l.ms });
       // Pod staro mejo stavka (2 s), ki jo je CI s JIT presegel ze pri 5000 vstopnicah; celoten HTTP zahtevek, ne le stavek.
+      // Rezerva: lokalno (4 CPU) hladno 220-270 ms (brez JIT) proti 677 ms z JIT; na CI ~2-3x pocasneje. Ta meja je casovna in ohlapna;
+      // deterministicni preverbi JIT sta spodaj (zagonski paket jit=off, EXPLAIN pravega stavka brez JIT).
       assert(l.ms < 2000, `hladen prvi scan-list (20 000) v ${l.ms} ms < 2000 ms`, l.ms);
     } else assert(l.status === 200, `scan-list ${i + 1}. klic -> 200`, { status: l.status });
     casi.push(l.ms);
@@ -264,7 +267,14 @@ let srv = null, log = "";
     `povezave skenPool: jit=off, lock_timeout ${LOCK_MS}, statement_timeout ${STMT_MS} (zagonski paket)`, skenZagoni);
   const stavekSeznama = posrednik.stavki.find(q => /FROM tickets t JOIN orders o/.test(q) && /WHERE t\.event_id = \$1/.test(q) && /ORDER BY t\.id/.test(q) && /holder_username/.test(q));
   assert(!!stavekSeznama, "pravi stavek scan-list ujet (Parse)");
-  assert(posrednik.stavki.includes(`SET LOCAL statement_timeout = ${SEZNAM_MS}`), `scan-list v transakciji z SET LOCAL statement_timeout = ${SEZNAM_MS}`);
+  assert(posrednik.stavki.includes(`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${SEZNAM_MS}`),
+    `scan-list v transakciji z SET LOCAL statement_timeout = ${SEZNAM_MS} (BEGIN in SET v enem Query = ena krozna pot)`);
+  // iOS hitra pot (scan-batch z 1 elementom): brez transakcije (BEGIN/SET/COMMIT bi bile dodatne krozne poti pod rokom 2 s).
+  posrednik.stavki.length = 0;
+  const vecSer = (await pool.query("SELECT serial FROM tickets t JOIN orders o ON o.id=t.order_id WHERE o.public_ref LIKE 'ZK%' ORDER BY t.id OFFSET 500 LIMIT 1")).rows[0].serial;
+  const en = await api("POST", "/business/tickets/scan-batch", T.lastnik, { scans: [{ client_scan_id: "z5-en", device_id: "dev-z5", serial: vecSer }] });
+  assert(en.status === 200 && en.body.results[0].result === "ok", "scan-batch z 1 elementom -> ok", en.body);
+  assert(!posrednik.stavki.some(q => /^\s*(BEGIN|COMMIT|SET)/i.test(q)), "scan-batch z 1 elementom brez BEGIN/SET/COMMIT", posrednik.stavki.filter(q => /^\s*(BEGIN|COMMIT|SET)/i.test(q)));
   if (stavekSeznama) {
     const zJit = await razlozi("on"), brezJit = await razlozi("off");
     const pragJit = Number((await pool.query("SHOW jit_above_cost")).rows[0].jit_above_cost);
@@ -276,6 +286,37 @@ let srv = null, log = "";
   }
   await ustavi();
   await pos.zapri();
+
+  // ---------------------------------------------------------------- Z6
+  console.log("\n# Z6: hkratni scan-list ne zasedejo vseh povezav skenPool (PG_SKEN_POOL_MAX 3 -> najvec 2 seznama), sken uspe");
+  // Seznama obvisita na zaklepu ticket_transfers (drugi stavek scan-list; sken veljavne vstopnice te tabele ne bere) z lock_timeout 3 s.
+  await zagon({ PG_SKEN_LOCK_TIMEOUT_MS: "3000" });
+  const ser6 = (await pool.query("SELECT serial FROM tickets t JOIN orders o ON o.id=t.order_id WHERE o.public_ref LIKE 'ZK%' AND t.status='valid' ORDER BY t.id LIMIT 1")).rows[0].serial;
+  await zZaklepom("LOCK TABLE ticket_transfers IN ACCESS EXCLUSIVE MODE", [], async () => {
+    const dva = [1, 2].map(() => api("GET", `/business/events/${dog}/scan-list`, T.lastnik, null, 10000));
+    let cakata = 0;
+    for (const doKdaj = Date.now() + 5000; cakata < 2 && Date.now() < doKdaj;) {
+      cakata = (await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FROM ticket_transfers tt%' AND pid <> pg_backend_pid()")).rows[0].n;
+      if (cakata < 2) await new Promise(r => setImmediate(r));
+    }
+    assert(cakata === 2, "dva scan-list drzita povezavi skenPool (cakata na zaklep)", cakata);
+    // Tretji: z mejo takoj 503; brez nje bi zasedel zadnjo povezavo (cakal na zaklep) in sken bi po 2,5 s dobil 503.
+    let tretjiKonec = false;
+    const tretjiP = api("GET", `/business/events/${dog}/scan-list`, T.lastnik, null, 10000).then(x => { tretjiKonec = true; return x; });
+    for (const doKdaj = Date.now() + 5000; !tretjiKonec && cakata < 3 && Date.now() < doKdaj;) {
+      cakata = (await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FROM ticket_transfers tt%' AND pid <> pg_backend_pid()")).rows[0].n;
+      if (cakata < 3) await new Promise(r => setImmediate(r));
+    }
+    const s6 = await api("POST", "/business/tickets/scan", T.lastnik, { serial: ser6 }, 5000);
+    const tretji = await tretjiP;
+    assert(tretji.status === 503 && tretji.retryAfter === "5" && tretji.ms < 1000, `tretji hkratni scan-list -> TAKOJ 503 + Retry-After 5 (${tretji.ms} ms, brez vrste)`, tretji);
+    assert(s6.status === 200 && s6.body.result === "ok", `sken med dvema visecima scan-list -> 200 ok (${s6.ms} ms; povezava ostane skenu)`, s6);
+    await Promise.all(dva);
+  });
+  r = await api("GET", `/business/events/${dog}/scan-list`, T.lastnik, null, 10000);
+  assert(r.status === 200, "po sprostitvi scan-list spet 200 (stevec hkratnih se je vrnil)", { status: r.status });
+  assert(/scan-list zavrnjen: ze 2 hkrati/.test(log), "dnevnik: zavrnjen scan-list (meja hkratnih)");
+  await ustavi();
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
   const sumljivo = log.split("\n").filter(l => /TypeError|Unhandled|ReferenceError/i.test(l));

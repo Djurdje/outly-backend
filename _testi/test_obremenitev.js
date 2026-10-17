@@ -21,6 +21,7 @@
  *      (trditev: 404 unknown in odgovor < 8 s); med 3b jedro ne sme zavreci nobene povezave (backlog 4096, #134). Pred/po 3b test izpise stevce jedra (/proc/net/netstat) in casovnico sprejemanja.
  *   4. 300 hkratnih nakupov z mesanimi kolicinami (1-4) za dogodek s kapaciteto 100: sold_count == vsota uspesnih,
  *      <= capacity, nobenega 5xx.
+ *      Cetrti vratar skenira kot iOS hitra pot: POST scan-batch z enim elementom (iste meje kot POST /scan).
  *   5. Po koncu obremenitve backend takoj odgovarja: p95 20 zaporednih GET /events in 20 skenov < 500 ms.
  * Vrsta, prekinitve, 503 in sprostitev dovoljenja: _testi/test_nakup_vrsta.js.
  */
@@ -240,6 +241,7 @@ let srv = null;   // proces backenda (ubit tudi ob izjemi)
   // POZOR: keepAliveTimeout strezniku je 5 s (Node privzeto). Korak, ki bi med prvim skenom (izhodisce) in zacetkom navale trajal > 5 s,
   // bi povezavo zaprl (`socket hang up` ali tiha nova povezava): skenerji tecejo 100 ms pred navalo, da je povezava sveza.
   const agentiSken = vratarji.map(() => new http.Agent({ keepAlive: true, maxSockets: 1 }));
+  const agentPaket = new http.Agent({ keepAlive: true, maxSockets: 1 });
   let skenovSkupaj = 10;   // izhodiscnih 10 + vsi med navalami
   // Ena navala: 300 hkratnih nakupov za dogodek + (neobvezno) bralci GET /events hkrati + 3 vratarji skenirajo.
   async function navala(dogodek, bralcev) {
@@ -254,7 +256,19 @@ let srv = null;   // proces backenda (ubit tudi ob izjemi)
         await new Promise(rs => setTimeout(rs, bralcev ? 15 : 5));
       }
     }
-    const skenerji = vratarji.map((v, i) => skener(v, i));
+    // iOS hitra pot (online sken): POST scan-batch z ENIM elementom, rok odjemalca 2 s (SkenSeja.swift rokStreznika). Lasten vratar
+    // (vratarji[0], druga naprava) in lastna vzdrzevana povezava; iste meje kot POST /scan zgoraj.
+    const paketi = [];
+    async function paketniSkener() {
+      while (!nakupiKonec && kodeSken.length) {
+        const zacetek = performance.now() - tNavale;
+        const x = await apiHttp(agentPaket, "POST", "/business/tickets/scan-batch", vratarji[0].token,
+          { scans: [{ client_scan_id: crypto.randomUUID(), device_id: "obremenitev-paket", qr: kodeSken.pop() }] });
+        paketi.push({ status: x.status, result: x.body && x.body.results && x.body.results[0] && x.body.results[0].result, ms: x.ms, zacetek });
+        await new Promise(rs => setTimeout(rs, bralcev ? 15 : 5));
+      }
+    }
+    const skenerji = [...vratarji.map((v, i) => skener(v, i)), paketniSkener()];
     await new Promise(rs => setTimeout(rs, 100));   // skenerji tecejo, ko se sprozi navala
     const t = performance.now();
     const bralci = Array.from({ length: bralcev }, () => api("GET", "/events?upcoming=true"));   // hkrati z nakupi
@@ -268,8 +282,8 @@ let srv = null;   // proces backenda (ubit tudi ob izjemi)
     await Promise.all(skenerji);
     const bralciRez = await Promise.all(bralci);
     const sondeRez = await Promise.all(sonde);
-    skenovSkupaj += skeni.length;
-    return { nakupi, trajanje, skeni, bralciRez, sondeRez };
+    skenovSkupaj += skeni.length + paketi.length;
+    return { nakupi, trajanje, skeni, paketi, bralciRez, sondeRez };
   }
   function preveriSkene(oznaka, skeni, meja = SKEN_MEJA_MS) {
     const ms = skeni.map(x => x.ms).sort((a, b) => a - b);
@@ -283,7 +297,7 @@ let srv = null;   // proces backenda (ubit tudi ob izjemi)
   }
 
   console.log("\n# 2+3. 300 hkratnih nakupov (kapaciteta 100) + sken med obremenitvijo");
-  const { nakupi, trajanje: trajanjeNakupov, skeni } = await navala(dogodekA, 0);
+  const { nakupi, trajanje: trajanjeNakupov, skeni, paketi } = await navala(dogodekA, 0);
 
   const stNakupov = steviloPoStatusu(nakupi);
   const nakupMs = nakupi.map(x => x.ms).sort((a, b) => a - b);
@@ -306,6 +320,7 @@ let srv = null;   // proces backenda (ubit tudi ob izjemi)
   assert(neg.rows[0].n === 0, "noben dogodek nima negativne ali presezene zaloge", neg.rows[0]);
 
   preveriSkene("navala nakupov", skeni);
+  preveriSkene("navala nakupov, scan-batch z 1 elementom (iOS hitra pot)", paketi);
 
   console.log("\n# 3b. Navala 300 nakupov + 1000 bralcev GET /events hkrati + sken (dogodek D)");
   const tZacetek3b = Date.now();
@@ -344,6 +359,7 @@ let srv = null;   // proces backenda (ubit tudi ob izjemi)
   // Meja 1000 ms: ob 1000 hkratnih velikih odgovorih je eno-nitni Node procesorsko zaseden (na enem jedru p95 ~400 ms) - tu lovimo
   // vrsto za povezavo (sekunde), ne CPU. Natancnejso mejo (500 ms) drzi navala brez bralcev zgoraj.
   preveriSkene("navala + 1000 bralcev", d.skeni, 1000);
+  preveriSkene("navala + 1000 bralcev, scan-batch z 1 elementom", d.paketi, 1000);
   const sondeMs = d.sondeRez.map(x => Math.round(x.ms));
   console.log(`  (informativno: sken z NOVO povezavo ob navali ${sondeMs.join(", ")} ms; nova povezava caka v vrsti sprejemanja za povezavami bralcev, vzdrzevana ne)`);
   assert(d.sondeRez.every(x => typeof x.ms === "number" && x.ms < 8000), "sken z novo povezavo ob navali: odgovor v < 8000 ms (ohlapna meja; garancije za novo povezavo ni, issue #139)", sondeMs);
