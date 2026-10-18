@@ -1017,7 +1017,9 @@ async function naloziSpore() {
           imaPovrnitev && Number.isSafeInteger(x.dispute_fee_cents) ? h("span", { class: "drobno" }, "pristojbina spora " + evriCelo(x.dispute_fee_cents, x.currency)) : null),
         h("td", { style: V_NAPAKA_STIL }, x.recovery_error ? brezMaila(x.recovery_error) : "—"),
         h("td", { class: "mono" }, datum(x.created_at)),
-        h("td", {}, imaPovrnitev && RETRY_STANJA.includes(x.recovery_state)
+        h("td", {}, imaPovrnitev && RETRY_STANJA.includes(x.recovery_state) && x.order_paid === false
+          ? h("span", { class: "drobno" }, "Naročilo ni plačano: povrnitve od kluba ni brez Martinove odločitve.")
+          : imaPovrnitev && RETRY_STANJA.includes(x.recovery_state)
           ? h("button", { class: "mali", type: "button", onclick: (ev) => vRetry(`/admin/api/disputes/${encodeURIComponent(x.id)}/retry`,
               `Poskusi znova povrnitev spora ${x.id} (${evriCelo(x.amount_cents, x.currency)}) od kluba?\n\nPovrnitev (transfer reversal) gre znova v vrsto in se izvede v ozadju. Najprej odpravi vzrok (npr. klub nima sredstev).`,
               `Povrnitev spora ${x.id} je znova v vrsti.`, ev.currentTarget) }, "Poskusi znova")

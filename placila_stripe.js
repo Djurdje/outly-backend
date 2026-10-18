@@ -340,7 +340,9 @@ async function spor(c, dp) {
      ON CONFLICT (id) DO UPDATE SET stanje = EXCLUDED.stanje, razlog = EXCLUDED.razlog, order_id = COALESCE(spori.order_id, EXCLUDED.order_id),
             rok_dokazov_at = EXCLUDED.rok_dokazov_at, zaprt_at = COALESCE(spori.zaprt_at, EXCLUDED.zaprt_at), posodobljen_at = NOW(),
             povrnitev_stanje = COALESCE(spori.povrnitev_stanje, EXCLUDED.povrnitev_stanje),
-            povrnitev_napaka = CASE WHEN spori.povrnitev_stanje IS NULL AND EXCLUDED.povrnitev_stanje = 'rocno' THEN EXCLUDED.povrnitev_napaka ELSE spori.povrnitev_napaka END`,
+            povrnitev_napaka = CASE WHEN spori.povrnitev_stanje IS NULL AND EXCLUDED.povrnitev_stanje = 'rocno' THEN EXCLUDED.povrnitev_napaka
+                 WHEN spori.povrnitev_stanje = 'rocno' AND spori.order_id IS NULL AND EXCLUDED.order_id IS NOT NULL AND NOT $12::boolean THEN 'spor na neplacanem/preklicanem narocilu: povrnitev od kluba ni samodejna, odloci rocno'
+                 ELSE spori.povrnitev_napaka END`,
     [dp.id, n ? n.id : null, pi, ch, String(dp.status || "unknown").slice(0, 40), dp.reason ? String(dp.reason).slice(0, 60) : null, znesek,
      dp.currency ? String(dp.currency).toUpperCase().slice(0, 3) : null, rok, ustvarjen, zaprt, placano]);
   const kaj = `spor ${dp.id} (${dp.reason || "?"}) ${znesek} c, stanje ${dp.status}, narocilo ${n ? n.public_ref : "NEZNANO"}`;

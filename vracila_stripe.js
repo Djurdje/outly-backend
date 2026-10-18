@@ -37,6 +37,8 @@ class Rocno extends Error {}
 
 // Narocila (alias `o`), ki ob odpovedi dogodka dobijo vrstico v `vracila` (VSTAVI_VRACILA, sweep). Isti pogoj uporabi varovalo odpovedi v index.js (I42),
 // tam dodatno samo z denarjem (total_cents > refunded_cents; 0 EUR dobi vrstico brez Stripa, a nicesar ne vrne). Ob spremembi preveri oba.
+// Spor na placano naroceno (ima vstopnice; edino tako naroceno je lahko terjatev do kluba). Ena resnica za mail lastniku kluba, obdelovalec in admin retry; alias spora podan.
+const SQL_SPOR_NAROCILO_PLACANO = (a) => `EXISTS (SELECT 1 FROM orders sn WHERE sn.id = ${a}.order_id AND sn.status IN ('paid', 'partially_refunded', 'refunded'))`;
 const SQL_NAROCILO_ZA_ODPOVED = "o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL";
 
 function ustvari({ pool, naKoncano, posljiNeposlane }) {
@@ -400,12 +402,17 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   // (iz dispute.balance_transactions, ne trdo kodirana), omejeno z se neobrnjenim delom transferja (po vracilih z reverse_transfer); razliko nosi Outly (alarm + zapis v vrstici).
   // Sprozi ga SAMO `lost` (webhook nastavi povrnitev_stanje='caka'). Idempotentni kljuc `outly-spor-<id>[-g<n>]`; vrstica nosi zamrznjene vrednosti in reversal_id.
   // ---------------------------------------------------------------------------------------------------------------------------
+  // #285 (3. krog): povrnitev od kluba SAMO za placano naroceno (ena resnica: SQL_SPOR_NAROCILO_PLACANO, isti pogoj kot mail lastniku kluba v index.js).
+  async function sporNaPlacanemNarocilu(id) {
+    return (await pool.query(`SELECT ${SQL_SPOR_NAROCILO_PLACANO("spori")} AS ok FROM spori WHERE id = $1`, [id])).rows[0]?.ok === true;
+  }
   const kljucSpor = (sp) => `outly-spor-${sp.id}${sp.povrnitev_kljuc_gen ? "-g" + sp.povrnitev_kljuc_gen : ""}`;
   async function izvediSpor(sp) {
     const s = placila.stripe();
     if (!s) throw new Rocno("STRIPE_SECRET_KEY ni nastavljen");
     if (sp.stanje !== "lost") throw new Rocno(`spor ni izgubljen (${sp.stanje})`);
     if (sp.order_id === null) throw new Rocno("spor brez narocila: povrnitve od kluba ni mogoce izracunati");
+    if (!(await sporNaPlacanemNarocilu(sp.id))) throw new Rocno("spor na neplacanem narocilu - povrnitev od kluba ni dovoljena brez Martinove odlocitve");
     const dp = await s.disputes.retrieve(sp.id);
     if (dp.status !== "lost") throw new Rocno(`Stripe poroca stanje spora ${dp.status}, ne lost`);
     const chId = typeof dp.charge === "string" ? dp.charge : dp.charge && dp.charge.id;
@@ -477,7 +484,10 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     await pool.query("UPDATE spori SET povrnitev_stanje = 'caka', povrnitev_naslednji_at = NOW() WHERE povrnitev_stanje = 'v_teku' AND povrnitev_prevzeto_at < NOW() - ($1::int * INTERVAL '1 minute')", [ZASTARELO_MIN]);
   }
   // Admin: povrnitev ni_uspelo / rocno znova (nova generacija kljuca, zamrznjene vrednosti se izracunajo znova; ze narejen reversal se najde po metadata.spor_id).
+  // Vrne true (v vrsti), false (ni v stanju ni_uspelo/rocno) ali "neplacano" (naroceno ni placano: povrnitev od kluba ni dovoljena, stanje ostane `rocno`).
   async function ponoviSpor(id) {
+    const np = await pool.query(`SELECT 1 FROM spori WHERE id = $1 AND order_id IS NOT NULL AND NOT ${SQL_SPOR_NAROCILO_PLACANO("spori")}`, [id]);
+    if (np.rowCount) return "neplacano";
     const u = await pool.query(
       `UPDATE spori SET povrnitev_stanje = 'caka', povrnitev_poskusi = 0, povrnitev_naslednji_at = NOW(), povrnitev_napaka = NULL, povrnitev_kljuc_gen = povrnitev_kljuc_gen + 1,
               povrnitev_zelena_cents = CASE WHEN reversal_id IS NULL THEN NULL ELSE povrnitev_zelena_cents END, povrnitev_cents = CASE WHEN reversal_id IS NULL THEN NULL ELSE povrnitev_cents END
@@ -627,4 +637,4 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   return { vrstiZaDogodek, pomeni, tek, zazeni, zbudi, ponovi, ponoviSpor, uskladiVracilo, kupecVrnjenPredMailom, preverbaNaVoljo };
 }
 
-module.exports = { ustvari, SQL_NAROCILO_ZA_ODPOVED };
+module.exports = { ustvari, SQL_NAROCILO_ZA_ODPOVED, SQL_SPOR_NAROCILO_PLACANO };

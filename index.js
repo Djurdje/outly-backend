@@ -3925,7 +3925,8 @@ admin.get("/disputes", async (req, res) => {
       `SELECT s.id, s.order_id, o.public_ref, e.title AS event_title, e.club_id, s.stanje AS state, s.razlog AS reason, s.znesek_cents AS amount_cents, s.valuta AS currency,
               s.rok_dokazov_at AS evidence_due_at, s.ustvarjen_at AS created_at, s.zaprt_at AS closed_at, s.mail_odprt_poslano_at AS opened_mail_sent_at, s.mail_zaprt_poslano_at AS closed_mail_sent_at,
               s.povrnitev_stanje AS recovery_state, s.povrnitev_zelena_cents AS recovery_wanted_cents, s.povrnitev_cents AS recovered_cents, s.pristojbina_spora_cents AS dispute_fee_cents,
-              s.reversal_id AS stripe_reversal_id, s.povrnitev_napaka AS recovery_error
+              s.reversal_id AS stripe_reversal_id, s.povrnitev_napaka AS recovery_error,
+              CASE WHEN s.order_id IS NULL THEN NULL ELSE o.status IN ('paid', 'partially_refunded', 'refunded') END AS order_paid
          FROM spori s LEFT JOIN orders o ON o.id = s.order_id LEFT JOIN events e ON e.id = o.event_id
         WHERE ($1::boolean = FALSE OR s.zaprt_at IS NULL) ORDER BY s.ustvarjen_at DESC LIMIT $2`, [odprti, limit]);
     return res.json({ items: r.rows });
@@ -3936,7 +3937,9 @@ admin.post("/disputes/:id/retry", async (req, res) => {
   try {
     const id = String(req.params.id);
     if (!/^dp_[A-Za-z0-9]{1,60}$/.test(id)) return res.status(400).send("Invalid dispute id.");
-    if (!(await vracilaStripe.ponoviSpor(id))) return res.status(409).send("Only a recovery in state ni_uspelo or rocno can be retried.");
+    const pon = await vracilaStripe.ponoviSpor(id);
+    if (pon === "neplacano") return res.status(409).json({ error: "dispute_unpaid_order", message: "Dispute on an unpaid/cancelled order: recovery from the club is not allowed without Martin's decision (state stays rocno)." });
+    if (!pon) return res.status(409).send("Only a recovery in state ni_uspelo or rocno can be retried.");
     console.log(`Admin ${req.user.userId} je ponovno vrinil povrnitev spora ${id} v vrsto`);
     return res.json({ id, recovery_state: "caka" });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
@@ -6220,7 +6223,7 @@ async function posljiVraciloKupcu(vid, vrsta) {
 // pogodba #97 mora to klubu nalozit), ali da avtomatska povrnitev ni uspela. Mail ob zaprtju `lost` pocaka na izid povrnitve.
 // #285: obvestilo lastniku kluba o sporu SAMO za placano naroceno (paid/partially_refunded/refunded; ima vstopnice). Spor na cancelled/failed/pending naroceno (I44, N3, placilo po preklicu)
 // ni terjatev do kluba (placila_stripe.js spor(): povrnitev `rocno`), zato maila ni. Isti pogoj v obdelovalcu (sweep) in pri prevzemu; alias spora podan.
-const SQL_SPOR_NAROCILO_PLACANO = (a) => `EXISTS (SELECT 1 FROM orders sn WHERE sn.id = ${a}.order_id AND sn.status IN ('paid', 'partially_refunded', 'refunded'))`;
+const { SQL_SPOR_NAROCILO_PLACANO } = require("./vracila_stripe");   // ena resnica (vracila_stripe.js)
 const SPORI_STOLPCI = { odprt: ["mail_odprt_poskusi", "mail_odprt_prevzeto_at", "mail_odprt_poslano_at", ""],
   zaprt: ["mail_zaprt_poskusi", "mail_zaprt_prevzeto_at", "mail_zaprt_poslano_at", "AND s.zaprt_at IS NOT NULL AND (s.stanje <> 'lost' OR s.povrnitev_stanje IN ('opravljeno','ni_uspelo','rocno'))"] };
 const sporMailVTeku = new Set();

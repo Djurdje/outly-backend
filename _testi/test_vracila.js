@@ -1393,6 +1393,20 @@ async function webhook(tip, objekt, id) {
     }
     assert(klici("POST", /reversals/).length === revPred + 1, "SP: transfer reversal SAMO za placano naroceno (neplacana tri: brez povrnitve od kluba)", [klici("POST", /reversals/).length, revPred]);
     assert((await api("GET", "/admin/api/disputes", T.admin)).body.items.filter(x => ["dp_a", "dp_f", "dp_n3"].includes(x.id)).every(x => x.recovery_state === "rocno"), "SP: admin vidi povrnitev 'rocno' (seznam pozornosti)");
+    // 3. krog: admin retry NE sme obiti varovala (409, stanje ostane `rocno`, brez reversala); obdelovalec ima isto varovalo (spor na silo v `caka`).
+    const revPred3 = klici("POST", /reversals/).length;
+    const adm = (await api("GET", "/admin/api/disputes", T.admin)).body.items;
+    assert(["dp_a", "dp_f", "dp_n3"].every(id => adm.find(x => x.id === id).order_paid === false) && adm.find(x => x.id === "dp_pl").order_paid === true, "SP admin: order_paid false za neplacana, true za placano");
+    for (const id of ["dp_a", "dp_f", "dp_n3"]) {
+      const rr3 = await api("POST", `/admin/api/disputes/${id}/retry`, T.admin);
+      const s3 = (await pool.query("SELECT povrnitev_stanje, povrnitev_kljuc_gen FROM spori WHERE id=$1", [id])).rows[0];
+      assert(rr3.status === 409 && rr3.body.error === "dispute_unpaid_order" && s3.povrnitev_stanje === "rocno" && s3.povrnitev_kljuc_gen === 0, `SP: admin retry spora ${id} na neplacanem narocilu: 409, ostane rocno`, [rr3.status, rr3.body, s3]);
+    }
+    await pool.query("UPDATE spori SET povrnitev_stanje='caka', povrnitev_naslednji_at=NOW() WHERE id='dp_a'");   // obhod okolja varovala
+    await obhod(); await obhod();
+    const s3a = (await pool.query("SELECT povrnitev_stanje, povrnitev_napaka FROM spori WHERE id='dp_a'")).rows[0];
+    assert(s3a.povrnitev_stanje === "rocno" && /neplacanem narocilu/.test(s3a.povrnitev_napaka) && klici("POST", /reversals/).length === revPred3, "SP: obdelovalec ob sili `caka` na neplacanem narocilu: rocno, brez klica reversala", [s3a, klici("POST", /reversals/).length, revPred3]);
+    assert((await api("POST", "/admin/api/disputes/dp_pl/retry", T.admin)).status === 409, "SP: retry placanega naroceno z opravljeno povrnitvijo: 409 kot prej (ne neplacano)");
     // mail kupcu `ni_izvedeno` na neplacanem narocilu z izgubljenim sporom: ukinjen kot prej (lost po order_id)
     const vSPa = await vnesiSp(SPa, null);
     await obhod();
