@@ -429,6 +429,10 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     console.log("\n# 8. Napaka Resenda, pospravljalec, hramba");
     const eT = await dogodek("Prenos Hramba", 0);
     const hV = await kupi(T.kupec, eT, 3);
+    // Potrdilo o nakupu (#95) gre asinhrono po odgovoru nakupa. Ce bi njegovo prvo posiljanje padlo v okno napake Resenda, bi ga pospravljalec ponovil sele
+    // pozneje (premor + cikel) in bi kot zamudnik pristal med poznejsimi preverbami (»natanko en mail« v sklopu 9; #291). Zato ga pocakamo PRED napako.
+    assert(await cakaj(async () => (await pool.query("SELECT o.receipt_mail_sent_at FROM orders o JOIN tickets t ON t.order_id = o.id WHERE t.id = $1", [hV[0].id])).rows[0].receipt_mail_sent_at !== null),
+      "potrdilo o nakupu poslano pred napako Resenda (#291)");
     R.napaka = true;
     r = await apiB("POST", `/tickets/${hV[0].id}/transfer`, T.kupec, { email: "napaka@example.com", allow_guest: true });
     assert(r.status === 200, "napaka Resenda ne podre prenosa (200)", r.body);
@@ -486,6 +490,15 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
       assert(await cakaj(async () => (await pool.query("SELECT o.receipt_mail_sent_at FROM orders o JOIN tickets t ON t.order_id = o.id WHERE t.id = $1", [t.id])).rows[0].receipt_mail_sent_at !== null),
         "potrdilo o nakupu poslano pred testom hkratnosti (#95)");
     }
+    // Izhodisce »prejHk« mora biti v mirnem stanju: noben posiljatelj (potrdila kupcem, prva posiljanja vstopnic gostom) ne sme imeti mailov v teku ali v ponovitvi,
+    // sicer zamudnik pristane med izhodiscem in trditvijo (pod obremenitvijo 1/15, #291). Pogoj je isti kot pri pospravljalcu v index.js (poskusov < 8 = GOST_POSTA_POSKUSOV).
+    const cakajoci = async () => (await pool.query(
+      `SELECT (SELECT COUNT(*)::int FROM orders WHERE receipt_mail_attempts IS NOT NULL AND receipt_mail_sent_at IS NULL AND receipt_mail_attempts < 8
+                 AND status = 'paid' AND user_id IS NOT NULL AND guest_list_id IS NULL) AS potrdil,
+              (SELECT COUNT(*)::int FROM tickets WHERE holder_is_guest AND holder_guest_email IS NOT NULL AND status = 'valid' AND holder_guest_mail_sent_at IS NULL
+                 AND holder_guest_mail_attempts < 8) AS vstopnic`)).rows[0];
+    assert(await cakaj(async () => { const c = await cakajoci(); return c.potrdil === 0 && c.vstopnic === 0; }, 15000),
+      "pred testom hkratnosti ni neposlanih potrdil ali mailov z vstopnicami (mirno stanje)", await cakajoci());
     const prejHk = R.poslano.length;
     const [x1, x2] = await Promise.all([
       apiB("POST", `/tickets/${hk[0].id}/transfer`, T.kupec, { email: "hk1@example.com", allow_guest: true }),
@@ -493,7 +506,7 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     assert([x1.status, x2.status].sort().join() === "200,404", "hkratna prenosa iste vstopnice: en 200, drugi 404 (ni vec imetnik)", [x1.status, x2.status]);
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM ticket_transfers WHERE ticket_id=$1", [hk[0].id])).rows[0].n === 1, "natanko en zapis prenosa");
     assert(await cakaj(async () => (await poslanoOb(hk[0].id)) !== null), "»poslano« zapisano");
-    assert(R.poslano.length === prejHk + 1, "natanko en mail", R.poslano.length - prejHk);
+    assert(R.poslano.length === prejHk + 1, "natanko en mail", R.poslano.length - prejHk > 1 ? R.poslano.slice(prejHk).map(m => ({ to: m.to, subject: String(m.subject).slice(0, 60) })) : R.poslano.length - prejHk);
     // gost ne more naprej: vstopnica gosta ni na /me/tickets nikogar, prenos s kupcevim zetonom -> 404
     r = await apiB("POST", `/tickets/${hk[0].id}/transfer`, T.kupec, { email: "hk3@example.com", allow_guest: true });
     assert(r.status === 404, "kupec ne more znova prenesti vstopnice, ki jo drzi gost (404)", r.status);
