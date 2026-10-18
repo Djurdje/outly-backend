@@ -1714,6 +1714,17 @@ function prodajalecZavraNakup(k, nacin, skupajCents) {
 function napakaProdajalca(e, nacin, skupajCents) {
   return prodajalecZavraNakup(e, nacin, skupajCents) ? NAPAKA_PRODAJALEC_NEPOPOLN : null;
 }
+// EN SAM pogoj I49 (Martin 18. 10. 2026): klub BREZ dokoncanega Stripa v TEKOCEM nacinu (`nacin === "klub"`: sk_live_ in klub brez Connecta ali z racunom iz sandboxa, I36)
+// zavrne samo PLACLJIV nakup (denar brez povezanega racuna ne sme nikamor); znesek natanko 0 gre mimo Stripa (`placanoTakoj`), zato je kupljiv. Fail closed:
+// vse, kar ni natanko 0 (tudi NaN), je zavrnjeno. Uporabljajo ga vse tri nakupne poti (`napakaKlubaBrezStripa`) in javni `payment_mode` (`javniNacinProdajalca`).
+function klubBrezStripaZavraNakup(nacin, skupajCents) {
+  return nacin === "klub" && skupajCents !== 0;
+}
+const NAPAKA_KLUB_BREZ_STRIPA = "This club does not accept online payments yet.";
+// Kot `napakaProdajalca`: vrne besedilo 409 ali null. Klic PRED rezervacijo zaloge/mize, vpisom naroclila in idempotentnim kljucem (ROLLBACK brez stranskih ucinkov).
+function napakaKlubaBrezStripa(nacin, skupajCents) {
+  return klubBrezStripaZavraNakup(nacin, skupajCents) ? NAPAKA_KLUB_BREZ_STRIPA : null;
+}
 // Razlog, zakaj je `payment_mode` kluba "unavailable" (samo GET /business/sales, lastnik in manager; #220): "stripe_not_ready" (live, klub brez dokoncanega Stripa -> nacin "klub"),
 // "payments_not_configured" (Stripe kljuc brez webhook skrivnosti -> "nastavitve", 503), "seller_incomplete" (live, klub s Stripom, nepopolni podatki prodajalca). Sicer null.
 function razlogNerazpolozljivosti(nacin, k, najvecCents, brezplacno) {
@@ -1725,6 +1736,9 @@ function razlogNerazpolozljivosti(nacin, k, najvecCents, brezplacno) {
 // `payment_mode` za odjemalce (#149, #220): kot `javniNacin`, le da ob pogoju I34 vrne "unavailable" namesto "stripe". `najvecCents` = najvecji znesek,
 // ki ga kupec lahko placa (> 0 = placljivo); `brezplacno` = obstaja kupljiva ponudba za 0 EUR (ta gre mimo Stripa in I34, zato ostane kupljiva).
 function javniNacinProdajalca(nacin, k, najvecCents, brezplacno) {
+  // I49: klub brez Stripa: ponudba za 0 EUR je kupljiva ("stripe": brez Checkouta, kot pri klubu s Stripom), placljiva ne ("unavailable"); isti pogoj kot nakup.
+  // Brez kupljive ponudbe (npr. dogodek brez vstopnic) ostane "unavailable" kot doslej (znesek 0 bi bil napacno »brezplacen«, zato Math.max(.., 1)).
+  if (nacin === "klub") return klubBrezStripaZavraNakup(nacin, brezplacno ? 0 : Math.max(najvecCents, 1)) ? "unavailable" : "stripe";
   if (nacin === "stripe" && !brezplacno && prodajalecZavraNakup(k, nacin, najvecCents)) return "unavailable";
   return placilaStripe.javniNacin(nacin);
 }
@@ -2461,10 +2475,10 @@ if (STOLPCI_DOGODKA_LAHKI === STOLPCI_DOGODKA) throw new Error("STOLPCI_DOGODKA_
 
 // payment_mode (#149, #191): kako se pri tem dogodku placa. DODANO polje v javnih odgovorih (GET /events, GET /events/:id, GET /events/:id/vip, GET /business/events):
 //   "test"        nic se ne zaracuna (sistem v testnem nacinu ali sandbox + klub brez Stripa)
-//   "stripe"      pravo placilo prek Stripa (klub ima dokoncan Connect)
-//   "unavailable" nakup bi bil zavrnjen (live kljuc in klub brez Stripa -> 409; Stripe brez webhook skrivnosti -> 503)
+//   "stripe"      pravo placilo prek Stripa ali 0 EUR mimo Stripa (I49, I34)
+//   "unavailable" nakup bi bil zavrnjen (live kljuc in klub brez Stripa -> 409 za PLACLJIVO; Stripe brez webhook skrivnosti -> 503 za vse)
 // Izracun je ISTI kot ob nakupu (placilaStripe.nacinPlacilaZ), odvisen od kluba (prodajalec = events.club_id), NE od uporabnika: sme v javni predpomnilnik (I17).
-// Cena 0 EUR gre mimo Stripa, a isti preizkus nacina velja tudi zanjo (ob "unavailable" je nakup zavrnjen tudi za 0 EUR). Pomozni stolpec se iz vrstice odstrani; stripe_account_id ne zapusti streznika.
+// Cena 0 EUR gre mimo Stripa; pri klubu brez Stripa ob zivem kljucu je zato kupljiva (I49: "stripe"), le Stripe kljuc brez webhook skrivnosti (503) zavrne tudi 0 EUR. Pomozni stolpec se iz vrstice odstrani; stripe_account_id ne zapusti streznika.
 // #220: ob `sk_live_` in nepopolnih podatkih prodajalca (I34) je nakup z zneskom > 0 zavrnjen (409 seller_incomplete), zato je `payment_mode` tam "unavailable"
 // (isti pogoj kot nakup: `prodajalecZavraNakup`). Dogodek z vstopnico za 0 EUR ostane "stripe": brezplacno je kupljivo.
 // Dogodek je mesanica vstopnic in VIP miz z eno vrednostjo: odloca vstopnica (`ticket_price_cents`), ce obstaja, sicer najcenejsa miza (`vip_from_cents`).
@@ -4983,9 +4997,10 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     // Nacin placila (placila_stripe.js): test = takoj placano; stripe = cakajoce narocilo + Checkout seja po COMMIT-u.
     const nacin = placilaStripe.nacinPlacila(e);
     if (nacin === "nastavitve") { await c.query("ROLLBACK"); return res.status(503).send("Payments are not available yet."); }
-    if (nacin === "klub") { await c.query("ROLLBACK"); return res.status(409).send("This club does not accept online payments yet."); }
     const test = nacin === "test";
     const skupaj = e.ticket_price_cents * q;
+    const npk = napakaKlubaBrezStripa(nacin, skupaj);   // I49: klub brez Stripa zavrne samo placljivo
+    if (npk) { await c.query("ROLLBACK"); return res.status(409).send(npk); }
     const np2 = napakaProdajalca(e, nacin, skupaj);
     if (np2) { await c.query("ROLLBACK"); return res.status(409).json(np2); }
     // 0 EUR (#191): Stripe Checkout ima najmanjsi znesek (Stripe zavrne sejo, nakup bi koncal s 502), zato brezplacno narocilo NE gre v Stripe:
@@ -5419,9 +5434,10 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     // Nacin placila: isto kot pri racunih (test = takoj placano; stripe = cakajoce narocilo + Checkout seja po COMMIT-u).
     const nacin = placilaStripe.nacinPlacila(e);
     if (nacin === "nastavitve") { await c.query("ROLLBACK"); return res.status(503).send("Payments are not available yet."); }
-    if (nacin === "klub") { await c.query("ROLLBACK"); return res.status(409).send("This club does not accept online payments yet."); }
     const test = nacin === "test";
     const skupaj = e.ticket_price_cents * g.quantity;
+    const npk = napakaKlubaBrezStripa(nacin, skupaj);   // I49: klub brez Stripa zavrne samo placljivo
+    if (npk) { await c.query("ROLLBACK"); return res.status(409).send(npk); }
     const np2 = napakaProdajalca(e, nacin, skupaj);
     if (np2) { await c.query("ROLLBACK"); return res.status(409).json(np2); }
     const placanoTakoj = test || skupaj === 0;   // 0 EUR gre mimo Stripa (#191), kot pri nakupu z racunom
@@ -8665,9 +8681,10 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
 
     const nacin = placilaStripe.nacinPlacila(e);
     if (nacin === "nastavitve") { await c.query("ROLLBACK"); return res.status(503).send("Payments are not available yet."); }
-    if (nacin === "klub") { await c.query("ROLLBACK"); return res.status(409).send("This club does not accept online payments yet."); }
     const test = nacin === "test";
     const cena = miza.price_cents;
+    const npk = napakaKlubaBrezStripa(nacin, cena);   // I49: klub brez Stripa zavrne samo placljivo
+    if (npk) { await c.query("ROLLBACK"); return res.status(409).send(npk); }
     const np2 = napakaProdajalca(e, nacin, cena);
     if (np2) { await c.query("ROLLBACK"); return res.status(409).json(np2); }
     const placanoTakoj = test || cena === 0;   // miza za 0 EUR gre mimo Stripa (#191), kot vstopnice
