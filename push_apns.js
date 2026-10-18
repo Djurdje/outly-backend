@@ -24,7 +24,8 @@ const JWT_OSVEZI_S = 50 * 60;          // Apple zavrne JWT starejsi od 60 min; o
 const JWT_NAJMANJ_OSVEZITEV_S = 20 * 60;
 const LOC_ARG_NAJVEC = 200;            // znakov; payload ima mejo 4 KB
 // Prednost v skupni vrsti (#277 N3): operativni pushi (natakar, prejemnik vstopnice, povabljenec: nekaj zetonov, nekdo ceka na telefon)
-// ne smejo cakati za mnozicnim obvestilom (sledilci kluba: tisoci). Kar ni na seznamu (tudi prihodnji tipi), je mnozicno = vedenje kot doslej.
+// ne smejo cakati za mnozicnim obvestilom (sledilci kluba: tisoci). Kar ni na seznamu (tudi prihodnji tipi), je mnozicno (brez prednosti). Pozor: zaradi rezerve (APNS_REZERVA) mnozicna obvestila
+// zasedejo najvec socasno - rezerva slotov TUDI, ko operativnih ni (privzeto 18 od 20: prepustnost mnozicnih je ~10 % nizja kot pred #277).
 const OPERATIVNI_TIPI = new Set(["table_service", "ticket_received", "guest_list_invite"]);
 
 function celo(vrednost, privzeto, min, max) {

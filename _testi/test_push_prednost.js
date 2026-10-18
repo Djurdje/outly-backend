@@ -85,9 +85,17 @@ function novApns(okolje, port) {
       assert(sestaviObvestilo({ tip, id: 1, naslov: "x", kljuc: "y" }).prednost === "operativno", `${tip} = operativno`);
     }
     assert(sestaviObvestilo({ tip: "club_event", id: 1, naslov: "x", kljuc: "y" }).prednost === "mnozicno", "club_event = mnozicno");
-    assert(sestaviObvestilo({ tip: "nekaj_novega", id: 1, naslov: "x", kljuc: "y" }).prednost === "mnozicno", "neznan tip = mnozicno (kot doslej)");
+    assert(sestaviObvestilo({ tip: "nekaj_novega", id: 1, naslov: "x", kljuc: "y" }).prednost === "mnozicno", "neznan tip = mnozicno (brez prednosti)");
     assert(operativno.velja === 3600 || operativno.velja === 24 * 3600, "obstojeca polja (velja) so ostala");
     assert(!("prednost" in JSON.parse(operativno.telo)) && !operativno.telo.includes("operativno"), "prednost NI v vsebini obvestila (payload ostane isti)");
+
+    // neveljavna vrednost ostane na privzeti (kot celo() drugod); rezerva je omejena na socasno - 1
+    for (const [okolje, pricakovano] of [[{ APNS_REZERVA: "abc" }, 2], [{ APNS_REZERVA: "-1" }, 2], [{ APNS_REZERVA: "0" }, 0], [{ APNS_SOCASNO: "2", APNS_REZERVA: "9" }, 1]]) {
+      let vrstica = "";
+      const a = ustvariApns({ APNS_KEY_ID: "TESTKEYID1", APNS_TEAM_ID: "TESTTEAM12", APNS_KEY_P8: P8_B64, APNS_HOST: `https://localhost:${port}`, ...okolje }, { log: (x) => { vrstica += x; }, error() {} });
+      apnsi.push(a);
+      assert(vrstica.includes(`rezerva za operativne ${pricakovano})`), `APNS_REZERVA ${JSON.stringify(okolje)} -> rezerva ${pricakovano}`, vrstica);
+    }
 
     console.log("\n# 2. Operativni push ne caka na mnozicno vrsto");
     {
