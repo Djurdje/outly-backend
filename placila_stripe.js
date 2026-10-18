@@ -141,9 +141,11 @@ async function vrniNeaktivno(c, o, seja, opis) {
   const znesek = Number.isInteger(seja.amount_total) ? seja.amount_total : 0;
   if (pi && znesek > 0 && ["cancelled", "failed"].includes(o.status)) {
     const v = await c.query(
-      `INSERT INTO vracila (order_id, event_id, razlog, znesek_cents, payment_intent_id, checkout_session_id, stripe_livemode)
-       VALUES ($1, $2, 'inactive_order', $3, $4, $5, $6) ON CONFLICT (order_id, razlog) DO NOTHING RETURNING id`,
-      [o.id, o.event_id, znesek, pi, seja.id, typeof seja.livemode === "boolean" ? seja.livemode : null]);
+      `INSERT INTO vracila (order_id, event_id, razlog, znesek_cents, payment_intent_id, checkout_session_id, stripe_livemode, valuta)
+       VALUES ($1, $2, 'inactive_order', $3, $4, $5, $6, $7) ON CONFLICT (order_id, razlog) DO NOTHING RETURNING id`,
+      [o.id, o.event_id, znesek, pi, seja.id, typeof seja.livemode === "boolean" ? seja.livemode : null,
+       typeof seja.currency === "string" && /^[a-z]{3}$/i.test(seja.currency) ? seja.currency.toUpperCase() : null]);   // #285 N3: znesek je v valuti SEJE (lahko drugacna od orders.currency), mail jo izpise
+
     console.error(`[stripe] POZOR: ${opis}: ${v.rows.length ? "vracilo v vrsti (samodejno)" : "vracilo je ze v vrsti"}.`);
   } else {
     console.error(`[stripe] POZOR: ${opis} - vrni rocno v Stripu.`);
