@@ -6827,7 +6827,7 @@ app.get("/business/events/:id/tickets", requireAuth, requireClub("owner", "manag
       if (c) await c.query("ROLLBACK").catch(() => {});
       if (e && e.code === "57014") {
         console.error("[tickets] iskanje je preseglo statement_timeout");
-        return res.status(503).set("Retry-After", "5").json({ error: "search_timeout", message: "The search took too long. Try a shorter search." });
+        return res.status(503).set("Retry-After", "5").json({ error: "search_timeout", message: "The ticket list is busy. Try again in a few seconds." });
       }
       throw e;
     } finally { if (c) c.release(); }
