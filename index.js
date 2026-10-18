@@ -6776,6 +6776,7 @@ app.get("/business/events/:id/tickets", requireAuth, requireClub("owner", "manag
         if (typeof req.query.q !== "string") return res.status(400).json({ error: "invalid_q", message: "q must be a single string." });
         const q = req.query.q.trim();
         if (q.length > VSTOPNICE_Q_NAJVEC) return res.status(400).json({ error: "invalid_q", message: `q must be at most ${VSTOPNICE_Q_NAJVEC} characters.` });
+        if (/[\u0000-\u001f\u007f]/.test(q)) return res.status(400).json({ error: "invalid_q", message: "q must not contain control characters." });   // NUL bi Postgres zavrnil (500)
         if (q) iskanje = "%" + q.replace(/[\\%_]/g, "\\$&") + "%";
       }
     }
@@ -6790,29 +6791,46 @@ app.get("/business/events/:id/tickets", requireAuth, requireClub("owner", "manag
           OR COALESCE(u.username, ${IME_GOSTA}) ILIKE $3 ESCAPE '\\' OR COALESCE(hu.username, ${IME_GOSTA_IMETNIKA}) ILIKE $3 ESCAPE '\\'`
         + (vratar ? ")" : ` OR (o.guest_list_id IS NULL AND (o.buyer_email ILIKE $3 ESCAPE '\\' OR hu.email ILIKE $3 ESCAPE '\\')))`);
     }
-    const r = await pool.query(
-      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.buyer_email, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username, ${STOLPCI_IMETNIKA}, ${SQL_SPOR_ODPRT} AS payment_disputed
-       ${iz}
-       WHERE ${pogoj} ORDER BY t.id LIMIT ${ovojnica ? limit + 1 : limit} OFFSET ${offset}`, params
-    );
-    const vrstice = ovojnica ? r.rows.slice(0, limit) : r.rows;
-    const vrni = vrstice.map(t => {
-      const v = { ...t, qr: qrVstopnice(t) };
-      // Guest lista (035): e-naslovov gostitelja in povabljenih prijateljev klub ne vidi (nobena vloga); samo uporabniska imena.
-      if (vratar || t.is_guest_list) { delete v.buyer_email; delete v.holder_email; }
-      return v;
-    });
-    if (!ovojnica) return res.json(vrni);
-    // Stevci cez VSE vstopnice dogodka (indeks tickets_event_idx); `total` = zadetki iskanja (brez iskanja = vse).
-    const [st, sk] = await Promise.all([
-      pool.query(`SELECT t.status, COUNT(*)::int AS n FROM tickets t JOIN events e ON e.id = t.event_id WHERE t.event_id = $1 AND e.club_id = $2 GROUP BY t.status`, [id, klub]),
-      iskanje ? pool.query(`SELECT COUNT(*)::int AS n ${iz} WHERE ${pogoj}`, params) : Promise.resolve(null),
-    ]);
-    const po = Object.fromEntries(st.rows.map(x => [x.status, x.n]));
-    const counts = { all: st.rows.reduce((a, x) => a + x.n, 0), sold: (po.valid || 0) + (po.used || 0), checked_in: po.used || 0,
-      expected: po.valid || 0, refunded: po.refunded || 0, void: po.void || 0 };
-    const hasMore = r.rows.length > limit;
-    return res.json({ tickets: vrni, counts, total: sk ? sk.rows[0].n : counts.all, limit, offset, has_more: hasMore, next_offset: hasMore ? offset + limit : null });
+    // Ovojnica: seznam in stevci tecejo ZAPOREDNO na eni povezavi glavnega poola (ne dveh), z mejo 3 s (ILIKE brez indeksa; glavni pool sicer
+    // nima statement_timeout). Brez ovojnice (star odjemalec) ostane en navaden stavek kot doslej.
+    let c = null;
+    try {
+      if (ovojnica) {
+        c = await pool.connect();
+        await c.query("BEGIN READ ONLY");
+        await c.query("SET LOCAL statement_timeout = 3000");
+      }
+      const db = c || pool;
+      const r = await db.query(
+        `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.buyer_email, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username, ${STOLPCI_IMETNIKA}, ${SQL_SPOR_ODPRT} AS payment_disputed
+         ${iz}
+         WHERE ${pogoj} ORDER BY t.id LIMIT ${ovojnica ? limit + 1 : limit} OFFSET ${offset}`, params
+      );
+      const vrstice = ovojnica ? r.rows.slice(0, limit) : r.rows;
+      const vrni = vrstice.map(t => {
+        const v = { ...t, qr: qrVstopnice(t) };
+        // Guest lista (035): e-naslovov gostitelja in povabljenih prijateljev klub ne vidi (nobena vloga); samo uporabniska imena.
+        if (vratar || t.is_guest_list) { delete v.buyer_email; delete v.holder_email; }
+        return v;
+      });
+      if (!ovojnica) return res.json(vrni);
+      // Stevci cez VSE vstopnice dogodka (indeks tickets_event_idx); `total` = zadetki iskanja (brez iskanja = vse).
+      const st = await db.query(`SELECT t.status, COUNT(*)::int AS n FROM tickets t JOIN events e ON e.id = t.event_id WHERE t.event_id = $1 AND e.club_id = $2 GROUP BY t.status`, [id, klub]);
+      const sk = iskanje ? await db.query(`SELECT COUNT(*)::int AS n ${iz} WHERE ${pogoj}`, params) : null;
+      await c.query("COMMIT");
+      const po = Object.fromEntries(st.rows.map(x => [x.status, x.n]));
+      const counts = { all: st.rows.reduce((a, x) => a + x.n, 0), sold: (po.valid || 0) + (po.used || 0), checked_in: po.used || 0,
+        expected: po.valid || 0, refunded: po.refunded || 0, void: po.void || 0 };
+      const hasMore = limit > 0 && r.rows.length > limit;   // limit=0 = samo stevci: odjemalec se ne sme zacikliti na has_more
+      return res.json({ tickets: vrni, counts, total: sk ? sk.rows[0].n : counts.all, limit, offset, has_more: hasMore, next_offset: hasMore ? offset + limit : null });
+    } catch (e) {
+      if (c) await c.query("ROLLBACK").catch(() => {});
+      if (e && e.code === "57014") {
+        console.error("[tickets] iskanje je preseglo statement_timeout");
+        return res.status(503).set("Retry-After", "5").json({ error: "search_timeout", message: "The search took too long. Try a shorter search." });
+      }
+      throw e;
+    } finally { if (c) c.release(); }
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 

@@ -10,7 +10,8 @@
  *  2  limit/offset: ovojnica { tickets, counts, total, limit, offset, has_more, next_offset }; strani se ne prekrivajo in skupaj dajo vse vstopnice
  *  3  counts so neodvisni od reza (limit 0 = samo stevci), sold = valid + used, vrnjena/neveljavna ne stejejo kot prodana
  *  4  q: iskanje po public_ref, serialu, uporabniskem imenu; lastnik in manager tudi po e-naslovu, VRATAR NIKOLI (I21); guest lista nikoli po e-naslovu
- *  5  q z znaki % in _ je dobesedno besedilo (ne vzorec); neveljavni limit/offset/q -> 400; tuj klub/dogodek -> prazno
+ *  5  q z znaki % in _ je dobesedno besedilo (ne vzorec); neveljavni limit/offset/q (tudi NUL in kontrolni znaki) -> 400 in ne 500; tuj klub/dogodek -> prazno
+ *     limit=0: has_more false, next_offset null
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -142,7 +143,9 @@ let srv = null;
 
     console.log("\n# 3. counts so neodvisni od reza");
     r = await api("GET", `/business/events/${ev}/tickets?limit=0`, T.lastnik);
-    assert(r.status === 200 && r.body.tickets.length === 0 && r.body.has_more === true, "limit=0: samo stevci", { n: r.body.tickets && r.body.tickets.length });
+    assert(r.status === 200 && r.body.tickets.length === 0 && r.body.has_more === false && r.body.next_offset === null && r.body.total === skupaj, "limit=0: samo stevci, has_more false in next_offset null (odjemalec se ne zacikla)", r.body);
+    r = await api("GET", `/business/events/${ev}/tickets?limit=0&offset=5&q=ana`, T.lastnik);
+    assert(r.status === 200 && r.body.has_more === false && r.body.next_offset === null && r.body.total > 1000, "limit=0 z q in offset: isto, total = zadetki", { has_more: r.body.has_more, next: r.body.next_offset, total: r.body.total });
     const c = r.body.counts;
     assert(c.all === skupaj && c.sold === prodanih && c.checked_in === porabljenih && c.expected === prodanih - porabljenih && c.refunded === vrnjenih && c.void === neveljavnih,
       "counts: all, sold = valid+used, checked_in, expected = valid, refunded, void", c);
@@ -199,10 +202,13 @@ let srv = null;
     }
     for (const [url, koda] of [["limit=-1", "invalid_limit"], ["limit=1001", "invalid_limit"], ["limit=abc", "invalid_limit"], ["limit=", "invalid_limit"], ["limit=1.5", "invalid_limit"],
       ["limit=1&limit=2", "invalid_limit"], ["offset=-5", "invalid_offset"], ["offset=x", "invalid_offset"], ["offset=99999999999", "invalid_offset"],
-      ["q=" + "a".repeat(65), "invalid_q"], ["q=a&q=b", "invalid_q"], ["q[x]=1", "invalid_q"]]) {
+      ["q=" + "a".repeat(65), "invalid_q"], ["q=a&q=b", "invalid_q"], ["q[x]=1", "invalid_q"],
+      ["q=%00", "invalid_q"], ["q=a%00b", "invalid_q"], ["q=%01", "invalid_q"], ["q=a%0Ab", "invalid_q"], ["q=%1F", "invalid_q"], ["q=%7F", "invalid_q"]]) {
       r = await api("GET", `/business/events/${ev}/tickets?${url}`, T.lastnik);
       assert(r.status === 400 && r.body && r.body.error === koda, `${url.slice(0, 30)} -> 400 ${koda}`, { status: r.status, body: r.body });
     }
+    r = await api("GET", `/business/events/${ev}/tickets?q=${encodeURIComponent("\u00e8\u00e9 \ud83d\ude00")}`, T.lastnik);
+    assert(r.status === 200, "q z Unicode znaki in emoji: 200", r.status);
     r = await iskanje(T.lastnik, "a".repeat(64));
     assert(r.status === 200, "q z 64 znaki je se v redu", r.status);
     r = await api("GET", `/business/events/${ev}/tickets?limit=10`, T.tuj);
