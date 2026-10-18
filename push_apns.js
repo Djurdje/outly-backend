@@ -23,6 +23,9 @@ const ZETON_VZOREC = /^[0-9a-fA-F]{64,200}$/;
 const JWT_OSVEZI_S = 50 * 60;          // Apple zavrne JWT starejsi od 60 min; osvezevanje pogosteje kot na 20 min tudi
 const JWT_NAJMANJ_OSVEZITEV_S = 20 * 60;
 const LOC_ARG_NAJVEC = 200;            // znakov; payload ima mejo 4 KB
+// Prednost v skupni vrsti (#277 N3): operativni pushi (natakar, prejemnik vstopnice, povabljenec: nekaj zetonov, nekdo ceka na telefon)
+// ne smejo cakati za mnozicnim obvestilom (sledilci kluba: tisoci). Kar ni na seznamu (tudi prihodnji tipi), je mnozicno = vedenje kot doslej.
+const OPERATIVNI_TIPI = new Set(["table_service", "ticket_received", "guest_list_invite"]);
 
 function celo(vrednost, privzeto, min, max) {
   const v = Number.parseInt(vrednost, 10);
@@ -53,7 +56,8 @@ function sestaviObvestilo({ tip, id, naslov, kljuc, argumenti = [], velja = VELJ
     },
     outly: { type: tip, id },
   };
-  return { telo: JSON.stringify(telo), velja };
+  // `prednost` NI del vsebine (payload ostane isti): samo vrsta v ustvariApns() po njej izbira, kdo je naslednji.
+  return { telo: JSON.stringify(telo), velja, prednost: OPERATIVNI_TIPI.has(tip) ? "operativno" : "mnozicno" };
 }
 
 function ustvariApns(okolje = process.env, dnevnik = console) {
@@ -90,6 +94,11 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
   const timeoutMs = celo(okolje.APNS_TIMEOUT_MS, 10000, 200, 60000);
   const socasno = celo(okolje.APNS_SOCASNO, 20, 1, 200);
   const vrstaNajvec = celo(okolje.APNS_VRSTA_NAJVEC, 20000, 1, 1000000);
+  // Prednostna vrsta (#277 N3): `rezerva` slotov je samo za operativna obvestila (mnozicna smejo zasesti najvec socasno - rezerva), zato operativno
+  // obvestilo ob polni mnozicni vrsti dobi slot takoj; sprostitev slota gre najprej operativni vrsti, a po `operativnihZapored` zaporednih
+  // dodelitvah, ce mnozicno caka, ena mnozicna (mnozicna ne stradajo). Omejitev vrste (vrstaNajvec) velja za vsako vrsto posebej.
+  const rezerva = Math.min(celo(okolje.APNS_REZERVA, 2, 0, 100), socasno - 1);
+  const operativnihZapored = celo(okolje.APNS_OPERATIVNIH_ZAPORED, 8, 1, 1000);
 
   // --- JWT (predpomnjen) ---
   let jwtZeton = null, jwtIat = 0;
@@ -189,20 +198,31 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
     });
   }
 
-  // --- omejena socasnost (skupna za vse klice v procesu) ---
+  // --- omejena socasnost (skupna za vse klice v procesu), dve vrsti cakajocih ---
   let aktivnih = 0;
-  const vrsta = [];
-  function vstopi() {
-    if (aktivnih < socasno) { aktivnih++; return Promise.resolve(true); }
-    if (vrsta.length >= vrstaNajvec) return Promise.resolve(false);
-    return new Promise((r) => vrsta.push(r));
+  const vrstaOp = [];      // operativni: resolve funkcije v vrstnem redu prihoda
+  const vrstaMn = [];      // mnozicni
+  let zaporednihOp = 0;    // operativnih dodelitev zapored, ODKAR mnozicni cakajo
+  function izberi() {
+    if (aktivnih >= socasno) return null;
+    const opCaka = vrstaOp.length > 0, mnCaka = vrstaMn.length > 0;
+    if (opCaka && mnCaka && zaporednihOp >= operativnihZapored) { zaporednihOp = 0; return vrstaMn.shift(); }   // meja: ena mnozicna
+    if (opCaka) { zaporednihOp = mnCaka ? zaporednihOp + 1 : 0; return vrstaOp.shift(); }
+    if (mnCaka && aktivnih < socasno - rezerva) { zaporednihOp = 0; return vrstaMn.shift(); }
+    return null;
   }
-  function izstopi() { const n = vrsta.shift(); if (n) n(true); else aktivnih--; }
+  function razdeli() { for (let n = izberi(); n; n = izberi()) { aktivnih++; n(true); } }
+  function vstopi(operativno) {
+    const vrsta = operativno ? vrstaOp : vrstaMn;
+    if (vrsta.length >= vrstaNajvec) return Promise.resolve(false);
+    return new Promise((r) => { vrsta.push(r); razdeli(); });
+  }
+  function izstopi() { aktivnih--; razdeli(); }
 
   async function poslji(zeton, obvestilo) {
     try {
       if (!ZETON_VZOREC.test(String(zeton))) return { ok: false, status: 0, razlog: "zeton", neveljaven: false };
-      if (!(await vstopi())) { opozori("vrsta", `[push] vrsta polna (${vrstaNajvec}): obvestila zavrzena`); return { ok: false, status: 0, razlog: "vrsta_polna", neveljaven: false }; }
+      if (!(await vstopi(!!obvestilo && obvestilo.prednost === "operativno"))) { opozori("vrsta", `[push] vrsta polna (${vrstaNajvec}): obvestila zavrzena`); return { ok: false, status: 0, razlog: "vrsta_polna", neveljaven: false }; }
       try {
         let r = await enaZahteva(zeton, obvestilo, false);
         if (r.omrezna) {                                                 // prekinjena seja: ponovni poskus VEDNO na novi (stara se zapre, drugi zahtevki na njej se dokoncajo)
@@ -241,7 +261,7 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
 
   function zapri() { try { if (seja) seja.destroy(); } catch { /* ignoriraj */ } seja = null; }
 
-  dnevnik.log(`[push] vklopljen: ${origin}, topic ${topic}, najvec ${socasno} hkrati, rok ${timeoutMs} ms`);
+  dnevnik.log(`[push] vklopljen: ${origin}, topic ${topic}, najvec ${socasno} hkrati (rezerva za operativne ${rezerva}), rok ${timeoutMs} ms`);
   return { vklopljen: true, poslji, posljiVsem, zapri };
 }
 
