@@ -6721,27 +6721,82 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
 });
 
 // GET /business/events/:id/tickets — vstopnice dogodka (za vrata: kdo je prišel).
+// BREZ poizvedbenih parametrov: golo polje, najvec 1000 vstopnic po id (oblika, ki jo poznata iOS in splet; pri vec kot 1000 je rez tih).
+// Z `limit`, `offset` ali `q` (#277 N1): ovojnica { tickets, counts, total, limit, offset, has_more, next_offset } - glej ARCHITECTURE »Seznam vstopnic«.
+//   limit 0..1000 (privzeto 200; 0 = samo stevci), offset >= 0, q = podniz (1..64 znakov, brez razlike velikosti) po tem, kar vloga SME videti:
+//   public_ref, serial, uporabnisko ime kupca in imetnika; lastnik in manager se po e-naslovu kupca/imetnika (vratar nikoli, I21; vstopnice guest liste
+//   nikoli: njihovih e-naslovov odgovor ne vrne). `counts` stejejo VSE vstopnice dogodka, neodvisno od q/limit/offset.
+const VSTOPNICE_LIMIT_NAJVEC = 1000;
+const VSTOPNICE_LIMIT_PRIVZETO = 200;
+const VSTOPNICE_OFFSET_NAJVEC = 10000000;
+const VSTOPNICE_Q_NAJVEC = 64;
+function celoIzPoizvedbe(v, najmanj, najvec) {
+  if (typeof v !== "string" || !/^[0-9]{1,9}$/.test(v)) return null;
+  const n = Number(v);
+  return n >= najmanj && n <= najvec ? n : null;
+}
 app.get("/business/events/:id/tickets", requireAuth, requireClub("owner", "manager", "doorman"), async (req, res) => {
   try {
     const id = celoId(req.params.id);
     if (!id) return res.status(400).send("Invalid event id.");
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
-    const r = await pool.query(
-      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.buyer_email, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username, ${STOLPCI_IMETNIKA}, ${SQL_SPOR_ODPRT} AS payment_disputed
-       FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id
-       LEFT JOIN users u ON u.id = o.user_id ${JOIN_IMETNIK}
-       WHERE t.event_id = $1 AND e.club_id = $2 ORDER BY t.id LIMIT 1000`, [id, klub]
-    );
     // Vratar (zacasno osebje) ne potrebuje e-naslovov kupcev (najmanj podatkov, GDPR); za rocni vstop zadostujeta
     // podpisan QR in uporabnisko ime. Lastnik in manager vidita vse kot doslej (pregled 5. 10. 2026).
     const vratar = req.klub && req.klub.role === "doorman";
-    return res.json(r.rows.map(t => {
+    const ovojnica = ["limit", "offset", "q"].some((k) => req.query[k] !== undefined);
+    let limit = VSTOPNICE_LIMIT_NAJVEC, offset = 0, iskanje = null;
+    if (ovojnica) {
+      limit = VSTOPNICE_LIMIT_PRIVZETO;
+      if (req.query.limit !== undefined) {
+        limit = celoIzPoizvedbe(req.query.limit, 0, VSTOPNICE_LIMIT_NAJVEC);
+        if (limit === null) return res.status(400).json({ error: "invalid_limit", message: `limit must be an integer between 0 and ${VSTOPNICE_LIMIT_NAJVEC}.` });
+      }
+      if (req.query.offset !== undefined) {
+        offset = celoIzPoizvedbe(req.query.offset, 0, VSTOPNICE_OFFSET_NAJVEC);
+        if (offset === null) return res.status(400).json({ error: "invalid_offset", message: "offset must be a non-negative integer." });
+      }
+      if (req.query.q !== undefined) {
+        if (typeof req.query.q !== "string") return res.status(400).json({ error: "invalid_q", message: "q must be a single string." });
+        const q = req.query.q.trim();
+        if (q.length > VSTOPNICE_Q_NAJVEC) return res.status(400).json({ error: "invalid_q", message: `q must be at most ${VSTOPNICE_Q_NAJVEC} characters.` });
+        if (q) iskanje = "%" + q.replace(/[\\%_]/g, "\\$&") + "%";
+      }
+    }
+    const iz = `FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id
+       LEFT JOIN users u ON u.id = o.user_id ${JOIN_IMETNIK}`;
+    const params = [id, klub];
+    let pogoj = "t.event_id = $1 AND e.club_id = $2";
+    if (iskanje) {
+      params.push(iskanje);
+      // Samo polja, ki jih vloga vidi v odgovoru (sicer bi iskanje razkrilo, cesar seznam ne): e-naslov samo lastnik/manager in ne pri guest listi.
+      pogoj += ` AND (o.public_ref ILIKE $3 ESCAPE '\\' OR t.serial::text ILIKE $3 ESCAPE '\\'
+          OR COALESCE(u.username, ${IME_GOSTA}) ILIKE $3 ESCAPE '\\' OR COALESCE(hu.username, ${IME_GOSTA_IMETNIKA}) ILIKE $3 ESCAPE '\\'`
+        + (vratar ? ")" : ` OR (o.guest_list_id IS NULL AND (o.buyer_email ILIKE $3 ESCAPE '\\' OR hu.email ILIKE $3 ESCAPE '\\')))`);
+    }
+    const r = await pool.query(
+      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.buyer_email, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username, ${STOLPCI_IMETNIKA}, ${SQL_SPOR_ODPRT} AS payment_disputed
+       ${iz}
+       WHERE ${pogoj} ORDER BY t.id LIMIT ${ovojnica ? limit + 1 : limit} OFFSET ${offset}`, params
+    );
+    const vrstice = ovojnica ? r.rows.slice(0, limit) : r.rows;
+    const vrni = vrstice.map(t => {
       const v = { ...t, qr: qrVstopnice(t) };
       // Guest lista (035): e-naslovov gostitelja in povabljenih prijateljev klub ne vidi (nobena vloga); samo uporabniska imena.
       if (vratar || t.is_guest_list) { delete v.buyer_email; delete v.holder_email; }
       return v;
-    }));
+    });
+    if (!ovojnica) return res.json(vrni);
+    // Stevci cez VSE vstopnice dogodka (indeks tickets_event_idx); `total` = zadetki iskanja (brez iskanja = vse).
+    const [st, sk] = await Promise.all([
+      pool.query(`SELECT t.status, COUNT(*)::int AS n FROM tickets t JOIN events e ON e.id = t.event_id WHERE t.event_id = $1 AND e.club_id = $2 GROUP BY t.status`, [id, klub]),
+      iskanje ? pool.query(`SELECT COUNT(*)::int AS n ${iz} WHERE ${pogoj}`, params) : Promise.resolve(null),
+    ]);
+    const po = Object.fromEntries(st.rows.map(x => [x.status, x.n]));
+    const counts = { all: st.rows.reduce((a, x) => a + x.n, 0), sold: (po.valid || 0) + (po.used || 0), checked_in: po.used || 0,
+      expected: po.valid || 0, refunded: po.refunded || 0, void: po.void || 0 };
+    const hasMore = r.rows.length > limit;
+    return res.json({ tickets: vrni, counts, total: sk ? sk.rows[0].n : counts.all, limit, offset, has_more: hasMore, next_offset: hasMore ? offset + limit : null });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 

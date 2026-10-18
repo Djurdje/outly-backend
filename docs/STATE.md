@@ -67,7 +67,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte nal
 - **Ni javna** (Martin 29. 9.: »da lahko jaz prvo vse preverim«): dosegljiva samo z neposrednim URL-jem, `noindex`.
   **Gumba na outly.si ne dodajaj, dokler Martin ne reče** — to je hkrati javna objava.
 - **Osnutek politike zasebnosti** za spletno aplikacijo (`docs/osnutki/zasebnost-spletna-aplikacija.md`, tudi kamera) NI objavljen, čaka Martinov DA; popravi netočno alinejo §11.
-- `GET /business/events/:id/tickets` vrne podpisan `qr` vseh vstopnic vsem vlogam v klubu (iOS enako); splet ga hrani samo v pomnilniku.
+- `GET /business/events/:id/tickets` vrne podpisan `qr` vseh vstopnic vsem vlogam v klubu (iOS enako); splet ga hrani samo v pomnilniku. **#277 N1 (18. 10.):** brez parametrov še vedno golo polje ≤ 1000; z `limit`/`offset`/`q` ovojnica s `counts` (pogodba: ARCHITECTURE »Seznam vstopnic dogodka za vrata«, I45). **ios-dev / web-dev (odprto):** pošiljaj `?limit=200` (+ `offset`), »sold/checked in/expected« beri iz `counts` (ne `tickets.count`), iskanje in »Load more« prek `q`/`has_more`/`next_offset`.
 - **Past (backend, obstojeca):** `klubUporabnika(uid, zeljeni)` za lastnika z VEC klubi vrne samo prvega (`ORDER BY id LIMIT 1`);
   lastnik z drugim klubom v glavi `X-Outly-Club` dobi 404. Danes ima vsak lastnik en klub - ob drugem klubu to popraviti.
 - **Past (splet):** `PATCH /me` vrne samo `POLJA_UPORABNIKA` (brez `clubs`, `pending_*`) - odjemalec mora zdruziti s
