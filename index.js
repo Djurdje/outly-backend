@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const net = require("net");
 const { Resend } = require("resend");
 const { jePrepovedanoIme } = require("./prepovedana_imena");   // filter neprimernih uporabniskih imen (#216 N9)
+const { preveriUrlPolja } = require("./url_polja");   // URL polja kluba/dogodka: samo http(s) (#269)
 const { qrPng, pdfVstopnice } = require("./vstopnica_priloge");   // QR (PNG, vgrajen v mail) in PDF vstopnice (priloga); migracija 034
 const path = require("path");
 // Express 4 ne ujame zavrnjenih obljub asinhronih rocnikov: neujet `await pool.connect()` je sesul CEL proces (issue #129).
@@ -1980,6 +1981,10 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
 
     if (!name) return res.status(400).send("Missing name.");
 
+    // URL polja (#269): samo http(s); website/instagram brez sheme dobita https://; null in "" = prazno.
+    const urlK = preveriUrlPolja([["logo_url", logoUrl], ["banner_url", bannerUrl], ["website", website, { normaliziraj: true }], ["instagram", instagram, { normaliziraj: true, instagram: true }]]);
+    if (urlK.napaka) return res.status(400).json(urlK.napaka);
+
     // Zanri: neznan zanr = 400 (preveriZanre); manjkajoce ali null = brez zanrov (kot doslej).
     const zanriKluba = (genres === undefined || genres === null) ? [] : preveriZanre(genres, res);
     if (!zanriKluba) return;
@@ -1995,13 +2000,13 @@ app.post("/clubs", requireAuth, requireRole("business", "admin"), async (req, re
       [
         req.user.userId,
         name,
-        logoUrl || "",
-        bannerUrl || "",
+        urlK.vrednosti.logo_url || "",
+        urlK.vrednosti.banner_url || "",
         description || "",
         contactEmail || "",
         contactPhone || "",
-        instagram || "",
-        website || "",
+        urlK.vrednosti.instagram || "",
+        urlK.vrednosti.website || "",
         address || "",
         city || "",
         country || "",
@@ -2256,6 +2261,17 @@ app.patch("/business/clubs/me", requireAuth, requireClub("owner", "manager"), as
     };
     if (incoming.is_organizer !== undefined && typeof incoming.is_organizer !== "boolean") {
       return res.status(400).send("isOrganizer must be true or false.");
+    }
+
+    // URL polja kluba (#269): samo http(s), napaka 400 invalid_url. Nespremenjena vrednost (tudi stara neveljavna) se ne preverja,
+    // ker iOS ob vsakem shranjevanju poslje vsa polja. Stari zapisi se ne cistijo. Pred vsakim zapisom, zato se ob napaki nic ne zapise.
+    const urlPolja = [["logo_url", incoming.logo_url], ["banner_url", incoming.banner_url], ["website", incoming.website, { normaliziraj: true }],
+      ["instagram", incoming.instagram, { normaliziraj: true, instagram: true }]];
+    if (urlPolja.some(([, v]) => v !== undefined)) {
+      const stare = (await pool.query("SELECT logo_url, banner_url, website, instagram FROM clubs WHERE id=$1", [clubId])).rows[0];
+      const urlK = preveriUrlPolja(urlPolja, stare);
+      if (urlK.napaka) return res.status(400).json(urlK.napaka);
+      Object.assign(incoming, urlK.vrednosti);
     }
 
     // URL slike/videa: https, brez presledkov, razumna dolzina. Prazen niz je dovoljen (odstrani).
@@ -2833,7 +2849,7 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
     const clubId = req.body.clubId ?? req.body.club_id;
     const title = req.body.title;
     const description = req.body.description ?? "";
-    const posterUrl = req.body.posterUrl ?? req.body.poster_url ?? "";
+    const posterUrlSurov = req.body.posterUrl ?? req.body.poster_url;
     const startAt = req.body.startAt ?? req.body.start_at;
     const endAt = req.body.endAt ?? req.body.end_at ?? null;
     const minAge = req.body.minAge ?? req.body.min_age;
@@ -2842,7 +2858,7 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
 
     const ticketPriceCents = req.body.ticketPriceCents ?? req.body.ticket_price_cents ?? null;
     const currency = (req.body.currency ?? "EUR").toString();
-    const ticketUrl = (req.body.ticketUrl ?? req.body.ticket_url ?? "").toString();
+    const ticketUrlSurov = req.body.ticketUrl ?? req.body.ticket_url;
     const capacity = req.body.capacity ?? null;
     if (capacity !== null) {
       const c = Number(capacity);
@@ -2851,6 +2867,11 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
 
     if (!clubId || !title || !startAt) return res.status(400).send("Missing clubId, title or startAt.");
     if (!/^\d+$/.test(String(clubId))) return res.status(400).send("Invalid clubId.");
+    // URL polja (#269): samo http(s), 400 invalid_url; brez polja ali null = "".
+    const urlD = preveriUrlPolja([["poster_url", posterUrlSurov], ["ticket_url", ticketUrlSurov]]);
+    if (urlD.napaka) return res.status(400).json(urlD.napaka);
+    const posterUrl = urlD.vrednosti.poster_url || "";
+    const ticketUrl = urlD.vrednosti.ticket_url || "";
     if (String(title).trim().length === 0) return res.status(400).send("Title is required.");
     if (Number.isNaN(new Date(startAt).getTime())) return res.status(400).send("startAt must be a valid date.");
     if (endAt !== null && Number.isNaN(new Date(endAt).getTime())) return res.status(400).send("endAt must be a valid date.");
@@ -2974,7 +2995,7 @@ async function dogodekZaUrejanje(req, res) {
   if (!/^\d+$/.test(req.params.id)) { res.status(400).send("Invalid event id."); return null; }
 
   const r = await pool.query(
-    `SELECT e.id, e.club_id, e.status, c.owner_user_id, c.is_organizer,
+    `SELECT e.id, e.club_id, e.status, c.owner_user_id, c.is_organizer, e.poster_url, e.ticket_url,
             e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng,
             (COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') <= NOW()) AS je_koncan
      FROM events e JOIN clubs c ON c.id = e.club_id
@@ -3045,6 +3066,12 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
       // Posnetek koncanega dogodka (migracija 019). Prazen niz = odstrani.
       recap_video_url:    b.recapVideoUrl    ?? b.recap_video_url,
     };
+
+    // URL polja (#269): samo http(s), 400 invalid_url. Nespremenjena vrednost (tudi stara neveljavna) se ne preverja (obrazca iOS in splet
+    // ob vsakem shranjevanju posljeta vsa polja); stari zapisi se ne cistijo.
+    const urlD = preveriUrlPolja([["poster_url", dovoljeno.poster_url], ["ticket_url", dovoljeno.ticket_url]], d);
+    if (urlD.napaka) return res.status(400).json(urlD.napaka);
+    Object.assign(dovoljeno, urlD.vrednosti);
 
     // Posnetek sme dobiti SAMO koncan dogodek, ki je med tremi najbolj popularnimi
     // dogodki svojega kluba (po prodanih vstopnicah). Brez te meje bi stran kluba
@@ -3594,7 +3621,7 @@ function provizijaIzTelesa(b) {
   return { bps };
 }
 
-function poljaKluba(b, zaVstavljanje) {
+function poljaKluba(b, zaVstavljanje, stare) {
   const out = {};
   const bes = (kljuc, ...imena) => {
     for (const ime of imena) if (b[ime] !== undefined) { out[kljuc] = b[ime] === null ? "" : String(b[ime]).trim(); return; }
@@ -3613,10 +3640,12 @@ function poljaKluba(b, zaVstavljanje) {
 
   if (out.name !== undefined && (out.name.length === 0 || out.name.length > 120)) return { napaka: "name is required (1-120 characters)." };
   if (out.contact_email !== undefined && out.contact_email && !VELJAVEN_EMAIL.test(out.contact_email)) return { napaka: "contactEmail is not a valid email." };
-  for (const k of ["logo_url", "banner_url", "website"]) {
-    if (out[k] && !/^https?:\/\//i.test(out[k])) return { napaka: `${k} must start with http:// or https://.` };
-    if (out[k] && out[k].length > 500) return { napaka: `${k} too long.` };
-  }
+  // URL polja (#269): samo http(s) (razclenjen URL), website/instagram brez sheme dobita https://. `stare` = trenutni zapis (PATCH): nespremenjena
+  // vrednost se ne preverja, ker admin panel ob shranjevanju poslje cel obrazec. Napaka `url` je JSON { error: "invalid_url", field, message }.
+  const urlA = preveriUrlPolja([["logo_url", out.logo_url], ["banner_url", out.banner_url], ["website", out.website, { normaliziraj: true }],
+    ["instagram", out.instagram, { normaliziraj: true, instagram: true }]], stare);
+  if (urlA.napaka) return { napaka: urlA.napaka.message, url: urlA.napaka };
+  Object.assign(out, urlA.vrednosti);
   if (out.description !== undefined && out.description.length > 5000) return { napaka: "description too long (max 5000)." };
 
   const lat = b.lat, lng = b.lng;
@@ -3675,7 +3704,7 @@ admin.post("/clubs", async (req, res) => {
   try {
     if (b.ownerEmail === undefined && b.owner_email === undefined) return res.status(400).send("ownerEmail is required.");
     const pk = poljaKluba(b, true);
-    if (pk.napaka) return res.status(400).send(pk.napaka);
+    if (pk.napaka) return pk.url ? res.status(400).json(pk.url) : res.status(400).send(pk.napaka);
     const prov = provizijaIzTelesa(b);
     if (prov && prov.napaka) return res.status(400).send(prov.napaka);
     if (prov) pk.polja.commission_bps = prov.bps;
@@ -3719,8 +3748,9 @@ admin.patch("/clubs/:id", async (req, res) => {
   const b = req.body || {};
   const c = await pool.connect();
   try {
-    const pk = poljaKluba(b, false);
-    if (pk.napaka) return res.status(400).send(pk.napaka);
+    const stareUrl = (await c.query("SELECT logo_url, banner_url, website, instagram FROM clubs WHERE id=$1", [id])).rows[0];   // nespremenjen stari zapis se ne preverja (#269)
+    const pk = poljaKluba(b, false, stareUrl);
+    if (pk.napaka) return pk.url ? res.status(400).json(pk.url) : res.status(400).send(pk.napaka);
     const prov = provizijaIzTelesa(b);
     if (prov && prov.napaka) return res.status(400).send(prov.napaka);
     if (prov) pk.polja.commission_bps = prov.bps;
