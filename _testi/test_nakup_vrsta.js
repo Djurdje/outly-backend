@@ -98,6 +98,23 @@ async function api(method, path, token, body, signal) {
     await c.query("BEGIN"); await c.query("SELECT id FROM events WHERE id=$1 FOR UPDATE", [dogodek]);
     return { sprosti: async () => { await c.query("ROLLBACK"); c.release(); } };
   }
+  // Cakanje na POGOJ, ne na cas: stavek z danim besedilom je v bazi res obvisel na zaklepu (pg_stat_activity). Fiksen spi(400) je bil
+  // pod obremenitvijo premalo (stavek se se ni zacel) ali pa je skupaj z drugimi cakanji pojedel mejo lock_timeout (#286).
+  async function cakajNaZaklep(vzorec, rok = 10000) {
+    const konec = Date.now() + rok;
+    while (Date.now() < konec) {
+      const r = await pool.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query ILIKE $1 AND pid <> pg_backend_pid()", [vzorec]);
+      if (r.rows.length) return true;
+      await spi(20);
+    }
+    return false;
+  }
+  // Isto za dnevnik procesa: vrstica pride cez cev (stdout/stderr) asinhrono, za odgovorom HTTP (#286).
+  async function cakajLog(re, rok = 5000) {
+    const konec = Date.now() + rok;
+    while (Date.now() < konec) { if (re.test(log)) return true; await spi(20); }
+    return re.test(log);
+  }
   const steviloNarocil = async (ime) => (await pool.query("SELECT COUNT(*)::int AS n FROM orders o JOIN users u ON u.id=o.user_id WHERE u.email=$1", [`${ime}@outly.si`])).rows[0].n;
 
   // ---------------------------------------------------------------- S1
@@ -229,7 +246,9 @@ async function api(method, path, token, body, signal) {
 
   // ---------------------------------------------------------------- S4
   console.log("\n# S4: izcrpan pool ni odjava (PG_POOL_MAX=1, PG_SKEN_POOL_MAX=1, kratki timeouti)");
-  await zagon(3144, { PG_POOL_MAX: "1", PG_CONNECT_TIMEOUT_MS: "300", PG_SKEN_POOL_MAX: "1", PG_SKEN_CONNECT_TIMEOUT_MS: "300" });
+  // PG_SKEN_LOCK_TIMEOUT_MS=20000: S4 ne preverja lock_timeout (to dela test_sken_zaklep.js Z3), temvec da sken, ki je obvisel na zaklepu,
+  // PO SPROSTITVI uspe. S privzetim 1 s je bila to casovna dirka: zaklep 400 ms + sken2 + scan-key + /healthz skupaj ~1 s (#286, #273).
+  await zagon(3144, { PG_POOL_MAX: "1", PG_CONNECT_TIMEOUT_MS: "300", PG_SKEN_POOL_MAX: "1", PG_SKEN_CONNECT_TIMEOUT_MS: "300", PG_SKEN_LOCK_TIMEOUT_MS: "20000" });
   const E4 = await dogodek("E4 zaklenjen", 1000);
   const E4sken = await dogodek("E4 sken (v oknu skena)", 1000, cez2Uri);
   const kup = await api("POST", `/events/${E4sken}/orders`, U.kupec_c, { quantity: 1 });
@@ -237,7 +256,7 @@ async function api(method, path, token, body, signal) {
   const koda = kup.body.tickets[0];
   const lkE = await zakleni(E4);
   const obvisel = api("POST", `/events/${E4}/orders`, U.kupec_d, { quantity: 1 });                  // drzi edino povezavo glavnega poola
-  await spi(400);
+  assert(await cakajNaZaklep("%INSERT INTO orders%"), "priprava: nakup je obvisel na zaklepu dogodka in drzi edino povezavo glavnega poola");
   const me = await api("GET", "/me", U.kupec_c);
   assert(me.status === 503 && me.retryAfter === "5", "GET /me ob izcrpanem glavnem poolu -> 503 Retry-After (NE 401, sicer aplikacija odjavi uporabnika)", me);
   const me2 = await api("GET", "/me/tickets", U.kupec_c);
@@ -261,7 +280,7 @@ async function api(method, path, token, body, signal) {
   // Sken: edina povezava skenPool obvisi na zaklepu vrstice vstopnice; naslednji sken dobi 503, ne 401.
   const lkT = await (async () => { const c = await pool.connect(); await c.query("BEGIN"); await c.query("SELECT id FROM tickets WHERE serial=$1 FOR UPDATE", [koda.serial]); return { sprosti: async () => { await c.query("ROLLBACK"); c.release(); } }; })();
   const sken1 = api("POST", "/business/tickets/scan", U.lastnik, { qr: koda.qr });                   // obvisi na UPDATE
-  await spi(400);
+  assert(await cakajNaZaklep("%UPDATE tickets SET status=%"), "priprava: sken je obvisel na UPDATE vstopnice in drzi edino povezavo skenPool");
   const sken2 = await api("POST", "/business/tickets/scan", U.lastnik, { qr: koda.qr });
   assert(sken2.status === 503 && sken2.retryAfter === "5", "sken ob izcrpanem skenPool -> 503 Retry-After (NE 401: vratar ostane prijavljen, telefon preklopi na preverjanje brez povezave)", sken2);
   assert(sken2.ms < 2000, "503 skena pride hitro (kratek PG_SKEN_CONNECT_TIMEOUT_MS)", sken2.ms);
@@ -319,7 +338,7 @@ async function api(method, path, token, body, signal) {
   try { s5j = await api("GET", "/business/events", U.lastnik); }
   finally { await pool.query("ALTER TABLE clubs_skrita RENAME TO clubs"); }
   assert(s5j.status === 500, "napaka sheme (manjkajoca tabela) v iskanju kluba ostane 500 (ne maskirana kot 503)", s5j);
-  assert(/\[klub\] nepricakovana napaka/.test(log), "500 je zapisan v dnevnik s skladom");
+  assert(await cakajLog(/\[klub\] nepricakovana napaka/), "500 je zapisan v dnevnik s skladom");
   await ustavi();
 
   // ---------------------------------------------------------------- S6
@@ -339,7 +358,7 @@ async function api(method, path, token, body, signal) {
   const hz503 = await api("GET", "/healthz");
   assert(hz503.status === 503 && hz503.body.ok === false, "zastoj (nobena povezava se ne vrne) dlje od ZDRAVJE_ZASICEN_MS -> /healthz 503", hz503);
   assert(hz503.body && "commit" in hz503.body, "503 ima polje commit", hz503.body);
-  assert(/\[zdravje\] glavni pool: zastoj/.test(log), "razlog 503 je zapisan v dnevnik");
+  assert(await cakajLog(/\[zdravje\] glavni pool: zastoj/), "razlog 503 je zapisan v dnevnik");
   tok = false;
   await lk6.sprosti();
   assert((await obvisel6).status === 201, "obvisel nakup se po sprostitvi konca");
@@ -396,7 +415,7 @@ async function api(method, path, token, body, signal) {
   await spi(2200);
   const t9 = await api("GET", "/healthz");
   assert(t9.status === 503, "skenPool brez vrnjene povezave dlje od meje -> /healthz 503", t9);
-  assert(/\[zdravje\] skenPool: zastoj/.test(log), "razlog 503 (skenPool) je zapisan v dnevnik");
+  assert(await cakajLog(/\[zdravje\] skenPool: zastoj/), "razlog 503 (skenPool) je zapisan v dnevnik");
   await lkT9.query("ROLLBACK"); lkT9.release();
   await sken9;
   await spi(600);

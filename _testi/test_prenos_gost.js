@@ -644,15 +644,31 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
       await pdfT({ dogodek: { naslov: "Noc", zacetek: "x", prizoriscePodatki: "y", starost: "", organizator: "" }, vstopnice: ks.map(k => ({ koda: k, vrsta: "S", oznaka: "t" })), varnost: "v" });
     };
     await Promise.all(Array.from({ length: 4 }, eno));   // ogrevanje (JIT)
-    const zamiki = []; let zadnji = process.hrtime.bigint();
-    const casovnik = setInterval(() => { const n = process.hrtime.bigint(); zamiki.push(Number(n - zadnji) / 1e6 - 1); zadnji = n; }, 1);
-    const t0 = Date.now();
-    await Promise.all(Array.from({ length: 40 }, eno));
-    clearInterval(casovnik);
-    zamiki.sort((x, y) => x - y);
-    const p99 = zamiki[Math.floor(zamiki.length * 0.99)], najvec = zamiki[zamiki.length - 1];
-    console.log(`  (40 x 6 vstopnic: ${Date.now() - t0} ms skupaj; zamik zanke p50 ${zamiki[zamiki.length >> 1].toFixed(1)} p99 ${p99.toFixed(1)} max ${najvec.toFixed(1)} ms)`);
-    assert(p99 < 30, "S1: p99 zamika zanke dogodkov med navalom sestavljanja QR + PDF < 30 ms", p99);
+    // Meritev zamika zanke (setInterval 1 ms) je v ABSOLUTNIH ms odvisna od mašine: kos QR/PDF (~7-10 ms CPU) na obremenjeni mašini traja v stenski
+    // uri 2-3x dlje (OS ga prekine), p99 je bil 36-87 ms brez vsake napake v kodi (#286). Zato je meja RELATIVNA na izhodisce ISTEGA procesa
+    // v istem trenutku: ista dela, a zaporedoma (ena pošta naenkrat = največji kos je en sam kos, brez nalaganja kosov različnih mailov).
+    // Test varuje, da globalna veriga kosov (vstopnica_priloge.js, setImmediate) 40 hkratnih mailov NE zloži v isti obrat zanke
+    // (brez verige je zamik ~300 ms, tj. >> 10x izhodisce): zamik pri 40 hkratnih mailih ne sme biti bistveno vecji od zamika pri enem.
+    const izmeriZamik = async (delo) => {
+      const zamiki = []; let zadnji = process.hrtime.bigint();
+      const casovnik = setInterval(() => { const n = process.hrtime.bigint(); zamiki.push(Number(n - zadnji) / 1e6 - 1); zadnji = n; }, 1);
+      const t0 = Date.now();
+      await delo();
+      clearInterval(casovnik);
+      zamiki.sort((x, y) => x - y);
+      return { p50: zamiki[zamiki.length >> 1], p99: zamiki[Math.floor(zamiki.length * 0.99)], max: zamiki[zamiki.length - 1], ms: Date.now() - t0 };
+    };
+    // Lastnosti neodvisne od obremenitve: niti ena meritev ni nujno cista, zato do 3 poskusov; napaka v kodi (kosi se zlozijo) pade v VSEH.
+    let najboljsi = null;
+    for (let poskus = 1; poskus <= 3; poskus++) {
+      const izh = await izmeriZamik(async () => { for (let i = 0; i < 10; i++) await eno(); });
+      const naval = await izmeriZamik(() => Promise.all(Array.from({ length: 40 }, eno)));
+      const meja = Math.max(30, izh.p99 * 1.5 + 10);
+      console.log(`  (poskus ${poskus}: izhodisce 10 x 6 zaporedoma p99 ${izh.p99.toFixed(1)} max ${izh.max.toFixed(1)} ms; naval 40 x 6 vstopnic: ${naval.ms} ms skupaj; zamik zanke p50 ${naval.p50.toFixed(1)} p99 ${naval.p99.toFixed(1)} max ${naval.max.toFixed(1)} ms; meja ${meja.toFixed(1)} ms)`);
+      najboljsi = { naval, izh, meja };
+      if (naval.p99 < meja) break;
+    }
+    assert(najboljsi.naval.p99 < najboljsi.meja, "S1: p99 zamika zanke dogodkov med navalom 40 hkratnih mailov (QR + PDF) < max(30 ms, 1,5 x izhodisce enega maila + 10 ms)", najboljsi);
     // N1: predolgo besedilo ne potisne kode QR s strani
     const dolg = await pdfT({ dogodek: { naslov: "N".repeat(3000), zacetek: "x", prizoriscePodatki: "P".repeat(3000), starost: "", organizator: "O".repeat(3000) }, vstopnice: [{ koda: kod(), vrsta: "S", oznaka: "" }], varnost: "v" });
     const dolgS = dolg.toString("latin1");
