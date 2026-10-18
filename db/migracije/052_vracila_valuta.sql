@@ -16,10 +16,11 @@
 
 BEGIN;
 
+-- Indeks na `spori` PRVI: ACCESS EXCLUSIVE na `vracila` (ADD COLUMN) se drzi do COMMIT in ob deployu ne sme cakati na webhook spor(), ki bere `vracila`/`spori`.
+CREATE INDEX IF NOT EXISTS spori_payment_intent_idx ON spori (payment_intent_id);
+
 ALTER TABLE vracila ADD COLUMN IF NOT EXISTS valuta TEXT;
 
 COMMENT ON COLUMN vracila.valuta IS 'Valuta znesek_cents (052, #285), velike crke; NULL = valuta naroceno (orders.currency). Pri inactive_order zaradi neujemanja valute seje = valuta SEJE.';
-
-CREATE INDEX IF NOT EXISTS spori_payment_intent_idx ON spori (payment_intent_id);
 
 COMMIT;

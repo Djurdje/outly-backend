@@ -6218,6 +6218,9 @@ async function posljiVraciloKupcu(vid, vrsta) {
 // Spor (chargeback): obvestilo LASTNIKU kluba ob odprtju in ob zaprtju. Prejemniki: e-naslov racuna lastnika (clubs.owner_user_id) in kontaktni e-naslov kluba.
 // Ob odprtju: vstopnice naroceno na vratih ne veljajo do odlocitve. Ob zaprtju `lost`: znesek, ki ga je Outly povrnil od kluba (transfer reversal; Martin 12. 10. 2026: izgubljen spor nosi klub;
 // pogodba #97 mora to klubu nalozit), ali da avtomatska povrnitev ni uspela. Mail ob zaprtju `lost` pocaka na izid povrnitve.
+// #285: obvestilo lastniku kluba o sporu SAMO za placano naroceno (paid/partially_refunded/refunded; ima vstopnice). Spor na cancelled/failed/pending naroceno (I44, N3, placilo po preklicu)
+// ni terjatev do kluba (placila_stripe.js spor(): povrnitev `rocno`), zato maila ni. Isti pogoj v obdelovalcu (sweep) in pri prevzemu; alias spora podan.
+const SQL_SPOR_NAROCILO_PLACANO = (a) => `EXISTS (SELECT 1 FROM orders sn WHERE sn.id = ${a}.order_id AND sn.status IN ('paid', 'partially_refunded', 'refunded'))`;
 const SPORI_STOLPCI = { odprt: ["mail_odprt_poskusi", "mail_odprt_prevzeto_at", "mail_odprt_poslano_at", ""],
   zaprt: ["mail_zaprt_poskusi", "mail_zaprt_prevzeto_at", "mail_zaprt_poslano_at", "AND s.zaprt_at IS NOT NULL AND (s.stanje <> 'lost' OR s.povrnitev_stanje IN ('opravljeno','ni_uspelo','rocno'))"] };
 const sporMailVTeku = new Set();
@@ -6265,7 +6268,7 @@ async function posljiSporMail(did, vrsta) {
   try {
     const k = await pool.query(
       `UPDATE spori s SET ${cPoskusi} = s.${cPoskusi} + 1, ${cPrevzeto} = NOW()
-        WHERE s.id = $1 AND s.${cPoslano} IS NULL AND s.${cPoskusi} < $2 ${dodatek}
+        WHERE s.id = $1 AND s.${cPoslano} IS NULL AND s.${cPoskusi} < $2 ${dodatek} AND (s.order_id IS NULL OR ${SQL_SPOR_NAROCILO_PLACANO("s")})
           AND (s.${cPrevzeto} IS NULL OR s.${cPrevzeto} < NOW() - ($3::bigint[])[s.${cPoskusi} + 1] * INTERVAL '1 millisecond')
         RETURNING s.order_id, s.stanje, s.razlog, s.znesek_cents, s.valuta, s.povrnitev_stanje, s.povrnitev_cents, s.pristojbina_spora_cents, s.${cPoskusi} AS poskus`, [did, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
     if (!k.rows.length) return false;
@@ -6315,7 +6318,7 @@ async function vracilaObvestilaNeposlana() {
     for (const v of r.rows) { if (await posljiVraciloKupcu(v.id, vrsta) && VRACILA_MAIL_RAZMAK_MS) await pocakaj(VRACILA_MAIL_RAZMAK_MS); }
   }
   const sp = await pool.query(
-    `SELECT id FROM spori WHERE order_id IS NOT NULL AND ((mail_odprt_poslano_at IS NULL AND mail_odprt_poskusi < $1)
+    `SELECT id FROM spori WHERE order_id IS NOT NULL AND ${SQL_SPOR_NAROCILO_PLACANO("spori")} AND ((mail_odprt_poslano_at IS NULL AND mail_odprt_poskusi < $1)
         OR (zaprt_at IS NOT NULL AND mail_zaprt_poslano_at IS NULL AND mail_zaprt_poskusi < $1)) AND ustvarjen_at > NOW() - INTERVAL '60 days' ORDER BY ustvarjen_at LIMIT 10`, [GOST_POSTA_POSKUSOV]);
   for (const x of sp.rows) await posljiSporLastniku(x.id);
 }
