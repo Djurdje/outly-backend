@@ -17,8 +17,9 @@
  *   3. Med nakupi 3 vratarji vzporedno skenirajo (POST /business/tickets/scan): vsi sken 200, p95 < 500 ms (meja je
  *      sproscena za pocasnejse GitHub runnerje; stara koda ~580-780 ms). 3b: ista navala + 1000 bralcev GET /events hkrati
  *      (p95 skena < 1000 ms, brez 5xx). Vsak vratar skenira prek svoje vzdrzevane (keep-alive) povezave; sken z NOVO povezavo
- *      ob navali caka v vrsti sprejemanja za ~1000 povezavami (~2,5-3 s; issue #139), zato je to samo informativna sonda
- *      (trditev: 404 unknown in odgovor < 8 s); med 3b jedro ne sme zavreci nobene povezave (backlog 4096, #134). Pred/po 3b test izpise stevce jedra (/proc/net/netstat) in casovnico sprejemanja.
+ *      ob navali caka v vrsti sprejemanja za ~1000 povezavami (issue #139; cas ~ trajanje navale, 5-8 s), zato je to sonda
+ *      »ni obvisela« (trditev: 404 unknown in odgovor < 1,25 x trajanje navale + 1 s, relativno na isti zagon, #291; trda meja v stenski uri je padala
+ *      pod obremenitvijo masine). Regresijo skena ob navali NE lovi sonda, ampak p95 (500 ms; 1000 ms ob 1000 bralcih) in max (2 s) vzdrzevanih skenerjev; med 3b jedro ne sme zavreci nobene povezave (backlog 4096, #134). Pred/po 3b test izpise stevce jedra (/proc/net/netstat) in casovnico sprejemanja.
  *   4. 300 hkratnih nakupov z mesanimi kolicinami (1-4) za dogodek s kapaciteto 100: sold_count == vsota uspesnih,
  *      <= capacity, nobenega 5xx.
  *      Cetrti vratar skenira kot iOS hitra pot: POST scan-batch z enim elementom (iste meje kot POST /scan).

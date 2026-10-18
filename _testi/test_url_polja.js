@@ -8,6 +8,8 @@
  *
  *   1  PATCH /business/clubs/me: neveljavni URL -> 400 { error: "invalid_url", field, message }, NIC se ne zapise (tudi veljavna polja v istem zahtevku);
  *      veljavni: https/http, `www.klub.si` dobi https:// (website, instagram), @uporabnisko_ime ostane, null/"" brise
+ *      `-` (website, instagram) = brisanje, kot ga bere iOS (ClubContact.cisto); `\\` v URL-ju je zavrnjen (WHATWG/RFC razlika gostitelja)
+ *   1b manager sme, doorman 403, brez zetona 401 (PATCH /business/clubs/me)
  *   2  stari neveljavni zapis (vstavljen mimo API-ja): nespremenjena vrednost NE blokira shranjevanja drugih polj; sprememba v drugo neveljavno pa 400
  *   3  POST /clubs: logoUrl / bannerUrl / website / instagram; klub se ob zavrnitvi NE ustvari
  *   4  POST /events: ticketUrl / posterUrl (camelCase in snake_case); dogodek se ob zavrnitvi NE ustvari
@@ -68,6 +70,8 @@ const ZLI = [
   ["uporabnik@ (prevara z naslovom)", "https://zaupanja.vredno.si@zlobna.si/x"],
   ["predolg (2049)", "https://klub.si/" + "a".repeat(2033)],
   ["protocol-relative", "//zlobna.si/x"],
+  ["povratna poševnica (WHATWG gostitelj good.com, RFC evil.com)", "https://good.com\\@evil.com"],
+  ["povratna poševnica v poti", "https://klub.si/a\\b"],
 ];
 const ZLI_TIPI = [["stevilo", 5], ["objekt", { href: "https://klub.si" }], ["seznam", ["https://klub.si"]], ["boolean", true]];
 
@@ -81,7 +85,7 @@ const ZLI_TIPI = [["stevilo", 5], ["objekt", { href: "https://klub.si" }], ["sez
   for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
 
   try {
-    const imena = ["lastnik", "novi1", "novi2", "admin", "klubi", "obiskovalec"];
+    const imena = ["lastnik", "novi1", "novi2", "admin", "klubi", "obiskovalec", "manager", "vratar"];
     const T = {};
     imena.forEach((k, i) => { T[k] = zeton(`${k}@outly.si`, uuid(i + 1)); });
     for (const k of imena) await api("GET", "/me", T[k]);   // prvi klic ustvari vrstico
@@ -89,6 +93,8 @@ const ZLI_TIPI = [["stevilo", 5], ["objekt", { href: "https://klub.si" }], ["sez
     await pool.query("UPDATE users SET role='admin' WHERE email='admin@outly.si'");
     await pool.query("INSERT INTO clubs (owner_user_id, name, city) SELECT id, 'Lastnikov klub', 'Ljubljana' FROM users WHERE email='lastnik@outly.si'");
     const klubId = (await pool.query("SELECT id FROM clubs WHERE name='Lastnikov klub'")).rows[0].id;
+    await pool.query("INSERT INTO club_members (club_id, user_id, role) SELECT $1, id, 'manager' FROM users WHERE email='manager@outly.si'", [klubId]);
+    await pool.query("INSERT INTO club_members (club_id, user_id, role) SELECT $1, id, 'doorman' FROM users WHERE email='vratar@outly.si'", [klubId]);
     const klub = async () => (await pool.query("SELECT name, logo_url, banner_url, website, instagram, gallery_urls, video_url FROM clubs WHERE id=$1", [klubId])).rows[0];
     const stKlubov = async () => (await pool.query("SELECT COUNT(*)::int AS n FROM clubs")).rows[0].n;
     const stDogodkov = async () => (await pool.query("SELECT COUNT(*)::int AS n FROM events")).rows[0].n;
@@ -112,8 +118,10 @@ const ZLI_TIPI = [["stevilo", 5], ["objekt", { href: "https://klub.si" }], ["sez
       const r = await api("PATCH", "/business/clubs/me", T.lastnik, { [camel]: "javascript:alert(1)" });
       assert(jeInvalidUrl(r, camel === "logoUrl" ? "logo_url" : "banner_url"), `camelCase ${camel}: javascript: -> 400 invalid_url`, r);
     }
-    let r = await api("PATCH", "/business/clubs/me", T.lastnik, { website: "-" });
-    assert(jeInvalidUrl(r, "website"), "website `-` (brez piko v imenu gostitelja) -> 400", r);
+    let r = await api("PATCH", "/business/clubs/me", T.lastnik, { website: "N/A" });
+    assert(jeInvalidUrl(r, "website"), "website `N/A` (brez piko v imenu gostitelja) -> 400", r);
+    r = await api("PATCH", "/business/clubs/me", T.lastnik, { website: "klub.si\\@evil.com" });
+    assert(jeInvalidUrl(r, "website"), "website brez sheme z `\\` -> 400", r);
     r = await api("PATCH", "/business/clubs/me", T.lastnik, { instagram: "<img src=x onerror=alert(1)>" });
     assert(jeInvalidUrl(r, "instagram"), "instagram z HTML -> 400", r);
     r = await api("PATCH", "/business/clubs/me", T.lastnik, { instagram: "a".repeat(31) });
@@ -146,6 +154,14 @@ const ZLI_TIPI = [["stevilo", 5], ["objekt", { href: "https://klub.si" }], ["sez
     assert(r.status === 200 && r.body.instagram === "velvet_lj", "instagram golo uporabnisko ime ostane, kot je (obstojeca logika)", r.body);
     r = await api("PATCH", "/business/clubs/me", T.lastnik, { website: null, logo_url: "", instagram: "" });
     assert(r.status === 200 && r.body.website === "" && r.body.logo_url === "" && r.body.instagram === "", "null in prazen niz brisata (shrani se \"\")", r.body);
+    // iOS vnos »-« bere kot »kontakta ni« (ClubView ClubContact.cisto) in ga zapise lokalno pred klicem: strezniku pomeni brisanje, ne 400.
+    await pool.query("UPDATE clubs SET website='https://klub.si', instagram='@velvet.lj' WHERE id=$1", [klubId]);
+    r = await api("PATCH", "/business/clubs/me", T.lastnik, { website: " - ", instagram: "-", city: "Ljubljana" });
+    assert(r.status === 200 && r.body.website === "" && r.body.instagram === "", "website in instagram `-` (po obrezovanju) = brisanje (\"\")", r.body);
+    r = await api("PATCH", "/business/clubs/me", T.lastnik, { logo_url: "-" });
+    assert(jeInvalidUrl(r, "logo_url"), "logo_url `-` ni »prazen znak« (samo website in instagram) -> 400", r);
+    r = await api("PATCH", "/business/clubs/me", T.lastnik, { website: "—" });
+    assert(jeInvalidUrl(r, "website"), "website `—` (iOS ga ne pozna kot prazen znak) -> 400", r);
     r = await api("PATCH", "/business/clubs/me", T.lastnik, { name: "Lastnikov klub", contact_email: "a@klub.si" });
     assert(r.status === 200, "zahtevek brez URL polj dela kot prej", r);
 
@@ -172,8 +188,21 @@ const ZLI_TIPI = [["stevilo", 5], ["objekt", { href: "https://klub.si" }], ["sez
     assert(await stKlubov() === klubovPred, "zavrnjeni zahtevki niso ustvarili kluba", await stKlubov());
     r = await api("POST", "/clubs", T.novi1, { name: "Dober klub", city: "Maribor", logoUrl: "https://res.cloudinary.com/testoblak/image/upload/v1/l.jpg", bannerUrl: "", website: "www.dober.si", instagram: "@dober" });
     assert(r.status === 201 && r.body.website === "https://www.dober.si" && r.body.instagram === "@dober" && r.body.logo_url.endsWith("/l.jpg") && r.body.banner_url === "", "veljaven klub: website dobi https://", r.body);
-    r = await api("POST", "/clubs", T.novi2, { name: "Brez URL-jev", city: "Maribor" });
-    assert(r.status === 201 && r.body.website === "" && r.body.logo_url === "", "brez URL polj dela kot prej", r.body);
+    r = await api("POST", "/clubs", T.novi2, { name: "Brez URL-jev", city: "Maribor", website: "-", instagram: "-" });
+    assert(r.status === 201 && r.body.website === "" && r.body.logo_url === "", "POST /clubs: website/instagram `-` = prazno, brez URL polj dela kot prej", r.body);
+
+    console.log("\n# 3b. Vloge na PATCH /business/clubs/me (nova veja): manager sme, vratar 403, brez zetona 401");
+    r = await api("PATCH", "/business/clubs/me", T.manager, { website: "javascript:alert(1)" });
+    assert(jeInvalidUrl(r, "website"), "manager: neveljaven URL -> 400 invalid_url (vloga manager sme urejati)", r);
+    r = await api("PATCH", "/business/clubs/me", T.manager, { website: "www.manager.si" });
+    assert(r.status === 200 && r.body.website === "https://www.manager.si", "manager: veljaven website -> 200, normaliziran", r);
+    r = await api("PATCH", "/business/clubs/me", T.vratar, { website: "https://vratar.si" });
+    assert(r.status === 403, "vratar (doorman): 403, URL se ne zapise", r);
+    r = await api("PATCH", "/business/clubs/me", T.vratar, { website: "javascript:alert(1)" });
+    assert(r.status === 403, "vratar: neveljaven URL -> 403 (vloga pred validacijo)", r);
+    r = await api("PATCH", "/business/clubs/me", null, { website: "https://anon.si" });
+    assert(r.status === 401, "brez zetona: 401", r);
+    assert((await klub()).website === "https://www.manager.si", "po 403/401 je website nespremenjen", await klub());
 
     console.log("\n# 4. POST /events");
     const dogodek = (extra) => ({ clubId: klubId, title: "Zabava", startAt: cezTeden, ...extra });

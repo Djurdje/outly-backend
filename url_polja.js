@@ -4,8 +4,9 @@
 //
 // Pravilo (dodano, oblika odgovorov se ne spreminja):
 //  - undefined = polja ni v zahtevku (ne spreminjaj), null ali prazen niz = brisanje (shrani se ""), kot doslej;
-//  - sicer niz do 2048 znakov, brez presledkov in kontrolnih znakov, absoluten URL s shemo http: ali https: (razclenjen z `new URL`,
+//  - sicer niz do 2048 znakov, brez presledkov, kontrolnih znakov in `\`, absoluten URL s shemo http: ali https: (razclenjen z `new URL`,
 //    NE samo regex), z imenom gostitelja in brez uporabnika/gesla (`https://zaupanja.vredno.si@zlobna.si` je klasicna prevara);
+//  - `-` (website, instagram) = brisanje (iOS ga razume kot »ni kontakta«);
 //  - `normaliziraj` (website, instagram): vnos brez sheme (`www.klub.si`) dobi `https://` (iOS ClubInfoView pri spletni strani
 //    ne preverja ničesar in vsako shranjevanje posle vse polja), a mora imeti ime gostitelja s piko;
 //  - `instagram`: golo uporabnisko ime (`@velvet.lj`, brez `:` in `/`; crke, stevke, piko, podcrtaj, do 30 znakov) se sprejme kot doslej, vse ostalo je URL;
@@ -35,12 +36,17 @@ function preveriUrl(surova, polje, opcije = {}) {
   if (typeof surova !== "string") return { napaka: napakaUrl(polje) };
   let v = surova.trim();
   if (v === "") return { vrednost: "" };
+  // iOS (ClubView ClubContact.cisto) vnos »-« razume kot »kontakta ni«; lokalno ga zapise pred klicem, zato ga mora strezniku brisati, ne zavrniti
+  // (sicer bi vsako naslednje shranjevanje kluba dobilo 400). Druge »prazne« znake iOS ne pozna (»—« je samo prikaz).
+  if ((normaliziraj || instagram) && v === "-") return { vrednost: "" };
   if (typeof stara === "string" && v === stara.trim()) return { vrednost: v };   // nespremenjeno: stari zapis ne blokira shranjevanja
   if (v.length > NAJVEC_DOLZINA_URL) return { napaka: napakaUrl(polje) };
   if (instagram && !v.includes(":") && !v.includes("/")) {   // @uporabnisko_ime (kot iOS InstagramVnos: crke, stevke, piko, podcrtaj; do 30 znakov)
     return /^@?[A-Za-z0-9._]{1,30}$/.test(v) ? { vrednost: v } : { napaka: napakaUrl(polje) };
   }
-  if (/[\s\u0000-\u001f\u007f]/.test(v)) return { napaka: napakaUrl(polje) };
+  // Poleg presledkov in kontrolnih znakov tudi `\`: WHATWG (`new URL`, brskalnik) `https://good.com\@evil.com` bere kot gostitelja good.com,
+  // RFC 3986 razclenjevalnik (iOS `URL`) pa kot evil.com.
+  if (/[\s\u0000-\u001f\u007f\\]/.test(v)) return { napaka: napakaUrl(polje) };
   let predponaDodana = false;
   if (normaliziraj && (!IMA_SHEMO.test(v) || GOSTITELJ_Z_VRATI.test(v)) && !v.startsWith("/")) {
     v = "https://" + v;
