@@ -17,8 +17,9 @@
  *   3. Med nakupi 3 vratarji vzporedno skenirajo (POST /business/tickets/scan): vsi sken 200, p95 < 500 ms (meja je
  *      sproscena za pocasnejse GitHub runnerje; stara koda ~580-780 ms). 3b: ista navala + 1000 bralcev GET /events hkrati
  *      (p95 skena < 1000 ms, brez 5xx). Vsak vratar skenira prek svoje vzdrzevane (keep-alive) povezave; sken z NOVO povezavo
- *      ob navali caka v vrsti sprejemanja za ~1000 povezavami (~2,5-3 s; issue #139), zato je to samo informativna sonda
- *      (trditev: 404 unknown in odgovor < 8 s); med 3b jedro ne sme zavreci nobene povezave (backlog 4096, #134). Pred/po 3b test izpise stevce jedra (/proc/net/netstat) in casovnico sprejemanja.
+ *      ob navali caka v vrsti sprejemanja za ~1000 povezavami (issue #139; cas ~ trajanje navale, 5-8 s), zato je to sonda
+ *      »ni obvisela« (trditev: 404 unknown in odgovor < 1,25 x trajanje navale + 1 s, relativno na isti zagon, #291; trda meja v stenski uri je padala
+ *      pod obremenitvijo masine). Regresijo skena ob navali NE lovi sonda, ampak p95 (500 ms; 1000 ms ob 1000 bralcih) in max (2 s) vzdrzevanih skenerjev; med 3b jedro ne sme zavreci nobene povezave (backlog 4096, #134). Pred/po 3b test izpise stevce jedra (/proc/net/netstat) in casovnico sprejemanja.
  *   4. 300 hkratnih nakupov z mesanimi kolicinami (1-4) za dogodek s kapaciteto 100: sold_count == vsota uspesnih,
  *      <= capacity, nobenega 5xx.
  *      Cetrti vratar skenira kot iOS hitra pot: POST scan-batch z enim elementom (iste meje kot POST /scan).
@@ -362,7 +363,15 @@ let srv = null;   // proces backenda (ubit tudi ob izjemi)
   preveriSkene("navala + 1000 bralcev, scan-batch z 1 elementom", d.paketi, 1000);
   const sondeMs = d.sondeRez.map(x => Math.round(x.ms));
   console.log(`  (informativno: sken z NOVO povezavo ob navali ${sondeMs.join(", ")} ms; nova povezava caka v vrsti sprejemanja za povezavami bralcev, vzdrzevana ne)`);
-  assert(d.sondeRez.every(x => typeof x.ms === "number" && x.ms < 8000), "sken z novo povezavo ob navali: odgovor v < 8000 ms (ohlapna meja; garancije za novo povezavo ni, issue #139)", sondeMs);
+  // Meja je RELATIVNA na trajanje navale, izmerjeno v istem procesu ob istem casu (#291): nova povezava caka v vrsti sprejemanja za 1000 povezavami
+  // bralcev, zato je njen cas ~ trajanje cele navale (nakupi 8,5 s, bralci p95 7,3 s, sonda 7,7 s tudi na prosti masini), ki raste in pada s hitrostjo
+  // masine. Prejsnja trda meja 8000 ms je bila ze v miru na 96 % in je pod obremenitvijo (CI, vrtece procese) padala (8,7-9,3 s) brez napake streznika.
+  // Sonda ne sme cakati obcutno dlje, kot traja cela navala (obrnjen vrstni red sprejemanja, povezava, ki je streznik ne sprejme, dokler se navala ne
+  // konca, ponovni SYN po 1/3/7 s); 25 % + 1 s rezerve za jitter, zgornja absolutna meja 60 s ujame obvisel test. Odgovor vsake sonde je preverjen spodaj.
+  const navalaMs = Math.max(d.trajanje, ...d.bralciRez.map(x => x.ms));
+  const mejaSonde = Math.min(1.25 * navalaMs + 1000, 60000);
+  console.log(`  (meja sonde: ${Math.round(mejaSonde)} ms = 1,25 x navala ${Math.round(navalaMs)} ms + 1 s)`);
+  assert(d.sondeRez.every(x => typeof x.ms === "number" && x.ms < mejaSonde), `sken z novo povezavo ob navali: odgovor v < ${Math.round(mejaSonde)} ms (1,25 x trajanje navale + 1 s; garancije za novo povezavo ni, issue #139)`, { sondeMs, navalaMs: Math.round(navalaMs) });
   assert(d.sondeRez.every(x => x.status === 404 && x.body && x.body.result === "unknown"), "sken z novo povezavo ob navali: odgovor 404 unknown (brez 5xx, brez prekinjene povezave)", d.sondeRez.map(x => x.status));
   const porabljene = await pool.query("SELECT COUNT(*)::int AS n FROM tickets WHERE event_id=$1 AND status='used'", [dogodekB]);
   assert(porabljene.rows[0].n === skenovSkupaj, "v bazi je tocno toliko porabljenih vstopnic, kolikor je bilo skenov", { baza: porabljene.rows[0].n, skenov: skenovSkupaj });
