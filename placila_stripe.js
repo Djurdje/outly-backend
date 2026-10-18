@@ -141,9 +141,11 @@ async function vrniNeaktivno(c, o, seja, opis) {
   const znesek = Number.isInteger(seja.amount_total) ? seja.amount_total : 0;
   if (pi && znesek > 0 && ["cancelled", "failed"].includes(o.status)) {
     const v = await c.query(
-      `INSERT INTO vracila (order_id, event_id, razlog, znesek_cents, payment_intent_id, checkout_session_id, stripe_livemode)
-       VALUES ($1, $2, 'inactive_order', $3, $4, $5, $6) ON CONFLICT (order_id, razlog) DO NOTHING RETURNING id`,
-      [o.id, o.event_id, znesek, pi, seja.id, typeof seja.livemode === "boolean" ? seja.livemode : null]);
+      `INSERT INTO vracila (order_id, event_id, razlog, znesek_cents, payment_intent_id, checkout_session_id, stripe_livemode, valuta)
+       VALUES ($1, $2, 'inactive_order', $3, $4, $5, $6, $7) ON CONFLICT (order_id, razlog) DO NOTHING RETURNING id`,
+      [o.id, o.event_id, znesek, pi, seja.id, typeof seja.livemode === "boolean" ? seja.livemode : null,
+       typeof seja.currency === "string" && /^[a-z]{3}$/i.test(seja.currency) ? seja.currency.toUpperCase() : null]);   // #285 N3: znesek je v valuti SEJE (lahko drugacna od orders.currency), mail jo izpise
+
     console.error(`[stripe] POZOR: ${opis}: ${v.rows.length ? "vracilo v vrsti (samodejno)" : "vracilo je ze v vrsti"}.`);
   } else {
     console.error(`[stripe] POZOR: ${opis} - vrni rocno v Stripu.`);
@@ -313,31 +315,47 @@ async function vracilo(c, charge) {
 // Narocilo najdemo po PaymentIntentu ali naboju (charge); spor brez narocila se zapise (order_id NULL) in sproži alarm.
 // Stripovi statusi (docs.stripe.com/api/disputes/object): warning_needs_response, warning_under_review, warning_closed, needs_response, under_review, won, lost, prevented.
 // Zaprt = won | lost | warning_closed | prevented. Vstopnice naroceno so NA VRATIH neveljavne, dokler spor ni zaprt, in za vedno ob `lost` (index.js: SQL_SPOR_ODPRT).
+const SPOR_NAROCILO_PLACANO = ["paid", "partially_refunded", "refunded"];
 const SPOR_ZAPRT = ["won", "lost", "warning_closed", "prevented"];
 async function spor(c, dp) {
   const idOd = (v) => (typeof v === "string" ? v : (v && v.id) || null);
   const pi = idOd(dp.payment_intent), ch = idOd(dp.charge);
   if (pi) await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", ["pi:" + pi]);   // serializacija z zakljuci() (glej tam): spor se poveze natanko enkrat
   let n = null;
-  if (pi) n = (await c.query("SELECT id, public_ref FROM orders WHERE stripe_payment_intent_id = $1", [pi])).rows[0] || null;
-  if (!n && ch) n = (await c.query("SELECT id, public_ref FROM orders WHERE stripe_charge_id = $1", [ch])).rows[0] || null;
+  if (pi) n = (await c.query("SELECT id, public_ref, status FROM orders WHERE stripe_payment_intent_id = $1", [pi])).rows[0] || null;
+  if (!n && ch) n = (await c.query("SELECT id, public_ref, status FROM orders WHERE stripe_charge_id = $1", [ch])).rows[0] || null;
   const zaprt = SPOR_ZAPRT.includes(dp.status);
+  // #285: spor na naroceno, ki NI placano (cancelled/failed/pending: I44, N3 #258, placilo po preklicu) nima vstopnic in ni pogodbena terjatev do kluba: `inactive_order` je nasa napaka
+  // (pristojbino nosi Outly), zato povrnitev od kluba NI samodejna (`rocno`, odloci Martin) in lastnik kluba ne dobi maila (index.js: SQL_SPOR_NAROCILO_PLACANO).
+  const placano = !n || SPOR_NAROCILO_PLACANO.includes(n.status);
   const rok = dp.evidence_details && Number.isInteger(dp.evidence_details.due_by) ? new Date(dp.evidence_details.due_by * 1000) : null;
   const ustvarjen = Number.isInteger(dp.created) ? new Date(dp.created * 1000) : new Date();
   const znesek = Number.isInteger(dp.amount) && dp.amount >= 0 ? dp.amount : 0;
   const prej = (await c.query("SELECT stanje FROM spori WHERE id = $1", [dp.id])).rows[0];
   await c.query(
     `INSERT INTO spori (id, order_id, payment_intent_id, charge_id, stanje, razlog, znesek_cents, valuta, rok_dokazov_at, ustvarjen_at, zaprt_at, povrnitev_stanje, povrnitev_napaka)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 THEN NOW() END, CASE WHEN $5 = 'lost' THEN (CASE WHEN $2::bigint IS NULL THEN 'rocno' ELSE 'caka' END) END,
-            CASE WHEN $5 = 'lost' AND $2::bigint IS NULL THEN 'spor brez narocila: povrnitve od kluba ni mogoce izracunati' END)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 THEN NOW() END, CASE WHEN $5 = 'lost' THEN (CASE WHEN $2::bigint IS NULL OR NOT $12::boolean THEN 'rocno' ELSE 'caka' END) END,
+            CASE WHEN $5 = 'lost' AND $2::bigint IS NULL THEN 'spor brez narocila: povrnitve od kluba ni mogoce izracunati'
+                 WHEN $5 = 'lost' AND NOT $12::boolean THEN 'spor na neplacanem/preklicanem narocilu: povrnitev od kluba ni samodejna, odloci rocno' END)
      ON CONFLICT (id) DO UPDATE SET stanje = EXCLUDED.stanje, razlog = EXCLUDED.razlog, order_id = COALESCE(spori.order_id, EXCLUDED.order_id),
             rok_dokazov_at = EXCLUDED.rok_dokazov_at, zaprt_at = COALESCE(spori.zaprt_at, EXCLUDED.zaprt_at), posodobljen_at = NOW(),
             povrnitev_stanje = COALESCE(spori.povrnitev_stanje, EXCLUDED.povrnitev_stanje),
-            povrnitev_napaka = CASE WHEN spori.povrnitev_stanje IS NULL AND EXCLUDED.povrnitev_stanje = 'rocno' THEN 'spor brez narocila: povrnitve od kluba ni mogoce izracunati' ELSE spori.povrnitev_napaka END`,
+            povrnitev_napaka = CASE WHEN spori.povrnitev_stanje IS NULL AND EXCLUDED.povrnitev_stanje = 'rocno' THEN EXCLUDED.povrnitev_napaka
+                 WHEN spori.povrnitev_stanje = 'rocno' AND spori.order_id IS NULL AND EXCLUDED.order_id IS NOT NULL AND NOT $12::boolean THEN 'spor na neplacanem/preklicanem narocilu: povrnitev od kluba ni samodejna, odloci rocno'
+                 ELSE spori.povrnitev_napaka END`,
     [dp.id, n ? n.id : null, pi, ch, String(dp.status || "unknown").slice(0, 40), dp.reason ? String(dp.reason).slice(0, 60) : null, znesek,
-     dp.currency ? String(dp.currency).toUpperCase().slice(0, 3) : null, rok, ustvarjen, zaprt]);
+     dp.currency ? String(dp.currency).toUpperCase().slice(0, 3) : null, rok, ustvarjen, zaprt, placano]);
   const kaj = `spor ${dp.id} (${dp.reason || "?"}) ${znesek} c, stanje ${dp.status}, narocilo ${n ? n.public_ref : "NEZNANO"}`;
+  // #285 N4: izgubljen spor, kupec pa je ze dobil mail »vracilo se ni izvedeno, uredili ga bomo rocno«: obljuba je zdaj napacna (denar je dobil prek banke).
+  if (dp.status === "lost" && (!prej || prej.stanje !== "lost") && (n || pi)) {
+    const ob = await c.query(
+      `SELECT v.id FROM vracila v WHERE v.mail_ni_izvedeno_poslano_at IS NOT NULL AND (($1::bigint IS NOT NULL AND v.order_id = $1) OR ($2::text IS NOT NULL AND v.payment_intent_id = $2)) LIMIT 1`,
+      [n ? n.id : null, pi]);
+    if (ob.rows.length) console.error(`[vracila] POZOR: ${kaj}: kupec je ze dobil mail »vracilo se ni izvedeno, uredili ga bomo rocno« (vracilo ${ob.rows[0].id}), zdaj je denar dobil prek izgubljenega spora - NE vracaj rocno.`);
+  }
   if (!n) console.error(`[spori] POZOR: ${kaj} - spora ni mogoce povezati z narocilom, preveri v Stripu.${dp.status === "lost" ? " IZGUBLJEN: povrnitev od kluba NI sprozena (rocno)." : ""}`);
+  else if (!placano && (!prej || zaprt)) console.error(`[spori] POZOR: spor na neplacanem/preklicanem narocilu ${n.public_ref} (${n.status}): ${kaj} - povrnitev od kluba NI samodejna, lastnik kluba NI obvescen, odloci rocno.`);
+  else if (!placano) console.log(`[spori] posodobljen ${kaj} (narocilo ni placano)`);
   else if (!prej) console.error(`[spori] POZOR: nov ${kaj}. Vstopnice naroceno na vratih NE veljajo do konca spora; lastnik kluba je obvescen. Rok za dokaze: ${rok ? rok.toISOString() : "?"}.`);
   else if (zaprt) console.error(`[spori] POZOR: spor zaprt: ${kaj}.${dp.status === "lost" ? " Izgubljen: povrnitev od kluba (transfer reversal) je v vrsti, vstopnice ostanejo neveljavne." : " Vstopnice spet veljajo."}`);
   else console.log(`[spori] posodobljen ${kaj}`);

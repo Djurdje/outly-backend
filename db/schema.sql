@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–051, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–052, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -1607,6 +1607,7 @@ CREATE TABLE public.vracila (
     mail_ni_izvedeno_poskusi smallint DEFAULT 0 NOT NULL,
     mail_ni_izvedeno_prevzeto_at timestamp with time zone,
     mail_ni_izvedeno_poslano_at timestamp with time zone,
+    valuta text,
     CONSTRAINT vracila_provizija_chk CHECK (((provizija_za_vrnitev_cents IS NULL) OR (provizija_za_vrnitev_cents >= 0))),
     CONSTRAINT vracila_razlog_chk CHECK ((razlog = ANY (ARRAY['event_cancelled'::text, 'inactive_order'::text]))),
     CONSTRAINT vracila_stanje_chk CHECK ((stanje = ANY (ARRAY['caka'::text, 'v_teku'::text, 'potrditev'::text, 'opravljeno'::text, 'ni_uspelo'::text, 'rocno'::text, 'preklicano'::text]))),
@@ -1633,6 +1634,13 @@ COMMENT ON COLUMN public.vracila.ni_izvedeno_od_at IS 'Kdaj je vrstica vstopila 
 --
 
 COMMENT ON COLUMN public.vracila.mail_ni_izvedeno_poslano_at IS 'Mail kupcu `ni_izvedeno` (Stripe je vracilo zavrnil, kupec denarja se ni dobil, uredimo rocno) poslan (051). Natanko enkrat.';
+
+
+--
+-- Name: COLUMN vracila.valuta; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.vracila.valuta IS 'Valuta znesek_cents (052, #285), velike crke; NULL = valuta naroceno (orders.currency). Pri inactive_order zaradi neujemanja valute seje = valuta SEJE.';
 
 
 --
@@ -2516,6 +2524,13 @@ CREATE INDEX spori_mail_idx ON public.spori USING btree (ustvarjen_at) WHERE ((m
 --
 
 CREATE INDEX spori_narocilo_idx ON public.spori USING btree (order_id);
+
+
+--
+-- Name: spori_payment_intent_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX spori_payment_intent_idx ON public.spori USING btree (payment_intent_id);
 
 
 --

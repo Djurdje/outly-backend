@@ -3894,7 +3894,7 @@ admin.get("/refunds", async (req, res) => {
     const counts = Object.fromEntries(STANJA.map((x) => [x, 0]));
     for (const x of stevila.rows) counts[x.stanje] = x.n;
     const r = await pool.query(
-      `SELECT v.id, v.order_id, o.public_ref, v.event_id, e.title AS event_title, v.razlog AS reason, v.stanje AS state, v.znesek_cents AS amount_cents, o.currency,
+      `SELECT v.id, v.order_id, o.public_ref, v.event_id, e.title AS event_title, v.razlog AS reason, v.stanje AS state, v.znesek_cents AS amount_cents, o.currency, COALESCE(v.valuta, o.currency) AS currency_paid,
               v.poskusi AS attempts, v.napaka AS error, v.brez_stripa AS no_stripe, v.stripe_vracilo_id AS stripe_refund_id,
               v.provizija_za_vrnitev_cents AS fee_refund_cents, v.provizija_vracilo_id AS stripe_fee_refund_id, v.stripe_pristojbina_cents AS stripe_fee_cents,
               v.stripe_stanje AS stripe_state, v.created_at, v.naslednji_poskus_at AS next_attempt_at, v.opravljeno_at AS done_at, v.mail_poslano_at AS mail_sent_at,
@@ -3925,7 +3925,8 @@ admin.get("/disputes", async (req, res) => {
       `SELECT s.id, s.order_id, o.public_ref, e.title AS event_title, e.club_id, s.stanje AS state, s.razlog AS reason, s.znesek_cents AS amount_cents, s.valuta AS currency,
               s.rok_dokazov_at AS evidence_due_at, s.ustvarjen_at AS created_at, s.zaprt_at AS closed_at, s.mail_odprt_poslano_at AS opened_mail_sent_at, s.mail_zaprt_poslano_at AS closed_mail_sent_at,
               s.povrnitev_stanje AS recovery_state, s.povrnitev_zelena_cents AS recovery_wanted_cents, s.povrnitev_cents AS recovered_cents, s.pristojbina_spora_cents AS dispute_fee_cents,
-              s.reversal_id AS stripe_reversal_id, s.povrnitev_napaka AS recovery_error
+              s.reversal_id AS stripe_reversal_id, s.povrnitev_napaka AS recovery_error,
+              CASE WHEN s.order_id IS NULL THEN NULL ELSE o.status IN ('paid', 'partially_refunded', 'refunded') END AS order_paid
          FROM spori s LEFT JOIN orders o ON o.id = s.order_id LEFT JOIN events e ON e.id = o.event_id
         WHERE ($1::boolean = FALSE OR s.zaprt_at IS NULL) ORDER BY s.ustvarjen_at DESC LIMIT $2`, [odprti, limit]);
     return res.json({ items: r.rows });
@@ -3936,7 +3937,9 @@ admin.post("/disputes/:id/retry", async (req, res) => {
   try {
     const id = String(req.params.id);
     if (!/^dp_[A-Za-z0-9]{1,60}$/.test(id)) return res.status(400).send("Invalid dispute id.");
-    if (!(await vracilaStripe.ponoviSpor(id))) return res.status(409).send("Only a recovery in state ni_uspelo or rocno can be retried.");
+    const pon = await vracilaStripe.ponoviSpor(id);
+    if (pon === "neplacano") return res.status(409).json({ error: "dispute_unpaid_order", message: "Dispute on an unpaid/cancelled order: recovery from the club is not allowed without Martin's decision (state stays rocno)." });
+    if (!pon) return res.status(409).send("Only a recovery in state ni_uspelo or rocno can be retried.");
     console.log(`Admin ${req.user.userId} je ponovno vrinil povrnitev spora ${id} v vrsto`);
     return res.json({ id, recovery_state: "caka" });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
@@ -6041,6 +6044,11 @@ const VRACILA_MAIL_RAZMAK_MS = okoljeCelo("VRACILA_MAIL_RAZMAK_MS", 550, 0, 6000
 // (pravnik 17. 10. 2026: zavrnjenega Stripovega vracila admin ne more ponoviti, retry je 409, zato dolgo cakanje nima smisla).
 const VRACILA_NI_IZVEDENO_PO_MS = okoljeCelo("VRACILA_NI_IZVEDENO_PO_MS", 3600 * 1000, 0, 30 * 24 * 3600 * 1000);
 const VRACILA_MAIL_PAKET = 20;
+// #285: mail `ni_izvedeno` (»uredili ga bomo rocno«) gre SAMO ob stanjih spora, kjer kupec denarja ne dobi vec prek banke ali spor ni chargeback (WHITELIST, ne seznam odprtih):
+// won, warning_closed, prevented (spor zakljucen v korist trgovca), warning_needs_response / warning_under_review (poizvedba banke, ni chargeback; pravnikov rok 1 h velja),
+// charge_refunded (vracilo ustavi kupecVrnjenPredMailom) in `lost` (tega obravna posljiVraciloKupcu: mail NE gre, POZOR). Vse drugo (needs_response, under_review, unknown, karkoli novega) mail ODLOZI
+// brez casovne meje (admin vidi vrstico ni_uspelo v seznamu pozornosti in stevec sporov). Spor se veze po order_id ALI po PaymentIntentu (spor brez order_id: narocilo ni imelo PI).
+const SPORI_MAIL_SME_SQL = "'won', 'warning_closed', 'prevented', 'warning_needs_response', 'warning_under_review', 'charge_refunded', 'lost'";
 const vraciloMailVTeku = new Set();
 // vrsta: 'odpoved' (takoj po zamiku odpovedi: »dogodek odpovedan, vracilo je na poti«; 0 EUR/test: »nic ni bilo zaracunano«) | 'vrnjeno' (Stripe je vracilo IZVEDEL: »vrnili smo«;
 // razlog inactive_order: »placilo smo vrnili, naroceno ni bilo zakljuceno«). Martin 12. 10. 2026: oba maila, natanko enkrat vsak.
@@ -6131,12 +6139,14 @@ const VRACILO_MAIL = {
   // Vsaj VRACILA_NI_IZVEDENO_PO_MS od ni_izvedeno_od_at; pri event_cancelled sele po poslanem mailu `odpoved` (inactive_order ga nima) in samo, ce je dogodek se odpovedan.
   // Tik pred Resendom posljiVraciloKupcu vprasa Stripe (vracilaStripe.kupecVrnjenPredMailom), ali je kupec medtem rocno vrnjen v nadzorni plosci.
   // Pogoj vsebuje pogoj indeksa vracila_mail_ni_izvedeno_idx (051: NOT brez_stripa, stanje, stripe_stanje, mail_ni_izvedeno_poslano_at IS NULL); ob spremembi uskladi oba.
+  // #285: spor, ki NI v SPORI_MAIL_SME_SQL (pravi chargeback ali neznano stanje), mail ODLOZI (pogoj ni resnicen: brez claima, poskus se ne porabi, vrstica ostane odprta); `lost` obravna posljiVraciloKupcu.
   ni_izvedeno: { poskusi: "mail_ni_izvedeno_poskusi", prevzeto: "mail_ni_izvedeno_prevzeto_at", poslano: "mail_ni_izvedeno_poslano_at",
     pogoj: `NOT v.brez_stripa AND v.stanje IN ('ni_uspelo', 'rocno') AND v.stripe_stanje IN ('failed', 'canceled')
       AND v.ni_izvedeno_od_at <= NOW() - (${VRACILA_NI_IZVEDENO_PO_MS}::bigint * INTERVAL '1 millisecond')
       AND (v.razlog = 'inactive_order' OR (v.mail_odpoved_poslano_at IS NOT NULL AND EXISTS (SELECT 1 FROM events ev WHERE ev.id = v.event_id AND ev.status = 'cancelled')))
       AND NOT COALESCE(v.payment_intent_id LIKE 'test_%', FALSE)
-      AND EXISTS (SELECT 1 FROM orders zo WHERE zo.id = v.order_id AND zo.total_cents > 0 AND NOT COALESCE(zo.stripe_payment_intent_id LIKE 'test_%', FALSE))`,
+      AND EXISTS (SELECT 1 FROM orders zo WHERE zo.id = v.order_id AND zo.total_cents > 0 AND NOT COALESCE(zo.stripe_payment_intent_id LIKE 'test_%', FALSE))
+      AND NOT EXISTS (SELECT 1 FROM spori sp WHERE (sp.order_id = v.order_id OR sp.payment_intent_id = v.payment_intent_id) AND sp.stanje NOT IN (${SPORI_MAIL_SME_SQL}))`,
     zadeva: "Vračilo še ni izvedeno / Refund not completed yet" },
 };
 async function posljiVraciloKupcu(vid, vrsta) {
@@ -6151,7 +6161,7 @@ async function posljiVraciloKupcu(vid, vrsta) {
       `UPDATE vracila v SET ${m.poskusi} = v.${m.poskusi} + 1, ${m.prevzeto} = NOW()
         WHERE v.id = $1 AND ${m.pogoj} AND v.${m.poslano} IS NULL AND v.${m.poskusi} < $2
           AND (v.${m.prevzeto} IS NULL OR v.${m.prevzeto} < NOW() - ($3::bigint[])[v.${m.poskusi} + 1] * INTERVAL '1 millisecond')
-        RETURNING v.order_id, v.razlog, v.znesek_cents, v.${m.poskusi} AS poskus`, [vid, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+        RETURNING v.order_id, v.payment_intent_id, v.razlog, v.znesek_cents, v.valuta, v.${m.poskusi} AS poskus`, [vid, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
     if (!k.rows.length) return false;
     const v = k.rows[0];
     const r0 = await pool.query(
@@ -6160,8 +6170,21 @@ async function posljiVraciloKupcu(vid, vrsta) {
          FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = e.club_id WHERE o.id = $1`, [v.order_id]);
     const o = r0.rows[0];
     if (!o) return false;
-    if (!/^[^@\s]+@[^@\s]+$/.test(o.buyer_email || "") || /@outly\.invalid$/i.test(o.buyer_email)) {
+    if (vrsta === "ni_izvedeno") {   // #285: spor `lost` = kupec je denar ze dobil prek banke (chargeback): obljuba »uredili ga bomo rocno« bi bila napacna in admina zapeljala v dvojno vracilo
+      const lost = await pool.query("SELECT COALESCE(SUM(znesek_cents), 0)::bigint AS cents FROM spori WHERE (order_id = $1 OR ($2::text IS NOT NULL AND payment_intent_id = $2)) AND stanje = 'lost' HAVING COUNT(*) > 0", [v.order_id, v.payment_intent_id]);
+      if (lost.rows.length) {
+        await pool.query(`UPDATE vracila SET ${m.poskusi} = $2 WHERE id = $1 AND ${m.poslano} IS NULL`, [vid, GOST_POSTA_POSKUSOV]);   // obdelano: brez zanke, brez maila
+        const placano = v.znesek_cents !== null && v.znesek_cents !== undefined ? v.znesek_cents : Math.max(0, o.total_cents - (o.refunded_cents || 0)), spor = Number(lost.rows[0].cents);
+        console.error(`[vracila] POZOR: narocilo ${o.public_ref} (vracilo ${vid}): Stripe vracila ni izvedel, kupec pa je denar dobil prek izgubljenega spora (chargeback); mail »vracilo se ni izvedeno« NI poslan. `
+          + (spor < placano ? `DELNI spor: ${spor} od ${placano} centov - razliko preveri rocno.` : "NE vracaj rocno (dvojno vracilo)."));
+        return false;
+      }
+    }
+    const naslovIzbrisan = /@outly\.invalid$/i.test(o.buyer_email || "");
+    if (!/^[^@\s]+@[^@\s]+$/.test(o.buyer_email || "") || naslovIzbrisan) {
       await pool.query(`UPDATE vracila SET ${m.poskusi} = $2 WHERE id = $1 AND ${m.poslano} IS NULL`, [vid, GOST_POSTA_POSKUSOV]);   // naslova ni vec: ne ponavljaj
+      // #285: claim zahteva poskusi < max, po tem zapisu je poskusi = max: ta vrstica pride sem NATANKO ENKRAT, zato je alarm enkraten (brez e-naslova: osebni podatki ostanejo v bazi)
+      if (vrsta === "ni_izvedeno") console.error(`[vracila] POZOR: kupec narocila ${o.public_ref} ni obvescen o neuspelem vracilu (${naslovIzbrisan ? "naslov izbrisan" : "naslov neveljaven"}) - obvesti/rocno`);
       return false;
     }
     // pred prvim poskusom znesek se ni zamrznjen: kar je se placano (obdelovalec bo vrnil ostanek, vracila_stripe.js izvedi())
@@ -6181,7 +6204,7 @@ async function posljiVraciloKupcu(vid, vrsta) {
         return false;
       }
     }
-    const { besedilo, html } = vraciloMailBesedilo({ ...o, razlog: v.razlog, znesek_cents: zn }, vrsta);
+    const { besedilo, html } = vraciloMailBesedilo({ ...o, currency: v.valuta || o.currency, razlog: v.razlog, znesek_cents: zn }, vrsta);   // #285 N3: valuta vracila (seja) ima prednost pred valuto naroceno
     const r = await gostResendPosli({ to: o.buyer_email, subject: `${m.zadeva}: ${o.event_title} (${o.public_ref})`.slice(0, 200), html, text: besedilo });
     if (r && r.error) {
       console.error(`Resend napaka (vracilo kupcu ${vrsta}, ${o.public_ref}, poskus ${v.poskus}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
@@ -6198,6 +6221,9 @@ async function posljiVraciloKupcu(vid, vrsta) {
 // Spor (chargeback): obvestilo LASTNIKU kluba ob odprtju in ob zaprtju. Prejemniki: e-naslov racuna lastnika (clubs.owner_user_id) in kontaktni e-naslov kluba.
 // Ob odprtju: vstopnice naroceno na vratih ne veljajo do odlocitve. Ob zaprtju `lost`: znesek, ki ga je Outly povrnil od kluba (transfer reversal; Martin 12. 10. 2026: izgubljen spor nosi klub;
 // pogodba #97 mora to klubu nalozit), ali da avtomatska povrnitev ni uspela. Mail ob zaprtju `lost` pocaka na izid povrnitve.
+// #285: obvestilo lastniku kluba o sporu SAMO za placano naroceno (paid/partially_refunded/refunded; ima vstopnice). Spor na cancelled/failed/pending naroceno (I44, N3, placilo po preklicu)
+// ni terjatev do kluba (placila_stripe.js spor(): povrnitev `rocno`), zato maila ni. Isti pogoj v obdelovalcu (sweep) in pri prevzemu; alias spora podan.
+const { SQL_SPOR_NAROCILO_PLACANO } = require("./vracila_stripe");   // ena resnica (vracila_stripe.js)
 const SPORI_STOLPCI = { odprt: ["mail_odprt_poskusi", "mail_odprt_prevzeto_at", "mail_odprt_poslano_at", ""],
   zaprt: ["mail_zaprt_poskusi", "mail_zaprt_prevzeto_at", "mail_zaprt_poslano_at", "AND s.zaprt_at IS NOT NULL AND (s.stanje <> 'lost' OR s.povrnitev_stanje IN ('opravljeno','ni_uspelo','rocno'))"] };
 const sporMailVTeku = new Set();
@@ -6245,7 +6271,7 @@ async function posljiSporMail(did, vrsta) {
   try {
     const k = await pool.query(
       `UPDATE spori s SET ${cPoskusi} = s.${cPoskusi} + 1, ${cPrevzeto} = NOW()
-        WHERE s.id = $1 AND s.${cPoslano} IS NULL AND s.${cPoskusi} < $2 ${dodatek}
+        WHERE s.id = $1 AND s.${cPoslano} IS NULL AND s.${cPoskusi} < $2 ${dodatek} AND (s.order_id IS NULL OR ${SQL_SPOR_NAROCILO_PLACANO("s")})
           AND (s.${cPrevzeto} IS NULL OR s.${cPrevzeto} < NOW() - ($3::bigint[])[s.${cPoskusi} + 1] * INTERVAL '1 millisecond')
         RETURNING s.order_id, s.stanje, s.razlog, s.znesek_cents, s.valuta, s.povrnitev_stanje, s.povrnitev_cents, s.pristojbina_spora_cents, s.${cPoskusi} AS poskus`, [did, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
     if (!k.rows.length) return false;
@@ -6295,7 +6321,7 @@ async function vracilaObvestilaNeposlana() {
     for (const v of r.rows) { if (await posljiVraciloKupcu(v.id, vrsta) && VRACILA_MAIL_RAZMAK_MS) await pocakaj(VRACILA_MAIL_RAZMAK_MS); }
   }
   const sp = await pool.query(
-    `SELECT id FROM spori WHERE order_id IS NOT NULL AND ((mail_odprt_poslano_at IS NULL AND mail_odprt_poskusi < $1)
+    `SELECT id FROM spori WHERE order_id IS NOT NULL AND ${SQL_SPOR_NAROCILO_PLACANO("spori")} AND ((mail_odprt_poslano_at IS NULL AND mail_odprt_poskusi < $1)
         OR (zaprt_at IS NOT NULL AND mail_zaprt_poslano_at IS NULL AND mail_zaprt_poskusi < $1)) AND ustvarjen_at > NOW() - INTERVAL '60 days' ORDER BY ustvarjen_at LIMIT 10`, [GOST_POSTA_POSKUSOV]);
   for (const x of sp.rows) await posljiSporLastniku(x.id);
 }
