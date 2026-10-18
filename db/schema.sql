@@ -2527,6 +2527,13 @@ CREATE INDEX spori_narocilo_idx ON public.spori USING btree (order_id);
 
 
 --
+-- Name: spori_payment_intent_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX spori_payment_intent_idx ON public.spori USING btree (payment_intent_id);
+
+
+--
 -- Name: spori_povrnitev_idx; Type: INDEX; Schema: public; Owner: -
 --
 

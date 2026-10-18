@@ -974,7 +974,7 @@ async function naloziVracilaSeznam() {
       h("td", { class: "mono" }, x.id),
       h("td", {}, h("b", {}, x.public_ref || "—"), h("span", { class: "drobno" }, "naročilo #" + x.order_id)),
       h("td", {}, x.event_title || "—", h("span", { class: "drobno" }, "dogodek #" + x.event_id)),
-      h("td", { class: "mono" }, evriCelo(x.amount_cents, x.currency),
+      h("td", { class: "mono" }, evriCelo(x.amount_cents, x.currency_paid || x.currency),
         x.amount_cents === null || x.amount_cents === undefined ? h("span", { class: "drobno" }, "se določi ob prvem poskusu") : null,
         Number.isSafeInteger(x.fee_refund_cents) && x.fee_refund_cents > 0 ? h("span", { class: "drobno" }, "provizija: " + evriCelo(x.fee_refund_cents, x.currency)) : null),
       h("td", {}, V_RAZLOGI[x.reason] || x.reason || "—", x.no_stripe ? h("span", { class: "drobno" }, "brez Stripa (test/0 €)") : null),
@@ -989,7 +989,7 @@ async function naloziVracilaSeznam() {
         ? h("span", { class: "drobno", style: V_NAPAKA_STIL }, `Stripe vračila ni izvedel (${x.stripe_state}) — kupec ni dobil denarja; vrni ročno v Stripu (ponovni poskus bi lahko vrnil dvojno)`)
         : RETRY_STANJA.includes(x.state) && !STRIPE_ZAVRNJENO.includes(x.stripe_state)
         ? h("button", { class: "mali", type: "button", onclick: (ev) => vRetry(`/admin/api/refunds/${encodeURIComponent(x.id)}/retry`,
-            `Poskusi znova vračilo #${x.id} (naročilo ${x.public_ref}, ${evriCelo(x.amount_cents, x.currency)})?\n\nVračilo gre znova v vrsto in se izvede v ozadju (~10 s). Najprej odpravi vzrok (npr. klub nima sredstev). Pred dvojnim vračilom varuje preverba že narejenih vračil pri Stripu.`,
+            `Poskusi znova vračilo #${x.id} (naročilo ${x.public_ref}, ${evriCelo(x.amount_cents, x.currency_paid || x.currency)})?\n\nVračilo gre znova v vrsto in se izvede v ozadju (~10 s). Najprej odpravi vzrok (npr. klub nima sredstev). Pred dvojnim vračilom varuje preverba že narejenih vračil pri Stripu.`,
             `Vračilo #${x.id} je znova v vrsti.`, ev.currentTarget, "če je Stripe vračilo zavrnil po sprejetju, ga vrni ročno v Stripu") }, "Poskusi znova")
         : null));
     const pln = d.items.length >= LIM;

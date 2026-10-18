@@ -168,6 +168,14 @@ async function zakljuci(c, seja) {
   if (o.status !== "pending") {
     if (!["paid", "partially_refunded", "refunded"].includes(o.status)) {
       // Placilo za ze preklicano/neuspelo narocilo (zaloga je bila sproscena). Ne vknjizimo ga (lahko bi presegli zalogo, vstopnic ni): kupec dobi VSE nazaj.
+      // #285 S1: PI zapisemo na narocilo (COALESCE, kot I44/N3): webhook spor/charge.refunded ga najde po PI, spor dobi order_id (odlog / `lost` maila `ni_izvedeno`, sken).
+      // Samo, ce PI se ni na nobenem narocilu (UNIQUE orders_pi_key ne sme zrusiti transakcije webhooka); isti advisory lock kot spor() in zakljuci().
+      const piC = typeof seja.payment_intent === "string" ? seja.payment_intent : (seja.payment_intent && seja.payment_intent.id) || null;
+      if (piC) {
+        await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", ["pi:" + piC]);
+        await c.query(`UPDATE orders SET stripe_payment_intent_id = $2 WHERE id = $1 AND stripe_payment_intent_id IS NULL
+                         AND NOT EXISTS (SELECT 1 FROM orders x WHERE x.stripe_payment_intent_id = $2)`, [o.id, piC]);
+      }
       await vrniNeaktivno(c, o, seja);
     }
     return null;
@@ -339,6 +347,13 @@ async function spor(c, dp) {
     [dp.id, n ? n.id : null, pi, ch, String(dp.status || "unknown").slice(0, 40), dp.reason ? String(dp.reason).slice(0, 60) : null, znesek,
      dp.currency ? String(dp.currency).toUpperCase().slice(0, 3) : null, rok, ustvarjen, zaprt]);
   const kaj = `spor ${dp.id} (${dp.reason || "?"}) ${znesek} c, stanje ${dp.status}, narocilo ${n ? n.public_ref : "NEZNANO"}`;
+  // #285 N4: izgubljen spor, kupec pa je ze dobil mail »vracilo se ni izvedeno, uredili ga bomo rocno«: obljuba je zdaj napacna (denar je dobil prek banke).
+  if (dp.status === "lost" && (!prej || prej.stanje !== "lost") && (n || pi)) {
+    const ob = await c.query(
+      `SELECT v.id FROM vracila v WHERE v.mail_ni_izvedeno_poslano_at IS NOT NULL AND (($1::bigint IS NOT NULL AND v.order_id = $1) OR ($2::text IS NOT NULL AND v.payment_intent_id = $2)) LIMIT 1`,
+      [n ? n.id : null, pi]);
+    if (ob.rows.length) console.error(`[vracila] POZOR: ${kaj}: kupec je ze dobil mail »vracilo se ni izvedeno, uredili ga bomo rocno« (vracilo ${ob.rows[0].id}), zdaj je denar dobil prek izgubljenega spora - NE vracaj rocno.`);
+  }
   if (!n) console.error(`[spori] POZOR: ${kaj} - spora ni mogoce povezati z narocilom, preveri v Stripu.${dp.status === "lost" ? " IZGUBLJEN: povrnitev od kluba NI sprozena (rocno)." : ""}`);
   else if (!prej) console.error(`[spori] POZOR: nov ${kaj}. Vstopnice naroceno na vratih NE veljajo do konca spora; lastnik kluba je obvescen. Rok za dokaze: ${rok ? rok.toISOString() : "?"}.`);
   else if (zaprt) console.error(`[spori] POZOR: spor zaprt: ${kaj}.${dp.status === "lost" ? " Izgubljen: povrnitev od kluba (transfer reversal) je v vrsti, vstopnice ostanejo neveljavne." : " Vstopnice spet veljajo."}`);
