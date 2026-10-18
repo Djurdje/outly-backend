@@ -96,7 +96,9 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   await new Promise(r => stripeServer.listen(STRIPE_PORT, r));
   const stripeOkolje = { STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}` };
-  const ZIV = zagon(PORT_ZIV, { ...stripeOkolje, STRIPE_SECRET_KEY: "sk_live_lokalno", GOST_NAKUP_LIVE: "1" });
+  // Obdelovalec vracil pospesen (sklop 3: odpoved brezplacnega dogodka kluba brez Stripa mora biti `opravljeno` brez klica Stripa)
+  const ZIV = zagon(PORT_ZIV, { ...stripeOkolje, STRIPE_SECRET_KEY: "sk_live_lokalno", GOST_NAKUP_LIVE: "1",
+    VRACILA_TICK_MS: "250", VRACILA_RAZMAK_MS: "10", VRACILA_ZAMIK_S: "0", VRACILA_SWEEP_MS: "400" });
   const ZIV_TP = zagon(PORT_ZIV_TP, { ...stripeOkolje, STRIPE_SECRET_KEY: "sk_live_lokalno", GOST_NAKUP_LIVE: "1", TEST_PLACILA: "true" });
   const ZIV_BREZ_WH = zagon(PORT_ZIV_BREZ_WH, { STRIPE_SECRET_KEY: "sk_live_lokalno", STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, GOST_NAKUP_LIVE: "1" });
   const SAND = zagon(PORT_SANDBOX, { ...stripeOkolje, STRIPE_SECRET_KEY: "sk_test_lokalno" });
@@ -263,9 +265,21 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     // VIP miza: ista miza dvakrat (I13)
     r = await kupiM(bZ, T.jan, evZZ, M.F3); assert(jePlacano0(r), "miza F3 za 0 EUR: 201", r);
     r = await kupiM(bZ, T.kaja, evZZ, M.F3); assert(r.status === 409 && /already booked/.test(r.body), "ista miza drugic: 409 (I13)", r);
-    // Ob odpovedi dogodka z brezplacnimi naroclili ni denarja za vrniti (0 EUR ne gre v vracila)
-    const vracil = (await pool.query("SELECT COUNT(*)::int AS n FROM vracila")).rows[0].n;
-    assert(vracil === 0, "brezplacna naroclila brez Stripa ne ustvarijo vrstic v vracilih", vracil);
+    // Odpoved brezplacnega dogodka kluba brez Stripa (sk_live_): vrstica v `vracila` nastane tudi za 0 EUR (SQL_NAROCILO_ZA_ODPOVED), a jo obdelovalec zakljuci
+    // BREZ Stripa (vracila_stripe.js: total_cents = 0 -> opravi(..., brez_stripa)); naroclilo `refunded`, vstopnice `refunded`, Stripe 0 klicev.
+    const evOdp = await dogodek(2, "lastnik2", "Brezplacen, odpovedan", 0);
+    r = await kupiV(bZ, T.kaja, evOdp, 2); assert(jePlacano0(r), "dogodek za odpoved: 2 brezplacni vstopnici", r);
+    const idOdp = (r.body.order || {}).id;
+    const pred3v = S.zahtevki;
+    r = await api(bZ, "DELETE", `/events/${evOdp}`, T.lastnik2, undefined, { "x-outly-club": "2" });
+    assert(r.status === 200 && r.body.refunds_queued === 1, "odpoved: 200, refunds_queued 1 (0 EUR gre v vrsto)", r);
+    let vr = null;
+    for (let i = 0; i < 60 && !(vr && vr.stanje === "opravljeno"); i++) { await pocakaj(250); vr = (await pool.query("SELECT stanje, brez_stripa, znesek_cents, stripe_vracilo_id FROM vracila WHERE order_id=$1", [idOdp])).rows[0]; }
+    assert(vr && vr.stanje === "opravljeno" && vr.brez_stripa === true && !vr.stripe_vracilo_id, "vracilo: opravljeno, brez Stripa (brez stripe_vracilo_id)", vr);
+    const ov = (await pool.query("SELECT status, refunded_cents FROM orders WHERE id=$1", [idOdp])).rows[0];
+    assert(ov.status === "refunded" && Number(ov.refunded_cents) === 0, "naroclilo: refunded (znesek 0)", ov);
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM tickets WHERE order_id=$1 AND status='refunded'", [idOdp])).rows[0].n === 2, "obe vstopnici refunded");
+    assert(S.zahtevki === pred3v, "Stripa se ni klicalo (ne vracilo, ne provizija)", S.zahtevki - pred3v);
 
     // ================================================================
     console.log("\n# 4. payment_mode: 0 EUR stripe, placljivo unavailable; isti pogoj kot nakup");
@@ -299,6 +313,17 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(o.pp === "unavailable" && o.sezPP === "unavailable" && o.vipPP === "unavailable", "placljiva vstopnica + placljiva miza: vse unavailable", o);
     const oA = await modi(bZ, T.ana);
     assert(JSON.stringify(oA) === JSON.stringify(o), "prijavljen kupec vidi enak payment_mode kot gost (I17)", [oA, o]);
+    // Mesan VIP tloris (znana omejitev, kot I34/#220): miza za 0 EUR IN placljiva miza vklopljeni. /vip `payment_mode` je po PROSTI mizi za 0 EUR ("stripe"),
+    // odjemalec ponudi tudi placljivo mizo, nakup te vrne 409 (denar ne uide); brez novega polja v API-ju.
+    const evMes = await dogodek(2, "lastnik2", "Mesan tloris", 0);
+    await pool.query("UPDATE events SET vip_enabled = TRUE WHERE id=$1", [evMes]);
+    const predMes = S.zahtevki;
+    r = await api(bZ, "GET", `/events/${evMes}/vip`);
+    assert(r.status === 200 && r.body.payment_mode === "stripe" && r.body.tables.some(t => t.price_cents === 0) && r.body.tables.some(t => t.price_cents > 0), "mesan tloris: /vip payment_mode stripe (po prosti mizi 0 EUR), obe vrsti miz na seznamu", [r.status, r.body.payment_mode]);
+    r = await kupiM(bZ, T.hana, evMes, M.F1); assert(jePlacano0(r) && r.body.mode === "stripe", "mesan tloris: miza F 0 EUR: 201 paid", r);
+    r = await kupiM(bZ, T.hana, evMes, M.P1); assert(jeBrezStripa(r), "mesan tloris: placljiva miza P: 409 (znana omejitev)", r);
+    assert(S.zahtevki === predMes && !(await pool.query("SELECT 1 FROM orders WHERE event_id=$1 AND table_id=$2", [evMes, M.P1])).rows.length, "mesan tloris: Stripa se ni klicalo, placljiva miza ni zasedena");
+
     // ISTI POGOJ: unavailable <=> nakup tega dela 409 (brez razhajanja)
     const kupci = ["kaja", "hana", "gina", "fran", "dana", "cene", "bor", "ana", "iva", "jan"];
     let ki = 0; const kupec = () => T[kupci[ki++ % kupci.length]];

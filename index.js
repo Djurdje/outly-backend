@@ -2475,7 +2475,7 @@ if (STOLPCI_DOGODKA_LAHKI === STOLPCI_DOGODKA) throw new Error("STOLPCI_DOGODKA_
 
 // payment_mode (#149, #191): kako se pri tem dogodku placa. DODANO polje v javnih odgovorih (GET /events, GET /events/:id, GET /events/:id/vip, GET /business/events):
 //   "test"        nic se ne zaracuna (sistem v testnem nacinu ali sandbox + klub brez Stripa)
-//   "stripe"      pravo placilo prek Stripa (klub ima dokoncan Connect)
+//   "stripe"      pravo placilo prek Stripa ali 0 EUR mimo Stripa (I49, I34)
 //   "unavailable" nakup bi bil zavrnjen (live kljuc in klub brez Stripa -> 409 za PLACLJIVO; Stripe brez webhook skrivnosti -> 503 za vse)
 // Izracun je ISTI kot ob nakupu (placilaStripe.nacinPlacilaZ), odvisen od kluba (prodajalec = events.club_id), NE od uporabnika: sme v javni predpomnilnik (I17).
 // Cena 0 EUR gre mimo Stripa; pri klubu brez Stripa ob zivem kljucu je zato kupljiva (I49: "stripe"), le Stripe kljuc brez webhook skrivnosti (503) zavrne tudi 0 EUR. Pomozni stolpec se iz vrstice odstrani; stripe_account_id ne zapusti streznika.
