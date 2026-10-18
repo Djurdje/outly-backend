@@ -4722,6 +4722,15 @@ function vsebinaNakupaMize(req) {
   }
   return { event_id: id, quantity: 1, table_id: mizaId, package_id: paketId };
 }
+// Neobvezna potrditev cene vstopnice (#277 N2, kot pri VIP mizi): `expected_price_cents` = cena ENE vstopnice v centih, ki jo je kupec videl.
+// Manjka ali null = brez preverbe (star odjemalec). Vrne { cena: number|null } ali { napaka }. Ni del vsebine nakupa (odtis idempotence se ne spremeni).
+function pricakovanaCenaIzTela(b) {
+  const v = b ? b.expected_price_cents : undefined;
+  if (v === undefined || v === null) return { cena: null };
+  if (!Number.isInteger(v) || v < 0) return { napaka: "expected_price_cents must be a non-negative integer (cents)." };
+  return { cena: v };
+}
+const SPREMENJENA_CENA_VSTOPNICE = "The ticket price has changed.";
 // Razlicica pogojev ob nakupu Z RACUNOM (044, #215): neobvezno polje telesa `terms_version`. Ni del vsebine nakupa (odtis idempotence se ne spremeni).
 // Vrne { verzija: string|null } ali { napaka }. Manjka ali null = NULL v bazi (star odjemalec); isti regex kot pri gostu in v CHECK-u migracije 044.
 const TERMS_VERZIJA_RE = /^[A-Za-z0-9._:-]{1,40}$/;
@@ -4930,6 +4939,8 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
   }
   const pogoji = pogojiIzTela(req.body);
   if (pogoji.napaka) return res.status(400).send(pogoji.napaka);
+  const pricakovana = pricakovanaCenaIzTela(req.body);
+  if (pricakovana.napaka) return res.status(400).send(pricakovana.napaka);
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
@@ -4957,6 +4968,8 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     if (demo) { await c.query("ROLLBACK"); return res.status(409).json(demo); }
     const np = napakaProdaje(e, { zahtevajCeno: true });
     if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
+    // Potrditev cene (#277 N2): cena vstopnice se je med ogledom in nakupom spremenila -> 409, nic ni zaracunano ali rezervirano.
+    if (pricakovana.cena !== null && pricakovana.cena !== e.ticket_price_cents) { await c.query("ROLLBACK"); return res.status(409).send(SPREMENJENA_CENA_VSTOPNICE); }
     if (e.capacity !== null && e.sold_count + q > e.capacity) {
       if (e.capacity - e.sold_count <= 0) razprodanoOznaci("v:" + id);
       await c.query("ROLLBACK"); return res.status(409).send(`Only ${Math.max(0, e.capacity - e.sold_count)} tickets left.`);
@@ -5245,7 +5258,9 @@ function gostTelo(req, res, next) {
     dob = gostDatumRojstva(b.date_of_birth);
     if (!dob) return res.status(400).send("Enter your date of birth as YYYY-MM-DD.");
   }
-  req.gost = { eventId, email, quantity: q, dob, terms: b.terms_version };
+  const pricakovana = pricakovanaCenaIzTela(b);
+  if (pricakovana.napaka) return res.status(400).send(pricakovana.napaka);
+  req.gost = { eventId, email, quantity: q, dob, terms: b.terms_version, pricakovanaCena: pricakovana.cena };
   next();
 }
 
@@ -5386,6 +5401,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     if (demo) { await c.query("ROLLBACK"); return res.status(409).json(demo); }
     const np = napakaProdaje(e, { zahtevajCeno: true });
     if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
+    if (g.pricakovanaCena !== null && g.pricakovanaCena !== e.ticket_price_cents) { await c.query("ROLLBACK"); return res.status(409).send(SPREMENJENA_CENA_VSTOPNICE); }   // #277 N2
     if (e.capacity !== null && e.sold_count + g.quantity > e.capacity) {
       if (e.capacity - e.sold_count <= 0) razprodanoOznaci("v:" + e.id);
       await c.query("ROLLBACK"); return res.status(409).send(`Only ${Math.max(0, e.capacity - e.sold_count)} tickets left.`);
@@ -6751,27 +6767,100 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
 });
 
 // GET /business/events/:id/tickets — vstopnice dogodka (za vrata: kdo je prišel).
+// BREZ poizvedbenih parametrov: golo polje, najvec 1000 vstopnic po id (oblika, ki jo poznata iOS in splet; pri vec kot 1000 je rez tih).
+// Z `limit`, `offset` ali `q` (#277 N1): ovojnica { tickets, counts, total, limit, offset, has_more, next_offset } - glej ARCHITECTURE »Seznam vstopnic«.
+//   limit 0..1000 (privzeto 200; 0 = samo stevci), offset >= 0, q = podniz (1..64 znakov, brez razlike velikosti) po tem, kar vloga SME videti:
+//   public_ref, serial, uporabnisko ime kupca in imetnika; lastnik in manager se po e-naslovu kupca/imetnika (vratar nikoli, I21; vstopnice guest liste
+//   nikoli: njihovih e-naslovov odgovor ne vrne). `counts` stejejo VSE vstopnice dogodka, neodvisno od q/limit/offset.
+const VSTOPNICE_LIMIT_NAJVEC = 1000;
+const VSTOPNICE_LIMIT_PRIVZETO = 200;
+const VSTOPNICE_OFFSET_NAJVEC = 10000000;
+const VSTOPNICE_Q_NAJVEC = 64;
+function celoIzPoizvedbe(v, najmanj, najvec) {
+  if (typeof v !== "string" || !/^[0-9]{1,9}$/.test(v)) return null;
+  const n = Number(v);
+  return n >= najmanj && n <= najvec ? n : null;
+}
 app.get("/business/events/:id/tickets", requireAuth, requireClub("owner", "manager", "doorman"), async (req, res) => {
   try {
     const id = celoId(req.params.id);
     if (!id) return res.status(400).send("Invalid event id.");
     const klub = await mojKlubId(req);
     if (!klub) return res.status(404).send("Club not found.");
-    const r = await pool.query(
-      `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.buyer_email, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username, ${STOLPCI_IMETNIKA}, ${SQL_SPOR_ODPRT} AS payment_disputed
-       FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id
-       LEFT JOIN users u ON u.id = o.user_id ${JOIN_IMETNIK}
-       WHERE t.event_id = $1 AND e.club_id = $2 ORDER BY t.id LIMIT 1000`, [id, klub]
-    );
     // Vratar (zacasno osebje) ne potrebuje e-naslovov kupcev (najmanj podatkov, GDPR); za rocni vstop zadostujeta
     // podpisan QR in uporabnisko ime. Lastnik in manager vidita vse kot doslej (pregled 5. 10. 2026).
     const vratar = req.klub && req.klub.role === "doorman";
-    return res.json(r.rows.map(t => {
-      const v = { ...t, qr: qrVstopnice(t) };
-      // Guest lista (035): e-naslovov gostitelja in povabljenih prijateljev klub ne vidi (nobena vloga); samo uporabniska imena.
-      if (vratar || t.is_guest_list) { delete v.buyer_email; delete v.holder_email; }
-      return v;
-    }));
+    const ovojnica = ["limit", "offset", "q"].some((k) => req.query[k] !== undefined);
+    let limit = VSTOPNICE_LIMIT_NAJVEC, offset = 0, iskanje = null;
+    if (ovojnica) {
+      limit = VSTOPNICE_LIMIT_PRIVZETO;
+      if (req.query.limit !== undefined) {
+        limit = celoIzPoizvedbe(req.query.limit, 0, VSTOPNICE_LIMIT_NAJVEC);
+        if (limit === null) return res.status(400).json({ error: "invalid_limit", message: `limit must be an integer between 0 and ${VSTOPNICE_LIMIT_NAJVEC}.` });
+      }
+      if (req.query.offset !== undefined) {
+        offset = celoIzPoizvedbe(req.query.offset, 0, VSTOPNICE_OFFSET_NAJVEC);
+        if (offset === null) return res.status(400).json({ error: "invalid_offset", message: "offset must be a non-negative integer." });
+      }
+      if (req.query.q !== undefined) {
+        if (typeof req.query.q !== "string") return res.status(400).json({ error: "invalid_q", message: "q must be a single string." });
+        const q = req.query.q.trim();
+        if (q.length > VSTOPNICE_Q_NAJVEC) return res.status(400).json({ error: "invalid_q", message: `q must be at most ${VSTOPNICE_Q_NAJVEC} characters.` });
+        if (/[\u0000-\u001f\u007f]/.test(q)) return res.status(400).json({ error: "invalid_q", message: "q must not contain control characters." });   // NUL bi Postgres zavrnil (500)
+        if (q) iskanje = "%" + q.replace(/[\\%_]/g, "\\$&") + "%";
+      }
+    }
+    const iz = `FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id
+       LEFT JOIN users u ON u.id = o.user_id ${JOIN_IMETNIK}`;
+    const params = [id, klub];
+    let pogoj = "t.event_id = $1 AND e.club_id = $2";
+    if (iskanje) {
+      params.push(iskanje);
+      // Samo polja, ki jih vloga vidi v odgovoru (sicer bi iskanje razkrilo, cesar seznam ne): e-naslov samo lastnik/manager in ne pri guest listi.
+      pogoj += ` AND (o.public_ref ILIKE $3 ESCAPE '\\' OR t.serial::text ILIKE $3 ESCAPE '\\'
+          OR COALESCE(u.username, ${IME_GOSTA}) ILIKE $3 ESCAPE '\\' OR COALESCE(hu.username, ${IME_GOSTA_IMETNIKA}) ILIKE $3 ESCAPE '\\'`
+        + (vratar ? ")" : ` OR (o.guest_list_id IS NULL AND (o.buyer_email ILIKE $3 ESCAPE '\\' OR hu.email ILIKE $3 ESCAPE '\\')))`);
+    }
+    // Ovojnica: seznam in stevci tecejo ZAPOREDNO na eni povezavi glavnega poola (ne dveh), z mejo 3 s (ILIKE brez indeksa; glavni pool sicer
+    // nima statement_timeout). Brez ovojnice (star odjemalec) ostane en navaden stavek kot doslej.
+    let c = null;
+    try {
+      if (ovojnica) {
+        c = await pool.connect();
+        await c.query("BEGIN READ ONLY");
+        await c.query("SET LOCAL statement_timeout = 3000");
+      }
+      const db = c || pool;
+      const r = await db.query(
+        `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.buyer_email, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username, ${STOLPCI_IMETNIKA}, ${SQL_SPOR_ODPRT} AS payment_disputed
+         ${iz}
+         WHERE ${pogoj} ORDER BY t.id LIMIT ${ovojnica ? limit + 1 : limit} OFFSET ${offset}`, params
+      );
+      const vrstice = ovojnica ? r.rows.slice(0, limit) : r.rows;
+      const vrni = vrstice.map(t => {
+        const v = { ...t, qr: qrVstopnice(t) };
+        // Guest lista (035): e-naslovov gostitelja in povabljenih prijateljev klub ne vidi (nobena vloga); samo uporabniska imena.
+        if (vratar || t.is_guest_list) { delete v.buyer_email; delete v.holder_email; }
+        return v;
+      });
+      if (!ovojnica) return res.json(vrni);
+      // Stevci cez VSE vstopnice dogodka (indeks tickets_event_idx); `total` = zadetki iskanja (brez iskanja = vse).
+      const st = await db.query(`SELECT t.status, COUNT(*)::int AS n FROM tickets t JOIN events e ON e.id = t.event_id WHERE t.event_id = $1 AND e.club_id = $2 GROUP BY t.status`, [id, klub]);
+      const sk = iskanje ? await db.query(`SELECT COUNT(*)::int AS n ${iz} WHERE ${pogoj}`, params) : null;
+      await c.query("COMMIT");
+      const po = Object.fromEntries(st.rows.map(x => [x.status, x.n]));
+      const counts = { all: st.rows.reduce((a, x) => a + x.n, 0), sold: (po.valid || 0) + (po.used || 0), checked_in: po.used || 0,
+        expected: po.valid || 0, refunded: po.refunded || 0, void: po.void || 0 };
+      const hasMore = limit > 0 && r.rows.length > limit;   // limit=0 = samo stevci: odjemalec se ne sme zacikliti na has_more
+      return res.json({ tickets: vrni, counts, total: sk ? sk.rows[0].n : counts.all, limit, offset, has_more: hasMore, next_offset: hasMore ? offset + limit : null });
+    } catch (e) {
+      if (c) await c.query("ROLLBACK").catch(() => {});
+      if (e && e.code === "57014") {
+        console.error("[tickets] iskanje je preseglo statement_timeout");
+        return res.status(503).set("Retry-After", "5").json({ error: "search_timeout", message: "The ticket list is busy. Try again in a few seconds." });
+      }
+      throw e;
+    } finally { if (c) c.release(); }
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
