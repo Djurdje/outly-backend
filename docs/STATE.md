@@ -51,7 +51,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte nal
   omejevalnik "nakup" (20/uro na IP). `PUT /business/vip` zaklene vrstico kluba z `FOR NO KEY UPDATE` (ne `FOR UPDATE`): nakup mize
   bere klub prek tujega kljuca in bi se s polnim zaklepom zaciklal (mrtva zanka).
 - `PUT /business/events/:id/vip` id arhivirane mize TEGA kluba tiho preskoči (400 samo za tuje); javni `GET /events/:id/vip` obdrži
-  prodano mizo tudi po izklopu/arhivu (`available: false`); `POST .../orders` sprejme `expected_price_cents` (409 ob spremembi cene).
+  prodano mizo tudi po izklopu/arhivu (`available: false`); `POST .../orders` sprejme `expected_price_cents` (409 ob spremembi cene). Od #277 N2 (18. 10.) isto polje sprejme tudi nakup vstopnic (`POST /events/:id/orders`, `/guest/events/:id/orders`; cena ENE vstopnice; 409 `The ticket price has changed.`, ARCHITECTURE »Potrditev cene«, I46). **ios-dev / web-dev (odprto):** pošiljaj `expected_price_cents` (cena, ki jo je kupec videl) in ob 409 z »ticket price has changed« (preveri PRED splošnim »price has changed«, ki je zdaj VIP) osveži dogodek in pokaži novo ceno.
 - **Vračila miz** gredo po istem toku kot vstopnice (odpoved dogodka → `vracila`, glej »Vračila in spori«); posameznega vračila na pobudo kluba (`POST /business/orders/:id/refund`) ni (kdo nosi pristojbino in provizijo, ni odločeno). Nakup mize gre skozi isti `nacinPlacila` kot vstopnice (Stripe Checkout).
 - **VIP 18+ na odjemalcih še ni:** iOS in splet polja `package_min_age` (lahko `undefined` na starem backendu — privzeto 18) še ne
   kažeta. 403 sta navadno besedilo (kot pri `min_age`); odjemalec starosti ne preverja sam.

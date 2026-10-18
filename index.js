@@ -4692,6 +4692,15 @@ function vsebinaNakupaMize(req) {
   }
   return { event_id: id, quantity: 1, table_id: mizaId, package_id: paketId };
 }
+// Neobvezna potrditev cene vstopnice (#277 N2, kot pri VIP mizi): `expected_price_cents` = cena ENE vstopnice v centih, ki jo je kupec videl.
+// Manjka ali null = brez preverbe (star odjemalec). Vrne { cena: number|null } ali { napaka }. Ni del vsebine nakupa (odtis idempotence se ne spremeni).
+function pricakovanaCenaIzTela(b) {
+  const v = b ? b.expected_price_cents : undefined;
+  if (v === undefined || v === null) return { cena: null };
+  if (!Number.isInteger(v) || v < 0) return { napaka: "expected_price_cents must be a non-negative integer (cents)." };
+  return { cena: v };
+}
+const SPREMENJENA_CENA_VSTOPNICE = "The ticket price has changed.";
 // Razlicica pogojev ob nakupu Z RACUNOM (044, #215): neobvezno polje telesa `terms_version`. Ni del vsebine nakupa (odtis idempotence se ne spremeni).
 // Vrne { verzija: string|null } ali { napaka }. Manjka ali null = NULL v bazi (star odjemalec); isti regex kot pri gostu in v CHECK-u migracije 044.
 const TERMS_VERZIJA_RE = /^[A-Za-z0-9._:-]{1,40}$/;
@@ -4900,6 +4909,8 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
   }
   const pogoji = pogojiIzTela(req.body);
   if (pogoji.napaka) return res.status(400).send(pogoji.napaka);
+  const pricakovana = pricakovanaCenaIzTela(req.body);
+  if (pricakovana.napaka) return res.status(400).send(pricakovana.napaka);
   if (!(await nakupDovoljenje(req, res))) return;
   let c;
   try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
@@ -4927,6 +4938,8 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     if (demo) { await c.query("ROLLBACK"); return res.status(409).json(demo); }
     const np = napakaProdaje(e, { zahtevajCeno: true });
     if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
+    // Potrditev cene (#277 N2): cena vstopnice se je med ogledom in nakupom spremenila -> 409, nic ni zaracunano ali rezervirano.
+    if (pricakovana.cena !== null && pricakovana.cena !== e.ticket_price_cents) { await c.query("ROLLBACK"); return res.status(409).send(SPREMENJENA_CENA_VSTOPNICE); }
     if (e.capacity !== null && e.sold_count + q > e.capacity) {
       if (e.capacity - e.sold_count <= 0) razprodanoOznaci("v:" + id);
       await c.query("ROLLBACK"); return res.status(409).send(`Only ${Math.max(0, e.capacity - e.sold_count)} tickets left.`);
@@ -5215,7 +5228,9 @@ function gostTelo(req, res, next) {
     dob = gostDatumRojstva(b.date_of_birth);
     if (!dob) return res.status(400).send("Enter your date of birth as YYYY-MM-DD.");
   }
-  req.gost = { eventId, email, quantity: q, dob, terms: b.terms_version };
+  const pricakovana = pricakovanaCenaIzTela(b);
+  if (pricakovana.napaka) return res.status(400).send(pricakovana.napaka);
+  req.gost = { eventId, email, quantity: q, dob, terms: b.terms_version, pricakovanaCena: pricakovana.cena };
   next();
 }
 
@@ -5356,6 +5371,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     if (demo) { await c.query("ROLLBACK"); return res.status(409).json(demo); }
     const np = napakaProdaje(e, { zahtevajCeno: true });
     if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
+    if (g.pricakovanaCena !== null && g.pricakovanaCena !== e.ticket_price_cents) { await c.query("ROLLBACK"); return res.status(409).send(SPREMENJENA_CENA_VSTOPNICE); }   // #277 N2
     if (e.capacity !== null && e.sold_count + g.quantity > e.capacity) {
       if (e.capacity - e.sold_count <= 0) razprodanoOznaci("v:" + e.id);
       await c.query("ROLLBACK"); return res.status(409).send(`Only ${Math.max(0, e.capacity - e.sold_count)} tickets left.`);
