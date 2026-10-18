@@ -19,7 +19,7 @@
 //     je slabsi od tega, da prodaja gre skozi pravi Stripe.
 //   - klub z dokoncanim Connect onboardingom (charges_enabled): Stripe
 //   - SANDBOX kljuc (sk_test_), klub brez Stripa: se vedno testni nacin, da demo klubi in TestFlight delajo naprej
-//   - LIVE kljuc (sk_live_), klub brez Stripa: nakup zavrnjen (409)
+//   - LIVE kljuc (sk_live_), klub brez Stripa (ali z racunom iz sandboxa, I36): PLACLJIV nakup zavrnjen (409); znesek 0 EUR je kupljiv (I49, index.js `klubBrezStripaZavraNakup`)
 //   - znesek 0 EUR: ne gre v Stripe (Checkout ima najmanjsi znesek), narocilo je takoj `paid` brez provizije (index.js, #191)
 "use strict";
 const Stripe = require("stripe");
@@ -67,7 +67,8 @@ function nacinPlacilaZ(klubImaStripe) {
 const racunVNacinu = (klub) => !!klub && (klub.stripe_account_livemode === true) === jeLive();
 const nacinPlacila = (klub) => nacinPlacilaZ(!!(klub && klub.stripe_account_id && klub.stripe_charges_enabled && racunVNacinu(klub)));
 // Vrednost za odjemalce (`payment_mode` v javnih odgovorih, #149): "test" (nic se ne zaracuna) | "stripe" (pravo placilo)
-// | "unavailable" (nakup bi vrnil 409 »klub ne sprejema spletnih placil« ali 503 »placila niso nastavljena«).
+// | "unavailable" (nakup bi vrnil 409 »klub ne sprejema spletnih placil« ali 503 »placila niso nastavljena«). Natancnejsi javni `payment_mode`
+// (po znesku: 0 EUR pri klubu brez Stripa je "stripe", I49; I34 seller_incomplete) racuna `javniNacinProdajalca` v index.js.
 const javniNacin = (nacin) => (nacin === "test" || nacin === "stripe" ? nacin : "unavailable");
 
 // Checkout seja za narocilo. Klicatelj narocilo ze ima (pending, v bazi). Vrne sejo ali vrze napako.
