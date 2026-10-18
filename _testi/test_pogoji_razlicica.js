@@ -4,7 +4,7 @@
  *   DATABASE_URL="postgres://postgres:postgres@localhost:5432/outly" node _testi/test_pogoji_razlicica.js
  * Vzorec kot test_pogoji_racun.js (lokalni JWKS, lazni Resend, testni nacin placila).
  *
- *   1  trenutna razlicica (TRENUTNI_POGOJI = 1.1.2) -> nakup uspe, brez opozorila
+ *   1  trenutna razlicica (TRENUTNI_POGOJI = 1.1.3) -> nakup uspe, brez opozorila
  *   2  druga razlicica / brez polja -> nakup USPE (201, odgovor brez novih polj), shranjeno kar je poslal odjemalec, opozorilo [pogoji]
  *      s potjo, razlicico in referenco narocila, BREZ e-naslova
  *   3  ista (pot, razlicica) drugic v oknu -> brez novega opozorila (dnevnik se ne poplavi); druga pot ali razlicica -> svoje opozorilo
@@ -99,10 +99,10 @@ const mailiNa = (email) => poslano.filter(m => m.to === email || (Array.isArray(
 
     // ================================================================
     console.log("\n# 1. Trenutna razlicica: brez opozorila");
-    let r = await nakup(T.ana, { quantity: 1, terms_version: "1.1.2" });
-    assert(r.status === 201, "nakup z 1.1.2 uspe", r.body);
+    let r = await nakup(T.ana, { quantity: 1, terms_version: "1.1.3" });
+    assert(r.status === 201, "nakup z 1.1.3 uspe", r.body);
     let v = await vrstica(r.body.order.id);
-    assert(v.terms_version === "1.1.2" && v.terms_accepted_at, "1.1.2 shranjena", v);
+    assert(v.terms_version === "1.1.3" && v.terms_accepted_at, "1.1.3 shranjena", v);
 
     // ================================================================
     console.log("\n# 2. Druga razlicica / brez polja: nakup uspe + opozorilo");
@@ -114,7 +114,7 @@ const mailiNa = (email) => poslano.filter(m => m.to === email || (Array.isArray(
     const ref11 = v.public_ref;
     assert(await cakaj(() => z(P, '"1.1"').length >= 1, 3000), "opozorilo za 1.1 v dnevniku", opozorila());
     let l = z(P, '"1.1"')[0] || "";
-    assert(l.includes(ref11) && l.includes("1.1.2"), "opozorilo vsebuje referenco narocila in trenutno razlicico", l);
+    assert(l.includes(ref11) && l.includes("1.1.3"), "opozorilo vsebuje referenco narocila in trenutno razlicico", l);
 
     r = await nakup(T.cene, { quantity: 1 });
     assert(r.status === 201, "nakup brez terms_version uspe (star iOS)", r.body);
@@ -147,8 +147,8 @@ const mailiNa = (email) => poslano.filter(m => m.to === email || (Array.isArray(
     assert(v.terms_version === "1.1", "VIP: shranjena 1.1", v.terms_version);
     assert(await cakaj(() => z(PV, '"1.1"').length === 1, 3000), "VIP: svoje opozorilo (druga pot)", opozorila());
     assert(z(PV, '"1.1"')[0].includes(v.public_ref), "VIP opozorilo vsebuje referenco", z(PV, '"1.1"'));
-    r = await api("POST", `/events/${ev}/tables/${miza[1]}/orders`, T.ana, { terms_version: "1.1.2" });
-    assert(r.status === 201, "VIP z 1.1.2 uspe", r.body);
+    r = await api("POST", `/events/${ev}/tables/${miza[1]}/orders`, T.ana, { terms_version: "1.1.3" });
+    assert(r.status === 201, "VIP z 1.1.3 uspe", r.body);
 
     const PG = "POST /guest/events/:id/orders";
     const g = await api("POST", `/guest/events/${ev}/orders`, null, { email: "gost-razlicica@example.com", quantity: 1, accept_terms: true, terms_version: "1.1" });
@@ -157,11 +157,11 @@ const mailiNa = (email) => poslano.filter(m => m.to === email || (Array.isArray(
     assert(gv && gv.guest_terms_version === "1.1", "gost: shranjena 1.1", gv);
     assert(await cakaj(() => z(PG, '"1.1"').length === 1, 3000), "gost: opozorilo", opozorila());
     assert(z(PG, '"1.1"')[0].includes(gv.public_ref), "gost opozorilo vsebuje referenco", z(PG, '"1.1"'));
-    const g2 = await api("POST", `/guest/events/${ev}/orders`, null, { email: "gost-razlicica2@example.com", quantity: 1, accept_terms: true, terms_version: "1.1.2" });
-    assert(g2.status === 201, "gost z 1.1.2 uspe", g2.body);
+    const g2 = await api("POST", `/guest/events/${ev}/orders`, null, { email: "gost-razlicica2@example.com", quantity: 1, accept_terms: true, terms_version: "1.1.3" });
+    assert(g2.status === 201, "gost z 1.1.3 uspe", g2.body);
 
     await pocakaj(300);
-    assert(!opozorila().some(l => l.includes('"1.1.2"')), "za trenutno razlicico 1.1.2 ni nobenega opozorila", opozorila());
+    assert(!opozorila().some(l => l.includes('"1.1.3"')), "za trenutno razlicico 1.1.3 ni nobenega opozorila", opozorila());
     assert(!opozorila().some(l => l.includes("@")), "opozorila brez e-naslovov", opozorila());
 
     // ================================================================

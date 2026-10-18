@@ -8,10 +8,10 @@ kaj se je spremenilo → PR-ji; zakaj → `DECISIONS.md`; kaj se ne sme zgoditi 
 **Zgodovina** (zaključeni sklopi, dnevniki sej, stari načrti, pogodbe polj, ki jih odjemalca že imata) je v `docs/arhiv/` (`STATE-do-2026-10-02*.md`, `STATE-do-2026-10-11.md`, `STATE-do-2026-10-17.md`) — ni merodajna. Ta datoteka ima **največ 200 vrstic** (outly-hq pravilo 5);
 kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte naloge so v [GitHub Issues](https://github.com/Djurdje/outly-backend/issues); zagon (komercialna uporaba): glavni seznam [#198](https://github.com/Djurdje/outly-backend/issues/198)** — preberi ga pred vsako nalogo, povezano s plačili, pravom, App Store ali zanesljivostjo.
 
-## Podjetje TIP&TAP (od 14. 10. 2026, DECISIONS)
+## Podjetje NEXT DIMENSIONS (od 18. 10. 2026 spet; DECISIONS 2026-10-18)
 
-- **Koda in besedila** navajajo TIP&TAP (`POSREDNIK_VRSTICA` v potrdilih in mailih GDPR 14). **Podatki prodajalca uradnega profila Outly so v BAZI**, ne v kodi: Martin jih v `/admin/` popravi na TIP&TAP, `vat_payer = false` (TIP&TAP ni zavezanec za DDV). Pravnik (outly-hq `pravno/2026-10-14-menjava-podjetja-tiptap.md`, T3): dogodkov »Organized by Outly« ne prodajati, dokler računovodja ne potrdi DDV in davčnega potrjevanja.
-- **Stripe platformni račun** je bil odprt na NEXT DIMENSIONS: `sk_live_` NE nastavljati s tega računa; živi račun se odpre na TIP&TAP (T5). Apple: pretvorba Individual → Organization na TIP&TAP (outly-backend#17).
+- **Koda in besedila** navajajo NEXT DIMENSIONS, družba za marketing, d.o.o. (`POSREDNIK_VRSTICA` v potrdilih in mailih GDPR 14; pogoji 1.1.3, zasebnost 2.4.5, `TRENUTNI_POGOJI` 1.1.3). TIP&TAP (14.–17. 10. 2026) ostane samo v zgodovini različic pravnih dokumentov in v `INCIDENTI.md`. **Podatki prodajalca uradnega profila Outly so v BAZI**, ne v kodi (`/admin/`). Davčne številke in statusa DDV NEXT DIMENSIONS ni v nobenem repu: ne izmišljuj, vpiše Martin.
+- **Stripe platformni račun** »NEXT DIMENSIONS« (Live `acct_1URxXNBMFgsV3Xfs`, sandbox `acct_1URxXVBslpZWVaZ8`) je pravi račun; Martin je 18. 10. 2026 povabljen v ekipo in povezal Stripe MCP (Live Read, sandbox Write). Prepoved »`sk_live_` ne s tega računa« (T5) ne velja več. Apple: pretvorba Individual → Organization na NEXT DIMENSIONS (outly-backend#17).
 
 ## Spremljanje napak
 
