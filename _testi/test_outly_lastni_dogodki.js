@@ -351,6 +351,8 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     r = await api(bZ, "POST", `/guest/events/${evO}/orders`, null, { email: "gost1@example.com", quantity: 1, ...TERMS });
     assert(r.status === 201 && r.body.mode === "stripe" && r.body.checkout_url && r.body.guest_token, "gost: uradni profil: 201 stripe", [r.status, r.body]);
     const G1 = r.body.order.id;
+    const gGo = await api(bZ, "GET", "/guest/order", null, undefined, { "x-guest-token": r.body.guest_token });
+    assert(gGo.status === 200 && gGo.body.seller && gGo.body.seller.is_platform === true && gGo.body.order.seller.is_platform === true, "gost: GET /guest/order: seller.is_platform true (oznaka naroclila)", [gGo.status, gGo.body.seller]);
     p = S.zahtevkiSej[S.zahtevkiSej.length - 1].params;
     o = await nar(G1);
     assert(!imaConnect(p) && o.application_fee_cents === 0 && o.stripe_account_id === "platform" && o.guest_email === "gost1@example.com", "gost: seja neposredna, provizija 0", [Object.keys(p).filter(k => /transfer|behalf|fee/.test(k)), o.application_fee_cents]);
@@ -382,6 +384,19 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     const sejaN1 = (await nar(N1)).stripe_checkout_session_id; const piN1 = placaj(sejaN1);
     w = await webhook(bZ, "checkout.session.completed", { id: sejaN1 });
     assert(w.status === 200 && (await nar(N1)).status === "paid" && S.pi[piN1].transfer_data && S.ch[S.pi[piN1].latest_charge].transfer, "navaden klub: zakljucek kot doslej (destination charge)");
+    // S1: potrdilo kupcu in javni seller (I50): platforma = »vstopnico prodaja NEXT DIMENSIONS«, BREZ stavka o posredniku; navaden klub nespremenjen
+    {
+      const refO1 = (await nar(O1)).public_ref, refN1 = (await nar(N1)).public_ref;
+      const mailZa = (ref) => R.poslano.find(m => /Potrdilo|Confirm|Order|Naro/i.test(String(m.subject) + String(m.text || "")) && String(m.text || "").includes(ref) && /Seller|Prodajalec/i.test(String(m.text || "")));
+      assert(await cakaj(async () => !!mailZa(refO1) && !!mailZa(refN1), 15000), "potrdili kupcu (platforma in navaden klub) poslani", R.poslano.map(m => m.subject));
+      const mO = mailZa(refO1), mN = mailZa(refN1);
+      assert(mO && /Vstopnico prodaja[^\n]*NEXT DIMENSIONS/.test(mO.text) && /The ticket is sold by[^\n]*NEXT DIMENSIONS/.test(mO.text), "PLATFORMA: potrdilo (sl in en) pravi, da vstopnico prodaja NEXT DIMENSIONS", mO && mO.text);
+      assert(mO && !/posrednik|intermediary|Vstopnico prodaja klub|sold by the club/i.test(mO.text) && !/posrednik|intermediary/i.test(mO.html || ""), "PLATFORMA: potrdilo BREZ stavka o posredniku in brez »klub«", mO && mO.text);
+      assert(mN && /Vstopnico prodaja klub: /.test(mN.text) && /Outly je samo posrednik: NEXT DIMENSIONS/.test(mN.text) && /Outly is only the intermediary: NEXT DIMENSIONS/.test(mN.text) && /The ticket is sold by the club: /.test(mN.text), "NAVADEN KLUB: potrdilo nespremenjeno (klub + Outly je samo posrednik)", mN && mN.text);
+      const sO = (await api(bZ, "GET", `/events/${evO}`)).body.seller, sN = (await api(bZ, "GET", `/events/${evN}`)).body.seller;
+      assert(sO && sO.is_platform === true && sN && !("is_platform" in sN) && Object.keys(sN).length === 8, "javni seller: platforma ima is_platform true, navaden klub ima nespremenjenih 8 polj", [sO, sN]);
+      assert((await api(bZ, "GET", `/clubs/2`)).body.seller.is_platform === true && !("is_platform" in (await api(bZ, "GET", `/clubs/1`)).body.seller), "GET /clubs/:id: isto");
+    }
     // VIP miza
     const sejaV1 = (await nar(V1)).stripe_checkout_session_id; placaj(sejaV1);
     w = await webhook(bZ, "checkout.session.completed", { id: sejaV1 });
@@ -569,6 +584,65 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       "retry: eno vracilo 1000 c BREZ reverse_transfer in refund_application_fee", reRetry.map(x => x.params));
     assert((await nar(O6)).status === "refunded", "po retry: naroceno refunded");
     assert(S.fee_refundi.length === prejFee + 1, "platforma tudi po retry: se vedno brez vracila provizije");
+
+    // ================================================================
+    console.log("\n# 8. Vracilo odloca oznaka NAROCILA, ne trenutna zastavica kluba; dnevnik stikala is_official; opozorilo v panelu");
+    // 8a: placano kot platforma (klub 2 je is_official) -> admin izklopi is_official -> odpoved -> vracilo BREZ reverse_transfer
+    const evFlag = await dogodek(2, "Outly oznaka narocila", 1000);
+    r = await nakup(T.kupec1, evFlag);
+    const OF = r.body.order.id; const seOF = (await nar(OF)).stripe_checkout_session_id; const piOF = placaj(seOF);
+    await webhook(bZ, "checkout.session.completed", { id: seOF });
+    assert((await nar(OF)).status === "paid" && (await nar(OF)).stripe_account_id === "platform" && !S.pi[piOF].transfer_data, "8a: placano kot platforma (oznaka platform, PI brez transfer_data)");
+    const logPred = ZIV.log.length;
+    const klubi0 = await api(bZ, "GET", "/admin/api/clubs", T.admin);
+    const kl2 = (klubi0.body || []).find(x => x.id === 2), kl1 = (klubi0.body || []).find(x => x.id === 1), kl5 = (klubi0.body || []).find(x => x.id === 5);
+    assert(kl2 && kl2.has_stripe_account === false && kl2.order_count > 0 && kl1.has_stripe_account === true && kl1.order_count > 0 && kl5.has_stripe_account === false && typeof kl5.order_count === "number" && !/acct_/.test(klubi0.text),
+      "admin seznam klubov: has_stripe_account + order_count (panel potrdi vklop), racun sam ne uhaja", [kl2 && [kl2.has_stripe_account, kl2.order_count], kl1 && [kl1.has_stripe_account, kl1.order_count], kl5 && [kl5.has_stripe_account, kl5.order_count]]);
+    r = await api(bZ, "PATCH", "/admin/api/clubs/2", T.admin, { isOfficial: false });
+    assert(r.status === 200 && r.body.is_official === false, "8a: admin izklopi is_official kluba 2", [r.status, r.body && r.body.is_official]);
+    assert(new RegExp(`is_official: admin uporabnik ${U.admin} je klubu 2 .*true -> false`).test(ZIV.log.slice(logPred)), "S2: dnevnik: kdo, kateri klub, staro -> novo (true -> false)", ZIV.log.slice(logPred).slice(-600));
+    const logPred2 = ZIV.log.length;
+    r = await api(bZ, "PATCH", "/admin/api/clubs/2", T.admin, { isOfficial: false, name: "Outly" });
+    assert(r.status === 200 && !/is_official:/.test(ZIV.log.slice(logPred2)), "S2: brez spremembe stikala ni vrstice v dnevniku");
+    const prejOF = S.refundi.length;
+    r = await api(bZ, "DELETE", `/events/${evFlag}`, T.lastnik2, undefined, { "x-outly-club": "2" });
+    assert(r.status === 200, "8a: odpoved dogodka po izklopu is_official", [r.status, r.body]);
+    assert(await cakaj(async () => (await pool.query("SELECT stanje FROM vracila WHERE order_id=$1", [OF])).rows[0]?.stanje === "opravljeno", 15000), "8a: vracilo opravljeno", (await pool.query("SELECT stanje, napaka FROM vracila WHERE order_id=$1", [OF])).rows);
+    const reOF = S.refundi.slice(prejOF).filter(x => x.payment_intent === piOF);
+    assert(reOF.length === 1 && reOF[0].params.reverse_transfer === undefined && reOF[0].params.refund_application_fee === undefined && Number(reOF[0].params.amount) === 1000,
+      "8a: kljub izklopljeni zastavici vracilo BREZ reverse_transfer in refund_application_fee (odloca oznaka naroclila)", reOF.map(x => x.params));
+    assert(S.fee_refundi.length === prejFee + 1, "8a: brez vracila provizije");
+    // 8b: placano z acct_ (navaden klub 1) -> admin vklopi is_official -> odpoved -> vracilo Z reverse_transfer
+    const evFlag2 = await dogodek(1, "Navadna noc oznaka narocila", 1000);
+    r = await nakup(T.kupec2, evFlag2);
+    const NF = r.body.order.id; const seNF = (await nar(NF)).stripe_checkout_session_id; const piNF = placaj(seNF);
+    await webhook(bZ, "checkout.session.completed", { id: seNF });
+    assert((await nar(NF)).status === "paid" && (await nar(NF)).stripe_account_id === "acct_ziv1" && S.pi[piNF].transfer_data, "8b: placano z acct_ (destination charge)");
+    const logPred3 = ZIV.log.length;
+    r = await api(bZ, "PATCH", "/admin/api/clubs/1", T.admin, { isOfficial: true });
+    assert(r.status === 200 && r.body.is_official === true, "8b: admin vklopi is_official kluba 1", [r.status, r.body && r.body.is_official]);
+    assert(new RegExp(`is_official: admin uporabnik ${U.admin} je klubu 1 .*false -> true`).test(ZIV.log.slice(logPred3)), "S2: dnevnik: false -> true", ZIV.log.slice(logPred3).slice(-600));
+    assert((await nar(NF)).stripe_account_id === "acct_ziv1", "8b: oznaka narocila se ob vklopu zastavice NE spremeni");
+    const prejNF = S.refundi.length, prejFeeNF = S.fee_refundi.length;
+    r = await api(bZ, "DELETE", `/events/${evFlag2}`, T.lastnik);
+    assert(r.status === 200, "8b: odpoved dogodka po vklopu is_official", [r.status, r.body]);
+    assert(await cakaj(async () => (await pool.query("SELECT stanje FROM vracila WHERE order_id=$1", [NF])).rows[0]?.stanje === "opravljeno", 15000), "8b: vracilo opravljeno", (await pool.query("SELECT stanje, napaka FROM vracila WHERE order_id=$1", [NF])).rows);
+    const reNF = S.refundi.slice(prejNF).filter(x => x.payment_intent === piNF);
+    assert(reNF.length === 1 && reNF[0].params.reverse_transfer === "true" && reNF[0].params.refund_application_fee === "false" && Number(reNF[0].params.amount) === 1000,
+      "8b: kljub vklopljeni zastavici vracilo Z reverse_transfer=true (odloca oznaka naroclila)", reNF.map(x => x.params));
+    assert(S.fee_refundi.length === prejFeeNF + 1, "8b: vracilo provizije kot pri navadnem klubu");
+    // S1 vracilo: mail o odpovedi pri platformi brez »v imenu organizatorja«
+    const refOF = (await nar(OF)).public_ref, refNF = (await nar(NF)).public_ref;
+    await cakaj(async () => R.poslano.some(m => String(m.text || "").includes(refOF) && /odpovedan|cancelled/i.test(m.text)), 15000);
+    const mvO = R.poslano.filter(m => String(m.text || "").includes(refOF) && /odpovedan|cancelled/i.test(String(m.text || "")) && !/Prodajalec/.test(m.text));
+    assert(mvO.length > 0 && mvO.every(m => !/posrednik|intermediary|v imenu organizatorja|on the organiser/i.test(m.text)), "mail o odpovedi/vracilu (platforma): brez stavka o posredniku", mvO.map(m => m.subject));
+    // vrni stikali (kontrola: vklop kluba 2 brez Stripa, izklop kluba 1) in preveri se, da panel dobi opozorilo
+    r = await api(bZ, "PATCH", "/admin/api/clubs/1", T.admin, { isOfficial: false });
+    r = await api(bZ, "PATCH", "/admin/api/clubs/2", T.admin, { isOfficial: true });
+    assert(r.status === 200 && r.body.is_official === true, "stikali vrnjeni");
+    const html = require("fs").readFileSync(require("path").join(__dirname, "..", "admin", "index.html"), "utf8");
+    assert(/Vse prodaje tega kluba gredo na račun NEXT DIMENSIONS, provizije ni, klub ne dobi denarja\./.test(html) && /window\.confirm\([^)]*has_stripe_account|has_stripe_account[\s\S]{0,400}window\.confirm/.test(html) && /star\.has_stripe_account \|\| star\.order_count > 0/.test(html),
+      "panel: opozorilo ob stikalu + confirm ob vklopu pri klubu s Stripe racunom ali narocili");
   } finally {
     for (const x of [ZIV, SAND]) { x.srv.kill(); }
     stripeServer.close(); jwksServer.close(); resendServer.close(); await pool.end().catch(() => {});
