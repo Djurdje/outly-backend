@@ -119,9 +119,15 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
 
   const polnoleten = new Date(Date.now() - 25 * 365.25 * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const mladoleten = new Date(Date.now() - 16 * 365.25 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-  for (const [k, d] of [["ana", polnoleten], ["bor", polnoleten], ["cene", polnoleten], ["mladoletni", mladoleten]]) {
+  for (const [k, d] of [["ana", polnoleten], ["bor", polnoleten], ["cene", polnoleten]]) {
     const r = await api("PATCH", "/me", T[k], { dateOfBirth: d, genres: ["house"] });
     assert(r.status === 200, `${k} nastavi datum rojstva`, r.body);
+  }
+  // 19. 10. 2026: racun od 18 let; PATCH /me ne sprejme vec 16 let, zato obstojec racun pod 18 (vpisan, ko je veljalo 15) simuliramo neposredno v bazi.
+  await pool.query("UPDATE users SET date_of_birth=$1::date, genres=ARRAY['house'], onboarded_at=NOW() WHERE email='mladoletni@outly.si'", [mladoleten]);
+  {
+    const r = await api("PATCH", "/me", T.mladoletni, { genres: ["house"] });
+    assert(r.status === 200, "mladoletni: obstojec racun 16 let ostane urejljiv (datum rojstva neposredno v bazi)", r.body);
   }
 
   // Dogodki (neposredno v bazi, da imamo nadzor nad casi in okni prodaje).

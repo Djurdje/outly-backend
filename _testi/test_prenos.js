@@ -69,8 +69,10 @@ async function api(method, path, token, body) {
     const r = await api("PATCH", "/me", T[k], { dateOfBirth: polnoleten, genres: ["house"] });
     assert(r.status === 200, `${k} nastavi datum rojstva (polnoleten)`, r.body);
   }
-  let r = await api("PATCH", "/me", T.mladoletni, { dateOfBirth: mladoleten, genres: ["house"] });
-  assert(r.status === 200, "mladoletni nastavi datum rojstva (16 let)", r.body);
+  // 19. 10. 2026: racun od 18 let; PATCH /me ne sprejme vec 16 let, zato obstojec racun pod 18 (vpisan, ko je veljalo 15) simuliramo neposredno v bazi.
+  await pool.query("UPDATE users SET date_of_birth=$1::date, genres=ARRAY['house'], onboarded_at=NOW() WHERE email='mladoletni@outly.si'", [mladoleten]);
+  let r = await api("PATCH", "/me", T.mladoletni, { genres: ["house"] });
+  assert(r.status === 200, "mladoletni: obstojec racun 16 let ostane urejljiv (datum rojstva neposredno v bazi)", r.body);
 
   // Prejemnik "neveljaven" ni potrjen (email_verified=false) - simulacija racuna, ki se ni potrdil e-naslova.
   await pool.query("UPDATE users SET email_verified=false WHERE email='neveljaven@outly.si'");
