@@ -78,15 +78,17 @@ function preveriQrV2(qr, javniSurov) {
   await pool.query("INSERT INTO clubs (owner_user_id, name, city, hidden) VALUES ((SELECT id FROM users WHERE email='drugi@outly.si'), 'Skriti Klub', 'Maribor', TRUE)");
   await pool.query("INSERT INTO club_members (club_id, user_id, role) VALUES (1, (SELECT id FROM users WHERE email='doorman@outly.si'), 'doorman')");
 
-  // Datumi rojstva: ana in bor polnoletna, mladoletni 16 let (>= 15, a < 18), brezdatuma brez datuma.
+  // Datumi rojstva: ana in bor polnoletna, mladoletni 16 let (obstojec racun pod 18), brezdatuma brez datuma.
   const polnoleten = new Date(Date.now() - 25 * 365.25 * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const mladoleten = new Date(Date.now() - 16 * 365.25 * 24 * 3600 * 1000).toISOString().slice(0, 10);
   let r = await api("PATCH", "/me", T.ana, { dateOfBirth: polnoleten, genres: ["house"] });
   assert(r.status === 200, "ana nastavi datum rojstva (polnoletna)", r.body);
   r = await api("PATCH", "/me", T.bor, { dateOfBirth: polnoleten, genres: ["house"] });
   assert(r.status === 200, "bor nastavi datum rojstva (polnoleten)", r.body);
-  r = await api("PATCH", "/me", T.mladoletni, { dateOfBirth: mladoleten, genres: ["house"] });
-  assert(r.status === 200, "mladoletni nastavi datum rojstva (16 let)", r.body);
+  // 19. 10. 2026: racun od 18 let; PATCH /me ne sprejme vec 16 let, zato obstojec racun pod 18 (vpisan, ko je veljalo 15) simuliramo neposredno v bazi.
+  await pool.query("UPDATE users SET date_of_birth=$1::date, genres=ARRAY['house'], onboarded_at=NOW() WHERE email='mladoletni@outly.si'", [mladoleten]);
+  r = await api("PATCH", "/me", T.mladoletni, { genres: ["house"] });
+  assert(r.status === 200, "mladoletni: obstojec racun 16 let ostane urejljiv (datum rojstva neposredno v bazi)", r.body);
 
   console.log("\n# Priprava dogodkov");
   const cezDan = new Date(Date.now() + 24 * 3600 * 1000).toISOString();

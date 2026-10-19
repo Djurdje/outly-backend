@@ -1353,6 +1353,18 @@ function preveriZanre(vhod, res) {
   return izbrani;
 }
 
+// Najnizja starost za uporabniski racun (Martin, 19. 10. 2026, seja menedzerja, vprasanje »Starostna meja«: »18+ in racun od 18«;
+// prej 15 po ZVOP-2, 8. clen). Meja je SAMO tu. NI isto kot min_age dogodka in STAROST_PAKET_PIJACE (to sta starosti za nakup).
+const NAJMANJ_LET_RACUN = 18;
+// Polna leta od datuma rojstva (YYYY-MM-DD) do danes po koledarju v UTC: enako kot SQL funkcija starost() (AGE; 29. 2. dopolni leto sele 1. 3.).
+// Ne deli milisekund s 365,2425: tocno 18. rojstni dan je 18, dan prej 17 (prestopna leta in ura dneva ne spremenita rezultata).
+function polnaLeta(datumRojstva, zdaj = new Date()) {
+  const [l, m, d] = datumRojstva.split("-").map(Number);
+  let leta = zdaj.getUTCFullYear() - l;
+  if (zdaj.getUTCMonth() + 1 < m || (zdaj.getUTCMonth() + 1 === m && zdaj.getUTCDate() < d)) leta--;
+  return leta;
+}
+
 // Polja, ki jih vrnemo o uporabniku. Na enem mestu, da se GET /me, PATCH /me
 // in PATCH /me/avatar ne razidejo.
 const POLJA_UPORABNIKA = `id, email, username, role, avatar_url, email_verified,
@@ -1424,13 +1436,18 @@ app.patch("/me", requireAuth, async (req, res) => {
           return res.status(400).send("dateOfBirth must be YYYY-MM-DD.");
         }
         const dat = new Date(d + "T00:00:00Z");
-        if (Number.isNaN(dat.getTime())) return res.status(400).send("Invalid dateOfBirth.");
+        // Resnicen koledarski datum (2000-02-31 bi JS premaknil v marec, Postgres pa ga zavrne -> 500).
+        if (Number.isNaN(dat.getTime()) || gostDatumRojstva(String(d)) === null) return res.status(400).send("Invalid dateOfBirth.");
         const let_ = (Date.now() - dat.getTime()) / (365.2425 * 24 * 3600 * 1000);
         if (let_ <= 0)  return res.status(400).send("dateOfBirth cannot be in the future.");
         if (let_ > 120) return res.status(400).send("dateOfBirth is not plausible.");
-        // Meja za veljavno privolitev otroka v Sloveniji je 15 let (ZVOP-2, 8. clen).
-        // Aplikacija to preveri ze pred posiljanjem; streznik je zadnja obramba.
-        if (let_ < 15)  return res.status(400).send("You must be at least 15 years old.");
+        // Najnizja starost racuna (NAJMANJ_LET_RACUN, od 19. 10. 2026 18). Aplikacija to preveri ze pred posiljanjem; streznik je zadnja obramba.
+        // Meja velja SAMO ob nastavitvi ali spremembi datuma rojstva: obstojec racun pod mejo (vpisan, ko je veljalo 15) ostane nedotaknjen
+        // in sme urejati ime, zanre ipd.; isti datum, ki je ze v bazi, ni sprememba (odjemalec ob shranjevanju profila pogosto poslje vsa polja).
+        if (polnaLeta(String(d)) < NAJMANJ_LET_RACUN) {
+          const nespremenjen = await pool.query("SELECT 1 FROM users WHERE id=$1 AND date_of_birth = $2::date", [req.user.userId, String(d)]);
+          if (nespremenjen.rows.length === 0) return res.status(400).send(`You must be at least ${NAJMANJ_LET_RACUN} years old.`);
+        }
         dodaj("date_of_birth", d);
       }
     }
