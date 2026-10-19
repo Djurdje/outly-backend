@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const net = require("net");
 const { Resend } = require("resend");
 const { jePrepovedanoIme } = require("./prepovedana_imena");   // filter neprimernih uporabniskih imen (#216 N9)
+const { NAJMANJ_LET_RACUN, danesLjubljana, polnaLeta } = require("./starost_racuna");   // najnizja starost racuna 18 let, po ljubljanskem koledarju
 const { preveriUrlPolja } = require("./url_polja");   // URL polja kluba/dogodka: samo http(s) (#269)
 const { qrPng, pdfVstopnice } = require("./vstopnica_priloge");   // QR (PNG, vgrajen v mail) in PDF vstopnice (priloga); migracija 034
 const path = require("path");
@@ -1353,17 +1354,9 @@ function preveriZanre(vhod, res) {
   return izbrani;
 }
 
-// Najnizja starost za uporabniski racun (Martin, 19. 10. 2026, seja menedzerja, vprasanje »Starostna meja«: »18+ in racun od 18«;
-// prej 15 po ZVOP-2, 8. clen). Meja je SAMO tu. NI isto kot min_age dogodka in STAROST_PAKET_PIJACE (to sta starosti za nakup).
-const NAJMANJ_LET_RACUN = 18;
-// Polna leta od datuma rojstva (YYYY-MM-DD) do danes po koledarju v UTC: enako kot SQL funkcija starost() (AGE; 29. 2. dopolni leto sele 1. 3.).
-// Ne deli milisekund s 365,2425: tocno 18. rojstni dan je 18, dan prej 17 (prestopna leta in ura dneva ne spremenita rezultata).
-function polnaLeta(datumRojstva, zdaj = new Date()) {
-  const [l, m, d] = datumRojstva.split("-").map(Number);
-  let leta = zdaj.getUTCFullYear() - l;
-  if (zdaj.getUTCMonth() + 1 < m || (zdaj.getUTCMonth() + 1 === m && zdaj.getUTCDate() < d)) leta--;
-  return leta;
-}
+// Najnizja starost za uporabniski racun (NAJMANJ_LET_RACUN = 18) in stetje starosti po ljubljanskem koledarju: starost_racuna.js
+// (Martin, 19. 10. 2026, seja menedzerja, vprasanje »Starostna meja«: »18+ in racun od 18«; prej 15 po ZVOP-2, 8. clen).
+// Meja je SAMO tam. NI isto kot min_age dogodka in STAROST_PAKET_PIJACE (to sta starosti za nakup).
 
 // Polja, ki jih vrnemo o uporabniku. Na enem mestu, da se GET /me, PATCH /me
 // in PATCH /me/avatar ne razidejo.
@@ -1438,13 +1431,15 @@ app.patch("/me", requireAuth, async (req, res) => {
         const dat = new Date(d + "T00:00:00Z");
         // Resnicen koledarski datum (2000-02-31 bi JS premaknil v marec, Postgres pa ga zavrne -> 500).
         if (Number.isNaN(dat.getTime()) || gostDatumRojstva(String(d)) === null) return res.status(400).send("Invalid dateOfBirth.");
-        const let_ = (Date.now() - dat.getTime()) / (365.2425 * 24 * 3600 * 1000);
-        if (let_ <= 0)  return res.status(400).send("dateOfBirth cannot be in the future.");
-        if (let_ > 120) return res.status(400).send("dateOfBirth is not plausible.");
+        // Vse po ljubljanskem koledarju (isti »danes« kot pri meji 18): datum rojstva »danes« ni v prihodnosti.
+        const danes = danesLjubljana();
+        if (String(d) > danes) return res.status(400).send("dateOfBirth cannot be in the future.");
+        const leta = polnaLeta(String(d), danes);
+        if (leta > 120) return res.status(400).send("dateOfBirth is not plausible.");
         // Najnizja starost racuna (NAJMANJ_LET_RACUN, od 19. 10. 2026 18). Aplikacija to preveri ze pred posiljanjem; streznik je zadnja obramba.
         // Meja velja SAMO ob nastavitvi ali spremembi datuma rojstva: obstojec racun pod mejo (vpisan, ko je veljalo 15) ostane nedotaknjen
         // in sme urejati ime, zanre ipd.; isti datum, ki je ze v bazi, ni sprememba (odjemalec ob shranjevanju profila pogosto poslje vsa polja).
-        if (polnaLeta(String(d)) < NAJMANJ_LET_RACUN) {
+        if (leta < NAJMANJ_LET_RACUN) {
           const nespremenjen = await pool.query("SELECT 1 FROM users WHERE id=$1 AND date_of_birth = $2::date", [req.user.userId, String(d)]);
           if (nespremenjen.rows.length === 0) return res.status(400).send(`You must be at least ${NAJMANJ_LET_RACUN} years old.`);
         }
