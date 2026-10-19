@@ -12,6 +12,11 @@
 //     Ce je pristojbina vecja od provizije (poceni vstopnice), je vracilo provizije 0 in razliko nosi Outly.
 //   - PLACILO ZA NEAKTIVNO NAROCILO (`inactive_order`) je nasa napaka: `reverse_transfer: true` + `refund_application_fee: true` v enem klicu, Stripovo pristojbino nosi Outly.
 //
+// PRODAJALEC JE PLATFORMA (I50, uradni profil Outly, clubs.is_official; naroclilo ima orders.stripe_account_id = »platform«, placila.PLATFORMNI_RACUN): placilo je bilo neposredno na platformni
+// racun (brez transferja in brez provizije). Vracilo je NAVADNO vracilo na platformi: BREZ reverse_transfer in BREZ refund_application_fee (Stripe obe zavrne, ker transferja
+// in provizije ni), brez samostojnega vracila provizije (koraka B ni); Stripovo pristojbino za prvotno placilo nosi Outly (kot pri vsakem vracilu nase napake). Izgubljen spor:
+// kluba ni, od katerega bi povrnitev terjali (placila_stripe.js spor(): povrnitev_stanje ostane NULL), samo zapis in alarm.
+//
 // Zanesljivost (Martinova zahteva: 1000+ hkratnih uporabnikov, sken vstopnic ne sme pasti): masovno vracilo NE tece v zahtevku. Odpoved dogodka samo VSTAVI vrstice v
 // `vracila` (en INSERT ... SELECT, brez Stripa); ta obdelovalec jih po eno prevzema (FOR UPDATE SKIP LOCKED), z razmikom med klici (VRACILA_RAZMAK_MS), najvec eno
 // naroceno naenkrat (ena povezava iz pool-a v kratkih poizvedbah, nikoli drzana med klicem Stripa) in ponovitvami z narascajocim premorom. Vsak Stripov klic ima idempotentni
@@ -39,6 +44,8 @@ class Rocno extends Error {}
 // tam dodatno samo z denarjem (total_cents > refunded_cents; 0 EUR dobi vrstico brez Stripa, a nicesar ne vrne). Ob spremembi preveri oba.
 // Spor na placano naroceno (ima vstopnice; edino tako naroceno je lahko terjatev do kluba). Ena resnica za mail lastniku kluba, obdelovalec in admin retry; alias spora podan.
 const SQL_SPOR_NAROCILO_PLACANO = (a) => `EXISTS (SELECT 1 FROM orders sn WHERE sn.id = ${a}.order_id AND sn.status IN ('paid', 'partially_refunded', 'refunded'))`;
+// Spor, o katerem se obvesti LASTNIKA kluba (mail): placano naroceno IN prodajalec ni platforma (I50: pri uradnem profilu Outly lastnika ni komu obvestiti, izgubo nosi Outly).
+const SQL_SPOR_ZA_LASTNIKA = (a) => `(${SQL_SPOR_NAROCILO_PLACANO(a)} AND NOT EXISTS (SELECT 1 FROM orders sp2 WHERE sp2.id = ${a}.order_id AND ${placila.SQL_NAROCILO_PLATFORMNO("sp2")}))`;
 const SQL_NAROCILO_ZA_ODPOVED = "o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL";
 
 function ustvari({ pool, naKoncano, posljiNeposlane }) {
@@ -189,6 +196,9 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
 
   async function izvedi(v) {
     const jeEC = v.razlog === "event_cancelled";
+    // I50: prodajalec je platforma. Odloca zapis NAROCILA ob nakupu (stripe_account_id = »platform«), ne trenutna zastavica kluba (ta se lahko spremeni, placilo pa je ze na platformi).
+    // Vse ostalo (acct_..., NULL, manjkajoc stolpec) velja za navadno naroclilo: stara pot, ob napaki Stripe zavrne, nikoli tiho vracilo brez obracanja transferja.
+    const platformno = v.o_stripe_account_id === placila.PLATFORMNI_RACUN;
     const aOpravljen = !!v.stripe_vracilo_id;   // korak A (vracilo kupcu) je ze narejen: preverb o stanju narocila NE ponavljamo (webhook ga je morda ze oznacil `refunded`)
     const pi = v.payment_intent_id || v.o_pi || null;
     let znesek = v.znesek_cents !== null && v.znesek_cents !== undefined ? v.znesek_cents : (jeEC ? v.total_cents - v.o_refunded : 0);
@@ -248,6 +258,8 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
         const ch = p.latest_charge && typeof p.latest_charge === "object" ? p.latest_charge : null;
         if (!ch) throw new Error("PaymentIntent brez naboja (charge)");
         if (p.status !== "succeeded") throw new Rocno(`PaymentIntent ni v stanju succeeded (${p.status})`);
+        // I50: naroclilo je zapisano kot platformno, a ima placilo transfer h klubu: oznaka in Stripe se ne ujemata, ne vracamo na slepo (reverse_transfer bi manjkal).
+        if (platformno && p.transfer_data && p.transfer_data.destination) throw new Rocno(`naroceno je platformno (brez racuna kluba), PaymentIntent pa ima transfer na ${p.transfer_data.destination}: vrni rocno (reverse_transfer)`);
         const ostane = ch.amount - (ch.amount_refunded || 0);
         if (ch.amount !== v.total_cents) console.error(`[vracila] POZOR: znesek naboja (${ch.amount} c) != narocilo ${v.public_ref} (${v.total_cents} c); vracam, kar je Stripu ostalo placano (${ostane} c).`);
         if (ostane <= 0) {
@@ -266,7 +278,8 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
       const meta = { vracilo_id: String(v.id), order_id: String(v.order_id), public_ref: v.public_ref, razlog: v.razlog };
       let re = null;
       try {
-        re = await s.refunds.create({ payment_intent: pi, amount: znesek, reverse_transfer: true, refund_application_fee: v.razlog === "inactive_order", metadata: meta },
+        // Platforma (I50): navadno vracilo, NI reverse_transfer ne refund_application_fee (parametrov ne posiljamo niti kot false).
+        re = await s.refunds.create({ payment_intent: pi, amount: znesek, ...(platformno ? {} : { reverse_transfer: true, refund_application_fee: v.razlog === "inactive_order" }), metadata: meta },
           { idempotencyKey: kljucA(v) });
       } catch (e) {
         // Vracilo je ze bilo narejeno (proces se je ugasnil pred zapisom, idempotentni kljuc je potekel po 24 h) ali pa je placilo vrnjeno drugje.
@@ -282,7 +295,8 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     await uveljaviLokalno(v);   // kupec je vrnjen: stanje narocila zapisemo takoj (korak B lahko traja ali pade)
 
     // Korak B (odpoved dogodka): vracilo provizije brez Stripove pristojbine. Samostojen klic z lastnim idempotentnim kljucem; ob napaki se ponovi samo ta korak.
-    if (jeEC) {
+    // Platforma (I50): provizije ni (placilo neposredno na platformo), zato koraka B ni.
+    if (jeEC && !platformno) {
       if (v.provizija_za_vrnitev_cents === null || v.provizija_za_vrnitev_cents === undefined) {
         const izr = await izracunajProvizijo(s, pi, v);
         await pool.query("UPDATE vracila SET application_fee_id = $2, provizija_za_vrnitev_cents = $3, stripe_pristojbina_cents = $4 WHERE id = $1", [v.id, izr.feeId, izr.vrni, izr.pristojbina]);
@@ -387,7 +401,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   async function obdelaj(id) {
     const r = await pool.query(
       `SELECT v.*, o.public_ref, o.status AS o_status, o.total_cents, o.refunded_cents AS o_refunded, o.stripe_payment_intent_id AS o_pi,
-              o.stripe_checkout_session_id AS o_seja, e.status AS dogodek_status,
+              o.stripe_checkout_session_id AS o_seja, o.stripe_account_id AS o_stripe_account_id, e.status AS dogodek_status,
               EXISTS (SELECT 1 FROM spori sp WHERE sp.order_id = v.order_id AND sp.stanje IN ('needs_response', 'under_review', 'lost')) AS spor_odprt
          FROM vracila v JOIN orders o ON o.id = v.order_id JOIN events e ON e.id = v.event_id WHERE v.id = $1`, [id]);
     const v = r.rows[0];
@@ -413,6 +427,12 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     if (sp.stanje !== "lost") throw new Rocno(`spor ni izgubljen (${sp.stanje})`);
     if (sp.order_id === null) throw new Rocno("spor brez narocila: povrnitve od kluba ni mogoce izracunati");
     if (!(await sporNaPlacanemNarocilu(sp.id))) throw new Rocno("spor na neplacanem narocilu - povrnitev od kluba ni dovoljena brez Martinove odlocitve");
+    // I50: prodajalec je platforma: kluba ni, od katerega bi terjali (spor() tega stanja sploh ne sprozi; to je varovalo za zapis iz starejsega zagona). Izgubo nosi Outly.
+    if ((await pool.query(`SELECT 1 FROM spori sp JOIN orders o ON o.id = sp.order_id WHERE sp.id = $1 AND ${placila.SQL_NAROCILO_PLATFORMNO("o")}`, [sp.id])).rowCount) {
+      await pool.query("UPDATE spori SET povrnitev_stanje = NULL, povrnitev_napaka = NULL WHERE id = $1 AND povrnitev_stanje = 'v_teku'", [sp.id]);
+      console.error(`[spori] POZOR: spor ${sp.id} je na platformnem narocilu (uradni profil Outly): povrnitve od kluba ni, izgubo nosi Outly.`);
+      return;
+    }
     const dp = await s.disputes.retrieve(sp.id);
     if (dp.status !== "lost") throw new Rocno(`Stripe poroca stanje spora ${dp.status}, ne lost`);
     const chId = typeof dp.charge === "string" ? dp.charge : dp.charge && dp.charge.id;
@@ -637,4 +657,4 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   return { vrstiZaDogodek, pomeni, tek, zazeni, zbudi, ponovi, ponoviSpor, uskladiVracilo, kupecVrnjenPredMailom, preverbaNaVoljo };
 }
 
-module.exports = { ustvari, SQL_NAROCILO_ZA_ODPOVED, SQL_SPOR_NAROCILO_PLACANO };
+module.exports = { ustvari, SQL_NAROCILO_ZA_ODPOVED, SQL_SPOR_NAROCILO_PLACANO, SQL_SPOR_ZA_LASTNIKA };

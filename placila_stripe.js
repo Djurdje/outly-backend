@@ -3,6 +3,12 @@
 // Model (DECISIONS 2026-09): prodajalec je KLUB, Outly je posrednik s provizijo. Tehnicno: destination charge
 // (transfer_data.destination = racun kluba) z application_fee_amount (provizija) in on_behalf_of = racun kluba,
 // da je klub tudi »business of record« (pravna analiza 1. 10. 2026, V1: brez on_behalf_of bi bil to Outly).
+// IZJEMA (I50, Martin v seji menedzerja 19. 10. 2026): dogodek, katerega prodajalec (events.club_id) ima clubs.is_official = TRUE, prodaja NEXT DIMENSIONS sam
+// (platforma): Checkout seja BREZ transfer_data, BREZ on_behalf_of, BREZ application_fee_amount (placilo gre neposredno na platformni racun), provizija naroclila 0,
+// racun kluba (stripe_account_id, stripe_charges_enabled) ni pogoj, nacin placila doloca samo platformni kljuc. Vracila brez reverse_transfer in brez vracila provizije
+// (vracila_stripe.js), spor ne bremeni nobenega kluba (spor() spodaj). VSAKO naroclilo take prodaje (tudi 0 EUR in testni nacin) nosi orders.stripe_account_id = PLATFORMNI_RACUN
+// (»platform«; izrecna oznaka PRODAJALCA, zamrznjena ob nakupu, NE NULL: NULL ima testni in brezplacni nakup navadnega kluba). Ali je denar sel skozi Stripe, oznaka NE pove:
+// to odlocata total_cents = 0 in PI `test_` (vracila, finance, maili), kot pri navadnem klubu.
 // Kartica se nikoli ne vnasa v nas vmesnik: kupec placa na Stripovi gostovani strani (Checkout).
 //
 // Tok nakupa:
@@ -17,7 +23,7 @@
 //   - TEST_PLACILA=true: vsili testni nacin SAMO ob sandbox kljucu ali brez kljuca. Ob LIVE kljucu (sk_live_) se IGNORIRA (zagon izpise
 //     `[placila] POZOR ...`): ena napacna spremenljivka na Renderju sicer pomeni prave vstopnice brez placila (#191). Zagona NE zavrnemo: 503 v produkciji
 //     je slabsi od tega, da prodaja gre skozi pravi Stripe.
-//   - klub z dokoncanim Connect onboardingom (charges_enabled): Stripe
+//   - klub z dokoncanim Connect onboardingom (charges_enabled) ALI prodajalec je platforma (is_official, I50): Stripe
 //   - SANDBOX kljuc (sk_test_), klub brez Stripa: se vedno testni nacin, da demo klubi in TestFlight delajo naprej
 //   - LIVE kljuc (sk_live_), klub brez Stripa (ali z racunom iz sandboxa, I36): PLACLJIV nakup zavrnjen (409); znesek 0 EUR je kupljiv (I49, index.js `klubBrezStripaZavraNakup`)
 //   - znesek 0 EUR: ne gre v Stripe (Checkout ima najmanjsi znesek), narocilo je takoj `paid` brez provizije (index.js, #191)
@@ -65,7 +71,18 @@ function nacinPlacilaZ(klubImaStripe) {
 // NULL/manjka = neznano = SANDBOX (vsi zapisi pred 046 so iz sandboxa). Racun velja samo, ce se nacin ujema s kljucem (`jeLive()`); sicer je klub nepovezan
 // (`stripe_charges_enabled` se ne upostevata). SQL enakovrednik: `sqlRacunVNacinu` v index.js.
 const racunVNacinu = (klub) => !!klub && (klub.stripe_account_livemode === true) === jeLive();
-const nacinPlacila = (klub) => nacinPlacilaZ(!!(klub && klub.stripe_account_id && klub.stripe_charges_enabled && racunVNacinu(klub)));
+// I50: prodajalec je platforma (uradni profil Outly, `clubs.is_official`): placilo neposredno na platformni racun, racun kluba ni pogoj. Natanko TRUE (fail closed).
+// SQL enakovrednik za javni payment_mode: `sqlPlacilaPripravljena` v index.js.
+const jePlatformniProdajalec = (klub) => !!klub && klub.is_official === true;
+const nacinPlacila = (klub) => nacinPlacilaZ(jePlatformniProdajalec(klub) || !!(klub && klub.stripe_account_id && klub.stripe_charges_enabled && racunVNacinu(klub)));
+// Oznaka na narocilu (orders.stripe_account_id), ki ga je prodajala platforma (I50): prodajalec je NEXT DIMENSIONS. Velja za VSA naroclila uradnega profila, tudi 0 EUR in testni
+// nacin (pregled PR #302, 2. krog P2: sicer potrdilo in mail gostu 0 EUR vstopnice pisala »prodaja klub ... Outly je samo posrednik«). Navaden Stripe nakup tu hrani acct_...
+// racun kluba, testni in brezplacni (0 EUR) nakup navadnega kluba NULL (nespremenjeno). Iz oznake odloca vse po nakupu (prikaz prodajalca, vracila, spori, finance), ne trenutna
+// zastavica kluba (ta se lahko spremeni). Oznaka ne pomeni, da je placilo slo skozi Stripe: 0 EUR / PI `test_` gresta mimo Stripa po total_cents in PI (vracila_stripe.js izvedi).
+const PLATFORMNI_RACUN = "platform";
+const racunNarocila = (placanoTakoj, platformno, racunKluba) => (platformno ? PLATFORMNI_RACUN : (placanoTakoj ? null : racunKluba));
+// SQL: narocilo, katerega prodajalec je platforma. `a` = alias tabele orders.
+const SQL_NAROCILO_PLATFORMNO = (a = "orders") => `COALESCE(${a}.stripe_account_id = '${PLATFORMNI_RACUN}', FALSE)`;
 // Vrednost za odjemalce (`payment_mode` v javnih odgovorih, #149): "test" (nic se ne zaracuna) | "stripe" (pravo placilo)
 // | "unavailable" (nakup bi vrnil 409 »klub ne sprejema spletnih placil« ali 503 »placila niso nastavljena«). Natancnejsi javni `payment_mode`
 // (po znesku: 0 EUR pri klubu brez Stripa je "stripe", I49; I34 seller_incomplete) racuna `javniNacinProdajalca` v index.js.
@@ -99,10 +116,13 @@ function normalizirajLocale(v) {
 
 // povratna: neobvezen { success_url, cancel_url } namesto privzetih (nakup brez racuna: success_url nosi zeton gosta, index.js).
 // locale: ze normaliziran (normalizirajLocale) ali undefined; ponovitev z istim idempotentnim kljucem vrne obstojeco sejo (jezik prvega poskusa).
-async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale }) {
+// platformno (I50): prodajalec je platforma -> seja brez transfer_data / on_behalf_of / application_fee_amount (neposredno placilo na platformni racun). Brez te zastavice je
+// racun kluba OBVEZEN: manjkajoc racun navadnega kluba ne sme tiho postati neposredno placilo platformi (fail closed, Stripe se ne pokliche).
+async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racunKluba, platformno, email, eventId, odjemalec, povratna, locale }) {
+  if (!platformno && !racunKluba) throw new Error("Checkout brez racuna kluba: prodajalec ni platforma");
   const s = stripe();
   const ref = encodeURIComponent(narocilo.public_ref);
-  const meta = { order_id: String(narocilo.id), public_ref: narocilo.public_ref };
+  const meta = { order_id: String(narocilo.id), public_ref: narocilo.public_ref, ...(platformno ? { seller: "platform" } : {}) };
   return s.checkout.sessions.create({
     mode: "payment",
     client_reference_id: String(narocilo.id),
@@ -112,9 +132,7 @@ async function ustvariCheckout({ narocilo, opis, kolicina, cenaEnoteCents, racun
       price_data: { currency: String(narocilo.currency || "EUR").toLowerCase(), unit_amount: cenaEnoteCents, product_data: { name: opis.slice(0, 250) } },
     }],
     payment_intent_data: {
-      application_fee_amount: narocilo.application_fee_cents,
-      transfer_data: { destination: racunKluba },
-      on_behalf_of: racunKluba,
+      ...(platformno ? {} : { application_fee_amount: narocilo.application_fee_cents, transfer_data: { destination: racunKluba }, on_behalf_of: racunKluba }),
       description: `${opis} (${narocilo.public_ref})`.slice(0, 1000),
       metadata: meta,
     },
@@ -159,7 +177,7 @@ async function zakljuci(c, seja) {
   const id = idNarocilaIzSeje(seja);
   if (!id) { console.error(`[stripe] seja ${seja.id} brez narocila`); return null; }
   const r = await c.query(
-    `SELECT id, public_ref, status, total_cents, currency, quantity, table_id, table_seats, event_id, stripe_checkout_session_id, user_id, guest_email
+    `SELECT id, public_ref, status, total_cents, currency, quantity, table_id, table_seats, event_id, stripe_checkout_session_id, user_id, guest_email, stripe_account_id
        FROM orders WHERE id = $1 FOR UPDATE`, [id]);
   if (!r.rows.length) { console.error(`[stripe] seja ${seja.id}: narocila ${id} ni`); return null; }
   const o = r.rows[0];
@@ -222,9 +240,10 @@ async function zakljuci(c, seja) {
               mail_odprt_prevzeto_at = CASE WHEN mail_odprt_poslano_at IS NULL THEN NULL ELSE mail_odprt_prevzeto_at END,
               mail_zaprt_poskusi = CASE WHEN mail_zaprt_poslano_at IS NULL THEN 0 ELSE mail_zaprt_poskusi END,
               mail_zaprt_prevzeto_at = CASE WHEN mail_zaprt_poslano_at IS NULL THEN NULL ELSE mail_zaprt_prevzeto_at END,
-              povrnitev_stanje = CASE WHEN stanje = 'lost' AND povrnitev_stanje = 'rocno' AND povrnitev_napaka LIKE 'spor brez narocila%' THEN 'caka' ELSE povrnitev_stanje END,
+              -- I50: spor na naroclilo, ki ga je prodajala platforma, nima kluba, od katerega bi povrnitev terjali: ostane NULL (ni dolgovano), izgubo nosi Outly.
+              povrnitev_stanje = CASE WHEN stanje = 'lost' AND povrnitev_stanje = 'rocno' AND povrnitev_napaka LIKE 'spor brez narocila%' THEN (CASE WHEN $3::boolean THEN NULL ELSE 'caka' END) ELSE povrnitev_stanje END,
               povrnitev_napaka = CASE WHEN stanje = 'lost' AND povrnitev_stanje = 'rocno' AND povrnitev_napaka LIKE 'spor brez narocila%' THEN NULL ELSE povrnitev_napaka END
-        WHERE order_id IS NULL AND payment_intent_id = $2 RETURNING id`, [o.id, pi]);
+        WHERE order_id IS NULL AND payment_intent_id = $2 RETURNING id`, [o.id, pi, o.stripe_account_id === PLATFORMNI_RACUN]);
     if (sp.rows.length) console.error(`[spori] POZOR: spor ${sp.rows.map((x) => x.id).join(", ")} je prisel pred placilom, povezan z narocilom ${o.public_ref}.`);
   }
   console.log(`[stripe] placano: narocilo ${o.public_ref}, ${stevilo} vstopnic`);
@@ -312,6 +331,7 @@ async function vracilo(c, charge) {
 // Spor (chargeback, #190): zapis stanja v `spori` in alarm. Takoj ob odprtju spora vstopnice naroceno na vratih ne veljajo vec (sken: payment_disputed, brez klica Stripa: indeksiran
 // EXISTS po `spori`); ob `won`/`warning_closed`/`prevented` spet veljajo, ob `lost` ostanejo neveljavne. Ob `lost` se v isti transakciji vrstici nastavi povrnitev_stanje='caka':
 // transfer reversal od kluba izvede obdelovalec (vracila_stripe.js, Martin 12. 10. 2026: izgubljen spor nosi klub).
+// I50: spor na naroclilo, ki ga je prodajala platforma (SQL_NAROCILO_PLATFORMNO), ne sprozi povrnitve od kluba (povrnitev_stanje ostane NULL) in ne obvesti nobenega lastnika.
 // Objekt je svez iz Stripa (svezObjekt), zato zaporedje dogodkov (created/updated/closed) ni pomembno: vedno zapisemo trenutno stanje.
 // Narocilo najdemo po PaymentIntentu ali naboju (charge); spor brez narocila se zapise (order_id NULL) in sproži alarm.
 // Stripovi statusi (docs.stripe.com/api/disputes/object): warning_needs_response, warning_under_review, warning_closed, needs_response, under_review, won, lost, prevented.
@@ -323,8 +343,11 @@ async function spor(c, dp) {
   const pi = idOd(dp.payment_intent), ch = idOd(dp.charge);
   if (pi) await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", ["pi:" + pi]);   // serializacija z zakljuci() (glej tam): spor se poveze natanko enkrat
   let n = null;
-  if (pi) n = (await c.query("SELECT id, public_ref, status FROM orders WHERE stripe_payment_intent_id = $1", [pi])).rows[0] || null;
-  if (!n && ch) n = (await c.query("SELECT id, public_ref, status FROM orders WHERE stripe_charge_id = $1", [ch])).rows[0] || null;
+  const PL = `${SQL_NAROCILO_PLATFORMNO("orders")} AS platformno`;
+  if (pi) n = (await c.query(`SELECT id, public_ref, status, ${PL} FROM orders WHERE stripe_payment_intent_id = $1`, [pi])).rows[0] || null;
+  if (!n && ch) n = (await c.query(`SELECT id, public_ref, status, ${PL} FROM orders WHERE stripe_charge_id = $1`, [ch])).rows[0] || null;
+  // I50: prodajalec je platforma (uradni profil Outly): spor ne bremeni nobenega kluba. Zapis in alarm kot vedno, povrnitve od kluba (transfer reversal) NI in lastnik ne dobi maila.
+  const platformno = !!(n && n.platformno);
   const zaprt = SPOR_ZAPRT.includes(dp.status);
   // #285: spor na naroceno, ki NI placano (cancelled/failed/pending: I44, N3 #258, placilo po preklicu) nima vstopnic in ni pogodbena terjatev do kluba: `inactive_order` je nasa napaka
   // (pristojbino nosi Outly), zato povrnitev od kluba NI samodejna (`rocno`, odloci Martin) in lastnik kluba ne dobi maila (index.js: SQL_SPOR_NAROCILO_PLACANO).
@@ -335,8 +358,9 @@ async function spor(c, dp) {
   const prej = (await c.query("SELECT stanje FROM spori WHERE id = $1", [dp.id])).rows[0];
   await c.query(
     `INSERT INTO spori (id, order_id, payment_intent_id, charge_id, stanje, razlog, znesek_cents, valuta, rok_dokazov_at, ustvarjen_at, zaprt_at, povrnitev_stanje, povrnitev_napaka)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 THEN NOW() END, CASE WHEN $5 = 'lost' THEN (CASE WHEN $2::bigint IS NULL OR NOT $12::boolean THEN 'rocno' ELSE 'caka' END) END,
-            CASE WHEN $5 = 'lost' AND $2::bigint IS NULL THEN 'spor brez narocila: povrnitve od kluba ni mogoce izracunati'
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 THEN NOW() END, CASE WHEN $5 = 'lost' AND NOT $13::boolean THEN (CASE WHEN $2::bigint IS NULL OR NOT $12::boolean THEN 'rocno' ELSE 'caka' END) END,
+            CASE WHEN $13::boolean THEN NULL
+                 WHEN $5 = 'lost' AND $2::bigint IS NULL THEN 'spor brez narocila: povrnitve od kluba ni mogoce izracunati'
                  WHEN $5 = 'lost' AND NOT $12::boolean THEN 'spor na neplacanem/preklicanem narocilu: povrnitev od kluba ni samodejna, odloci rocno' END)
      ON CONFLICT (id) DO UPDATE SET stanje = EXCLUDED.stanje, razlog = EXCLUDED.razlog, order_id = COALESCE(spori.order_id, EXCLUDED.order_id),
             rok_dokazov_at = EXCLUDED.rok_dokazov_at, zaprt_at = COALESCE(spori.zaprt_at, EXCLUDED.zaprt_at), posodobljen_at = NOW(),
@@ -345,7 +369,7 @@ async function spor(c, dp) {
                  WHEN spori.povrnitev_stanje = 'rocno' AND spori.order_id IS NULL AND EXCLUDED.order_id IS NOT NULL AND NOT $12::boolean THEN 'spor na neplacanem/preklicanem narocilu: povrnitev od kluba ni samodejna, odloci rocno'
                  ELSE spori.povrnitev_napaka END`,
     [dp.id, n ? n.id : null, pi, ch, String(dp.status || "unknown").slice(0, 40), dp.reason ? String(dp.reason).slice(0, 60) : null, znesek,
-     dp.currency ? String(dp.currency).toUpperCase().slice(0, 3) : null, rok, ustvarjen, zaprt, placano]);
+     dp.currency ? String(dp.currency).toUpperCase().slice(0, 3) : null, rok, ustvarjen, zaprt, placano, platformno]);
   const kaj = `spor ${dp.id} (${dp.reason || "?"}) ${znesek} c, stanje ${dp.status}, narocilo ${n ? n.public_ref : "NEZNANO"}`;
   // #285 N4: izgubljen spor, kupec pa je ze dobil mail »vracilo se ni izvedeno, uredili ga bomo rocno«: obljuba je zdaj napacna (denar je dobil prek banke).
   if (dp.status === "lost" && (!prej || prej.stanje !== "lost") && (n || pi)) {
@@ -357,8 +381,8 @@ async function spor(c, dp) {
   if (!n) console.error(`[spori] POZOR: ${kaj} - spora ni mogoce povezati z narocilom, preveri v Stripu.${dp.status === "lost" ? " IZGUBLJEN: povrnitev od kluba NI sprozena (rocno)." : ""}`);
   else if (!placano && (!prej || zaprt)) console.error(`[spori] POZOR: spor na neplacanem/preklicanem narocilu ${n.public_ref} (${n.status}): ${kaj} - povrnitev od kluba NI samodejna, lastnik kluba NI obvescen, odloci rocno.`);
   else if (!placano) console.log(`[spori] posodobljen ${kaj} (narocilo ni placano)`);
-  else if (!prej) console.error(`[spori] POZOR: nov ${kaj}. Vstopnice naroceno na vratih NE veljajo do konca spora; lastnik kluba je obvescen. Rok za dokaze: ${rok ? rok.toISOString() : "?"}.`);
-  else if (zaprt) console.error(`[spori] POZOR: spor zaprt: ${kaj}.${dp.status === "lost" ? " Izgubljen: povrnitev od kluba (transfer reversal) je v vrsti, vstopnice ostanejo neveljavne." : " Vstopnice spet veljajo."}`);
+  else if (!prej) console.error(`[spori] POZOR: nov ${kaj}. Vstopnice naroceno na vratih NE veljajo do konca spora; ${platformno ? "prodajalec je platforma (uradni profil Outly): lastnik kluba NI obvescen, dokaze odda Outly v Stripu" : "lastnik kluba je obvescen"}. Rok za dokaze: ${rok ? rok.toISOString() : "?"}.`);
+  else if (zaprt) console.error(`[spori] POZOR: spor zaprt: ${kaj}.${dp.status === "lost" ? (platformno ? " Izgubljen: prodajalec je platforma (uradni profil Outly), izgubo nosi Outly, od nobenega kluba se ne terja; vstopnice ostanejo neveljavne." : " Izgubljen: povrnitev od kluba (transfer reversal) je v vrsti, vstopnice ostanejo neveljavne.") : " Vstopnice spet veljajo."}`);
   else console.log(`[spori] posodobljen ${kaj}`);
 }
 
@@ -602,4 +626,4 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu }) {
   return { webhook, pospravi, zazeni, preveriPoteklo };
 }
 
-module.exports = { uveljaviVracilo, povratniNaslovi, ustvari, stripe, jeSandbox, jeLive, testniNacin, racunVNacinu, nacinPlacila, nacinPlacilaZ, javniNacin, ustvariCheckout, normalizirajLocale, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };
+module.exports = { uveljaviVracilo, povratniNaslovi, ustvari, stripe, jeSandbox, jeLive, testniNacin, racunVNacinu, nacinPlacila, nacinPlacilaZ, jePlatformniProdajalec, PLATFORMNI_RACUN, racunNarocila, SQL_NAROCILO_PLATFORMNO, javniNacin, ustvariCheckout, normalizirajLocale, osnovaSpleta, CHECKOUT_MINUT, API_VERZIJA };

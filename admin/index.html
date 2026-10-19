@@ -259,6 +259,7 @@
             <div class="siroko">
               <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="k_isOrganizer" style="width:auto"> Organizator (brez prizorišča)</label>
               <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;margin-top:6px"><input type="checkbox" id="k_isOfficial" style="width:auto"> Uradni profil Outly</label>
+              <span id="k_uradniOpozorilo" style="display:block;font-size:12.5px;color:var(--napaka);font-weight:600;margin-top:4px">POZOR: vse prodaje tega kluba gredo na račun NEXT DIMENSIONS, provizije ni, klub ne dobi denarja. Vklopi samo za lastne dogodke Outly.</span>
               <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;margin-top:6px"><input type="checkbox" id="k_isDemo" style="width:auto"> Demo klub (izmišljen, brez nakupa vstopnic)</label>
               <span style="font-size:12.5px;color:var(--faint)">Organizator nima naslova in pina na zemljevidu; vsak njegov dogodek ima prizorišče (klub na Outlyju ali prosta lokacija). Uradni profil: njegovi prihajajoči dogodki so na vrhu domačega zaslona (»Organized by Outly«). To kljukico nastavi samo admin.</span>
             </div>
@@ -539,6 +540,7 @@ async function naloziFinance() {
       kos(evri(s.gross_cents), "bruto prodaja (pravi)", `od začetka ${evri(v.gross_cents)}`) +
       kos(evri(s.fee_cents), `prihodek Outlyja (${f.fee_percent} %)`, `od začetka ${evri(v.fee_cents)}`) +
       kos(evri(s.clubs_net_cents), "za klube (neto)", `bruto − provizija − vračila`) +
+      kos(evri(s.own_sales_cents || 0), "lastna prodaja Outly (neto)", `bruto − vračila, brez provizije`) +
       kos(evri(s.refunded_cents), "vračila") +
       kos(s.tickets_sold, "vstopnic", `od začetka ${v.tickets_sold}`) +
       kos(s.orders, "naročil", `${s.buyers} kupcev · ${s.clubs_with_sales} klubov`);
@@ -647,6 +649,10 @@ async function kShrani() {
     const id = $("k_id").value; const t = kTelo();
     if (!t.ownerEmail) throw new Error("E-naslov lastnika je obvezen.");
     if (!t.name) throw new Error("Ime kluba je obvezno.");
+    // I50: vklop »uradni profil« preusmeri ves denar kluba na platformo; pri klubu s Stripe računom ali naročili izrecna potrditev.
+    const star = id ? klubi.find(x => String(x.id) === String(id)) : null;
+    if (t.isOfficial && star && !star.is_official && (star.has_stripe_account || star.order_count > 0)
+        && !window.confirm(`Klub »${star.name}« ima ${star.has_stripe_account ? "Stripe račun" : "naročila"}${star.has_stripe_account && star.order_count > 0 ? " in naročila" : ""} (naročil: ${star.order_count || 0}).\n\nVse prodaje tega kluba gredo na račun NEXT DIMENSIONS, provizije ni, klub ne dobi denarja.\n\nVklopim uradni profil?`)) return;
     $("kShrani").disabled = true;
     try {
       const r = id ? await klic("PATCH", "/admin/api/clubs/" + id, t) : await klic("POST", "/admin/api/clubs", t);
