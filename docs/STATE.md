@@ -10,7 +10,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte nal
 
 ## Podjetje NEXT DIMENSIONS (od 18. 10. 2026 spet; DECISIONS 2026-10-18)
 
-- **Koda in besedila** navajajo NEXT DIMENSIONS, družba za marketing, d.o.o. (`POSREDNIK_VRSTICA` v potrdilih in mailih GDPR 14; pogoji 1.1.3, zasebnost 2.4.5, `TRENUTNI_POGOJI` 1.1.3). TIP&TAP (14.–17. 10. 2026) ostane samo v zgodovini različic pravnih dokumentov in v `INCIDENTI.md`. **Podatki prodajalca uradnega profila Outly so v BAZI**, ne v kodi (`/admin/`). Davčne številke in statusa DDV NEXT DIMENSIONS ni v nobenem repu: ne izmišljuj, vpiše Martin.
+- **Koda in besedila** navajajo NEXT DIMENSIONS, družba za marketing, d.o.o. (`POSREDNIK_VRSTICA` v potrdilih in mailih GDPR 14; pogoji 1.1.4, zasebnost 2.4.6, `TRENUTNI_POGOJI` 1.1.4 — od 20. 10. 2026 račun od 18 let, gost 15). TIP&TAP (14.–17. 10. 2026) ostane samo v zgodovini različic pravnih dokumentov in v `INCIDENTI.md`. **Podatki prodajalca uradnega profila Outly so v BAZI**, ne v kodi (`/admin/`). Davčne številke in statusa DDV NEXT DIMENSIONS ni v nobenem repu: ne izmišljuj, vpiše Martin.
 - **Stripe platformni račun** »NEXT DIMENSIONS« (Live `acct_1URxXNBMFgsV3Xfs`, sandbox `acct_1URxXVBslpZWVaZ8`) je pravi račun; Martin je 18. 10. 2026 povabljen v ekipo in povezal Stripe MCP (Live Read, sandbox Write). Prepoved »`sk_live_` ne s tega računa« (T5) ne velja več. Apple: pretvorba Individual → Organization na NEXT DIMENSIONS (outly-backend#17).
 
 ## Spremljanje napak

@@ -4769,7 +4769,7 @@ function pogojiIzTela(b) {
 // Trenutna razlicica pogojev uporabe (#260 N2). OB NOVI RAZLICICI POGOJEV posodobi skupaj s spletom (TERMS_VERSION) in iOS (LegalLinks.termsVersion);
 // glej docs/ARCHITECTURE.md »Razlicica pogojev«. Streznik nakupa zaradi druge razlicice NE zavrne (star iOS v rokah uporabnikov poslje starejso
 // ali nobene) in shrani, kar je poslal odjemalec (kar je kupec dejansko videl); samo zapise opozorilo v dnevnik.
-const TRENUTNI_POGOJI = "1.1.3";
+const TRENUTNI_POGOJI = "1.1.4";
 const POGOJI_OPOZORILO_MS = Math.max(0, Number(process.env.POGOJI_OPOZORILO_MS) || 60_000);   // najvec eno opozorilo na (pot, razlicico) v tem oknu
 const POGOJI_OPOZORILO_KLJUCEV = 200;   // meja pomnilnika: razlicic je lahko poljubno (vsak niz do 40 znakov)
 const pogojiOpozorjeno = new Map();     // "pot|razlicica" -> cas zadnjega opozorila
