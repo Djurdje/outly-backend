@@ -79,8 +79,10 @@ let srv = null;
     const r = await api("PATCH", "/me", T[k], { dateOfBirth: polnoleten, genres: ["house"] });
     assert(r.status === 200, `${k}: datum rojstva (polnoleten)`, r.body);
   }
-  let r = await api("PATCH", "/me", T.mlad, { dateOfBirth: mladoleten, genres: ["house"] });
-  assert(r.status === 200, "mlad: datum rojstva (16 let)", r.body);
+  // 19. 10. 2026: racun od 18 let; PATCH /me ne sprejme vec 16 let, zato obstojec racun pod 18 (vpisan, ko je veljalo 15) simuliramo neposredno v bazi.
+  await pool.query("UPDATE users SET date_of_birth=$1::date, genres=ARRAY['house'], onboarded_at=NOW() WHERE email='mlad@outly.si'", [mladoleten]);
+  let r = await api("PATCH", "/me", T.mlad, { genres: ["house"] });
+  assert(r.status === 200, "mlad: obstojec racun 16 let ostane urejljiv (datum rojstva neposredno v bazi)", r.body);
   // cene NIMA datuma rojstva (starost: brez datuma rabi age_confirmed)
   const prijatelja = async (a, b) => pool.query("INSERT INTO friendships (user_a, user_b) VALUES (LEAST($1::int,$2::int), GREATEST($1::int,$2::int)) ON CONFLICT DO NOTHING", [U[a], U[b]]);
   for (const k of ["ana", "bor", "cene", "mlad", "brisan", "f1", "f2", "f3", "f4", "f5"]) await prijatelja("host", k);
