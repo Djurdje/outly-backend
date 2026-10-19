@@ -539,6 +539,7 @@ async function naloziFinance() {
       kos(evri(s.gross_cents), "bruto prodaja (pravi)", `od začetka ${evri(v.gross_cents)}`) +
       kos(evri(s.fee_cents), `prihodek Outlyja (${f.fee_percent} %)`, `od začetka ${evri(v.fee_cents)}`) +
       kos(evri(s.clubs_net_cents), "za klube (neto)", `bruto − provizija − vračila`) +
+      kos(evri(s.own_sales_cents || 0), "lastna prodaja Outly (neto)", `bruto − vračila, brez provizije`) +
       kos(evri(s.refunded_cents), "vračila") +
       kos(s.tickets_sold, "vstopnic", `od začetka ${v.tickets_sold}`) +
       kos(s.orders, "naročil", `${s.buyers} kupcev · ${s.clubs_with_sales} klubov`);
