@@ -6,8 +6,9 @@
 // IZJEMA (I50, Martin v seji menedzerja 19. 10. 2026): dogodek, katerega prodajalec (events.club_id) ima clubs.is_official = TRUE, prodaja NEXT DIMENSIONS sam
 // (platforma): Checkout seja BREZ transfer_data, BREZ on_behalf_of, BREZ application_fee_amount (placilo gre neposredno na platformni racun), provizija naroclila 0,
 // racun kluba (stripe_account_id, stripe_charges_enabled) ni pogoj, nacin placila doloca samo platformni kljuc. Vracila brez reverse_transfer in brez vracila provizije
-// (vracila_stripe.js), spor ne bremeni nobenega kluba (spor() spodaj). Naroclilo take prodaje nosi orders.stripe_account_id = PLATFORMNI_RACUN (»platform«; izrecna oznaka, NE NULL:
-// NULL imata tudi testni in brezplacni nakup, zato iz njega ne bi smeli sklepati, da je denar prejela platforma).
+// (vracila_stripe.js), spor ne bremeni nobenega kluba (spor() spodaj). VSAKO naroclilo take prodaje (tudi 0 EUR in testni nacin) nosi orders.stripe_account_id = PLATFORMNI_RACUN
+// (»platform«; izrecna oznaka PRODAJALCA, zamrznjena ob nakupu, NE NULL: NULL ima testni in brezplacni nakup navadnega kluba). Ali je denar sel skozi Stripe, oznaka NE pove:
+// to odlocata total_cents = 0 in PI `test_` (vracila, finance, maili), kot pri navadnem klubu.
 // Kartica se nikoli ne vnasa v nas vmesnik: kupec placa na Stripovi gostovani strani (Checkout).
 //
 // Tok nakupa:
@@ -74,10 +75,12 @@ const racunVNacinu = (klub) => !!klub && (klub.stripe_account_livemode === true)
 // SQL enakovrednik za javni payment_mode: `sqlPlacilaPripravljena` v index.js.
 const jePlatformniProdajalec = (klub) => !!klub && klub.is_official === true;
 const nacinPlacila = (klub) => nacinPlacilaZ(jePlatformniProdajalec(klub) || !!(klub && klub.stripe_account_id && klub.stripe_charges_enabled && racunVNacinu(klub)));
-// Oznaka na narocilu (orders.stripe_account_id), ki ga je prodajala platforma (I50): pravo placilo neposredno na platformni racun. Navaden Stripe nakup tu hrani acct_...
-// racun kluba, testni in brezplacni (0 EUR) nakup NULL. Iz oznake odloca vse po nakupu (vracila, spori, finance), ne trenutna zastavica kluba (ta se lahko spremeni, placilo pa je ze na platformi).
+// Oznaka na narocilu (orders.stripe_account_id), ki ga je prodajala platforma (I50): prodajalec je NEXT DIMENSIONS. Velja za VSA naroclila uradnega profila, tudi 0 EUR in testni
+// nacin (pregled PR #302, 2. krog P2: sicer potrdilo in mail gostu 0 EUR vstopnice pisala »prodaja klub ... Outly je samo posrednik«). Navaden Stripe nakup tu hrani acct_...
+// racun kluba, testni in brezplacni (0 EUR) nakup navadnega kluba NULL (nespremenjeno). Iz oznake odloca vse po nakupu (prikaz prodajalca, vracila, spori, finance), ne trenutna
+// zastavica kluba (ta se lahko spremeni). Oznaka ne pomeni, da je placilo slo skozi Stripe: 0 EUR / PI `test_` gresta mimo Stripa po total_cents in PI (vracila_stripe.js izvedi).
 const PLATFORMNI_RACUN = "platform";
-const racunNarocila = (placanoTakoj, platformno, racunKluba) => (placanoTakoj ? null : (platformno ? PLATFORMNI_RACUN : racunKluba));
+const racunNarocila = (placanoTakoj, platformno, racunKluba) => (platformno ? PLATFORMNI_RACUN : (placanoTakoj ? null : racunKluba));
 // SQL: narocilo, katerega prodajalec je platforma. `a` = alias tabele orders.
 const SQL_NAROCILO_PLATFORMNO = (a = "orders") => `COALESCE(${a}.stripe_account_id = '${PLATFORMNI_RACUN}', FALSE)`;
 // Vrednost za odjemalce (`payment_mode` v javnih odgovorih, #149): "test" (nic se ne zaracuna) | "stripe" (pravo placilo)

@@ -6817,7 +6817,9 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
       payment_mode: kp && kp.is_demo ? "unavailable" : javniNacinProdajalca(nacinKluba, kp || {}, 1, false),
       // Zakaj je "unavailable" (DODANO polje, lastnik in manager): "demo_club" (050) | "seller_incomplete" | "stripe_not_ready" | "payments_not_configured" | null (payment_mode ni "unavailable").
       payment_unavailable_reason: kp && kp.is_demo ? "demo_club" : razlogNerazpolozljivosti(nacinKluba, kp || {}, 1, false),
-      fee_percent: kp && kp.is_official === true ? 0 : (kp && kp.commission_bps !== null ? kp.commission_bps / 100 : PROVIZIJA_ODSTOTEK),   // I50: uradni profil Outly: provizije ni (prodajalec je platforma)
+      // I50: `fee_percent` = provizija za NOVE prodaje kluba DANES (uradni profil Outly = platforma -> 0), NE povprecje preteklih naroceil: klub, ki mu admin vklopi is_official,
+      // ima stara `acct_` naroceila po 10 %, ta pa so pravilno v summary.fee_cents / application_fee_cents (zneski odlocajo po oznaki naroclila, ne po tem polju).
+      fee_percent: kp && kp.is_official === true ? 0 : (kp && kp.commission_bps !== null ? kp.commission_bps / 100 : PROVIZIJA_ODSTOTEK),
       summary,   // #236: samo pravi promet (testni je v test_summary)
       test_summary: { orders: test_orders, gross_cents: test_gross_cents, tickets_sold: test_tickets_sold },
       events: poDogodkih.rows,
