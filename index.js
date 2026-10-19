@@ -1768,12 +1768,15 @@ function prodajalec(k) {
     phone: niz(k.contact_phone),
     email: niz(k.contact_email),
     complete: prodajalecPopoln(k),
+    // I50: DODANO polje, prisotno (true) samo, ko je prodajalec platforma (uradni profil Outly, NEXT DIMENSIONS): odjemalec ne sme pisati »Outly je samo posrednik«.
+    // Pri navadnem klubu polja ni (oblika `seller` ostane 8 polj). Pri narocilu odloca oznaka narocila (gostNarociloOdgovor), pri klubu/dogodku zastavica kluba.
+    ...(k.is_official === true || k.is_platform === true ? { is_platform: true } : {}),
   };
 }
 // Surova polja za `prodajalec()` kot JSON (pomozni stolpec `seller_raw`, ga koda odstrani). `a` je vzdevek tabele clubs.
 const sqlProdajalecSurov = (a) => `jsonb_build_object('name', ${a}.name, 'legal_name', ${a}.legal_name, 'legal_address', ${a}.legal_address,
   'registration_number', ${a}.registration_number, 'tax_number', ${a}.tax_number, 'vat_payer', ${a}.vat_payer,
-  'address', ${a}.address, 'city', ${a}.city, 'contact_phone', ${a}.contact_phone, 'contact_email', ${a}.contact_email)`;
+  'address', ${a}.address, 'city', ${a}.city, 'contact_phone', ${a}.contact_phone, 'contact_email', ${a}.contact_email, 'is_official', ${a}.is_official)`;
 // Vrstice dogodka: `seller` iz pomoznega stolpca `seller_raw` (SQL_PRODAJALEC_DOGODKA); odvisen je samo od kluba, zato sme v javni predpomnilnik (I17).
 const SQL_PRODAJALEC_DOGODKA = `(SELECT ${sqlProdajalecSurov("cp")} FROM clubs cp WHERE cp.id = events.club_id) AS seller_raw`;
 function dodajProdajalca(vrstice) {
@@ -1821,6 +1824,9 @@ function preveriPodatkeProdajalca(b) {
 const sqlRacunVNacinu = (a = "") => `(COALESCE(${a}stripe_account_livemode, FALSE) = ${placilaStripe.jeLive() ? "TRUE" : "FALSE"})`;
 // Klub ima v TEKOCEM nacinu povezan Stripe racun, ki sprejema placila (kot `nacinPlacila(klub)` v placila_stripe.js).
 const sqlStripePripravljen = (a = "") => `(${a}stripe_account_id IS NOT NULL AND ${a}stripe_charges_enabled AND ${sqlRacunVNacinu(a)})`;
+// Nakup pri tem klubu gre skozi Stripe (javni `payment_mode`, `GET /business/sales`): racun kluba v tekocem nacinu ALI prodajalec je platforma (I50, `clubs.is_official`: neposredno
+// placilo na platformni racun, racun kluba ni pogoj). SQL enakovrednik `placilaStripe.nacinPlacila`. Stanje Stripa za lastnika/admina (`sqlStripeStanje`) ostane stanje KLUBOVEGA racuna.
+const sqlPlacilaPripravljena = (a = "") => `(${sqlStripePripravljen(a)} OR COALESCE(${a}is_official, FALSE))`;
 // Stanje Stripa za odgovore (lastnik, admin): vrednost iz baze velja samo, ce je racun iz tekocega nacina, sicer false.
 const sqlStripeStanje = (a = "") => `(${a}stripe_charges_enabled AND ${sqlRacunVNacinu(a)}) AS stripe_charges_enabled, (${a}stripe_payouts_enabled AND ${sqlRacunVNacinu(a)}) AS stripe_payouts_enabled`;
 
@@ -2497,7 +2503,7 @@ if (STOLPCI_DOGODKA_LAHKI === STOLPCI_DOGODKA) throw new Error("STOLPCI_DOGODKA_
 // Pri mesanici (vstopnica 0 EUR + placljiva miza ali obratno) je payment_mode dogodka po vstopnici, nakup drugega dela pa vrne 409;
 // natancno za mize je `payment_mode` v GET /events/:id/vip.
 // I36: `club_stripe_ready` = racun iz TEKOCEGA nacina (sqlStripePripravljen), zato je funkcija (nacin je znan ob klicu).
-const sqlKlubStripePripravljen = () => `(SELECT ${sqlStripePripravljen("cs.")} FROM clubs cs WHERE cs.id = events.club_id) AS club_stripe_ready,
+const sqlKlubStripePripravljen = () => `(SELECT ${sqlPlacilaPripravljena("cs.")} FROM clubs cs WHERE cs.id = events.club_id) AS club_stripe_ready,
         (SELECT ${sqlProdajalecSurov("cs")} FROM clubs cs WHERE cs.id = events.club_id) AS club_seller_raw`;
 function dodajNacinPlacila(vrstice) {
   for (const r of vrstice) {
@@ -3332,6 +3338,7 @@ const adminStolpciKluba = () => `c.id, c.owner_user_id, c.name, c.logo_url, c.ba
   c.contact_email, c.contact_phone, c.instagram, c.website, c.address, c.city, c.country,
   c.lat, c.lng, c.min_age, c.genres, c.hidden, (c.stripe_charges_enabled AND ${sqlRacunVNacinu("c.")}) AS stripe_charges_enabled, c.commission_bps, c.created_at,
   c.is_organizer, c.is_official, c.is_demo,
+  (c.stripe_account_id IS NOT NULL) AS has_stripe_account, (SELECT COUNT(*)::int FROM orders ord WHERE ord.club_id = c.id) AS order_count,   -- za opozorilo ob vklopu »uradni profil« (I50); racun sam ne uhaja
   c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer,
   u.email AS owner_email, u.username AS owner_username`;
 
@@ -3724,6 +3731,15 @@ async function lastnikPoEmailu(c, email) {
   return { uporabnik: r.rows[0] };
 }
 
+// I50: stikalo `is_official` preusmeri VES denar prodaje kluba na platformni racun (provizije ni, klub ne dobi denarja): vsaka SPREMEMBA (staro -> novo) gre v dnevnik
+// (kdo, kateri klub), da je za nazaj razvidno, od kdaj prodaja kluba ni vec njegova. Brez e-naslova klubov, samo id-ji.
+function zapisiSpremembaUradnega(req, klubId, ime, staro, novo) {
+  const a = staro === true, n = novo === true;
+  if (a === n) return;
+  const kdo = req.user && req.user.userId ? `admin uporabnik ${req.user.userId}` : "admin (neznan)";
+  console.warn(`[admin] POZOR is_official: ${kdo} je klubu ${klubId} (${String(ime).slice(0, 80)}) spremenil is_official ${a} -> ${n}; ${n ? "NOVE prodaje kluba gredo na racun NEXT DIMENSIONS brez provizije, klub ne dobi denarja" : "nove prodaje kluba spet po Connectu (obstojeca narocila ostanejo platformna)"}`);
+}
+
 admin.post("/clubs", async (req, res) => {
   const b = req.body || {};
   const c = await pool.connect();
@@ -3759,6 +3775,7 @@ admin.post("/clubs", async (req, res) => {
       [r.rows[0].id]
     );
     await c.query("COMMIT");
+    zapisiSpremembaUradnega(req, r.rows[0].id, nov.rows[0].name, false, nov.rows[0].is_official);
     return res.status(201).json(dodajSellerComplete(nov.rows[0]));
   } catch (e) {
     await c.query("ROLLBACK").catch(() => {});
@@ -3783,7 +3800,7 @@ admin.patch("/clubs/:id", async (req, res) => {
     const polja = pk.polja;
 
     await c.query("BEGIN");
-    const obstaja = await c.query("SELECT id, owner_user_id FROM clubs WHERE id=$1 FOR UPDATE", [id]);
+    const obstaja = await c.query("SELECT id, name, owner_user_id, is_official FROM clubs WHERE id=$1 FOR UPDATE", [id]);
     if (obstaja.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Club not found."); }
 
     // Prenos lastništva po e-naslovu. Novi lastnik ne sme že imeti kluba.
@@ -3812,6 +3829,7 @@ admin.patch("/clubs/:id", async (req, res) => {
        FROM clubs c LEFT JOIN users u ON u.id=c.owner_user_id WHERE c.id=$1`, [id]
     );
     await c.query("COMMIT");
+    zapisiSpremembaUradnega(req, id, obstaja.rows[0].name, obstaja.rows[0].is_official, r.rows[0].is_official);
     return res.status(200).json(dodajSellerComplete(r.rows[0]));
   } catch (e) {
     await c.query("ROLLBACK").catch(() => {});
@@ -4008,6 +4026,9 @@ admin.post("/disputes/:id/retry", async (req, res) => {
 // application_fee_cents (provizija PROVIZIJA_ODSTOTEK); "za klube" = bruto
 // minus provizija minus vračila. Štejejo se samo plačana naročila
 // (paid, partially_refunded).
+// I50: prodaja uradnega profila Outly (prodajalec je platforma, SQL_NAROCILO_PLATFORMNO: plačilo neposredno na platformni račun, provizija 0) je bruto
+// prodaja (vsa je prihodek Outlyja), v "za klube" / net_cents je NI (nobenemu klubu ni dolgovana); DODANO polje `own_sales_cents` = bruto - vračila te prodaje
+// (summary, by_club).
 //
 // TESTNI PROMET (#230): summary, all_time, by_club, by_event in by_day so SAMO PRAVI promet; testni je ločen
 // (test_summary, all_time_test, summary.test_orders). Testno naročilo (SQL_TESTNO_NAROCILO) je
@@ -4029,6 +4050,7 @@ admin.get("/finance", async (req, res) => {
     // o.guest_list_id IS NULL: guest lista (035, I24) ni prodaja (brez zneska); ne sme v stevilo narocil, kupcev, vstopnic.
     const KJE_VSE = `o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day')`;
     const KJE = `${KJE_VSE} AND ${SQL_PRAVO_NAROCILO}`;   // pravi promet (brez lažnega načina in sandboxa)
+    const PLATFORMNO = placilaStripe.SQL_NAROCILO_PLATFORMNO("o");   // I50: prodajalec je platforma (uradni profil Outly)
     const SESTEVEK_TEST = `COUNT(*)::int AS orders,
                 COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
@@ -4040,7 +4062,8 @@ admin.get("/finance", async (req, res) => {
         `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
                 COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
-                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents),0)::int AS clubs_net_cents,
+                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents) FILTER (WHERE NOT ${PLATFORMNO}),0)::int AS clubs_net_cents,
+                COALESCE(SUM(o.total_cents - o.refunded_cents) FILTER (WHERE ${PLATFORMNO}),0)::int AS own_sales_cents,
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold,
                 COUNT(*)::int AS orders,
                 COUNT(DISTINCT COALESCE(o.user_id::text, lower(o.guest_email)))::int AS buyers,
@@ -4051,7 +4074,8 @@ admin.get("/finance", async (req, res) => {
                 COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
                 COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
-                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents),0)::int AS net_cents,
+                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents) FILTER (WHERE NOT ${PLATFORMNO}),0)::int AS net_cents,
+                COALESCE(SUM(o.total_cents - o.refunded_cents) FILTER (WHERE ${PLATFORMNO}),0)::int AS own_sales_cents,
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold,
                 COUNT(o.id)::int AS orders
          FROM clubs c LEFT JOIN orders o ON o.club_id = c.id AND ${KJE}
@@ -4480,7 +4504,7 @@ async function omejitevBrezplacnih(c, { userId = null, gostEmail = null, eventId
 // Dovoljenje nakupa in povezavo `d` sprosti TAKOJ (#274): od tu naprej `c` ni vec nas. Stripe tece pod lastnim semaforjem; zapis seje in branje
 // odgovora pa na ENI kratkotrajni povezavi iz poola (drzimo eno povezavo in ne cakamo na drugo, zato pool ne zastane; glej opombo pri
 // POST /events/:id/orders). Neuspeh Stripa, zapisa ali semaforja = narocilo `failed` (sprozilec sprosti zalogo).
-async function nakupStripeSeja(res, d, { oid, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale }) {
+async function nakupStripeSeja(res, d, { oid, opis, kolicina, cenaEnoteCents, racunKluba, platformno, email, eventId, odjemalec, povratna, locale }) {
   // Neuspeh: narocilo `failed` (sprozilec sprosti zalogo) in `idempotency_key = NULL`: neuspeh se ne zapomni (I18, test_idempotenca §6), sicer bi
   // ponovitev z istim kljucem dobila 409 order_not_active. Zapis ne sme tiho odpasti (narocilo bi ostalo `pending` brez seje ~35 min, I20): 2 poskusa + dnevnik.
   const neuspeh = async (db, koda, sporocilo) => {
@@ -4515,7 +4539,7 @@ async function nakupStripeSeja(res, d, { oid, opis, kolicina, cenaEnoteCents, ra
     }
     let seja;
     try {
-      seja = await placilaStripe.ustvariCheckout({ narocilo: nr, opis, kolicina, cenaEnoteCents, racunKluba, email, eventId, odjemalec, povratna, locale });
+      seja = await placilaStripe.ustvariCheckout({ narocilo: nr, opis, kolicina, cenaEnoteCents, racunKluba, platformno, email, eventId, odjemalec, povratna, locale });
     } finally { stripeIzstopi(); }
     c2 = await pool.connect();
     try {
@@ -4984,7 +5008,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
               c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
-              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo
+              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]
     );
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
@@ -5027,7 +5051,8 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
       if (omejitev) { await c.query("ROLLBACK"); return res.status(409).send(omejitev); }
     }
 
-    const provizija = provizijaCentov(skupaj, e.commission_bps);
+    const platformno = placilaStripe.jePlatformniProdajalec(e);   // I50: prodajalec je platforma (uradni profil Outly): provizije ni, racuna kluba ni
+    const provizija = platformno ? 0 : provizijaCentov(skupaj, e.commission_bps);
     const ref = javnaRef();
     const pi = test ? "test_" + crypto.randomUUID() : null;
 
@@ -5039,7 +5064,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
                            stripe_account_id, receipt_mail_attempts, terms_version, terms_accepted_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $11 = 'paid' THEN NOW() END,$14,$15,CASE WHEN $11 = 'paid' THEN 0 END,$16::text,CASE WHEN $16::text IS NOT NULL THEN NOW() END) RETURNING id`,
       [ref, req.user.userId, e.id, e.club_id, q, e.ticket_price_cents, skupaj, e.currency, provizija, e.vat_rate,
-       placanoTakoj ? "paid" : "pending", pi, u.email, req.idemKljuc || null, placanoTakoj ? null : e.stripe_account_id, pogoji.verzija]
+       placanoTakoj ? "paid" : "pending", pi, u.email, req.idemKljuc || null, placilaStripe.racunNarocila(placanoTakoj, platformno, e.stripe_account_id), pogoji.verzija]
     );
     const oid = or.rows[0].id;
     if (placanoTakoj) {
@@ -5057,7 +5082,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     // obvisi, dokler ga Render ne zažene znova (ugotovljeno s testom sočasnosti). Stripe pot drzi najvec eno povezavo naenkrat (brez cakanja na drugo).
     const telo = placanoTakoj ? await odgovorNarocila(c, oid)
       : await nakupStripeSeja(res, d, { oid, opis: `${e.title} – ${q === 1 ? "1 ticket" : q + " tickets"}`,
-        kolicina: q, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: u.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) });
+        kolicina: q, cenaEnoteCents: e.ticket_price_cents, racunKluba: platformno ? null : e.stripe_account_id, platformno, email: u.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) });
     if (!telo) return;
     console.log(`Nakup (${placanoTakoj && !test ? "brezplacno" : nacin}): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, ${q}x ${e.ticket_price_cents} c`);
     if (placanoTakoj) posljiPotrdiloKupcu(oid);   // brez await: odgovor ne caka na Resend; napaka maila ne podre nakupa (pospravljalec ponovi)
@@ -5418,7 +5443,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
               c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
-              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo
+              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [g.eventId]
     );
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
@@ -5470,7 +5495,8 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
       }
     }
 
-    const provizija = provizijaCentov(skupaj, e.commission_bps);
+    const platformno = placilaStripe.jePlatformniProdajalec(e);   // I50: prodajalec je platforma (uradni profil Outly): provizije ni, racuna kluba ni
+    const provizija = platformno ? 0 : provizijaCentov(skupaj, e.commission_bps);
     const ref = javnaRef();
     const pi = test ? "test_" + crypto.randomUUID() : null;
     const or = await c.query(
@@ -5479,7 +5505,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
                            stripe_account_id, guest_email, guest_terms_version, guest_terms_accepted_at, guest_age_min)
        VALUES ($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,CASE WHEN $10 = 'paid' THEN NOW() END,$13,$14,$12,$15,NOW(),$16) RETURNING id`,
       [ref, e.id, e.club_id, g.quantity, e.ticket_price_cents, skupaj, e.currency, provizija, e.vat_rate,
-       placanoTakoj ? "paid" : "pending", pi, g.email, req.idemKljuc || null, placanoTakoj ? null : e.stripe_account_id, g.terms, g.dob ? e.min_age : null]
+       placanoTakoj ? "paid" : "pending", pi, g.email, req.idemKljuc || null, placilaStripe.racunNarocila(placanoTakoj, platformno, e.stripe_account_id), g.terms, g.dob ? e.min_age : null]
     );
     const oid = or.rows[0].id;
     if (placanoTakoj) {
@@ -5494,7 +5520,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     else {
       const povratna = { success_url: gostPovezava(zeton), cancel_url: gostPovezava(zeton) };   // stran naroclia: »Complete payment« / »Cancel order«
       telo = await nakupStripeSeja(res, d, { oid, opis: `${e.title} – ${g.quantity === 1 ? "1 ticket" : g.quantity + " tickets"}`,
-        kolicina: g.quantity, cenaEnoteCents: e.ticket_price_cents, racunKluba: e.stripe_account_id, email: g.email, eventId: e.id,
+        kolicina: g.quantity, cenaEnoteCents: e.ticket_price_cents, racunKluba: platformno ? null : e.stripe_account_id, platformno, email: g.email, eventId: e.id,
         odjemalec: "splet", povratna, locale: localeNakupa(req) });   // #274: povezavo in dovoljenje sprosti sama
       if (!telo) return;
     }
@@ -5539,7 +5565,7 @@ async function gostNarociloOdgovor(db, oid) {
             ${SQL_CHECKOUT_URL},
             e.id AS event_id, e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
             cl.id AS club_id, cl.name AS club_name, ${PRIZORISCE_NASLOV}, cl.logo_url, ${PRIZORISCE_E},
-            ${sqlProdajalecSurov("cl")} AS seller_raw
+            ${sqlProdajalecSurov("cl")} AS seller_raw, ${placilaStripe.SQL_NAROCILO_PLATFORMNO("o")} AS platformno
        FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id ${PRIZORISCE_JOIN} WHERE o.id = $1`, [oid]);
   if (!nr.rows.length) return null;
   const x = nr.rows[0];
@@ -5550,7 +5576,7 @@ async function gostNarociloOdgovor(db, oid) {
     event_id: x.event_id, club_id: x.club_id, event_title: x.event_title, start_at: x.start_at, poster_url: x.poster_url, club_name: x.club_name,
     event: { id: x.event_id, title: x.event_title, start_at: x.start_at, end_at: x.end_at, poster_url: x.poster_url, min_age: x.min_age,
              club_id: x.club_id, club_name: x.club_name, address: x.address, city: x.city, logo_url: x.logo_url, ...prizoriscePolja(x) },
-    seller: prodajalec(x.seller_raw),   // prodajalec = organizator/klub dogodka, ne prizorisce (043, #94)
+    seller: prodajalec({ ...x.seller_raw, is_official: false, is_platform: x.platformno === true }),   // prodajalec = organizator/klub dogodka, ne prizorisce (043, #94); I50: platforma po oznaki NAROCILA
   };
 }
 
@@ -5742,12 +5768,19 @@ function sellerVrstice(o, jez = "en") {
   const sl = jez === "sl";
   const s = prodajalec({ name: o.club_name, legal_name: o.legal_name, legal_address: o.legal_address, address: o.club_address, city: o.club_city,
     registration_number: o.registration_number, tax_number: o.tax_number, vat_payer: o.vat_payer, contact_phone: o.club_phone, contact_email: o.club_email });
-  const vrstice = [`${sl ? "Vstopnico prodaja klub" : "The ticket is sold by the club"}: ${[s.name, s.address, s.phone, s.email].filter(Boolean).join(", ")}.`];
+  // I50: prodajalec je platforma (narocilo z oznako »platform«): vstopnico prodaja NEXT DIMENSIONS sama (podatki prodajalca iz vrstice kluba), brez stavka o posredniku.
+  const platforma = o.stripe_account_id === placilaStripe.PLATFORMNI_RACUN;
+  const podatki = [s.name, s.address, s.phone, s.email].filter(Boolean).join(", ");
+  const vrstice = platforma
+    ? [/next dimensions/i.test(s.name)
+        ? `${sl ? "Vstopnico prodaja" : "The ticket is sold by"}: ${podatki}.`
+        : `${sl ? "Vstopnico prodaja družba NEXT DIMENSIONS" : "The ticket is sold by NEXT DIMENSIONS"}: ${podatki}.`]
+    : [`${sl ? "Vstopnico prodaja klub" : "The ticket is sold by the club"}: ${podatki}.`];
   const ident = [s.registration_number ? `${sl ? "Matična številka" : "Company registration number"}: ${s.registration_number}` : "", s.tax_number ? `${sl ? "Davčna številka" : "Tax number"}: ${s.tax_number}` : ""].filter(Boolean);
   if (ident.length) vrstice.push(`${ident.join(". ")}.`);
   if (s.vat_payer === true) vrstice.push(sl ? "Status DDV: prodajalec je zavezanec za DDV." : "VAT status: the seller is a VAT payer.");
   else if (s.vat_payer === false) vrstice.push(sl ? "Status DDV: prodajalec ni zavezanec za DDV." : "VAT status: the seller is not a VAT payer.");
-  vrstice.push(sl ? `Outly je samo posrednik: ${POSREDNIK_VRSTICA}.` : `Outly is only the intermediary: ${POSREDNIK_VRSTICA}.`);
+  if (!platforma) vrstice.push(sl ? `Outly je samo posrednik: ${POSREDNIK_VRSTICA}.` : `Outly is only the intermediary: ${POSREDNIK_VRSTICA}.`);
   return vrstice;
 }
 // Slovnicno stevilo za »sedez« (1 sedez, 2 sedeza, 3-4 sedezi, 5+ sedezev; 101 = sedez, 102 = sedeza ...).
@@ -5891,7 +5924,7 @@ async function gostPosljiEnoPosto(oid) {
     `UPDATE orders SET guest_mail_attempts = guest_mail_attempts + 1, guest_mail_claimed_at = NOW()
       WHERE id = $1 AND guest_email IS NOT NULL AND status = 'paid' AND guest_mail_sent_at IS NULL AND guest_mail_attempts < $2
         AND (guest_mail_claimed_at IS NULL OR guest_mail_claimed_at < NOW() - ($3::bigint[])[guest_mail_attempts + 1] * INTERVAL '1 millisecond')
-      RETURNING public_ref, guest_email, quantity, event_id, club_id, user_id, unit_price_cents, total_cents, currency, vat_rate, created_at, paid_at, guest_terms_version, guest_mail_attempts`;
+      RETURNING public_ref, guest_email, stripe_account_id, quantity, event_id, club_id, user_id, unit_price_cents, total_cents, currency, vat_rate, created_at, paid_at, guest_terms_version, guest_mail_attempts`;
   let k;
   if (!brezplacno) k = await pool.query(claimSql, [oid, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
   else {
@@ -6071,7 +6104,7 @@ async function potrdiloPosljiEno(oid) {
       WHERE id = $1 AND user_id IS NOT NULL AND guest_list_id IS NULL AND status = 'paid' AND receipt_mail_sent_at IS NULL
         AND receipt_mail_attempts IS NOT NULL AND receipt_mail_attempts < $2
         AND (receipt_mail_claimed_at IS NULL OR receipt_mail_claimed_at < NOW() - ($3::bigint[])[receipt_mail_attempts + 1] * INTERVAL '1 millisecond')
-      RETURNING public_ref, buyer_email, quantity, event_id, unit_price_cents, total_cents, currency, vat_rate, created_at, paid_at,
+      RETURNING public_ref, buyer_email, stripe_account_id, quantity, event_id, unit_price_cents, total_cents, currency, vat_rate, created_at, paid_at,
                 table_label, table_seats, package_name, receipt_mail_attempts, terms_version, COALESCE(stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test`,
     [oid, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
   if (!k.rows.length) return false;
@@ -6137,6 +6170,7 @@ function vraciloMailBesedilo(o, vrsta) {
       : T(`${o.quantity} ${o.quantity === 1 ? "vstopnica" : "vstopnice"}`, `${o.quantity} ${o.quantity === 1 ? "ticket" : "tickets"}`);
     const zn = znesek(o.znesek_cents, o.currency, jez);
     const koncno = vrsta === "vrnjeno";
+    const platforma = o.stripe_account_id === placilaStripe.PLATFORMNI_RACUN;   // I50: prodajalec je platforma, »organizatorja« ni (ni tretje stranke)
     if (vrsta === "ni_izvedeno") {
       const ec = o.razlog !== "inactive_order";
       return {
@@ -6147,10 +6181,10 @@ function vraciloMailBesedilo(o, vrsta) {
             T(`Dogodek »${o.event_title}« (${ljDatum(o.start_at, jez)}) je odpovedan.`, `The event "${o.event_title}" (${ljDatum(o.start_at, jez)}) has been cancelled.`),
             T(`Naročilo ${o.public_ref}: ${kaj}.`, `Order ${o.public_ref}: ${kaj}.`)] }] : []),
           { naslov: T("Vračilo", "Refund"), krepko: true, vrstice: ec ? [
-            T(`Ob odpovedi dogodka smo v imenu organizatorja sprožili vračilo ${zn} na način plačila, s katerim ste plačali. Ponudnik plačilnih storitev vračila ni izvedel, zato denarja še niste prejeli.`,
-              `When the event was cancelled, we started a refund of ${zn} to the payment method you used, on the organiser's behalf. The payment provider did not complete the refund, so you have not received the money yet.`),
-            T("Do vračila ste še vedno upravičeni. Uredili ga bomo ročno, skupaj z organizatorjem.",
-              "You are still entitled to the refund. We will arrange it manually, together with the organiser.")] : [
+            T(`Ob odpovedi dogodka smo ${platforma ? "" : "v imenu organizatorja "}sprožili vračilo ${zn} na način plačila, s katerim ste plačali. Ponudnik plačilnih storitev vračila ni izvedel, zato denarja še niste prejeli.`,
+              `When the event was cancelled, we started a refund of ${zn} to the payment method you used${platforma ? "" : ", on the organiser's behalf"}. The payment provider did not complete the refund, so you have not received the money yet.`),
+            T(`Do vračila ste še vedno upravičeni. Uredili ga bomo ročno${platforma ? "" : ", skupaj z organizatorjem"}.`,
+              `You are still entitled to the refund. We will arrange it manually${platforma ? "" : ", together with the organiser"}.`)] : [
             T(`Vračila vašega plačila ${zn} za naročilo ${o.public_ref} (dogodek »${o.event_title}«), ki ni bilo zaključeno, ponudnik plačilnih storitev ni izvedel, zato denarja še niste prejeli.`,
               `The payment provider did not complete the refund of your payment of ${zn} for order ${o.public_ref} (event "${o.event_title}"), which was not completed, so you have not received the money yet.`),
             T("Do vračila ste še vedno upravičeni. Uredili ga bomo ročno.", "You are still entitled to the refund. We will arrange it manually.")] },
@@ -6240,6 +6274,7 @@ async function posljiVraciloKupcu(vid, vrsta) {
     const v = k.rows[0];
     const r0 = await pool.query(
       `SELECT o.public_ref, o.buyer_email, o.quantity, o.currency, o.table_label, o.total_cents, o.refunded_cents, e.title AS event_title, e.start_at, cl.name AS club_name,
+              o.stripe_account_id,
               (o.total_cents = 0 OR COALESCE(o.stripe_payment_intent_id LIKE 'test_%', FALSE)) AS brez_placila
          FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = e.club_id WHERE o.id = $1`, [v.order_id]);
     const o = r0.rows[0];
@@ -6297,7 +6332,7 @@ async function posljiVraciloKupcu(vid, vrsta) {
 // pogodba #97 mora to klubu nalozit), ali da avtomatska povrnitev ni uspela. Mail ob zaprtju `lost` pocaka na izid povrnitve.
 // #285: obvestilo lastniku kluba o sporu SAMO za placano naroceno (paid/partially_refunded/refunded; ima vstopnice). Spor na cancelled/failed/pending naroceno (I44, N3, placilo po preklicu)
 // ni terjatev do kluba (placila_stripe.js spor(): povrnitev `rocno`), zato maila ni. Isti pogoj v obdelovalcu (sweep) in pri prevzemu; alias spora podan.
-const { SQL_SPOR_NAROCILO_PLACANO } = require("./vracila_stripe");   // ena resnica (vracila_stripe.js)
+const { SQL_SPOR_ZA_LASTNIKA } = require("./vracila_stripe");   // ena resnica (vracila_stripe.js); I50: spor na platformno narocilo (uradni profil Outly) lastnika ne obvesti
 const SPORI_STOLPCI = { odprt: ["mail_odprt_poskusi", "mail_odprt_prevzeto_at", "mail_odprt_poslano_at", ""],
   zaprt: ["mail_zaprt_poskusi", "mail_zaprt_prevzeto_at", "mail_zaprt_poslano_at", "AND s.zaprt_at IS NOT NULL AND (s.stanje <> 'lost' OR s.povrnitev_stanje IN ('opravljeno','ni_uspelo','rocno'))"] };
 const sporMailVTeku = new Set();
@@ -6345,7 +6380,7 @@ async function posljiSporMail(did, vrsta) {
   try {
     const k = await pool.query(
       `UPDATE spori s SET ${cPoskusi} = s.${cPoskusi} + 1, ${cPrevzeto} = NOW()
-        WHERE s.id = $1 AND s.${cPoslano} IS NULL AND s.${cPoskusi} < $2 ${dodatek} AND (s.order_id IS NULL OR ${SQL_SPOR_NAROCILO_PLACANO("s")})
+        WHERE s.id = $1 AND s.${cPoslano} IS NULL AND s.${cPoskusi} < $2 ${dodatek} AND (s.order_id IS NULL OR ${SQL_SPOR_ZA_LASTNIKA("s")})
           AND (s.${cPrevzeto} IS NULL OR s.${cPrevzeto} < NOW() - ($3::bigint[])[s.${cPoskusi} + 1] * INTERVAL '1 millisecond')
         RETURNING s.order_id, s.stanje, s.razlog, s.znesek_cents, s.valuta, s.povrnitev_stanje, s.povrnitev_cents, s.pristojbina_spora_cents, s.${cPoskusi} AS poskus`, [did, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
     if (!k.rows.length) return false;
@@ -6395,7 +6430,7 @@ async function vracilaObvestilaNeposlana() {
     for (const v of r.rows) { if (await posljiVraciloKupcu(v.id, vrsta) && VRACILA_MAIL_RAZMAK_MS) await pocakaj(VRACILA_MAIL_RAZMAK_MS); }
   }
   const sp = await pool.query(
-    `SELECT id FROM spori WHERE order_id IS NOT NULL AND ${SQL_SPOR_NAROCILO_PLACANO("spori")} AND ((mail_odprt_poslano_at IS NULL AND mail_odprt_poskusi < $1)
+    `SELECT id FROM spori WHERE order_id IS NOT NULL AND ${SQL_SPOR_ZA_LASTNIKA("spori")} AND ((mail_odprt_poslano_at IS NULL AND mail_odprt_poskusi < $1)
         OR (zaprt_at IS NOT NULL AND mail_zaprt_poslano_at IS NULL AND mail_zaprt_poskusi < $1)) AND ustvarjen_at > NOW() - INTERVAL '60 days' ORDER BY ustvarjen_at LIMIT 10`, [GOST_POSTA_POSKUSOV]);
   for (const x of sp.rows) await posljiSporLastniku(x.id);
 }
@@ -6772,7 +6807,7 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
       range ? serijaProdaje(klub, range) : Promise.resolve(null),
     ]);
     // Provizija TEGA kluba (031), ce jo je admin nastavil; sicer privzeta. Lastnik vidi svojo pogodbeno provizijo.
-    const kp = (await pool.query(`SELECT commission_bps, is_demo, ${sqlStripePripravljen()} AS stripe_pripravljen, ${STOLPCI_PRODAJALCA}, contact_phone, contact_email FROM clubs WHERE id=$1`, [klub])).rows[0];
+    const kp = (await pool.query(`SELECT commission_bps, is_demo, ${sqlPlacilaPripravljena()} AS stripe_pripravljen, is_official, ${STOLPCI_PRODAJALCA}, contact_phone, contact_email FROM clubs WHERE id=$1`, [klub])).rows[0];
     const nacinKluba = placilaStripe.nacinPlacilaZ(!!(kp && kp.stripe_pripravljen));
     const { test_orders, test_gross_cents, test_tickets_sold, ...summary } = povzetek.rows[0];
     const odgovor = {
@@ -6782,7 +6817,9 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
       payment_mode: kp && kp.is_demo ? "unavailable" : javniNacinProdajalca(nacinKluba, kp || {}, 1, false),
       // Zakaj je "unavailable" (DODANO polje, lastnik in manager): "demo_club" (050) | "seller_incomplete" | "stripe_not_ready" | "payments_not_configured" | null (payment_mode ni "unavailable").
       payment_unavailable_reason: kp && kp.is_demo ? "demo_club" : razlogNerazpolozljivosti(nacinKluba, kp || {}, 1, false),
-      fee_percent: kp && kp.commission_bps !== null ? kp.commission_bps / 100 : PROVIZIJA_ODSTOTEK,
+      // I50: `fee_percent` = provizija za NOVE prodaje kluba DANES (uradni profil Outly = platforma -> 0), NE povprecje preteklih naroceil: klub, ki mu admin vklopi is_official,
+      // ima stara `acct_` naroceila po 10 %, ta pa so pravilno v summary.fee_cents / application_fee_cents (zneski odlocajo po oznaki naroclila, ne po tem polju).
+      fee_percent: kp && kp.is_official === true ? 0 : (kp && kp.commission_bps !== null ? kp.commission_bps / 100 : PROVIZIJA_ODSTOTEK),
       summary,   // #236: samo pravi promet (testni je v test_summary)
       test_summary: { orders: test_orders, gross_cents: test_gross_cents, tickets_sold: test_tickets_sold },
       events: poDogodkih.rows,
@@ -8540,7 +8577,7 @@ app.get("/events/:id/vip", async (req, res) => {
     if (!id) return res.status(400).send("Invalid event id.");
     const er = await pool.query(
       `SELECT e.id, e.club_id, e.vip_enabled, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.min_age,
-              e.vip_layout_source, e.floor_plan, c.is_demo, ${sqlStripePripravljen("c.")} AS club_stripe_ready,
+              e.vip_layout_source, e.floor_plan, c.is_demo, ${sqlPlacilaPripravljena("c.")} AS club_stripe_ready,
               ${sqlProdajalecSurov("c")} AS seller_raw
          FROM events e JOIN clubs c ON c.id = e.club_id
         WHERE e.id = $1 AND e.status = 'published' AND NOT c.hidden`, [id]);
@@ -8639,7 +8676,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_layout_source,
               e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
-              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo
+              c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
          FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
     const e = er.rows[0];
@@ -8709,7 +8746,8 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
       if (omejitev) { await c.query("ROLLBACK"); return res.status(409).send(omejitev); }
     }
 
-    const provizija = provizijaCentov(cena, e.commission_bps);
+    const platformno = placilaStripe.jePlatformniProdajalec(e);   // I50: kot pri vstopnicah
+    const provizija = platformno ? 0 : provizijaCentov(cena, e.commission_bps);
     const ref = javnaRef();
     const pi = test ? "test_" + crypto.randomUUID() : null;
 
@@ -8723,7 +8761,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
        VALUES ($1,$2,$3,$4,1,$5,$5,$6,$7,$8,$18,$9,$10,CASE WHEN $18 = 'paid' THEN NOW() END,$11,$12,$13,$14,$15,$16,$17,$19,CASE WHEN $18 = 'paid' THEN 0 END,$20::text,CASE WHEN $20::text IS NOT NULL THEN NOW() END) RETURNING id`,
       [ref, req.user.userId, e.id, e.club_id, cena, e.currency, provizija, e.vat_rate, pi, starost.email,
        miza.id, miza.label, miza.seats, paket ? paket.id : null, paket ? paket.name : null, paket ? paket.description : null,
-       req.idemKljuc || null, placanoTakoj ? "paid" : "pending", placanoTakoj ? null : e.stripe_account_id, pogoji.verzija]
+       req.idemKljuc || null, placanoTakoj ? "paid" : "pending", placilaStripe.racunNarocila(placanoTakoj, platformno, e.stripe_account_id), pogoji.verzija]
     );
     const oid = or.rows[0].id;
     if (placanoTakoj) await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, miza.seats]);
@@ -8733,7 +8771,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     // Branje po COMMIT-u prek odjemalca c, NE prek pool (glej opombo pri POST /events/:id/orders); Stripe pot (#274) sprosti c in dovoljenje takoj.
     const telo = placanoTakoj ? await odgovorNarocila(c, oid)
       : await nakupStripeSeja(res, d, { oid, opis: `${e.title} – VIP ${miza.label}${paket ? " + " + paket.name : ""}`,
-        kolicina: 1, cenaEnoteCents: cena, racunKluba: e.stripe_account_id, email: starost.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) });
+        kolicina: 1, cenaEnoteCents: cena, racunKluba: platformno ? null : e.stripe_account_id, platformno, email: starost.email, eventId: e.id, odjemalec: odjemalecNakupa(req), locale: localeNakupa(req) });
     if (!telo) return;
     console.log(`Nakup mize (${placanoTakoj && !test ? "brezplacno" : nacin}): naročilo ${ref}, uporabnik ${req.user.userId}, dogodek ${e.id}, miza ${miza.id}, ${miza.seats} vstopnic, ${cena} c`);
     if (placanoTakoj) posljiPotrdiloKupcu(oid);   // brez await (kot pri vstopnicah)
