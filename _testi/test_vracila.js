@@ -980,8 +980,15 @@ async function webhook(tip, objekt, id) {
 
     // N5: sweep ne dotakne dogodkov, odpovedanih pred vec kot 30 dnevi
     const evN5 = await dogodek("N5 noc", 2000), N5 = await narocilo({ ev: evN5, uporabnik: U.ana });
-    await odpovedSql(evN5);
-    await pool.query("UPDATE odpovedi_dogodkov SET odpovedan_at = NOW() - INTERVAL '40 days' WHERE event_id=$1", [evN5]);
+    // Odpoved in prestavitev odpovedan_at v ENI transakciji: sprozilec (047) vstavi odpovedi_dogodkov z NOW(); ce bi bila UPDATE-a locena,
+    // lahko sweep backenda (vsako sekundo) vmes vidi svezo odpoved in naredi vracilo -> test bi bil odvisen od casovanja (CI 19. 10. 2026, #304).
+    { const c = await pool.connect();
+      try {
+        await c.query("BEGIN");
+        await c.query("UPDATE events SET status='cancelled' WHERE id=$1", [evN5]);
+        await c.query("UPDATE odpovedi_dogodkov SET odpovedan_at = NOW() - INTERVAL '40 days' WHERE event_id=$1", [evN5]);
+        await c.query("COMMIT");
+      } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
     await pocakaj(1500);
     assert(!(await vracilo(N5.id)) && (await vrsticaN(N5.id)).status === "paid", "N5: dogodek odpovedan pred 40 dnevi: sweep ga ne dotakne");
 
