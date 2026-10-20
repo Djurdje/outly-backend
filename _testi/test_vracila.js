@@ -290,6 +290,8 @@ async function webhook(tip, objekt, id) {
     assert(w.status === 200, "webhook charge.refunded (delno, nadzorna plosca): 200", w);
     let o6 = await vrsticaN(A6.id);
     assert(o6.status === "partially_refunded" && o6.refunded_cents === 500, "A6: partially_refunded, 500 c", [o6.status, o6.refunded_cents]);
+    // #309: mail o delnem vracilu iz plosce gre asinhrono po COMMIT-u; pocakaj nanj PRED odpovedjo (vrstica `vracila` ga sicer upraviceno odlozi, STATE)
+    assert(await cakaj(() => R.poslano.some(m => String(m.subject).includes(A6.ref) && /Vstopnice tega naročila ostanejo veljavne/.test(m.text || ""))), "#309 A6: mail o delnem vracilu iz plosce poslan pred odpovedjo");
 
     // ================================================================
     console.log("\n# 2. Odpoved dogodka A: hitro, brez Stripa v zahtevku");
