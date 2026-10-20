@@ -690,6 +690,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       g = await gostNar(zetGN0);
       assert(g.status === 200 && g.body.seller && !("is_platform" in g.body.seller) && Object.keys(g.body.seller).length === 8 && !("is_platform" in g.body.order.seller), "9c: navaden klub 0 EUR: GET /guest/order seller brez is_platform, 8 polj", g.body.seller);
       assert(await cakaj(async () => !!mailPo(ZAD_GOST, refGN0), 15000) && jeKlubBesedilo(mailPo(ZAD_GOST, refGN0)), "9c: navaden klub 0 EUR: mail gostu s posrednikom (nespremenjeno)", (mailPo(ZAD_GOST, refGN0) || {}).text);
+      assert(((mailPo(ZAD_GOST, refGN0) || {}).text || "").includes("Glede dogodka: obrnite se na klub (podatki zgoraj)."), "9c T9 kontrola: navaden klub ostane »obrnite se na klub«");
       // 9d S3: oznaka je zamrznjena ob nakupu; sprememba zastavice kluba po nakupu je ne premakne
       await api(bZ, "PATCH", "/admin/api/clubs/2", T.admin, { isOfficial: false });
       await api(bZ, "PATCH", "/admin/api/clubs/1", T.admin, { isOfficial: true });
@@ -735,6 +736,9 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       assert(w.status === 200 && (await nar(GM)).status === "paid" && (await nar(GM)).stripe_account_id === "platform", "10a: placano (pravilen znesek), oznaka platform", [(await nar(GM)).status]);
       assert(await cakaj(async () => !!mailPo(ZAD_GOST, refGM), 15000), "10a: mail gostu poslan", R.poslano.map(m => m.subject).slice(-5));
       assert(jePlatformaBesedilo(mailPo(ZAD_GOST, refGM)), "10a: mail gostu (placano, uradni profil): NEXT DIMENSIONS, BREZ »posrednik« in brez »klub«", (mailPo(ZAD_GOST, refGM) || {}).text);
+      { const t = (mailPo(ZAD_GOST, refGM) || {}).text || "";   // T9 (pravnik 2026-10-20): pri dogodku Outly organizator, ne klub
+        assert(t.includes("Glede dogodka: obrnite se na organizatorja (podatki zgoraj).") && t.includes("About the event: contact the organiser (details above).") && !/obrnite se na klub|contact the club|klub vam lahko|the club may/.test(t),
+          "10a T9: mail gostu pri prodajalcu platformi pise »organizator«, ne »klub«", t.slice(0, 600)); }
       // 10b Stripe vracilo ob odpovedi ZAVRNE (refund failed): ni_uspelo -> po roku mail `ni_izvedeno`
       const evNIo = await dogodek(2, "Outly ni izvedeno", 1000), evNIn = await dogodek(1, "Navadna ni izvedeno", 1000);
       r = await nakup(T.kupec1, evNIo); const NIo = r.body.order.id; const piNIo = placaj((await nar(NIo)).stripe_checkout_session_id);

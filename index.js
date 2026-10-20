@@ -6472,12 +6472,16 @@ async function posljiVraciloKupcu(vid, vrsta) {
 // (odpoved dogodka, inactive_order) kupca obvesca obdelovalec vracil; vrstica `vracila` vedno nastane PRED klicem Stripa, zato dirke z webhookom ni.
 // Pogoj sme postati resnicen pozneje (npr. vrstica `preklicano`): mail se le ODLOZI (brez claima, poskus se ne porabi), pospravljalec gleda 30 dni nazaj.
 const VRACILO_IZ_STRIPA_POGOJ = `NOT EXISTS (SELECT 1 FROM vracila vv WHERE vv.order_id = s.order_id AND vv.stanje <> 'preklicano')`;
+// Vrstni red (I51): vracila istega naboja gredo kupcu PO VRSTI (skupaj_vrnjeno, nato cas); novejse caka, dokler starejse ni poslano ali izcrpano (poskusi = max).
+// Sicer bi zakasnel mail starejsega delnega vracila kot zadnji rekel »vstopnice ostanejo veljavne«, ceprav so vrnjene. Pogoj je v claimu (velja med instancami).
+const VRACILO_IZ_STRIPA_PO_VRSTI = `NOT EXISTS (SELECT 1 FROM vracila_iz_stripa sp WHERE sp.charge_id = s.charge_id AND sp.mail_poslano_at IS NULL AND sp.mail_poskusi < $2
+                                        AND (sp.skupaj_vrnjeno_cents, sp.created_at, sp.vracilo_id) < (s.skupaj_vrnjeno_cents, s.created_at, s.vracilo_id))`;
 const vraciloIzStripaVTeku = new Set();
 // Po COMMIT-u webhooka charge.refunded: vsa neposlana vracila tega naboja (vsako Stripovo vracilo svoj mail), po vrsti.
 async function posljiVracilaIzStripaNaboja(chargeId) {
   if (!resend) return;
-  const r = await pool.query("SELECT vracilo_id FROM vracila_iz_stripa WHERE charge_id = $1 AND mail_poslano_at IS NULL ORDER BY skupaj_vrnjeno_cents, created_at", [String(chargeId)]);
-  for (const x of r.rows) await posljiVraciloIzStripa(x.vracilo_id);
+  const r = await pool.query("SELECT vracilo_id FROM vracila_iz_stripa WHERE charge_id = $1 AND mail_poslano_at IS NULL ORDER BY skupaj_vrnjeno_cents, created_at, vracilo_id", [String(chargeId)]);
+  for (const x of r.rows) if (!(await posljiVraciloIzStripa(x.vracilo_id))) break;   // po vrsti: neuspeh starejsega ustavi novejse (ponovi pospravljalec)
 }
 async function posljiVraciloIzStripa(vracId) {
   if (!resend) return false;
@@ -6494,7 +6498,7 @@ async function posljiVraciloIzStripa(vracId) {
 async function vraciloIzStripaPosljiEno(vracId) {
   const k = await pool.query(
     `UPDATE vracila_iz_stripa s SET mail_poskusi = s.mail_poskusi + 1, mail_prevzeto_at = NOW()
-      WHERE s.vracilo_id = $1 AND s.mail_poslano_at IS NULL AND s.mail_poskusi < $2 AND ${VRACILO_IZ_STRIPA_POGOJ}
+      WHERE s.vracilo_id = $1 AND s.mail_poslano_at IS NULL AND s.mail_poskusi < $2 AND ${VRACILO_IZ_STRIPA_POGOJ} AND ${VRACILO_IZ_STRIPA_PO_VRSTI}
         AND (s.mail_prevzeto_at IS NULL OR s.mail_prevzeto_at < NOW() - ($3::bigint[])[s.mail_poskusi + 1] * INTERVAL '1 millisecond')
       RETURNING s.order_id, s.znesek_cents, s.skupaj_vrnjeno_cents, s.valuta, s.mail_poskusi AS poskus`, [vracId, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
   if (!k.rows.length) return false;
@@ -6530,10 +6534,13 @@ async function vraciloIzStripaPosljiEno(vracId) {
 async function vraciloIzStripaPosljiNeposlane() {
   if (!resend) return;
   const r = await pool.query(
-    `SELECT s.vracilo_id FROM vracila_iz_stripa s
-      WHERE s.mail_poslano_at IS NULL AND s.mail_poskusi < $1 AND s.created_at > NOW() - INTERVAL '30 days' AND ${VRACILO_IZ_STRIPA_POGOJ}
-        AND (s.mail_prevzeto_at IS NULL OR s.mail_prevzeto_at < NOW() - ($2::bigint[])[s.mail_poskusi + 1] * INTERVAL '1 millisecond')
-      ORDER BY s.created_at, s.skupaj_vrnjeno_cents LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+    // na naboj samo NAJSTAREJSE neposlano (neizcrpano) vracilo; ce je v premoru, novejsa istega naboja cakajo
+    `SELECT n.vracilo_id FROM (
+       SELECT DISTINCT ON (s.charge_id) s.vracilo_id, s.mail_poskusi, s.mail_prevzeto_at, s.created_at FROM vracila_iz_stripa s
+        WHERE s.mail_poslano_at IS NULL AND s.mail_poskusi < $1 AND s.created_at > NOW() - INTERVAL '30 days' AND ${VRACILO_IZ_STRIPA_POGOJ}
+        ORDER BY s.charge_id, s.skupaj_vrnjeno_cents, s.created_at, s.vracilo_id) n
+      WHERE n.mail_prevzeto_at IS NULL OR n.mail_prevzeto_at < NOW() - ($2::bigint[])[n.mail_poskusi + 1] * INTERVAL '1 millisecond'
+      ORDER BY n.created_at LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
   for (const x of r.rows) await posljiVraciloIzStripa(x.vracilo_id);
 }
 

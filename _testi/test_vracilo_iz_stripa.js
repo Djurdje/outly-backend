@@ -55,13 +55,14 @@ const pocakaj = (ms) => new Promise(r => setTimeout(r, ms));
 async function cakaj(pogoj, ms = 8000) { const do_ = Date.now() + ms; while (Date.now() < do_) { if (await pogoj()) return true; await pocakaj(100); } return false; }
 
 // ---------- lazni Resend ----------
-const R = { poslano: [], napaka: false, drzi: false, zadrzani: [], zavrnjenih: 0 };   // zavrnjenih: zahtevki, ki jih je stub zavrnil (napaka = true)
+const R = { poslano: [], napaka: false, drzi: false, zadrzani: [], zavrnjenih: 0, zavrni429: null };   // zavrni429: (mail) => true -> en odgovor 429 za ta mail   // zavrnjenih: zahtevki, ki jih je stub zavrnil (napaka = true)
 const resendServer = http.createServer((req, res) => {
   let d = ""; req.on("data", x => d += x);
   req.on("end", () => {
     if (req.method === "POST" && req.url === "/emails") {
       if (R.napaka) { R.zavrnjenih++; res.writeHead(422, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "validation_error", message: "stub: zavrnjeno", statusCode: 422 })); }
       const m = JSON.parse(d);
+      if (R.zavrni429 && R.zavrni429(m)) { R.zavrni429 = null; R.zavrnjenih++; res.writeHead(429, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "rate_limit_exceeded", message: "stub: 429", statusCode: 429 })); }
       const koncaj = () => { R.poslano.push(m); res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "mail_" + R.poslano.length })); };
       if (R.drzi) { R.zadrzani.push(koncaj); return; }
       return koncaj();
@@ -226,6 +227,17 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { vrniBrezWebhooka(chId, skupaj
     assert(await cakaj(() => mailPo(O3b.ref).length >= 2), "dva maila");
     await pocakaj(1500);
     assert(mailPo(O3b.ref).length === 2 && (await zapisi(O3b.ch)).length === 2 && mailPo(O3b.ref).some(x => x.text.includes("Vrnili smo vam znesek 15,00 EUR") && x.text.includes("S tem je vrnjen celoten znesek")), "socasno: natanko dva maila (10 in 15 EUR), brez dvojnika", mailPo(O3b.ref).map(x => x.text.slice(0, 80)));
+    // Vrstni red (I51): Resend zavrne mail STAREJSEGA vracila (429); novejse vracilo (s »vstopnice ne veljajo vec«) ne sme oditi pred njim, sicer bi kupec
+    // kot zadnjega dobil »vstopnice ostanejo veljavne«, ceprav so vrnjene.
+    const O3d = await narocilo({ uporabnik: U.ana, kolicina: 1, cena: 2500 });
+    vrniBrezWebhooka(O3d.ch, 1000); vrniBrezWebhooka(O3d.ch, 2500);
+    R.zavrni429 = (m) => String(m.subject).includes(O3d.ref) && /Vrnili smo vam znesek 10,00 EUR/.test(m.text || "");
+    w = await webhook({ id: O3d.ch, object: "charge" });
+    assert(w.status === 200 && await cakaj(() => mailPo(O3d.ref).length >= 2, 10000), "429 na prvem: oba maila odideta (pospravljalec ponovi)", mailPo(O3d.ref).length);
+    await pocakaj(800);
+    const m3d = mailPo(O3d.ref);
+    assert(m3d.length === 2 && /znesek 10,00 EUR/.test(m3d[0].text) && /ostanejo veljavne/.test(m3d[0].text) && /znesek 15,00 EUR/.test(m3d[1].text) && /ne veljajo več/.test(m3d[1].text),
+      "vrstni red po casu vracila: najprej 10 EUR (veljavne), nato 15 EUR (ne veljajo vec) - zadnji mail pove pravo stanje", m3d.map(x => x.text.slice(0, 80)));
     // naboj brez seznama vracil (nadomestna pot): vsako povecanje amount_refunded en mail
     const O3c = await narocilo({ uporabnik: U.ana, kolicina: 2 });
     S.ch[O3c.ch].brezSeznama = true;
