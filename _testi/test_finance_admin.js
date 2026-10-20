@@ -179,13 +179,43 @@ async function api(method, path, token, body) {
   assert(r.status === 200 && r.body.summary.refunded_cents === 500, "vracilo 500 centov je upostevano", r.body.summary);
   assert(r.body.summary.clubs_net_cents === 3000 - 300 - 500, "neto klubom upostevana vracila = 2200", r.body.summary);
 
+  console.log("\n# #310: v celoti vrnjena narocila v bruto in vracilih (neto in vstopnice nespremenjeni)");
+  // O6 pravo 2 x 10 EUR (klub), O7 sandbox 1 x 10 EUR, O8 pravo 1 x 10 EUR prodajalec platforma (I50): vsa tri v CELOTI vrnjena (kot webhook charge.refunded -> uveljaviVracilo)
+  const vrnjeno = async (q, pi, seja, extra = "") => {
+    const x = await api("POST", `/events/${dogodekId}/orders`, T.kupec, { quantity: q });
+    assert(x.status === 201, `vrnjeno narocilo ${q} x 10 EUR`, x.body);
+    await pool.query(`UPDATE orders SET stripe_payment_intent_id=$2, stripe_checkout_session_id=$3, status='refunded', refunded_cents=total_cents${extra} WHERE id=$1`, [x.body.order.id, pi, seja]);
+    await pool.query("UPDATE tickets SET status='refunded' WHERE order_id=$1", [x.body.order.id]);
+    return x.body.order;
+  };
+  await vrnjeno(2, "pi_live_6", "cs_live_6");
+  await vrnjeno(1, "pi_sandbox_7", "cs_test_7");
+  await vrnjeno(1, "pi_live_8", "cs_live_8", ", stripe_account_id='platform', application_fee_cents=0");
+  r = await api("GET", "/admin/api/finance", T.admin);
+  const s310 = r.body.summary;
+  assert(r.status === 200 && s310.gross_cents === 6000 && s310.refunded_cents === 3500, "summary: bruto 6000 (3000 + 2000 + 1000 vrnjenih), vracila 3500 (500 + 2000 + 1000)", s310);
+  assert(s310.fee_cents === 300 && s310.clubs_net_cents === 2200 && s310.own_sales_cents === 0, "summary: provizija 300, neto klubom 2200, lastna prodaja 0 (vrnjena naroclila neto ne spremenijo)", s310);
+  assert(s310.gross_cents - s310.fee_cents - s310.refunded_cents === s310.clubs_net_cents + s310.own_sales_cents, "bruto - provizija - vracila = neto (klubi + lastna prodaja)", s310);
+  assert(s310.orders === 4 && s310.refunded_orders === 2 && s310.tickets_sold === 5 && s310.buyers === 1 && s310.clubs_with_sales === 1, "summary: 4 narocila (od tega 2 vrnjeni), vstopnic 5 (neto), 1 kupec", s310);
+  const k310 = r.body.by_club.find(c => c.name === "Pure Club");
+  assert(k310 && k310.gross_cents === 6000 && k310.refunded_cents === 3500 && k310.fee_cents === 300 && k310.net_cents === 2200 && k310.own_sales_cents === 0 && k310.orders === 4 && k310.refunded_orders === 2 && k310.tickets_sold === 5, "by_club: bruto 6000, vracila 3500, neto 2200, 4 narocila (2 vrnjeni), 5 vstopnic", k310);
+  const d310 = r.body.by_event.find(e => e.id === dogodekId);
+  assert(d310 && d310.gross_cents === 6000 && d310.refunded_cents === 3500 && d310.fee_cents === 300 && d310.orders === 3 && d310.tickets_sold === 3, "by_event: bruto 6000, vracila 3500 (novo polje), 3 narocila, 3 vstopnice", d310);
+  const dan310 = r.body.by_day.find(d => d.day === new Date().toISOString().slice(0, 10)) || r.body.by_day[r.body.by_day.length - 1];
+  assert(dan310 && dan310.gross_cents === 6000 && dan310.refunded_cents === 3500 && dan310.tickets === 5 && dan310.orders === 4, "by_day: bruto 6000, vracila 3500 (novo polje), 5 vstopnic, 4 narocila", dan310);
+  assert(r.body.all_time.gross_cents === 6000 && r.body.all_time.refunded_cents === 3500 && r.body.all_time.fee_cents === 300 && r.body.all_time.orders === 4 && r.body.all_time.refunded_orders === 2 && r.body.all_time.tickets_sold === 5, "all_time: enako (vrnjena v bruto in vracilih)", r.body.all_time);
+  const t310 = r.body.test_summary;
+  assert(t310.orders === 4 && t310.refunded_orders === 1 && t310.gross_cents === 6000 && t310.refunded_cents === 1500 && t310.fee_cents === 500 && t310.tickets_sold === 6, "test_summary: vrnjeno sandbox naroceno locno (4 narocila, bruto 6000, vracila 1500, provizija in vstopnice nespremenjene)", t310);
+  assert(r.body.all_time_test.orders === 4 && r.body.all_time_test.refunded_orders === 1 && r.body.all_time_test.refunded_cents === 1500, "all_time_test: enako", r.body.all_time_test);
+  assert(r.body.recent_orders.filter(o => o.status === "refunded").length === 3, "recent_orders: vsa tri vrnjena naroclila", r.body.recent_orders.map(o => o.status));
+
   console.log("\n# GET /admin/api/finance filtri from/to");
   const jutri = new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 10);
   const pojutrisnjem = new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString().slice(0, 10);
   r = await api("GET", `/admin/api/finance?from=${jutri}&to=${pojutrisnjem}`, T.admin);
   assert(r.status === 200 && r.body.summary.gross_cents === 0, "obdobje brez narocil (jutri-pojutrisnjem) -> gross 0", r.body.summary);
   assert(r.body.test_summary.gross_cents === 0 && r.body.test_summary.orders === 0 && r.body.summary.test_orders === 0, "obdobje brez narocil: tudi test blok 0", r.body.test_summary);
-  assert(r.body.all_time_test.orders === 3, "all_time_test ne glede na obdobje", r.body.all_time_test);
+  assert(r.body.all_time_test.orders === 4, "all_time_test ne glede na obdobje (3 + vrnjeno sandbox, #310)", r.body.all_time_test);
   r = await api("GET", `/admin/api/finance?from=${pojutrisnjem}&to=${jutri}`, T.admin);
   assert(r.status === 400, "from > to -> 400", r.status);
   const privzetiOd = new Date(Date.now() - 29 * 24 * 3600 * 1000).toISOString().slice(0, 10);

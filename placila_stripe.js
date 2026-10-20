@@ -301,7 +301,7 @@ async function uveljaviVracilo(c, o, vrnjenoCents, chargeId) {
 async function vracilo(c, charge) {
   const pi = typeof charge.payment_intent === "string" ? charge.payment_intent : (charge.payment_intent && charge.payment_intent.id);
   if (!pi) return;
-  const r = await c.query("SELECT id, public_ref, total_cents, refunded_cents, status FROM orders WHERE stripe_payment_intent_id = $1 FOR UPDATE", [pi]);
+  const r = await c.query("SELECT id, public_ref, total_cents, refunded_cents, status, guest_list_id FROM orders WHERE stripe_payment_intent_id = $1 FOR UPDATE", [pi]);
   if (!r.rows.length) {
     // #276 S2: PaymentIntent se zapise na narocilo sele v zakljuci() (checkout.session.completed). Ce je vracilo prislo PREJ (completed je padel/zamujen), bi ga tiho
     // izgubili (dogodek bi bil zabelezen kot obdelan), narocilo pa bi pozneje postalo `paid` z veljavnimi vstopnicami, denar pa je vrnjen. Zato: naboj nosi
@@ -326,6 +326,17 @@ async function vracilo(c, charge) {
   if (!["paid", "partially_refunded", "refunded"].includes(o.status)) return;
   const u = await uveljaviVracilo(c, o, Number(charge.amount_refunded) || 0, charge.id);
   console.log(`[stripe] vracilo: narocilo ${o.public_ref}, ${u.vrnjeno} c${u.polno ? " (polno)" : ""}`);
+  // #309: obvestilo kupcu natanko enkrat na NABOJ (vracila_iz_stripa, 053), v ISTI transakciji kot stanje narocila. Mail gre po COMMIT-u (naVraciluIzStripa) in ga
+  // ponavlja pospravljalec; NE gre, dokler ima naroceno vrstico v `vracila` (nase vracilo: kupca obvesca obdelovalec). Znesek = skupaj vrnjeno na naboju po Stripu
+  // (delno vracilo = delni znesek), dokler mail ni poslan, ga novejsi dogodek lahko poveca. Brez maila: guest lista, 0 EUR, testni nacin (test_ PI).
+  const zn = Math.min(o.total_cents, Math.max(0, Number(charge.amount_refunded) || 0));
+  if (zn > 0 && o.total_cents > 0 && o.guest_list_id === null && !/^test_/.test(pi)) {
+    await c.query(
+      `INSERT INTO vracila_iz_stripa (charge_id, order_id, znesek_cents, valuta) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (charge_id) DO UPDATE SET znesek_cents = GREATEST(vracila_iz_stripa.znesek_cents, EXCLUDED.znesek_cents), posodobljeno_at = NOW()
+        WHERE vracila_iz_stripa.mail_poslano_at IS NULL`,
+      [String(charge.id), o.id, zn, charge.currency ? String(charge.currency).toUpperCase().slice(0, 3) : null]);
+  }
 }
 
 // Spor (chargeback, #190): zapis stanja v `spori` in alarm. Takoj ob odprtju spora vstopnice naroceno na vratih ne veljajo vec (sken: payment_disputed, brez klica Stripa: indeksiran
@@ -420,7 +431,7 @@ async function obdelajDogodek(c, d, o) {
 
 // naPlacano(idNarocila): neobvezen povratni klic PO COMMIT-u, ko narocilo postane placano (webhook ali pospravljalec). Njegova napaka
 // ne sme podreti webhooka (Stripe bi ponavljal) ne pospravljalca; klicatelj jo ujame sam, tu je se varovalka.
-function ustvari({ pool, naPlacano, naSporu, naVracilu }) {
+function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
   const poPlacilu = (id) => {
     if (!id || !naPlacano) return;
     try { Promise.resolve(naPlacano(id)).catch((e) => console.error("[stripe] naPlacano:", e && e.message)); }
@@ -463,6 +474,11 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu }) {
       if (naSporu && d.type.startsWith("charge.dispute.") && objekt && objekt.id) {
         try { Promise.resolve(naSporu(objekt.id)).catch((e) => console.error("[spori] obvestilo:", e && e.message)); }
         catch (e) { console.error("[spori] obvestilo:", e && e.message); }
+      }
+      // #309: mail kupcu o vracilu iz Stripove nadzorne plosce (vracila_iz_stripa) po COMMIT-u, brez cakanja; napaka ne podre webhooka (ponovi pospravljalec).
+      if (naVraciluIzStripa && d.type === "charge.refunded" && objekt && objekt.id) {
+        try { Promise.resolve(naVraciluIzStripa(String(objekt.id))).catch((e) => console.error("[vracila] mail vracila iz Stripa:", e && e.message)); }
+        catch (e) { console.error("[vracila] mail vracila iz Stripa:", e && e.message); }
       }
       // Izid Stripovega vracila (pending -> succeeded | failed | canceled; vracila_stripe.js): po COMMIT-u, napaka ne podre webhooka.
       if (naVracilu && ["refund.updated", "refund.failed", "charge.refund.updated"].includes(d.type) && objekt && objekt.id) {

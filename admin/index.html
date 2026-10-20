@@ -541,11 +541,13 @@ async function naloziFinance() {
       kos(evri(s.fee_cents), `prihodek Outlyja (${f.fee_percent} %)`, `od začetka ${evri(v.fee_cents)}`) +
       kos(evri(s.clubs_net_cents), "za klube (neto)", `bruto − provizija − vračila`) +
       kos(evri(s.own_sales_cents || 0), "lastna prodaja Outly (neto)", `bruto − vračila, brez provizije`) +
-      kos(evri(s.refunded_cents), "vračila") +
-      kos(s.tickets_sold, "vstopnic", `od začetka ${v.tickets_sold}`) +
-      kos(s.orders, "naročil", `${s.buyers} kupcev · ${s.clubs_with_sales} klubov`);
+      // #310: v celoti vrnjena naročila so v bruto, vračilih in naročilih (refunded_orders), ne v proviziji in vstopnicah; star backend polja nima (0).
+      kos(evri(s.refunded_cents), "vračila", `${s.refunded_orders || 0} v celoti vrnjenih naročil`) +
+      kos(s.tickets_sold, "vstopnic (neto)", `od začetka ${v.tickets_sold}`) +
+      kos(s.orders, "naročil", `${s.refunded_orders ? `od tega ${s.refunded_orders} vrnjenih · ` : ""}${s.buyers} kupcev · ${s.clubs_with_sales} klubov`);
     // Zgoraj je SAMO pravi promet; testna naročila (lažni način brez Stripa: test_…, Stripe sandbox: seja cs_test_…) so v ločenem bloku (#230).
     $("fOpomba").textContent = "Zgoraj, po klubih, dogodkih in dnevih je samo pravi promet (vključno z brezplačnimi naročili brez Stripa). Testna naročila so šteta posebej, v bloku spodaj."
+      + " V celoti vrnjena naročila so v bruto, vračilih in številu naročil; v proviziji in vstopnicah niso (neto zanje je 0). Stripove pristojbine vrnjenih plačil tu ni."
       + (nacin === "fake" ? " Backend je zdaj v testnem načinu: nova naročila so testna."
         : nacin === "sandbox" ? " Backend je zdaj v Stripe sandboxu (sk_test_): nova plačana naročila so testna, ni pravi denar." : "");
     const t = f.test_summary || { orders: 0, gross_cents: 0, fee_cents: 0, refunded_cents: 0, tickets_sold: 0 }, vt = f.all_time_test || { orders: 0, gross_cents: 0 };
@@ -554,26 +556,26 @@ async function naloziFinance() {
       kosT(t.orders, "testnih naročil", `od začetka ${vt.orders}`) +
       kosT(evri(t.gross_cents), "testni bruto", `od začetka ${evri(vt.gross_cents)}`) +
       kosT(evri(t.fee_cents), "testna provizija") +
-      kosT(evri(t.refunded_cents), "testna vračila") +
+      kosT(evri(t.refunded_cents), "testna vračila", `${t.refunded_orders || 0} v celoti vrnjenih`) +
       kosT(t.tickets_sold, "testnih vstopnic");
     $("fTestOpomba").textContent = "Ni pravi denar in ni v zgornjih številkah: lažni način (brez Stripa) in Stripe sandbox. Za obračun s klubi se ne upošteva.";
     // graf po dnevih (bruto; provizija temnejši del)
     const maks = Math.max(1, ...f.by_day.map(d => d.gross_cents));
     $("fGraf").innerHTML = f.by_day.map(d => {
       const h = Math.round(100 * d.gross_cents / maks);
-      return `<div class="stolpec" data-o="${ubezi(d.day)}: ${evri(d.gross_cents)} · ${ubezi(d.tickets)} vst."><i style="height:${h}%"></i></div>`;
+      return `<div class="stolpec" data-o="${ubezi(d.day)}: ${evri(d.gross_cents)}${d.refunded_cents ? ` (vrnjeno ${evri(d.refunded_cents)})` : ""} · ${ubezi(d.tickets)} vst."><i style="height:${h}%"></i></div>`;
     }).join("");
     $("fOsi").innerHTML = `<span>${ubezi(f.from)}</span><span>${ubezi(f.to)}</span>`;
     tabela($("fKlubi"), ["Klub", "Bruto", "Provizija", "Vračila", "Neto klubu", "Vstopnic", "Naročil", "Stripe"], f.by_club.map(k => `
       <tr><td><b>${ubezi(k.name)}</b><span class="drobno">${ubezi(k.city || "")}</span></td>
       <td class="mono">${evri(k.gross_cents)}</td><td class="mono">${evri(k.fee_cents)}</td><td class="mono">${evri(k.refunded_cents)}</td>
-      <td class="mono"><b>${evri(k.net_cents)}</b></td><td class="mono">${ubezi(k.tickets_sold)}</td><td class="mono">${ubezi(k.orders)}</td>
+      <td class="mono"><b>${evri(k.net_cents)}</b></td><td class="mono">${ubezi(k.tickets_sold)}</td><td class="mono">${ubezi(k.orders)}${k.refunded_orders ? `<span class="drobno">${ubezi(k.refunded_orders)} vrnjenih</span>` : ""}</td>
       <td>${k.stripe_payouts_enabled ? '<span class="znacka ok">nakazila</span>' : (k.stripe_charges_enabled ? '<span class="znacka opoz">brez nakazil</span>' : '<span class="znacka">ni povezan</span>')}</td></tr>`), "V tem obdobju ni prodaje.");
-    tabela($("fDogodki"), ["Dogodek", "Klub", "Kdaj", "Cena", "Prodano / kap.", "Prišlo", "Bruto", "Provizija"], f.by_event.map(e => `
+    tabela($("fDogodki"), ["Dogodek", "Klub", "Kdaj", "Cena", "Prodano / kap.", "Prišlo", "Bruto", "Provizija", "Vračila"], f.by_event.map(e => `
       <tr><td><b>${ubezi(e.title)}</b><span class="drobno">${ubezi(e.status)}</span></td><td>${ubezi(e.club_name)}</td>
       <td class="mono">${datum(e.start_at)}</td><td class="mono">${evri(e.ticket_price_cents)}</td>
       <td class="mono">${ubezi(e.tickets_sold)}${e.capacity ? " / " + ubezi(e.capacity) : ""}</td><td class="mono">${ubezi(e.checked_in)}</td>
-      <td class="mono">${evri(e.gross_cents)}</td><td class="mono">${evri(e.fee_cents)}</td></tr>`), "V tem obdobju ni prodaje.");
+      <td class="mono">${evri(e.gross_cents)}</td><td class="mono">${evri(e.fee_cents)}</td><td class="mono">${evri(e.refunded_cents || 0)}</td></tr>`), "V tem obdobju ni prodaje.");
     const st = { paid: '<span class="znacka ok">plačano</span>', partially_refunded: '<span class="znacka opoz">delno vrnjeno</span>', refunded: '<span class="znacka slabo">vrnjeno</span>', cancelled: '<span class="znacka slabo">preklicano</span>', pending: '<span class="znacka">v teku</span>' };
     tabela($("fNarocila"), ["Ref", "Kdaj", "Dogodek", "Klub", "Kupec", "Kol.", "Znesek", "Provizija", "Stanje"], f.recent_orders.map(o => `
       <tr><td class="mono">${ubezi(o.public_ref)}${o.is_test ? ' <span class="znacka opoz">test</span>' : ""}</td><td class="mono">${datum(o.created_at)}</td>

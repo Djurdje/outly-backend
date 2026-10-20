@@ -779,9 +779,9 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(r.status === 200 && r.body.some(x => x.id === nAna && x.tickets.length === 1), "GET /me/orders deluje kot doslej");
     // Potrdilo pride asinhrono: pocakaj na dogodek (zapis »poslano« v bazi), ne na cas. Gostovega maila ob nakupu z racunom ni (preverjeno spodaj: en sam mail, brez zetona in priloge).
     assert(await cakaj(async () => (await pool.query("SELECT receipt_mail_sent_at FROM orders WHERE id=$1", [nAna])).rows[0].receipt_mail_sent_at !== null), "potrdilo kupcu poslano");
-    // Od #95 kupec z racunom dobi POTRDILO (ne gostovega maila z vstopnicami: brez zetona gosta in brez priloge); podrobnosti: test_potrdilo_kupcu.js
+    // Od #95 kupec z racunom dobi POTRDILO (ne gostovega maila z vstopnicami: brez zetona gosta); od 20. 10. 2026 ima potrdilo PDF s kodo QR (podrobnosti: test_potrdilo_kupcu.js)
     const novi = R.poslano.slice(mailPrej);
-    assert(novi.length === 1 && !zetonIzMaila(novi[0]) && !(novi[0].attachments && novi[0].attachments.length), "navaden nakup ne poslje gostovega maila (zeton, priloge), samo potrdilo kupcu", novi.length);
+    assert(novi.length === 1 && !zetonIzMaila(novi[0]) && /^Vaše vstopnice \/ Your tickets: .*, \d/.test(novi[0].subject) && !/guest\/order/.test(novi[0].html), "navaden nakup ne poslje gostovega maila (zeton), samo potrdilo kupcu", novi.length);
 
     // ============================================================
     console.log("\n# 12. Omejitev po IP (instanca B: 3 na uro)");

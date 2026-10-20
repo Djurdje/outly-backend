@@ -4024,8 +4024,11 @@ admin.post("/disputes/:id/retry", async (req, res) => {
 // Promet celotne platforme za admin panel: skupaj, po klubih, po dogodkih,
 // po dnevih, zadnja naročila. Zneski v centih, EUR. "Prihodek Outlyja" =
 // application_fee_cents (provizija PROVIZIJA_ODSTOTEK); "za klube" = bruto
-// minus provizija minus vračila. Štejejo se samo plačana naročila
-// (paid, partially_refunded).
+// minus provizija minus vračila. Štejejo se plačana naročila (paid, partially_refunded) in od #310 (20. 10. 2026) tudi v CELOTI
+// vrnjena (refunded): ta so v `gross_cents`, `refunded_cents` in `orders` (+ novo `refunded_orders`), `buyers`, `clubs_with_sales`,
+// NISO pa v `fee_cents` in `tickets_sold`/`tickets` (vstopnice ne veljajo, provizija se ob odpovedi vrne klubu), zato neto (`clubs_net_cents`,
+// `net_cents`, `own_sales_cents`) ostane bruto − provizija − vračila in je za vrnjeno naročilo 0, kot pred #310. Velja za summary, all_time, by_club,
+// by_event, by_day in testni promet (test_summary, all_time_test). Stripova pristojbina vrnjenega plačila (je Stripe ne vrne) NI v bazi in je ni v poročilu.
 // I50: prodaja uradnega profila Outly (prodajalec je platforma, SQL_NAROCILO_PLATFORMNO: plačilo neposredno na platformni račun, provizija 0) je bruto
 // prodaja (vsa je prihodek Outlyja), v "za klube" / net_cents je NI (nobenemu klubu ni dolgovana); DODANO polje `own_sales_cents` = bruto - vračila te prodaje
 // (summary, by_club).
@@ -4048,44 +4051,52 @@ admin.get("/finance", async (req, res) => {
     // Meji sta datuma; zgornja je vključujoča (do konca dneva).
     const p = [od, do_];
     // o.guest_list_id IS NULL: guest lista (035, I24) ni prodaja (brez zneska); ne sme v stevilo narocil, kupcev, vstopnic.
-    const KJE_VSE = `o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day')`;
+    // #310: v celoti vrnjena naročila (`refunded`) so del prometa (bruto in vračila), sicer bi iz poročila izginila (bruto 0, vračilo 0).
+    const STANJA = `o.status IN ('paid','partially_refunded','refunded')`;
+    const NETO = `o.status <> 'refunded'`;   // provizija in vstopnice: samo naročila, ki niso v celoti vrnjena (neto ostane bruto − provizija − vračila kot prej)
+    const KJE_VSE = `${STANJA} AND o.guest_list_id IS NULL AND o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day')`;
     const KJE = `${KJE_VSE} AND ${SQL_PRAVO_NAROCILO}`;   // pravi promet (brez lažnega načina in sandboxa)
     const PLATFORMNO = placilaStripe.SQL_NAROCILO_PLATFORMNO("o");   // I50: prodajalec je platforma (uradni profil Outly)
     const SESTEVEK_TEST = `COUNT(*)::int AS orders,
+                COUNT(*) FILTER (WHERE o.status = 'refunded')::int AS refunded_orders,
                 COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
-                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
+                COALESCE(SUM(o.application_fee_cents) FILTER (WHERE ${NETO}),0)::int AS fee_cents,
                 COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
-                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold`;
+                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL AND ${NETO}),0)::int AS tickets_sold`;
 
     const [skupaj, poKlubih, poDogodkih, poDnevih, zadnja, vseh, testObdobje, testVseh] = await Promise.all([
       pool.query(
         `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
-                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
+                COALESCE(SUM(o.application_fee_cents) FILTER (WHERE ${NETO}),0)::int AS fee_cents,
                 COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
-                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents) FILTER (WHERE NOT ${PLATFORMNO}),0)::int AS clubs_net_cents,
+                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents) FILTER (WHERE NOT ${PLATFORMNO} AND ${NETO}),0)::int AS clubs_net_cents,
                 COALESCE(SUM(o.total_cents - o.refunded_cents) FILTER (WHERE ${PLATFORMNO}),0)::int AS own_sales_cents,
-                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold,
+                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL AND ${NETO}),0)::int AS tickets_sold,
                 COUNT(*)::int AS orders,
+                COUNT(*) FILTER (WHERE o.status = 'refunded')::int AS refunded_orders,
                 COUNT(DISTINCT COALESCE(o.user_id::text, lower(o.guest_email)))::int AS buyers,
                 COUNT(DISTINCT o.club_id)::int AS clubs_with_sales
          FROM orders o WHERE ${KJE}`, p),
       pool.query(
         `SELECT c.id, c.name, c.city, ${sqlStripeStanje("c.")},
                 COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
-                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
+                COALESCE(SUM(o.application_fee_cents) FILTER (WHERE ${NETO}),0)::int AS fee_cents,
                 COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
-                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents) FILTER (WHERE NOT ${PLATFORMNO}),0)::int AS net_cents,
+                COALESCE(SUM(o.total_cents - o.application_fee_cents - o.refunded_cents) FILTER (WHERE NOT ${PLATFORMNO} AND ${NETO}),0)::int AS net_cents,
                 COALESCE(SUM(o.total_cents - o.refunded_cents) FILTER (WHERE ${PLATFORMNO}),0)::int AS own_sales_cents,
-                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold,
-                COUNT(o.id)::int AS orders
+                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL AND ${NETO}),0)::int AS tickets_sold,
+                COUNT(o.id)::int AS orders,
+                COUNT(o.id) FILTER (WHERE o.status = 'refunded')::int AS refunded_orders
          FROM clubs c LEFT JOIN orders o ON o.club_id = c.id AND ${KJE}
          GROUP BY c.id ORDER BY gross_cents DESC, c.name`, p),
       pool.query(
         `SELECT e.id, e.title, e.start_at, e.status, e.ticket_price_cents, e.capacity, e.sold_count,
                 c.name AS club_name,
                 COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
-                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
-                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold,
+                COALESCE(SUM(o.application_fee_cents) FILTER (WHERE ${NETO}),0)::int AS fee_cents,
+                COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
+                COUNT(o.id)::int AS orders,
+                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL AND ${NETO}),0)::int AS tickets_sold,
                 (SELECT COUNT(*)::int FROM tickets t WHERE t.event_id = e.id AND t.status = 'used') AS checked_in
          FROM events e JOIN clubs c ON c.id = e.club_id
          LEFT JOIN orders o ON o.event_id = e.id AND ${KJE}
@@ -4094,11 +4105,12 @@ admin.get("/finance", async (req, res) => {
       pool.query(
         `SELECT to_char(d.dan, 'YYYY-MM-DD') AS day,
                 COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
-                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
-                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets,
+                COALESCE(SUM(o.application_fee_cents) FILTER (WHERE ${NETO}),0)::int AS fee_cents,
+                COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
+                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL AND ${NETO}),0)::int AS tickets,
                 COUNT(o.id)::int AS orders
          FROM generate_series($1::date, $2::date, '1 day') AS d(dan)
-         LEFT JOIN orders o ON o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}
+         LEFT JOIN orders o ON ${STANJA} AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}
               AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
          GROUP BY d.dan ORDER BY d.dan`, p),
       pool.query(
@@ -4109,11 +4121,13 @@ admin.get("/finance", async (req, res) => {
          ORDER BY o.created_at DESC LIMIT 100`, p),
       pool.query(
         `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
-                COALESCE(SUM(o.application_fee_cents),0)::int AS fee_cents,
-                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL),0)::int AS tickets_sold, COUNT(*)::int AS orders
-         FROM orders o WHERE o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}`),
+                COALESCE(SUM(o.application_fee_cents) FILTER (WHERE ${NETO}),0)::int AS fee_cents,
+                COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
+                COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL AND ${NETO}),0)::int AS tickets_sold, COUNT(*)::int AS orders,
+                COUNT(*) FILTER (WHERE o.status = 'refunded')::int AS refunded_orders
+         FROM orders o WHERE ${STANJA} AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}`),
       pool.query(`SELECT ${SESTEVEK_TEST} FROM orders o WHERE ${KJE_VSE} AND ${SQL_TESTNO_NAROCILO}`, p),
-      pool.query(`SELECT ${SESTEVEK_TEST} FROM orders o WHERE o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}`),
+      pool.query(`SELECT ${SESTEVEK_TEST} FROM orders o WHERE ${STANJA} AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}`),
     ]);
     return res.json({
       mode: testniNacinPlacil() ? "test" : "live",   // "live" je tudi ob sandbox kljucu (sk_test_): za panel glej payments_mode
@@ -4318,7 +4332,7 @@ const placilaStripe = require("./placila_stripe");
 // naPlacano: po COMMIT-u webhooka/pospravljalca poslje mail: gostu z vstopnicami (nakup brez racuna, migracija 033) ALI kupcu z racunom potrdilo (042, #95).
 // Vsaka od obeh poti sama preveri, ali je narocilo njeno (user_id NULL + guest_email / user_id + receipt_mail_attempts), druga ne stori nicesar.
 // naSporu: po COMMIT-u webhooka charge.dispute.* obvesti lastnika kluba (mail; #190). Samo stanje in obvestilo: denarja ne premika, vstopnice ne razveljavi.
-const stripePlacila = placilaStripe.ustvari({ pool, naPlacano: (id) => Promise.all([posljiGostuVstopnice(id), posljiPotrdiloKupcu(id)]), naSporu: (id) => posljiSporLastniku(id), naVracilu: (re) => vracilaStripe.uskladiVracilo(re) });
+const stripePlacila = placilaStripe.ustvari({ pool, naPlacano: (id) => Promise.all([posljiGostuVstopnice(id), posljiPotrdiloKupcu(id)]), naSporu: (id) => posljiSporLastniku(id), naVracilu: (re) => vracilaStripe.uskladiVracilo(re), naVraciluIzStripa: (ch) => posljiVraciloIzStripa(ch) });
 stripePlacila.zazeni();
 // Vracila (#190, vracila_stripe.js): odpoved dogodka -> vrsta `vracila`, obdelovalec v ozadju (ne v zahtevku). posljiNeposlane: obvestila kupcem in lastnikom klubov (po vrsti, razmik za Resend).
 const vracilaStripe = require("./vracila_stripe").ustvari({ pool, posljiNeposlane: () => vracilaObvestilaNeposlana() });
@@ -5844,7 +5858,7 @@ const qrSlikaHtml = (cid, oznaka, alt = "Ticket QR code") => `<div style="margin
 // Resend 3.5 posreduje telo strezniku neprepisano (JSON, kljuci snake_case: content_type, content_id): vsebina priloge je BASE64 niz (Buffer bi se serializiral
 // napacno), `content_id` vgradi sliko (cid:). SDK tega NE tipizira in ne preverja (verzija 3.5.0): PREVERI ob vsaki nadgradnji SDK (npr. 4.x je prepisal polja v camelCase).
 // Inline slika SAMO za prvo kodo (zanesljivost: sestavljanje je CPU na glavni niti; ostale kode so v PDF, ena na stran); sestavljanje je asinhrono in prepusca zanko (vstopnica_priloge.js).
-async function prilogeVstopnic(ev, kode, imePdf) {
+async function prilogeVstopnic(ev, kode, imePdf, varnost = QR_STAVEK) {
   const starost = ev.min_age > 0 ? `Age limit: ${ev.min_age}+. Show a valid photo ID at the door.` : "";
   const priloge = [];
   if (kode.length) priloge.push({ filename: `${kode[0].cid}.png`, content: (await qrPng(kode[0].koda)).toString("base64"), content_type: "image/png", content_id: kode[0].cid });
@@ -5852,7 +5866,7 @@ async function prilogeVstopnic(ev, kode, imePdf) {
     const pdf = await pdfVstopnice({
       dogodek: { naslov: ev.event_title, zacetek: ljDatum(ev.start_at), prizoriscePodatki: prizoriscePodatki(ev),
                  starost: ev.starostPdf || starost, organizator: [ev.club_phone, ev.club_email].filter(Boolean).join(" | ") },
-      vstopnice: kode.map(k => ({ koda: k.koda, vrsta: k.vrsta, oznaka: k.oznaka })), varnost: QR_STAVEK });
+      vstopnice: kode.map(k => ({ koda: k.koda, vrsta: k.vrsta, oznaka: k.oznaka })), varnost });
     priloge.push({ filename: imePdf, content: pdf.toString("base64"), content_type: "application/pdf" });
   }
   return priloge;
@@ -5997,6 +6011,7 @@ async function gostPosljiNeposlane() {
     for (const o of r.rows) await posljiGostuVstopnice(o.id);
     await prenosPosljiNeposlane();   // vstopnice, poslane prijateljem brez racuna (034)
     await potrdiloPosljiNeposlane();   // potrdila kupcem z racunom (042, #95)
+    await vraciloIzStripaPosljiNeposlane();   // vracila iz Stripove nadzorne plosce (053, #309)
   } catch (e) { console.error("[gost] pospravljanje mailov:", e && e.message); }
   finally { gostPostaTece = false; }
 }
@@ -6009,8 +6024,8 @@ async function gostPosljiNeposlane() {
 //   * mnozica v teku (potrdiloVTeku) + spodnja meja premora (GOST_POSTA_PREMOR_MIN_MS) kot pri #201: pospravljalec ne prevzame narocila med pošiljanjem;
 //   * Resend ob napaki ne vrze ({ error }): zapis v dnevnik brez e-naslova, ponovi pospravljalec z narascajocim premorom (GOST_POSTA_PREMORI, 8 poskusov).
 // Dolgovano je SAMO, kjer koda postavi receipt_mail_attempts (= 0): nakup z racunom in zakljuci() za narocila z user_id. Guest lista, gostujoca narocila (imajo svoj mail
-// z vstopnicami) in vsa stara narocila ostanejo NULL in potrdila ne dobijo. Brez kod QR v mailu: kupec ima vstopnice v aplikaciji (/app/tickets), kodo za vstop pokaze
-// tam; stara koda v mailu bi po prenosu vstopnice zavajala, priprava QR/PDF pa bi bremenila glavno nit ob navalu nakupov (I16).
+// z vstopnicami) in vsa stara narocila ostanejo NULL in potrdila ne dobijo. Od 20. 10. 2026 (Martin obrnil #95, DECISIONS) ima mail vgrajeno kodo QR prve vstopnice
+// (CID) in PDF z vsemi kodami (vstopnica_priloge.js, kot gost); priprava je asinhrona, po COMMIT-u in pod semaforjem potrdil (I16), ob napaki gre mail brez priloge.
 // Mail na izbrisan racun (buyer_email *@outly.invalid) se ne poslje. Za narocila brez placila (testni nacin, 0 EUR) velja meja POTRDILO_BREZ_PLACILA_NA_DAN na uporabnika na 24 h.
 const POTRDILO_BREZ_PLACILA_NA_DAN = okoljeCelo("POTRDILO_BREZ_PLACILA_NA_DAN", 20, 1, 100000);
 const potrdiloVTeku = new Set();
@@ -6027,44 +6042,102 @@ async function potrdiloPostaVstopi() {
 function potrdiloPostaIzstopi() { const n = potrdiloPosta.cakajoci.shift(); if (n) n(); else potrdiloPosta.aktivnih--; }
 const potrdiloIzcrpaj = (oid) => pool.query("UPDATE orders SET receipt_mail_attempts = $2 WHERE id = $1 AND receipt_mail_sent_at IS NULL", [oid, GOST_POSTA_POSKUSOV]);
 
-// Vsebina potrdila kupcu (dvojezicno, glej izrisiDvojezicno; brez sledilnikov in oglasov). Razdelek »Seller« (sellerVrstice, #94): firma, sedež, telefon, e-naslov,
-// matična in davčna številka ter DDV status kluba (043); stavek o DDV po davekStavek(vat_rate, vat_payer) (#101).
-function kupecPotrdilo(o, povezava) {
-  return izrisiDvojezicno((jez) => {
+// Vsebina potrdila kupcu (#95, kratka oblika od 20. 10. 2026: Martin je obrnil »brez QR«, DECISIONS 2026-10-20; besedilo po pravniku
+// outly-hq/pravno/2026-10-20-potrdilo-nakupa-kratko.md, razdelek 6A platforma / 6B klub). Dvojezicno: slovenski blok (obvezen, ZVPot-1 7/1), locilo, angleski blok.
+// Vsak blok: VRH (dogodek, datum, prizorisce, kolicina · znesek · plačano, starost + osebni dokument, kje je QR, stavek o prenosu, gumb, stevilka narocila) in
+// DROBNI TISK (en odstavek, >= 12 px, #555 ali temneje, ni zlozen; isto besedilo v text/plain): neobstoj odstopa PRVI, zakonsko jamstvo, prodajalec (firma, sedez,
+// telefon, e-naslov, maticna, davcna; stavek o DDV), pri klubu Outly kot posrednik, pritozbe, pogoji z razlicico. Nic pravnega ni samo na povezavi ali samo v PDF.
+// pril = { kode: [{ cid }], vse: N vstopnic narocila, pdf: true|false } — PDF in vgrajena koda samo, ce je priprava uspela (sicer »vstopnice so v aplikaciji«, T4).
+// T9: pri prodajalcu platformi (I50) besedilo ne govori o klubu (»organizator« / »prodajalec«).
+const PLATFORMA_FIRMA = "NEXT DIMENSIONS, družba za marketing, d.o.o.", PLATFORMA_SEDEZ = "Trebče 81, 3256 Bistrica ob Sotli";
+const vstopnicSl = (n) => (n % 100 === 1 ? "vstopnica" : n % 100 === 2 ? "vstopnici" : n % 100 === 3 || n % 100 === 4 ? "vstopnice" : "vstopnic");
+const LJ_KRATKO = new Intl.DateTimeFormat("sl-SI", { day: "numeric", month: "numeric", year: "numeric", timeZone: "Europe/Ljubljana" });
+// Prodajalec v drobnem tisku (6A/6B). Vrne { besedilo, brezTelefona }. Pri platformi brez vpisane firme NEXT DIMENSIONS uporabi firmo in sedez iz POSREDNIK_VRSTICA.
+function prodajalecKratko(o, jez) {
+  const sl = jez === "sl";
+  const s = prodajalec({ name: o.club_name, legal_name: o.legal_name, legal_address: o.legal_address, address: o.club_address, city: o.club_city,
+    registration_number: o.registration_number, tax_number: o.tax_number, vat_payer: o.vat_payer, contact_phone: o.club_phone, contact_email: o.club_email });
+  const platforma = o.stripe_account_id === placilaStripe.PLATFORMNI_RACUN;
+  const lastnaFirma = !platforma || /next dimensions/i.test(s.name);
+  const firma = lastnaFirma ? s.name : PLATFORMA_FIRMA;
+  const sedez = lastnaFirma ? s.address : PLATFORMA_SEDEZ + (sl ? "" : ", Slovenia");
+  const email = s.email || (platforma ? POSTA_ODGOVOR : "");
+  const deli = [firma, sedez, s.phone ? `tel. ${s.phone}` : "", email,
+    s.registration_number ? `${sl ? "matična št." : "company reg. no."} ${s.registration_number}` : "", s.tax_number ? `${sl ? "davčna št." : "tax no."} ${s.tax_number}` : ""].filter(Boolean);
+  // Status DDV: davekStavek ga pove sam, ko stopnje ni (vat_rate NULL); ob vpisani stopnji ga dodamo, ce je znan.
+  const status = o.vat_rate !== null && o.vat_rate !== undefined && s.vat_payer !== null
+    ? ` ${s.vat_payer ? (sl ? "Prodajalec je zavezanec za DDV." : "The seller is a VAT payer.") : (sl ? "Prodajalec ni zavezanec za DDV." : "The seller is not a VAT payer.")}` : "";
+  return { besedilo: `${sl ? "Prodajalec in organizator" : "Seller and organiser"}: ${deli.join(", ")}; ${davekStavek(o.vat_rate, s.vat_payer, jez)}${status}`, brezTelefona: !s.phone, platforma };
+}
+function kupecPotrdiloBloki(o, povezava, pril) {
+  return JEZIKI_MAILA.map((jez) => {
     const T = (sl, en) => (jez === "sl" ? sl : en);
     const meja = starostZaPaket(o.min_age, !!o.package_name);
-    const pretvorbaMeje = meja > o.min_age;
-    const starost = meja > 0
-      ? T(`Starostna meja: ${meja}+${pretvorbaMeje ? " (miza s paketom pijače)" : ""}. Vsak obiskovalec mora izpolnjevati starostno mejo. Pri vhodu se preverja osebni dokument; klub vam lahko zavrne vstop, če je ne izpolnjujete.`,
-          `Age limit: ${meja}+${pretvorbaMeje ? " (table with a drinks package)" : ""}. Every visitor must meet the age limit. ID is checked at the door; the club may refuse entry if you don't meet it.`)
-      : T("Brez starostne omejitve.", "No age limit.");
+    const paket = meja > o.min_age;
     const jeMiza = !!o.table_label;
+    const placilo = o.is_test ? T("testni nakup, nič ni bilo zaračunano", "test purchase, nothing was charged")
+      : (o.total_cents === 0 ? T("brezplačno, nič ni bilo zaračunano", "free, nothing was charged") : T("plačano", "paid"));
     const kaj = jeMiza
-      ? T(`VIP miza ${o.table_label} (${o.table_seats} ${sedezSl(o.table_seats)})${o.package_name ? `, paket: ${o.package_name}` : ""}: ${znesek(o.total_cents, o.currency, jez)}.`,
-          `VIP table ${o.table_label} (${o.table_seats} ${o.table_seats === 1 ? "seat" : "seats"})${o.package_name ? `, package: ${o.package_name}` : ""}: ${znesek(o.total_cents, o.currency, jez)}.`)
-      : `${o.quantity} x ${znesek(o.unit_price_cents, o.currency, jez)} = ${znesek(o.total_cents, o.currency, jez)}.`;
-    const brezPlacila = o.is_test ? T("To je bil testni nakup: nič ni bilo zaračunano.", "This was a test purchase: nothing was charged.")
-      : (o.total_cents === 0 ? T("To naročilo je brezplačno: nič ni bilo zaračunano.", "This order is free: nothing was charged.") : null);
-    const razdelki = [
-      { naslov: T("Naročilo", "Order"), vrstice: [T(`Naročilo ${o.public_ref}. Čas naročila: ${ljDatum(o.paid_at || o.created_at, jez)}.`, `Order ${o.public_ref}, placed on ${ljDatum(o.paid_at || o.created_at, jez)}.`), ...(brezPlacila ? [brezPlacila] : [])] },
-      { naslov: T("Dogodek", "Event"), vrstice: [o.event_title, ljDatum(o.start_at, jez), prizoriscePodatki(o), starost] },
-      { naslov: jeMiza ? T("Miza", "Table") : T("Vstopnice", "Tickets"), vrstice: [`${kaj} ${davekStavek(o.vat_rate, o.vat_payer, jez)}`] },
-      { naslov: T("Prodajalec", "Seller"), vrstice: sellerVrstice(o, jez) },
-      { naslov: T("Brez pravice do odstopa", "No right of withdrawal"), vrstice: [T(
-        "Pri vstopnicah za dogodek na določen datum pravice do odstopa od pogodbe ni (Zakon o varstvu potrošnikov ZVPot-1, 135. člen, 12. točka). Če je dogodek odpovedan ali prestavljen, veljajo pravila iz pogojev.",
-        "There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply.")] },
-      { naslov: T("Pogoji", "Terms"), vrstice: [o.terms_version
-        ? T(`Sprejeli ste pogoje uporabe Outly, različica ${o.terms_version}: https://outly.si/terms`, `You accepted the Outly terms, version ${o.terms_version}: https://outly.si/terms`)
-        : T("Pogoji uporabe Outly: https://outly.si/terms", "Outly terms of use: https://outly.si/terms")] },
-      { naslov: T("Vaše vstopnice", "Your tickets"), vrstice: [T(`Vaše vstopnice so v aplikaciji Outly (Profil → Vstopnice) in na spletu: ${povezava}`, `Your tickets are in the Outly app (Profile, My tickets) and online: ${povezava}`),
-        T("Kode QR niso v tem sporočilu. Odprite jih v aplikaciji in pri vhodu pokažite eno kodo na osebo.", "The QR codes are not in this email. Open them in the app and show one code per person at the door.")] },
-      { naslov: T("Pritožbe", "Complaints"), vrstice: [T(`Glede dogodka: obrnite se na klub (podatki zgoraj). Glede nakupa ali plačila: obrnite se na Outly na ${POSTA_ODGOVOR}.`,
-        `About the event: contact the club (details above). About the purchase or the payment: contact Outly at ${POSTA_ODGOVOR}.`)] },
-      { naslov: T("Vprašanja", "Questions"), vrstice: [T(`Odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`, `Reply to this email or write to ${POSTA_ODGOVOR}.`)] },
-    ];
-    return { naslovBesedila: T(`Vaše naročilo Outly ${o.public_ref}`, `Your Outly order ${o.public_ref}`), naslovHtml: T("Vaše naročilo Outly", "Your Outly order"), razdelki };
-  }, povezava);
+      ? T(`VIP miza ${o.table_label} (${o.table_seats} ${sedezSl(o.table_seats)})${o.package_name ? `, paket ${o.package_name}` : ""}`,
+          `VIP table ${o.table_label} (${o.table_seats} ${o.table_seats === 1 ? "seat" : "seats"})${o.package_name ? `, package ${o.package_name}` : ""}`)
+      : T(`${o.quantity} ${vstopnicSl(o.quantity)}`, `${o.quantity} ${o.quantity === 1 ? "ticket" : "tickets"}`);
+    const vrh = [ljDatum(o.start_at, jez), prizoriscePodatki(o), `${kaj} · ${znesek(o.total_cents, o.currency, jez)} · ${placilo}`];
+    if (meja > 0) vrh.push(T(`Starost ${meja}+${paket ? " (miza s paketom pijače)" : ""}. Pri vhodu pokažite osebni dokument.`,
+      `Age ${meja}+${paket ? " (table with a drinks package)" : ""}. Show a valid photo ID at the door.`));
+    const n = pril.kode.length;
+    const kode = pril.pdf && n
+      ? [n > 1 ? T(`Kode QR so v priloženem PDF (outly-tickets.pdf, ena koda na stran) in v aplikaciji Outly (Profil → Vstopnice): ${povezava}`,
+                   `Your QR codes are in the attached PDF (outly-tickets.pdf, one code per page) and in the Outly app (Profile, My tickets): ${povezava}`)
+               : T(`Koda QR je v priloženem PDF (outly-tickets.pdf) in v aplikaciji Outly (Profil → Vstopnice): ${povezava}`,
+                   `Your QR code is in the attached PDF (outly-tickets.pdf) and in the Outly app (Profile, My tickets): ${povezava}`),
+         ...(n < pril.vse ? [T("V PDF so samo vstopnice, ki so še vaše (prenesenih ni).", "The PDF only contains the tickets that are still yours (not the ones you transferred).")] : []),
+         T("Pri vhodu pokažite eno kodo na osebo.", "Show one code per person at the door.")]
+      : [T(`Vstopnice s kodami QR so v aplikaciji Outly (Profil → Vstopnice): ${povezava}`, `Your tickets with QR codes are in the Outly app (Profile, My tickets): ${povezava}`),
+         T("Pri vhodu pokažite eno kodo na osebo.", "Show one code per person at the door.")];
+    const prenos = pril.pdf && n ? T("Če vstopnico v aplikaciji prenesete drugi osebi, njena koda QR v tem PDF-ju takoj preneha veljati; veljavna je samo koda v aplikaciji prejemnika.",
+      "If you transfer a ticket in the app, its QR code in this PDF stops working immediately; only the code in the recipient's app is valid.") : null;
+    const p = prodajalecKratko(o, jez);
+    const drobni = [
+      T("Pri vstopnicah za dogodek na določen datum nimate pravice do odstopa od pogodbe (ZVPot-1, 135. člen, 12. točka); ob odpovedi ali prestavitvi dogodka veljajo pogoji.",
+        "There is no right of withdrawal for tickets to an event on a fixed date (Slovenian Consumer Protection Act ZVPot-1, Article 135, point 12); if the event is cancelled or postponed, the terms apply."),
+      T("Za nepravilnosti pri izvedbi dogodka imate pravice po Zakonu o varstvu potrošnikov.", "You have the rights under the Consumer Protection Act if the event is not delivered as agreed."),
+      p.besedilo,
+      ...(p.platforma ? [] : [T(`Outly je samo posrednik: ${POSREDNIK_VRSTICA}.`, `Outly is only the intermediary: ${POSREDNIK_VRSTICA}.`)]),
+      p.platforma ? T(`Pritožbe in vprašanja: odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`, `Complaints and questions: reply to this email or write to ${POSTA_ODGOVOR}.`)
+        : T(`Pritožbe glede dogodka: prodajalec; glede nakupa ali plačila: odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`,
+            `Complaints about the event: the seller; about the purchase or payment: reply to this email or write to ${POSTA_ODGOVOR}.`),
+      o.terms_version ? T(`Pogoji uporabe Outly, različica ${o.terms_version}: https://outly.si/terms`, `Outly terms of use, version ${o.terms_version}: https://outly.si/terms`)
+        : T("Pogoji uporabe Outly: https://outly.si/terms", "Outly terms of use: https://outly.si/terms"),
+    ].join(" ");
+    return {
+      jez, naslov: T(`Vaše vstopnice za ${o.event_title}`, `Your tickets for ${o.event_title}`), vrh, kode, prenos,
+      slika: jez === "sl" && pril.pdf && n ? { cid: pril.kode[0].cid, alt: T("Koda QR vstopnice", "Ticket QR code") } : null,
+      gumb: T("Odpri v aplikaciji", "Open in the app"),
+      narocilo: T(`Naročilo ${o.public_ref}, ${ljDatum(o.paid_at || o.created_at, jez)}.`, `Order ${o.public_ref}, ${ljDatum(o.paid_at || o.created_at, jez)}.`),
+      drobni, brezTelefona: p.brezTelefona,
+    };
+  });
 }
+function kupecPotrdilo(o, povezava, pril = { kode: [], vse: 0, pdf: false }) {
+  const bloki = kupecPotrdiloBloki(o, povezava, pril);
+  const besedilo = bloki.map((b) => [b.naslov, "", ...b.vrh, "", ...b.kode, ...(b.prenos ? [b.prenos] : []), "", b.narocilo, "", b.drobni].join("\n")).join(`\n\n${LOCILO_MAILA}\n\n`) + "\n";
+  const N = GOST_POSTA_NIZ;
+  const zLinkom = (v) => { const e = N(v); return v.includes(povezava) ? e.replace(N(povezava), () => `<a href="${N(povezava)}" style="color:#111">${N(povezava)}</a>`) : e; };
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111;max-width:600px">` + bloki.map((b, i) =>
+    (i ? `<hr style="margin:28px 0;border:0;border-top:1px solid #ccc">` : "") + `<div lang="${b.jez}">`
+    + `<h2 style="margin:0 0 8px;font-size:20px">${N(b.naslov)}</h2>`
+    + `<p style="margin:0 0 12px">${b.vrh.map((v, j) => (j === 2 ? `<strong>${N(v)}</strong>` : N(v))).join("<br>")}</p>`
+    + (b.slika ? `<div style="margin:12px 0"><img src="cid:${b.slika.cid}" width="228" height="228" alt="${N(b.slika.alt)}" style="display:block;width:228px;height:228px;border:1px solid #ccc"></div>` : "")
+    + b.kode.map((v) => `<p style="margin:0 0 6px">${zLinkom(v)}</p>`).join("")
+    + (b.prenos ? `<p style="margin:0 0 6px"><strong>${N(b.prenos)}</strong></p>` : "")
+    + `<p style="margin:16px 0"><a href="${N(povezava)}" style="display:inline-block;background:#111;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">${N(b.gumb)}</a></p>`
+    + `<p style="margin:0 0 12px">${N(b.narocilo)}</p>`
+    + `<p style="margin:16px 0 0;font-size:13px;line-height:1.5;color:#555">${N(b.drobni)}</p>`
+    + `</div>`).join("") + `</div>`;
+  return { besedilo, html, brezTelefona: bloki[0].brezTelefona };
+}
+// Varnostni stavek v PDF kupca z racunom (angleski kot ves PDF; pravnik 2026-10-20, razdelek 5): prenos razveljavi kodo v PDF.
+const QR_STAVEK_KUPEC = "One QR code is valid for one entry. If you transfer a ticket in the Outly app, its QR code in this PDF stops working immediately; only the code in the recipient's app is valid.";
 
 async function posljiPotrdiloKupcu(oid) {
   if (!resend) return false;
@@ -6078,13 +6151,20 @@ async function posljiPotrdiloKupcu(oid) {
     finally { potrdiloPostaIzstopi(); }
   } finally { potrdiloVTeku.delete(kljuc); }
 }
+// Vrstni red (#95 s PDF, 20. 10. 2026): preverbe -> podatki dogodka in TRENUTNE vstopnice kupca -> priprava QR/PDF (asinhrona, vstopnica_priloge.js; ob napaki POZOR in mail
+// BREZ priloge, T4) -> rezervacija poskusa (claim) -> Resend. Priloga nastane PRED claimom: rok ponovnega prevzema (GOST_POSTA_TIMEOUT_MS + rezerva) tako pokriva samo klic
+// Resenda, ne priprave PDF ob navali (sicer bi druga instanca narocilo prevzela med pripravo in poslala drugic). Vse to tece po COMMIT-u nakupa/webhooka, brez povezave
+// iz poola med pripravo in pod semaforjem potrdil (2 socasni), zato nakup, webhook in sken ne cakajo nanj (I16).
+// Kode QR: samo vstopnice, ki so se veljavne in KUPCEVE (holder NULL ali kupec, ne gost), s serialom ob posiljanju: prenesena vstopnica (nov serial je prejemnikov)
+// v mailu NI, vstopnica, vrnjena kupcu, ima svoj trenutni serial.
 async function potrdiloPosljiEno(oid) {
   const pre = (await pool.query(
-    `SELECT user_id, status, buyer_email, guest_list_id, receipt_mail_attempts, receipt_mail_sent_at, public_ref,
-            (COALESCE(stripe_payment_intent_id LIKE 'test_%', FALSE) OR total_cents = 0) AS brez_placila
-       FROM orders WHERE id = $1`, [oid])).rows[0];
+    `SELECT user_id, status, buyer_email, guest_list_id, receipt_mail_attempts, receipt_mail_sent_at, public_ref, event_id, table_label, package_name,
+            (COALESCE(stripe_payment_intent_id LIKE 'test_%', FALSE) OR total_cents = 0) AS brez_placila,
+            (receipt_mail_claimed_at IS NULL OR receipt_mail_claimed_at < NOW() - ($1::bigint[])[COALESCE(receipt_mail_attempts, 0) + 1] * INTERVAL '1 millisecond') AS prevzemljivo
+       FROM orders WHERE id = $2`, [GOST_POSTA_PREMORI, oid])).rows[0];
   if (!pre || pre.user_id === null || pre.guest_list_id !== null || pre.status !== "paid" || pre.receipt_mail_attempts === null
-      || pre.receipt_mail_sent_at || pre.receipt_mail_attempts >= GOST_POSTA_POSKUSOV) return false;
+      || pre.receipt_mail_sent_at || pre.receipt_mail_attempts >= GOST_POSTA_POSKUSOV || !pre.prevzemljivo) return false;
   if (!/^[^@\s]+@[^@\s]+$/.test(pre.buyer_email || "") || /@outly\.invalid$/i.test(pre.buyer_email)) {
     await potrdiloIzcrpaj(oid);   // izbrisan racun: naslova ni vec
     return false;
@@ -6099,6 +6179,27 @@ async function potrdiloPosljiEno(oid) {
       return false;
     }
   }
+  const ev = (await pool.query(
+    `SELECT e.title AS event_title, e.start_at, e.min_age, e.club_id, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
+            cl.contact_phone AS club_phone, cl.contact_email AS club_email, ${SQL_PRODAJALEC_MAIL}, ${PRIZORISCE_MAIL_STOLPCI}
+       FROM events e JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN} WHERE e.id = $1`, [pre.event_id])).rows[0];
+  if (!ev) return false;
+  const vs = (await pool.query(
+    `SELECT t.serial, t.event_id, t.created_at, (t.status = 'valid' AND NOT t.holder_is_guest AND (t.holder_user_id IS NULL OR t.holder_user_id = $2)) AS kupceva
+       FROM tickets t WHERE t.order_id = $1 ORDER BY t.id`, [oid, pre.user_id])).rows;
+  const kv = vs.filter((t) => t.kupceva);
+  const kode = kv.map((t, i) => ({ cid: `ticket-qr-${i + 1}`, oznaka: kv.length > 1 ? `Ticket ${i + 1} of ${kv.length}` : "", n: i + 1, skupaj: kv.length, koda: qrVstopnice(t) }));
+  let priloge = [];
+  if (kode.length) {
+    try {
+      const meja = starostZaPaket(ev.min_age, !!pre.package_name);
+      priloge = await prilogeVstopnic({ ...ev, starostPdf: meja > 0 ? `Age limit: ${meja}+. Show a valid photo ID at the door.` : "" },
+        kode.map((k) => ({ ...k, vrsta: pre.table_label ? `VIP table ${pre.table_label}` : "Standard ticket" })), "outly-tickets.pdf", QR_STAVEK_KUPEC);
+    } catch (e) {
+      priloge = [];
+      console.error(`[potrdilo] POZOR: priprava QR/PDF za narocilo ${pre.public_ref} ni uspela (${e && e.message}); potrdilo gre BREZ priloge (vstopnice so v aplikaciji)`);
+    }
+  }
   const k = await pool.query(
     `UPDATE orders SET receipt_mail_attempts = receipt_mail_attempts + 1, receipt_mail_claimed_at = NOW()
       WHERE id = $1 AND user_id IS NOT NULL AND guest_list_id IS NULL AND status = 'paid' AND receipt_mail_sent_at IS NULL
@@ -6109,21 +6210,20 @@ async function potrdiloPosljiEno(oid) {
     [oid, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
   if (!k.rows.length) return false;
   const o = k.rows[0];
-  const ev = await pool.query(
-    `SELECT e.title AS event_title, e.start_at, e.min_age, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
-            cl.contact_phone AS club_phone, cl.contact_email AS club_email, ${SQL_PRODAJALEC_MAIL}, ${PRIZORISCE_MAIL_STOLPCI}
-       FROM events e JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN} WHERE e.id = $1`, [o.event_id]);
-  if (!ev.rows.length) return false;
-  const x = { ...o, ...ev.rows[0] };
-  const { besedilo, html } = kupecPotrdilo(x, `${placilaStripe.osnovaSpleta()}/app/tickets`);
-  const r = await gostResendPosli({ to: o.buyer_email, subject: `Vaše naročilo / Your order: ${x.event_title} (${o.public_ref})`.slice(0, 200), html, text: besedilo });
+  const x = { ...o, ...ev };
+  const zPdf = priloge.length > 0;
+  const { besedilo, html, brezTelefona } = kupecPotrdilo(x, `${placilaStripe.osnovaSpleta()}/app/tickets`, { kode: zPdf ? kode : [], vse: vs.length, pdf: zPdf });
+  // T2 (pravnik 20. 10. 2026, ZVPot-1 130/1-1): telefon prodajalca je obvezen, I34 pa pusti nakup tudi samo z e-naslovom. Ne izpuscamo tiho: alarm (najvec 1/h).
+  if (brezTelefona) gostPostaDnevnik("potrdilo-brez-telefona", `[potrdilo] POZOR: prodajalec (klub ${ev.club_id}) nima telefona: potrdilo narocila ${o.public_ref} je brez telefona prodajalca (ZVPot-1 130/1-1); vpisi telefon v podatke prodajalca`);
+  const r = await gostResendPosli({ to: o.buyer_email, subject: `Vaše vstopnice / Your tickets: ${x.event_title}, ${LJ_KRATKO.format(new Date(x.start_at))} (${o.public_ref})`.slice(0, 200),
+    html, text: besedilo, attachments: zPdf ? priloge : undefined });
   if (r && r.error) {
     console.error(`Resend napaka (potrdilo kupcu, ${o.public_ref}, poskus ${o.receipt_mail_attempts}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
     if (o.receipt_mail_attempts >= GOST_POSTA_POSKUSOV) console.error(`[potrdilo] POZOR: potrdilo za narocilo ${o.public_ref} NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov); kupec ima vstopnice v aplikaciji, potrdila po e-posti pa ne`);
     return false;
   }
   await pool.query("UPDATE orders SET receipt_mail_sent_at = NOW() WHERE id = $1", [oid]);
-  console.log(`[potrdilo] mail kupcu poslan: narocilo ${o.public_ref}`);
+  console.log(`[potrdilo] mail kupcu poslan: narocilo ${o.public_ref}${zPdf ? `, PDF ${kode.length}` : ", brez priloge"}`);
   return true;
 }
 // Pospravljalec: placana narocila z racunom brez poslanega potrdila (Resend je padel, proces se je ugasnil med placilom in mailom).
@@ -6198,6 +6298,24 @@ function vraciloMailBesedilo(o, vrsta) {
       };
     }
     const celoten = o.znesek_cents === o.total_cents;   // delno ze vrnjeno narocilo: vracamo ostanek, ne »celoten znesek«
+    if (vrsta === "iz_stripa") {   // #309: vracilo, narejeno v Stripovi nadzorni plosci (ne odpoved dogodka); delno vracilo: vstopnice ostanejo veljavne (uveljaviVracilo)
+      return {
+        naslovBesedila: T(`Vračilo opravljeno - naročilo ${o.public_ref}`, `Refund completed - order ${o.public_ref}`), naslovHtml: T("Vračilo opravljeno", "Refund completed"),
+        razdelki: [
+          { naslov: T("Naročilo", "Order"), vrstice: [T(`Naročilo ${o.public_ref}: ${kaj}, dogodek »${o.event_title}« (${ljDatum(o.start_at, jez)}).`,
+            `Order ${o.public_ref}: ${kaj}, event "${o.event_title}" (${ljDatum(o.start_at, jez)}).`)] },
+          { naslov: T("Vračilo", "Refund"), krepko: true, vrstice: [
+            T(`Vrnili smo vam ${celoten ? "celoten znesek" : "znesek"} ${zn} na način plačila, s katerim ste plačali. Banka ga običajno knjiži v 5 do 10 delovnih dneh.`,
+              `We have refunded ${celoten ? "the full amount" : "the amount"} of ${zn} to the payment method you used. Your bank usually posts it within 5 to 10 business days.`),
+            celoten ? T("Vstopnice tega naročila ne veljajo več.", "The tickets of this order are no longer valid.")
+              : T("Vstopnice tega naročila ostanejo veljavne.", "The tickets of this order remain valid.")] },
+          { naslov: T("Vprašanja", "Questions"), vrstice: [platforma
+            ? T(`Odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR} in navedite naročilo ${o.public_ref}.`, `Reply to this email or write to ${POSTA_ODGOVOR} and quote order ${o.public_ref}.`)
+            : T(`Glede vračila odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR} in navedite naročilo ${o.public_ref}. Glede dogodka se obrnite na klub (${o.club_name}).`,
+              `About the refund, reply to this email or write to ${POSTA_ODGOVOR} and quote order ${o.public_ref}. About the event, contact the club (${o.club_name}).`)] },
+        ],
+      };
+    }
     if (o.razlog === "inactive_order") {
       return {
         naslovBesedila: T(`Plačilo vrnjeno - naročilo ${o.public_ref}`, `Payment refunded - order ${o.public_ref}`), naslovHtml: T("Plačilo vrnjeno", "Payment refunded"),
@@ -6325,6 +6443,66 @@ async function posljiVraciloKupcu(vid, vrsta) {
     return true;
   } catch (err) { console.error(`Resend napaka (vracilo kupcu ${vrsta}, vracilo ${vid}):`, err && (err.message || String(err))); return false; }
   finally { vraciloMailVTeku.delete(kljuc); }
+}
+
+// #309 (migracija 053): vracilo, narejeno ZUNAJ Outlyja (Stripova nadzorna plosca), pride kot webhook charge.refunded; placila_stripe.js vracilo() v isti transakciji
+// kot stanje narocila vpise vrstico v vracila_iz_stripa (ena na naboj). Mail »vrnili smo X« kupcu natanko enkrat na naboj, vzorec kot posljiVraciloKupcu (claim v bazi
+// + mnozica v teku + mail_poslano_at po uspehu Resenda). Poslje ga webhook po COMMIT-u (brez cakanja) in pospravljalec mailov (gostPosljiNeposlane); posiljanje gre skozi
+// semafor potrdil (potrdiloPosta), zato ne zasede procesa. Pogoj VRACILO_IZ_STRIPA_POGOJ: naroceno brez vrstice v `vracila` (razen `preklicano`) - nase vracilo
+// (odpoved dogodka, inactive_order) kupca obvesca obdelovalec vracil; vrstica `vracila` vedno nastane PRED klicem Stripa, zato dirke z webhookom ni.
+// Pogoj sme postati resnicen pozneje (npr. vrstica `preklicano`): mail se le ODLOZI (brez claima, poskus se ne porabi), pospravljalec gleda 30 dni nazaj.
+const VRACILO_IZ_STRIPA_POGOJ = `NOT EXISTS (SELECT 1 FROM vracila vv WHERE vv.order_id = s.order_id AND vv.stanje <> 'preklicano')`;
+const vraciloIzStripaVTeku = new Set();
+async function posljiVraciloIzStripa(chargeId) {
+  if (!resend) return false;
+  const kljuc = String(chargeId);
+  if (vraciloIzStripaVTeku.has(kljuc)) return false;
+  vraciloIzStripaVTeku.add(kljuc);
+  try {
+    if (!(await potrdiloPostaVstopi())) return false;   // polna vrsta: pospravljalec poskusi pozneje (poskus se se ni porabil)
+    try { return await vraciloIzStripaPosljiEno(kljuc); }
+    catch (err) { console.error(`Resend napaka (vracilo iz Stripa, naboj ${kljuc}):`, err && (err.message || String(err))); return false; }
+    finally { potrdiloPostaIzstopi(); }
+  } finally { vraciloIzStripaVTeku.delete(kljuc); }
+}
+async function vraciloIzStripaPosljiEno(chargeId) {
+  const k = await pool.query(
+    `UPDATE vracila_iz_stripa s SET mail_poskusi = s.mail_poskusi + 1, mail_prevzeto_at = NOW()
+      WHERE s.charge_id = $1 AND s.mail_poslano_at IS NULL AND s.mail_poskusi < $2 AND ${VRACILO_IZ_STRIPA_POGOJ}
+        AND (s.mail_prevzeto_at IS NULL OR s.mail_prevzeto_at < NOW() - ($3::bigint[])[s.mail_poskusi + 1] * INTERVAL '1 millisecond')
+      RETURNING s.order_id, s.znesek_cents, s.valuta, s.mail_poskusi AS poskus`, [chargeId, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+  if (!k.rows.length) return false;
+  const v = k.rows[0];
+  const o = (await pool.query(
+    `SELECT o.public_ref, o.buyer_email, o.quantity, o.currency, o.table_label, o.total_cents, e.title AS event_title, e.start_at, cl.name AS club_name, o.stripe_account_id
+       FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = e.club_id WHERE o.id = $1`, [v.order_id])).rows[0];
+  if (!o) return false;
+  if (!/^[^@\s]+@[^@\s]+$/.test(o.buyer_email || "") || /@outly\.invalid$/i.test(o.buyer_email)) {
+    // izbrisan racun / anonimiziran gost: naslova ni vec. Claim zahteva poskusi < max, zato je ta vrstica (in alarm) natanko enkrat; brez e-naslova v dnevniku.
+    await pool.query("UPDATE vracila_iz_stripa SET mail_poskusi = $2 WHERE charge_id = $1 AND mail_poslano_at IS NULL", [chargeId, GOST_POSTA_POSKUSOV]);
+    console.error(`[vracila] POZOR: kupec narocila ${o.public_ref} ni obvescen o vracilu iz Stripove plosce (naslov izbrisan ali neveljaven) - obvesti rocno`);
+    return false;
+  }
+  const { besedilo, html } = vraciloMailBesedilo({ ...o, currency: v.valuta || o.currency, znesek_cents: v.znesek_cents }, "iz_stripa");
+  const r = await gostResendPosli({ to: o.buyer_email, subject: `${VRACILO_MAIL.vrnjeno.zadeva}: ${o.event_title} (${o.public_ref})`.slice(0, 200), html, text: besedilo });
+  if (r && r.error) {
+    console.error(`Resend napaka (vracilo iz Stripa, ${o.public_ref}, poskus ${v.poskus}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
+    if (v.poskus >= GOST_POSTA_POSKUSOV) console.error(`[vracila] POZOR: obvestila o vracilu iz Stripove plosce za narocilo ${o.public_ref} NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov)`);
+    return false;
+  }
+  await pool.query("UPDATE vracila_iz_stripa SET mail_poslano_at = NOW() WHERE charge_id = $1", [chargeId]);
+  console.log(`[vracila] mail kupcu (vracilo iz Stripove plosce) poslan: narocilo ${o.public_ref}`);
+  return true;
+}
+// Pospravljalec: neposlani maili o vracilu iz Stripa (Resend je padel, proces ugasnjen po COMMIT-u webhooka). Najvec 20 na tek, zadnjih 30 dni.
+async function vraciloIzStripaPosljiNeposlane() {
+  if (!resend) return;
+  const r = await pool.query(
+    `SELECT s.charge_id FROM vracila_iz_stripa s
+      WHERE s.mail_poslano_at IS NULL AND s.mail_poskusi < $1 AND s.created_at > NOW() - INTERVAL '30 days' AND ${VRACILO_IZ_STRIPA_POGOJ}
+        AND (s.mail_prevzeto_at IS NULL OR s.mail_prevzeto_at < NOW() - ($2::bigint[])[s.mail_poskusi + 1] * INTERVAL '1 millisecond')
+      ORDER BY s.created_at LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+  for (const x of r.rows) await posljiVraciloIzStripa(x.charge_id);
 }
 
 // Spor (chargeback): obvestilo LASTNIKU kluba ob odprtju in ob zaprtju. Prejemniki: e-naslov racuna lastnika (clubs.owner_user_id) in kontaktni e-naslov kluba.

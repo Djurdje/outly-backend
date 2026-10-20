@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–052, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–053, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict W5PpiqCcBIqbMAxxxOMr97uBX44AeuLfZTWCb9hdVxQbcuRi1jQjhNrmKctqjvK
+\restrict LaHY2u7ayQCWeA4qiy5qPf6DCI49xxXafjc4diMRN5ZoneJ1tVhf5SwO58wk71H
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -1663,6 +1663,31 @@ ALTER SEQUENCE public.vracila_id_seq OWNED BY public.vracila.id;
 
 
 --
+-- Name: vracila_iz_stripa; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.vracila_iz_stripa (
+    charge_id text NOT NULL,
+    order_id bigint NOT NULL,
+    znesek_cents integer NOT NULL,
+    valuta text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    posodobljeno_at timestamp with time zone DEFAULT now() NOT NULL,
+    mail_poskusi smallint DEFAULT 0 NOT NULL,
+    mail_prevzeto_at timestamp with time zone,
+    mail_poslano_at timestamp with time zone,
+    CONSTRAINT vracila_iz_stripa_znesek_cents_check CHECK ((znesek_cents > 0))
+);
+
+
+--
+-- Name: TABLE vracila_iz_stripa; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.vracila_iz_stripa IS 'Vracila, narejena zunaj Outlyja (Stripova nadzorna plosca), iz webhooka charge.refunded (053, #309): mail kupcu natanko enkrat na naboj.';
+
+
+--
 -- Name: bottle_packages id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -2096,6 +2121,14 @@ ALTER TABLE ONLY public.user_blocks
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: vracila_iz_stripa vracila_iz_stripa_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vracila_iz_stripa
+    ADD CONSTRAINT vracila_iz_stripa_pkey PRIMARY KEY (charge_id);
 
 
 --
@@ -2692,6 +2725,20 @@ CREATE INDEX vracila_caka_idx ON public.vracila USING btree (naslednji_poskus_at
 --
 
 CREATE INDEX vracila_dogodek_idx ON public.vracila USING btree (event_id);
+
+
+--
+-- Name: vracila_iz_stripa_mail_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX vracila_iz_stripa_mail_idx ON public.vracila_iz_stripa USING btree (created_at) WHERE (mail_poslano_at IS NULL);
+
+
+--
+-- Name: vracila_iz_stripa_order_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX vracila_iz_stripa_order_idx ON public.vracila_iz_stripa USING btree (order_id);
 
 
 --
@@ -3310,6 +3357,14 @@ ALTER TABLE ONLY public.vracila
 
 
 --
+-- Name: vracila_iz_stripa vracila_iz_stripa_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vracila_iz_stripa
+    ADD CONSTRAINT vracila_iz_stripa_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: vracila vracila_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3321,5 +3376,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict W5PpiqCcBIqbMAxxxOMr97uBX44AeuLfZTWCb9hdVxQbcuRi1jQjhNrmKctqjvK
+\unrestrict LaHY2u7ayQCWeA4qiy5qPf6DCI49xxXafjc4diMRN5ZoneJ1tVhf5SwO58wk71H
 

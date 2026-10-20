@@ -19,11 +19,12 @@ const http = require("http");
 const { spawn } = require("child_process");
 const { Pool } = require("pg");
 const Stripe = require("stripe");
+const { qrPng } = require("../vstopnica_priloge");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const PORT_A = 3221, PORT_B = 3222, JWKS_PORT = 3987, STRIPE_PORT = 3988, RESEND_PORT = 3989;
-const BA = `http://127.0.0.1:${PORT_A}`, BB = `http://127.0.0.1:${PORT_B}`;
+const PORT_A = 3221, PORT_B = 3222, PORT_C = 3223, JWKS_PORT = 3987, STRIPE_PORT = 3988, RESEND_PORT = 3989;
+const BA = `http://127.0.0.1:${PORT_A}`, BB = `http://127.0.0.1:${PORT_B}`, BC = `http://127.0.0.1:${PORT_C}`;
 const WHSEC = "whsec_test_potrdilo";
 const stripeLokalno = new Stripe("sk_test_lokalno");
 
@@ -110,8 +111,8 @@ async function webhook(baza, tip, objekt, id) {
 }
 const placana = (s, pi) => ({ ...s, status: "complete", payment_status: "paid", payment_intent: pi });
 
-function zagon(port, okolje) {
-  const srv = spawn("node", ["index.js"], { env: { ...process.env, GOST_NAKUP_TEST: "1", PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
+function zagon(port, okolje, argumenti = []) {
+  const srv = spawn("node", [...argumenti, "index.js"], { env: { ...process.env, GOST_NAKUP_TEST: "1", PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
     STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_POSPRAVI_MS: "3600000", PREVERI_OKNO_MS: "0",
     TEST_PLACILA: "", GOST_PREVZEM_MS: "0", RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>",
     ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
@@ -138,9 +139,10 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
   const api = (m, p, t, b, g) => zahtevek(BA, m, p, t, b, g);
   const apiB = (m, p, t, b, g) => zahtevek(BB, m, p, t, b, g);
   await cakajStreznik(BA); await cakajStreznik(BB);
+  let C = null;   // instanca s PDF, ki vedno pade (sklop 9)
 
   try {
-    const imena = ["lastnik", "lastnik2", "admin", "ana", "bor", "cene", "dana", "eva", "fran", "gina", "hana", "ivan", "jan", "kim", "lara", "mia", "nika", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9"];
+    const imena = ["lastnik", "lastnik2", "admin", "ana", "bor", "cene", "dana", "eva", "fran", "gina", "hana", "ivan", "jan", "kim", "lara", "mia", "nika", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "pa", "pb", "pc", "pd"];
     const T = {}; const U = {};
     imena.forEach((k, i) => { T[k] = zeton(`${k}@outly.si`, uuid(i + 1)); });
     for (const k of imena) { const r = await api("GET", "/me", T[k]); assert(r.status === 200, `GET /me ${k}`, r.body); U[k] = r.body.id; }
@@ -185,33 +187,48 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     let m = mailiNa("ana@outly.si");
     assert(m.length === 1, "natanko en mail (pospravljalec ga ne podvoji)", m.length);
     const besedilo = m[0] ? m[0].text : "", html = m[0] ? m[0].html : "";
-    assert(m[0] && m[0].subject.includes("Noc & <b>Test</b>") && m[0].subject.includes(r.body.order.public_ref), "zadeva: dogodek + stevilka narocila", m[0] && m[0].subject);
+    const ref1 = r.body.order.public_ref;
+    // Kratka oblika (20. 10. 2026, pravnik outly-hq/pravno/2026-10-20-potrdilo-nakupa-kratko.md 6B): vrh + en odstavek drobnega tiska na jezik, PDF s QR v prilogi.
+    assert(m[0] && /^Vaše vstopnice \/ Your tickets: Noc & <b>Test<\/b>, \d{1,2}\. \d{1,2}\. \d{4} \(OUT-[A-Z0-9]+\)$/.test(m[0].subject) && m[0].subject.includes(ref1), "zadeva: dogodek, datum, stevilka narocila (dvojezicna)", m[0] && m[0].subject);
     assert(m[0] && m[0].reply_to === "luka@outly.si", "reply_to luka@outly.si");
-    assert(besedilo.includes(`Order ${r.body.order.public_ref}`), "besedilo: stevilka narocila");
-    assert(besedilo.includes("Noc & <b>Test</b>") && /\(Ljubljana time\)/.test(besedilo), "besedilo: dogodek in datum (Ljubljana)");
-    assert(besedilo.includes("2 x 15.00 EUR = 30.00 EUR"), "besedilo: stevilo vstopnic in cena", besedilo);
-    assert(besedilo.includes("The price includes VAT (22%)."), "besedilo: stopnja DDV iz narocila");
-    assert(besedilo.includes("Plain Club") && besedilo.includes("Glavni trg 5, Maribor") && besedilo.includes("+38641333444") && besedilo.includes("hello@plain-club.si"), "besedilo: prodajalec (klub: ime, naslov, kontakt)");
-    assert(besedilo.includes("NEXT DIMENSIONS") && /intermediary/.test(besedilo), "besedilo: Outly kot posrednik");
-    assert(besedilo.includes("Article 135, point 12") && /no right of withdrawal/i.test(besedilo), "besedilo: odstopna pravica (ZVPot-1 135/12)");
-    assert(besedilo.includes("https://outly.test/app/tickets") && besedilo.includes("https://outly.si/terms"), "besedilo: povezava na vstopnice v aplikaciji in pogoje");
-    assert(/test purchase: nothing was charged/.test(besedilo), "besedilo: testno narocilo je oznaceno");
-    assert(!/guest\/order/.test(besedilo + html), "brez gostovega zetona/povezave");
-    assert(!m[0].attachments && !/cid:|<img/i.test(html), "brez priloge, QR slike in sledilnika");
-    assert(html.includes("Noc &amp; &lt;b&gt;Test&lt;/b&gt;") && !html.includes("<b>Test</b>"), "HTML: ime dogodka ubezeno");
-    assert(html.includes('<a href="https://outly.test/app/tickets">'), "HTML: povezava je klikljiva");
-    // #100: dvojezicno (slovenski blok PRED angleskim), enaki podatki, vse iz baze ubezeno v obeh blokih
-    assert(m[0].subject === `Vaše naročilo / Your order: Noc & <b>Test</b> (${r.body.order.public_ref})`, "zadeva (dvojezicna)", m[0].subject);
     const deli = besedilo.split("\n\n----------------------------------------\n\n");
-    assert(deli.length === 2 && deli[0].startsWith(`Vaše naročilo Outly ${r.body.order.public_ref}\n`) && deli[1].startsWith(`Your Outly order ${r.body.order.public_ref}\n`), "besedilo: slovenski blok, locilo, angleski blok", deli.map(d => d.slice(0, 50)));
+    assert(deli.length === 2 && deli[0].startsWith("Vaše vstopnice za Noc & <b>Test</b>\n") && deli[1].startsWith("Your tickets for Noc & <b>Test</b>\n"), "besedilo: slovenski blok, locilo, angleski blok", deli.map(d => d.slice(0, 50)));
     const [sl, en] = deli;
-    assert(sl.includes(`NAROČILO\nNaročilo ${r.body.order.public_ref}. Čas naročila: `) && /\(ljubljanski čas\)/.test(sl) && !/Ljubljana time/.test(sl), "sl: stevilka narocila in cas po sl-SI", sl.slice(0, 200));
-    assert(sl.includes("2 x 15,00 EUR = 30,00 EUR") && sl.includes("Cena vključuje DDV (22 %).") && !sl.includes("15.00") && en.includes("2 x 15.00 EUR = 30.00 EUR") && !en.includes("15,00"), "sl: znesek z decimalno vejico in stopnja DDV; en nespremenjen");
-    assert(sl.includes("Noc & <b>Test</b>") && sl.includes("Plain Club") && sl.includes("Glavni trg 5, Maribor") && sl.includes("+38641333444") && sl.includes("hello@plain-club.si"), "sl: dogodek in prodajalec (isti podatki kot en)");
-    assert(sl.includes("Outly je samo posrednik: NEXT DIMENSIONS") && sl.includes("135. člen, 12. točka") && sl.includes("https://outly.si/terms") && sl.includes("https://outly.test/app/tickets"), "sl: posrednik, odstop (ZVPot-1 135/12), pogoji, povezava");
-    assert(sl.includes("To je bil testni nakup: nič ni bilo zaračunano.") && /PRODAJALEC\nVstopnico prodaja klub: Plain Club/.test(sl) && /VAŠE VSTOPNICE\n/.test(sl), "sl: testno narocilo, razdelka Prodajalec in Vaše vstopnice");
+    // VRH: datum, prizorisce, kolicina · znesek · stanje placila, kje je QR, stavek o prenosu, stevilka narocila
+    assert(/\(ljubljanski čas\)/.test(sl) && /\(Ljubljana time\)/.test(en) && sl.includes("Plain Club, Glavni trg 5, Maribor"), "vrh: datum (Ljubljana) in prizorisce");
+    assert(sl.includes("2 vstopnici · 30,00 EUR · testni nakup, nič ni bilo zaračunano") && en.includes("2 tickets · 30.00 EUR · test purchase, nothing was charged"), "vrh: kolicina · znesek · testni nakup (sl z vejico, en s piko)", [sl.slice(0, 300)]);
+    assert(sl.includes("Kode QR so v priloženem PDF (outly-tickets.pdf, ena koda na stran) in v aplikaciji Outly (Profil → Vstopnice): https://outly.test/app/tickets") && en.includes("Your QR codes are in the attached PDF (outly-tickets.pdf, one code per page)"), "vrh: kode QR v PDF in aplikaciji (povezava)");
+    assert(sl.includes("Če vstopnico v aplikaciji prenesete drugi osebi, njena koda QR v tem PDF-ju takoj preneha veljati; veljavna je samo koda v aplikaciji prejemnika.") && en.includes("If you transfer a ticket in the app, its QR code in this PDF stops working immediately"), "vrh: stavek o prenosu (pravnik, vikanje)");
+    assert(sl.includes(`Naročilo ${ref1}, `) && en.includes(`Order ${ref1}, `), "vrh: stevilka narocila");
+    // DROBNI TISK: neobstoj odstopa PRVI, zakonsko jamstvo, prodajalec, DDV, posrednik, pritozbe, pogoji
+    const drobniSl = sl.split("\n").find(x => x.startsWith("Pri vstopnicah za dogodek na določen datum nimate pravice do odstopa")) || "";
+    const drobniEn = en.split("\n").find(x => x.startsWith("There is no right of withdrawal")) || "";
+    assert(drobniSl.includes("(ZVPot-1, 135. člen, 12. točka)") && drobniEn.includes("Article 135, point 12"), "drobni tisk: odstop ZVPot-1 135/12 je prvi stavek (sl, en)", [drobniSl.slice(0, 120), drobniEn.slice(0, 120)]);
+    assert(drobniSl.includes("Za nepravilnosti pri izvedbi dogodka imate pravice po Zakonu o varstvu potrošnikov.") && drobniEn.includes("You have the rights under the Consumer Protection Act"), "drobni tisk: zakonsko jamstvo (ZVPot-1 18/1-7)");
+    assert(drobniSl.includes("Prodajalec in organizator: Plain Club, Glavni trg 5, Maribor, tel. +38641333444, hello@plain-club.si; Cena vključuje DDV (22 %).") && drobniEn.includes("Seller and organiser: Plain Club, Glavni trg 5, Maribor, tel. +38641333444, hello@plain-club.si; The price includes VAT (22%)."), "drobni tisk: prodajalec (firma, sedez, telefon, e-naslov) in DDV iz narocila", drobniSl);
+    assert(drobniSl.includes("Outly je samo posrednik: NEXT DIMENSIONS") && drobniEn.includes("Outly is only the intermediary: NEXT DIMENSIONS"), "drobni tisk: Outly kot posrednik (klub)");
+    assert(drobniSl.includes("Pritožbe glede dogodka: prodajalec; glede nakupa ali plačila: odgovorite na to sporočilo ali pišite na luka@outly.si.") && drobniSl.endsWith("Pogoji uporabe Outly: https://outly.si/terms"), "drobni tisk: pritozbe in pogoji");
+    assert(!/guest\/order/.test(besedilo + html) && !/klub vam lahko zavrne/.test(besedilo), "brez gostovega zetona/povezave");
+    // HTML: kratek, drobni tisk >= 12 px in #555, ni zlozen; QR (CID) v slovenskem bloku; gumb »Odpri v aplikaciji«
     assert((html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="sl">,<div lang="en">' && html.indexOf('lang="sl"') < html.indexOf('lang="en"'), "HTML: bloka sl in en, sl prvi");
-    assert((html.match(/Noc &amp; &lt;b&gt;Test&lt;\/b&gt;/g) || []).length >= 2 && (html.match(/<a href="https:\/\/outly\.test\/app\/tickets">/g) || []).length === 2, "HTML: ubezen naslov in klikljiva povezava v OBEH blokih");
+    assert((html.match(/font-size:13px;line-height:1\.5;color:#555">Pri vstopnicah/g) || []).length === 1 && (html.match(/color:#555">There is no right/g) || []).length === 1 && !/display:\s*none/i.test(html), "HTML: drobni tisk 13 px, #555, ni skrit (oba bloka)");
+    assert((html.match(/<img src="cid:ticket-qr-1"/g) || []).length === 1 && html.indexOf("cid:ticket-qr-1") < html.indexOf('lang="en"'), "HTML: vgrajena koda QR prve vstopnice (CID) v slovenskem bloku");
+    assert(html.includes(">Odpri v aplikaciji</a>") && html.includes(">Open in the app</a>") && (html.match(/<a href="https:\/\/outly\.test\/app\/tickets"/g) || []).length >= 4, "HTML: gumb Odpri v aplikaciji in klikljiva povezava v obeh blokih");
+    assert(html.includes("Noc &amp; &lt;b&gt;Test&lt;/b&gt;") && !html.includes("<b>Test</b>"), "HTML: ime dogodka ubezeno");
+    assert(!/<img(?![^>]*cid:)/i.test(html) && !/https?:\/\/[^"]*\.(png|gif)/i.test(html), "HTML: brez sledilnika (samo CID slika)");
+    // PRILOGI: PNG prve kode (content_id) + PDF z obema vstopnicama (trenutni seriali)
+    const pril = m[0].attachments || [];
+    const png = pril.find(x => x.content_type === "image/png"), pdf = pril.find(x => x.filename === "outly-tickets.pdf");
+    assert(pril.length === 2 && png && png.content_id === "ticket-qr-1" && pdf && pdf.content_type === "application/pdf", "priloge: PNG (CID) in outly-tickets.pdf", pril.map(x => [x.filename, x.content_type, x.content_id]));
+    const pdfT = pdf ? Buffer.from(pdf.content, "base64").toString("latin1") : "";
+    assert(pdfT.startsWith("%PDF-") && /\/Count 2 /.test(pdfT) && pdfT.includes("stops working immediately"), "PDF: 2 strani (ena na vstopnico), stavek o prenosu", pdfT.slice(0, 40));
+    const qrNarocila = async (token, oid) => {   // trenutne kode QR vstopnic narocila (po id), kot jih vidi kupec v aplikaciji
+      const ids = (await pool.query("SELECT id FROM tickets WHERE order_id=$1 ORDER BY id", [oid])).rows.map(x => Number(x.id));
+      const vse = (await api("GET", "/me/tickets", token)).body;
+      return ids.map(id => (vse.find(t => Number(t.id) === id) || {}).qr).filter(Boolean);
+    };
+    const mojeQr = await qrNarocila(T.ana, o1);
+    assert(mojeQr.length === 2 && png && png.content === (await qrPng(mojeQr[0])).toString("base64"), "PNG = koda QR prve vstopnice iz GET /me/tickets", mojeQr.length);
     let v = await vrstica(o1);
     assert(v.receipt_mail_attempts === 1 && v.receipt_mail_sent_at && v.receipt_mail_claimed_at, "baza: 1 poskus, poslano", [v.receipt_mail_attempts, v.receipt_mail_sent_at]);
     r = await nakup(T.ana, evTest, 2, K1);
@@ -230,10 +247,11 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(await cakaj(() => mailiNa("bor@outly.si").length >= 1), "mail prispe");
     await pocakaj(600);
     m = mailiNa("bor@outly.si");
-    assert(m.length === 1 && m[0].text.includes("VIP table T1 (3 seats), package: Magnum: 300.00 EUR."), "VIP: miza, sedezi, paket, cena", m[0] && m[0].text);
-    assert(m[0].text.includes("Age limit: 18+ (table with a drinks package)"), "VIP: starost za paket pijace 18+");
-    assert(m[0].text.includes("VIP miza T1 (3 sedeži), paket: Magnum: 300,00 EUR.") && m[0].text.includes("Starostna meja: 18+ (miza s paketom pijače)") && /MIZA\n/.test(m[0].text), "VIP (sl): miza, sedeži, paket, cena z vejico, starost za paket");
-    assert(m[0].text.includes("TABLE") && !/\d x \d/.test(m[0].text.split("TABLE")[1].split("\n")[1] || ""), "VIP: razdelek Table brez stevila vstopnic");
+    assert(m.length === 1 && m[0].text.includes("VIP table T1 (3 seats), package Magnum · 300.00 EUR · test purchase, nothing was charged"), "VIP: miza, sedezi, paket, cena", m[0] && m[0].text);
+    assert(m[0].text.includes("Age 18+ (table with a drinks package). Show a valid photo ID at the door."), "VIP: starost za paket pijace 18+ in osebni dokument");
+    assert(m[0].text.includes("VIP miza T1 (3 sedeži), paket Magnum · 300,00 EUR · testni nakup") && m[0].text.includes("Starost 18+ (miza s paketom pijače). Pri vhodu pokažite osebni dokument."), "VIP (sl): miza, sedeži, paket, cena z vejico, starost za paket");
+    const pdfVip = Buffer.from(((m[0].attachments || []).find(x => x.filename === "outly-tickets.pdf") || { content: "" }).content, "base64").toString("latin1");
+    assert(/\/Count 3 /.test(pdfVip) && pdfVip.includes("VIP table T1") && pdfVip.includes("Age limit: 18+"), "VIP: PDF s 3 kodami (sedezi), oznaka mize, starost paketa");
 
     // ================================================================
     console.log("\n# 3. 0 EUR pri klubu s Stripom");
@@ -242,7 +260,8 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(r.status === 201 && r.body.order.status === "paid" && r.body.order.total_cents === 0, "brezplacna vstopnica paid", r.body);
     assert(await cakaj(() => mailiNa("cene@outly.si").length >= 1), "mail prispe");
     m = mailiNa("cene@outly.si");
-    assert(m.length === 1 && /free: nothing was charged/.test(m[0].text) && m[0].text.includes("1 x 0.00 EUR = 0.00 EUR"), "potrdilo za brezplacno narocilo", m[0] && m[0].text.slice(0, 200));
+    assert(m.length === 1 && m[0].text.includes("1 ticket · 0.00 EUR · free, nothing was charged") && m[0].text.includes("1 vstopnica · 0,00 EUR · brezplačno, nič ni bilo zaračunano"), "potrdilo za brezplacno narocilo", m[0] && m[0].text.slice(0, 200));
+    assert(m[0].text.includes("Koda QR je v priloženem PDF (outly-tickets.pdf)") && (m[0].attachments || []).length === 2, "ena vstopnica: koda v PDF, PNG + PDF v prilogi");
     assert(!/test purchase/.test(m[0].text) && S.zahtevki === st0, "ni testno narocilo, Stripe ni klican");
 
     // ================================================================
@@ -264,7 +283,8 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     await pocakaj(1500);
     m = mailiNa("dana@outly.si");
     assert(m.length === 1, "natanko en mail kljub podvojenim webhookom in pospravljalcu", m.length);
-    assert(!/test purchase|free: nothing/.test(m[0].text) && m[0].text.includes("1 x 20.00 EUR = 20.00 EUR") && m[0].text.includes("Stripe Club") && m[0].text.includes("Slovenska 1, Ljubljana"), "vsebina placanega narocila", m[0].text.slice(0, 300));
+    assert(!/test purchase|nothing was charged|nič ni bilo/.test(m[0].text) && m[0].text.includes("1 ticket · 20.00 EUR · paid") && m[0].text.includes("1 vstopnica · 20,00 EUR · plačano") && m[0].text.includes("Stripe Club") && m[0].text.includes("Slovenska 1, Ljubljana"), "vsebina placanega narocila (plačano)", m[0].text.slice(0, 300));
+    assert((m[0].attachments || []).some(x => x.filename === "outly-tickets.pdf"), "placano Stripe narocilo: PDF v prilogi (po webhooku)");
     v = await vrstica(o4);
     assert(v.status === "paid" && v.receipt_mail_attempts === 1 && v.receipt_mail_sent_at, "baza: paid, 1 poskus, poslano", v);
     // Placana potrdila se ne omejijo (meja 3 velja samo za narocila brez placila): eva placa 4 narocila
@@ -418,6 +438,31 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(/meja 3 potrdil na uporabnika/.test(logAB()) && !/kim@outly\.si/.test(logAB()), "meja zapisana v dnevnik brez e-naslova");
 
     // ================================================================
+    console.log("\n# 7b. Prenos vstopnice med nakupom in mailom: v mailu so samo kupceve vstopnice s TRENUTNIM serialom");
+    await pool.query("TRUNCATE omejitve");
+    R.napaka = true;
+    r = await nakup(T.pa, evTest, 2);
+    const o7e = r.body.order.id;
+    assert(r.status === 201 && r.body.tickets.length === 2, "nakup 2 vstopnic, Resend zavrne prvi mail", r.body);
+    assert(await cakaj(async () => (await vrstica(o7e)).receipt_mail_attempts >= 1), "prvi poskus porabljen (mail se ni odsel)");
+    const qrPrej = await qrNarocila(T.pa, o7e);
+    const tIds = (await pool.query("SELECT id FROM tickets WHERE order_id=$1 ORDER BY id", [o7e])).rows.map(x => x.id);
+    r = await api("POST", `/tickets/${tIds[0]}/transfer`, T.pa, { email: "pb@outly.si" });
+    assert(r.status === 200 && r.body.result === "ok", "prva vstopnica prenesena prijatelju PRED mailom", r.body);
+    const qrPo = await qrNarocila(T.pa, o7e);
+    R.napaka = false;
+    assert(await cakaj(() => mailiNa("pa@outly.si").length >= 1, 10000), "potrdilo pride, ko Resend spet dela");
+    await pocakaj(1200);
+    m = mailiNa("pa@outly.si");
+    const pr7 = (m[0] && m[0].attachments) || [];
+    const png7 = pr7.find(x => x.content_type === "image/png"), pdf7 = Buffer.from((pr7.find(x => x.filename === "outly-tickets.pdf") || { content: "" }).content, "base64").toString("latin1");
+    assert(m.length === 1, "natanko en mail", m.length);
+    assert(qrPrej.length === 2 && qrPo.length === 1 && png7 && png7.content === (await qrPng(qrPo[0])).toString("base64") && png7.content !== (await qrPng(qrPrej[0])).toString("base64"),
+      "vgrajena koda = trenutna koda vstopnice, ki je se kupceva (prenesena ni v mailu)");
+    assert(/\/Count 1 /.test(pdf7) && m[0].text.includes("V PDF so samo vstopnice, ki so še vaše (prenesenih ni).") && m[0].text.includes("2 vstopnici · 30,00 EUR"), "PDF ima samo kupcevo vstopnico, besedilo to pove; kolicina narocila ostane 2");
+    assert(!mailiNa("pb@outly.si").some(x => /Vaše vstopnice \/ Your tickets/.test(x.subject)), "prejemnik ne dobi kupcevega potrdila");
+
+    // ================================================================
     console.log("\n# 8. Natanko enkrat ob pocasnem Resendu (druga instanca, pospravljalec tece med posiljanjem)");
     A.srv.kill();   // ponovni prevzem v bazi je odvisen od nastavitev VSAKEGA procesa; instanca A ima kratek premor, zato pri B ne sme sodelovati
     await pocakaj(300);
@@ -449,10 +494,45 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(await cakaj(() => R.poslano.length - zacetek >= 10, 20000), "vseh 10 mailov poslanih", R.poslano.length - zacetek);
     const nov = R.poslano.slice(zacetek);
     assert(nov.filter(m => m.to !== "prednost@example.com").length === 9, "vseh 9 potrdil poslanih natanko enkrat", nov.length);
+
+    // ================================================================
+    console.log("\n# 9. PDF ne nastane (T4): potrdilo gre vseeno, brez priloge; mail ne blokira nakupa in webhooka");
+    B.srv.kill();
+    await pocakaj(300);
+    C = zagon(PORT_C, { GOST_POSTA_PONOVI_MS: "200", GOST_POSTA_TIMEOUT_MS: "5000", GOST_POSTA_REZERVA_MS: "0", GOST_POSTA_PREMOR_MS: "100" }, ["-r", require("path").join(__dirname, "pomoc_pdf_napaka.js")]);
+    await cakajStreznik(BC);
+    await pool.query("TRUNCATE omejitve");
+    R.drzi = true;   // Resend visi: nakup ne sme cakati na mail
+    let t0 = Date.now();
+    r = await zahtevek(BC, "POST", `/events/${evTest}/orders`, T.pc, { quantity: 2 });
+    const dt9 = Date.now() - t0;
+    assert(r.status === 201 && dt9 < 1500, "nakup 201 takoj, ceprav Resend visi", [r.status, dt9]);
+    assert(await cakaj(() => R.zadrzani.some(z => z.to === "pc@outly.si"), 5000), "potrdilo je v Resendu (po COMMIT-u)");
+    sprosti();
+    assert(await cakaj(() => mailiNa("pc@outly.si").length >= 1), "potrdilo pride");
+    await pocakaj(1000);
+    m = mailiNa("pc@outly.si");
+    assert(m.length === 1 && !m[0].attachments && !/cid:|<img/i.test(m[0].html), "PDF ni nastal: natanko en mail, BREZ priloge in brez vgrajene kode", m.map(x => !!x.attachments));
+    assert(m[0].text.includes("Vstopnice s kodami QR so v aplikaciji Outly (Profil → Vstopnice): https://outly.test/app/tickets") && !/PDF/.test(m[0].text) && m[0].text.includes("Pri vstopnicah za dogodek na določen datum nimate pravice do odstopa"),
+      "besedilo: vstopnice so v aplikaciji, brez omembe PDF; pravni blok ostane", m[0].text.slice(0, 400));
+    assert(/\[potrdilo\] POZOR: priprava QR\/PDF za narocilo OUT-[A-Z0-9]+ ni uspela/.test(C.log) && !/pc@outly\.si/.test(C.log), "alarm v dnevniku (brez e-naslova)", C.log.slice(-400));
+    // Stripe webhook ob visecem Resendu: 200 takoj, mail pozneje natanko enkrat
+    r = await zahtevek(BC, "POST", `/events/${evPaid[3]}/orders`, T.pd, { quantity: 1 });
+    const s9 = await sejaOd(r.body.order.id);
+    S.seje[s9] = placana(S.seje[s9], "pi_potr_9");
+    R.drzi = true;
+    t0 = Date.now();
+    const w9 = await webhook(BC, "checkout.session.completed", S.seje[s9]);
+    const dtw = Date.now() - t0;
+    assert(w9.status === 200 && dtw < 1500 && (await vrstica(r.body.order.id)).status === "paid", "webhook 200 takoj, ceprav Resend visi", [w9.status, dtw]);
+    assert(await cakaj(() => R.zadrzani.some(z => z.to === "pd@outly.si"), 5000), "potrdilo po webhooku je v Resendu");
+    sprosti();
+    await pocakaj(1500);
+    assert(mailiNa("pd@outly.si").length === 1, "natanko en mail po webhooku", mailiNa("pd@outly.si").length);
   } catch (e) {
     fail++; console.log("  ✗ IZJEMA v testu:", e && e.stack || e);
   } finally {
-    A.srv.kill(); B.srv.kill();
+    A.srv.kill(); B.srv.kill(); if (C) C.srv.kill();
     jwksServer.close(); stripeServer.close(); resendServer.close();
     await pool.end();
     console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
