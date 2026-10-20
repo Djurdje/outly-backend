@@ -6477,6 +6477,12 @@ async function vraciloIzStripaPosljiEno(chargeId) {
     `SELECT o.public_ref, o.buyer_email, o.quantity, o.currency, o.table_label, o.total_cents, e.title AS event_title, e.start_at, cl.name AS club_name, o.stripe_account_id
        FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = e.club_id WHERE o.id = $1`, [v.order_id])).rows[0];
   if (!o) return false;
+  // Tik pred Resendom se enkrat: je medtem nastala vrstica `vracila` (npr. odpoved dogodka po vracilu v plosci)? Potem kupca obvesca obdelovalec vracil;
+  // claim sprostimo brez porabe poskusa. (Okna med tem branjem in Resendom ni mogoce zapreti; oba maila bi bila resnicna.)
+  if ((await pool.query("SELECT 1 FROM vracila vv WHERE vv.order_id = $1 AND vv.stanje <> 'preklicano' LIMIT 1", [v.order_id])).rows.length) {
+    await pool.query("UPDATE vracila_iz_stripa SET mail_poskusi = GREATEST(mail_poskusi - 1, 0), mail_prevzeto_at = NULL WHERE charge_id = $1 AND mail_poslano_at IS NULL", [chargeId]);
+    return false;
+  }
   if (!/^[^@\s]+@[^@\s]+$/.test(o.buyer_email || "") || /@outly\.invalid$/i.test(o.buyer_email)) {
     // izbrisan racun / anonimiziran gost: naslova ni vec. Claim zahteva poskusi < max, zato je ta vrstica (in alarm) natanko enkrat; brez e-naslova v dnevniku.
     await pool.query("UPDATE vracila_iz_stripa SET mail_poskusi = $2 WHERE charge_id = $1 AND mail_poslano_at IS NULL", [chargeId, GOST_POSTA_POSKUSOV]);

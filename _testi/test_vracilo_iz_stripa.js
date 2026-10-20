@@ -55,12 +55,12 @@ const pocakaj = (ms) => new Promise(r => setTimeout(r, ms));
 async function cakaj(pogoj, ms = 8000) { const do_ = Date.now() + ms; while (Date.now() < do_) { if (await pogoj()) return true; await pocakaj(100); } return false; }
 
 // ---------- lazni Resend ----------
-const R = { poslano: [], napaka: false, drzi: false, zadrzani: [] };
+const R = { poslano: [], napaka: false, drzi: false, zadrzani: [], zavrnjenih: 0 };   // zavrnjenih: zahtevki, ki jih je stub zavrnil (napaka = true)
 const resendServer = http.createServer((req, res) => {
   let d = ""; req.on("data", x => d += x);
   req.on("end", () => {
     if (req.method === "POST" && req.url === "/emails") {
-      if (R.napaka) { res.writeHead(422, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "validation_error", message: "stub: zavrnjeno", statusCode: 422 })); }
+      if (R.napaka) { R.zavrnjenih++; res.writeHead(422, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "validation_error", message: "stub: zavrnjeno", statusCode: 422 })); }
       const m = JSON.parse(d);
       const koncaj = () => { R.poslano.push(m); res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "mail_" + R.poslano.length })); };
       if (R.drzi) { R.zadrzani.push(koncaj); return; }
@@ -184,9 +184,10 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { S.ch[chId].amount_refunded = 
     // dve delni vracili, preden mail odide (Resend je padel): en mail s SKUPNIM zneskom
     R.napaka = true;
     const O3 = await narocilo({ uporabnik: U.bor, kolicina: 2 });
+    const zavrnjeni3 = R.zavrnjenih;
     w = await vrniVPlosci(O3.ch, 500);
     assert(w.status === 200, "Resend zavrne: webhook vseeno 200", w);
-    assert(await cakaj(async () => ((await zapis(O3.ch)) || {}).mail_poskusi >= 1), "prvi poskus porabljen");
+    assert(await cakaj(() => R.zavrnjenih > zavrnjeni3), "prvi poskus: Resend ga je zavrnil", [R.zavrnjenih, zavrnjeni3]);
     w = await vrniVPlosci(O3.ch, 800);
     assert(w.status === 200 && (await zapis(O3.ch)).znesek_cents === 800, "drugo delno pred mailom: znesek se poveca na 800", await zapis(O3.ch));
     R.napaka = false;
@@ -206,8 +207,10 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { S.ch[chId].amount_refunded = 
     // vrstica `vracila` nastane PO vracilu v plosci (npr. odpoved dogodka med cakanjem na mail): mail se odlozi, poskus se ne porabi
     R.napaka = true;
     const O4b = await narocilo({ uporabnik: U.cene });
+    const zavrnjenihPrej = R.zavrnjenih;
     w = await vrniVPlosci(O4b.ch, 1000);
-    assert(w.status === 200 && await cakaj(async () => ((await zapis(O4b.ch)) || {}).mail_poskusi >= 1), "delno v plosci, prvi mail ne uspe");
+    // Dogodek: stub je ZAVRNIL prvi zahtevek (stevec poskusov v bazi naraste ze ob rezervaciji, PRED klicem Resenda; zahtevek je tedaj se lahko na poti in bi uspel po R.napaka = false)
+    assert(w.status === 200 && await cakaj(() => R.zavrnjenih > zavrnjenihPrej), "delno v plosci, prvi mail ne uspe (Resend zavrnil)", [R.zavrnjenih, zavrnjenihPrej]);
     await pool.query("INSERT INTO vracila (order_id, event_id, razlog, stanje) VALUES ($1, $2, 'event_cancelled', 'caka')", [O4b.id, ev]);
     const p4 = (await zapis(O4b.ch)).mail_poskusi;
     R.napaka = false;

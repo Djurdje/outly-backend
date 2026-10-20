@@ -441,15 +441,21 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     console.log("\n# 7b. Prenos vstopnice med nakupom in mailom: v mailu so samo kupceve vstopnice s TRENUTNIM serialom");
     await pool.query("TRUNCATE omejitve");
     R.napaka = true;
+    const zavrnjeni7 = R.zavrnjenih;
     r = await nakup(T.pa, evTest, 2);
     const o7e = r.body.order.id;
     assert(r.status === 201 && r.body.tickets.length === 2, "nakup 2 vstopnic, Resend zavrne prvi mail", r.body);
-    assert(await cakaj(async () => (await vrstica(o7e)).receipt_mail_attempts >= 1), "prvi poskus porabljen (mail se ni odsel)");
+    // dogodek: stub je zahtevek ZAVRNIL (stevec poskusov v bazi naraste ze ob rezervaciji, ko je zahtevek se na poti)
+    assert(await cakaj(() => R.zavrnjenih > zavrnjeni7, 10000), "prvi poskus zavrnjen (mail se ni odsel)", [R.zavrnjenih, zavrnjeni7]);
     const qrPrej = await qrNarocila(T.pa, o7e);
     const tIds = (await pool.query("SELECT id FROM tickets WHERE order_id=$1 ORDER BY id", [o7e])).rows.map(x => x.id);
     r = await api("POST", `/tickets/${tIds[0]}/transfer`, T.pa, { email: "pb@outly.si" });
     assert(r.status === 200 && r.body.result === "ok", "prva vstopnica prenesena prijatelju PRED mailom", r.body);
     const qrPo = await qrNarocila(T.pa, o7e);
+    // poskus, pripravljen PRED prenosom, je lahko se na poti: pocakaj, da stub zavrne vsaj se enega (ponovitev pospravljalca), sele nato Resend spet dela
+    const zavrnjeni7b = R.zavrnjenih;
+    assert(await cakaj(() => R.zavrnjenih > zavrnjeni7b, 10000), "ponovitev po prenosu tudi zavrnjena", [R.zavrnjenih, zavrnjeni7b]);
+    await pocakaj(500);
     R.napaka = false;
     assert(await cakaj(() => mailiNa("pa@outly.si").length >= 1, 10000), "potrdilo pride, ko Resend spet dela");
     await pocakaj(1200);
