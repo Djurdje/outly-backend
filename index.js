@@ -3398,13 +3398,13 @@ async function posljiMailProsnja(p) {
     const r2 = await resend.emails.send({
       from, to: p.potrdiloNa,
       subject: "We received your application",
-      html: `
+      html: nogaMaila({ html: `
     <div style="font-family: Arial, sans-serif; line-height:1.5">
       <h2>${appName} – application received</h2>
       <p>Thanks for applying to bring <b>${ubeziHtml(p.businessName)}</b> to ${appName}.</p>
       <p>A real person reads every application. If we need documents — business licence, proof of ownership, tax number or bank details — we will ask for them in our reply. Please don't send them before we ask.</p>
       <p>We'll get back to you at this address.</p>
-    </div>`,
+    </div>` }).html,
     });
     if (r2 && r2.error) console.error("Resend napaka (prošnja, potrdilo):", JSON.stringify(r2.error));
   } catch (e) { console.error("Resend napaka (prošnja):", e); }
@@ -4332,7 +4332,7 @@ const placilaStripe = require("./placila_stripe");
 // naPlacano: po COMMIT-u webhooka/pospravljalca poslje mail: gostu z vstopnicami (nakup brez racuna, migracija 033) ALI kupcu z racunom potrdilo (042, #95).
 // Vsaka od obeh poti sama preveri, ali je narocilo njeno (user_id NULL + guest_email / user_id + receipt_mail_attempts), druga ne stori nicesar.
 // naSporu: po COMMIT-u webhooka charge.dispute.* obvesti lastnika kluba (mail; #190). Samo stanje in obvestilo: denarja ne premika, vstopnice ne razveljavi.
-const stripePlacila = placilaStripe.ustvari({ pool, naPlacano: (id) => Promise.all([posljiGostuVstopnice(id), posljiPotrdiloKupcu(id)]), naSporu: (id) => posljiSporLastniku(id), naVracilu: (re) => vracilaStripe.uskladiVracilo(re), naVraciluIzStripa: (ch) => posljiVraciloIzStripa(ch) });
+const stripePlacila = placilaStripe.ustvari({ pool, naPlacano: (id) => Promise.all([posljiGostuVstopnice(id), posljiPotrdiloKupcu(id)]), naSporu: (id) => posljiSporLastniku(id), naVracilu: (re) => vracilaStripe.uskladiVracilo(re), naVraciluIzStripa: (ch) => posljiVracilaIzStripaNaboja(ch) });
 stripePlacila.zazeni();
 // Vracila (#190, vracila_stripe.js): odpoved dogodka -> vrsta `vracila`, obdelovalec v ozadju (ne v zahtevku). posljiNeposlane: obvestila kupcem in lastnikom klubov (po vrsti, razmik za Resend).
 const vracilaStripe = require("./vracila_stripe").ustvari({ pool, posljiNeposlane: () => vracilaObvestilaNeposlana() });
@@ -5749,7 +5749,19 @@ async function prevzemiGostujocaNarocila(userId, zVmesnimSpominom = false) {
 // Placano (total > 0, ne-testno) potrdilo ostane zakonska obveznost (ZVPot-1): nikoli izpuscen.
 // Napaka maila NE sme podreti placila ali webhooka (klicatelji ne cakajo in ne vidijo izjem). Vrne true, ce je mail poslan.
 const SQL_PRODAJALEC_MAIL = "cl.legal_name, cl.legal_address, cl.registration_number, cl.tax_number, cl.vat_payer";   // za sellerVrstice (043)
-const POSREDNIK_VRSTICA = "NEXT DIMENSIONS, družba za marketing, d.o.o., Trebče 81, 3256 Bistrica ob Sotli, luka@outly.si";
+// ZVPot-1 7(1) drugi stavek (pravnik 2026-10-20, tabela vrstica 5): VSAKO pisno sporocilo potrosniku nosi celotno ime firme in sedez posiljatelja.
+// Ena resnica za firmo platforme: POSREDNIK_VRSTICA, potrdilo (PLATFORMA_FIRMA) in noga vsakega maila (nogaMaila v gostResendPosli in ostalih posiljanjih).
+const FIRMA_PLATFORME = "NEXT DIMENSIONS, družba za marketing, d.o.o.", SEDEZ_PLATFORME = "Trebče 81, 3256 Bistrica ob Sotli";
+const POSREDNIK_VRSTICA = `${FIRMA_PLATFORME}, ${SEDEZ_PLATFORME}, luka@outly.si`;
+const NOGA_MAILA = `Pošiljatelj / Sender: ${FIRMA_PLATFORME}, ${SEDEZ_PLATFORME}`;
+// Noga z imenom firme in sedezem na koncu VSAKEGA maila (besedilo in HTML; 12 px, #555). Brez HTML-ja (samo besedilo) vrne samo besedilo.
+function nogaMaila({ html, text }) {
+  const n = NOGA_MAILA.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  return {
+    html: html === undefined ? undefined : `${html}<p style="margin:24px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;color:#555">${n}</p>`,
+    text: text === undefined ? undefined : `${String(text).replace(/\s+$/, "")}\n\n${NOGA_MAILA}\n`,
+  };
+}
 const POSTA_ODGOVOR = "luka@outly.si";
 // Maili, ki so del nakupa (potrdilo kupcu, vstopnice gostu, prejeta vstopnica), so DVOJEZICNI: slovenski blok, locilo, angleski blok (#100, ZVPot-1 7/1: informacije pred
 // sklenitvijo pogodbe v slovenscini). Podatki so eni, razdelke za vsak jezik gradi ista funkcija z `jez` ("sl" | "en") in jih izrise izrisiDvojezicno.
@@ -5818,9 +5830,11 @@ function izrisiDvojezicno(zgradi, povezava) {
 function gostPotrdilo(o, povezava, prevzeto, kode = []) {
   return izrisiDvojezicno((jez) => {
     const T = (sl, en) => (jez === "sl" ? sl : en);
+    // T9 (pravnik 2026-10-20): pri prodajalcu platformi (I50) ni kluba, je organizator (NEXT DIMENSIONS)
+    const klub = o.stripe_account_id === placilaStripe.PLATFORMNI_RACUN ? T("organizator", "organiser") : T("klub", "club");
     const starost = o.min_age > 0
-      ? T(`Starostna meja: ${o.min_age}+. Vsak obiskovalec mora izpolnjevati starostno mejo. Pri vhodu se preverja osebni dokument; klub vam lahko zavrne vstop, če je ne izpolnjujete.`,
-          `Age limit: ${o.min_age}+. Every visitor must meet the age limit. ID is checked at the door; the club may refuse entry if you don't meet it.`)
+      ? T(`Starostna meja: ${o.min_age}+. Vsak obiskovalec mora izpolnjevati starostno mejo. Pri vhodu se preverja osebni dokument; ${klub} vam lahko zavrne vstop, če je ne izpolnjujete.`,
+          `Age limit: ${o.min_age}+. Every visitor must meet the age limit. ID is checked at the door; the ${klub} may refuse entry if you don't meet it.`)
       : T("Brez starostne omejitve.", "No age limit.");
     const kodeVrstice = kode.length > 1
       ? [T("Prva koda QR je spodaj, vse vaše kode QR (ena na stran) so v priloženem PDF (outly-tickets.pdf). Pri vhodu pokažite eno kodo na osebo.",
@@ -5842,8 +5856,8 @@ function gostPotrdilo(o, povezava, prevzeto, kode = []) {
            T("Če z istim e-naslovom ustvarite račun Outly, se bodo vstopnice pojavile tam.", "If you create an Outly account with this email, your tickets will appear there.")])
         .concat(kodeVrstice),
         slika: kode.slice(0, 1).map((k) => ({ cid: k.cid, oznaka: oznakaKode(k, jez), alt: T("Koda QR vstopnice", "Ticket QR code") })) },
-      { naslov: T("Pritožbe", "Complaints"), vrstice: [T(`Glede dogodka: obrnite se na klub (podatki zgoraj). Glede nakupa ali plačila: obrnite se na Outly na ${POSTA_ODGOVOR}.`,
-        `About the event: contact the club (details above). About the purchase or the payment: contact Outly at ${POSTA_ODGOVOR}.`)] },
+      { naslov: T("Pritožbe", "Complaints"), vrstice: [T(`Glede dogodka: obrnite se na ${klub === "klub" ? "klub" : "organizatorja"} (podatki zgoraj). Glede nakupa ali plačila: obrnite se na Outly na ${POSTA_ODGOVOR}.`,
+        `About the event: contact the ${klub} (details above). About the purchase or the payment: contact Outly at ${POSTA_ODGOVOR}.`)] },
       { naslov: T("Vprašanja", "Questions"), vrstice: [T(`Odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`, `Reply to this email or write to ${POSTA_ODGOVOR}.`)] },
     ];
     return { naslovBesedila: T(`Vaše vstopnice Outly - naročilo ${o.public_ref}`, `Your Outly tickets - order ${o.public_ref}`), naslovHtml: T("Vaše vstopnice Outly", "Your Outly tickets"), razdelki };
@@ -5876,6 +5890,7 @@ async function prilogeVstopnic(ev, kode, imePdf, varnost = QR_STAVEK) {
 async function gostResendPosli({ to, subject, html, text, attachments }) {
   let timer;
   subject = zadevaMaila(subject);
+  ({ html, text } = nogaMaila({ html, text }));   // ZVPot-1 7(1): firma in sedez posiljatelja v vsakem mailu
   const poslano = resend.emails.send({
     from: process.env.EMAIL_FROM || "onboarding@resend.dev", to, reply_to: POSTA_ODGOVOR, subject, html, text, ...(attachments && attachments.length ? { attachments } : {}),
   });
@@ -6049,7 +6064,7 @@ const potrdiloIzcrpaj = (oid) => pool.query("UPDATE orders SET receipt_mail_atte
 // telefon, e-naslov, maticna, davcna; stavek o DDV), pri klubu Outly kot posrednik, pritozbe, pogoji z razlicico. Nic pravnega ni samo na povezavi ali samo v PDF.
 // pril = { kode: [{ cid }], vse: N vstopnic narocila, pdf: true|false } — PDF in vgrajena koda samo, ce je priprava uspela (sicer »vstopnice so v aplikaciji«, T4).
 // T9: pri prodajalcu platformi (I50) besedilo ne govori o klubu (»organizator« / »prodajalec«).
-const PLATFORMA_FIRMA = "NEXT DIMENSIONS, družba za marketing, d.o.o.", PLATFORMA_SEDEZ = "Trebče 81, 3256 Bistrica ob Sotli";
+const PLATFORMA_FIRMA = FIRMA_PLATFORME, PLATFORMA_SEDEZ = SEDEZ_PLATFORME;
 const vstopnicSl = (n) => (n % 100 === 1 ? "vstopnica" : n % 100 === 2 ? "vstopnici" : n % 100 === 3 || n % 100 === 4 ? "vstopnice" : "vstopnic");
 const LJ_KRATKO = new Intl.DateTimeFormat("sl-SI", { day: "numeric", month: "numeric", year: "numeric", timeZone: "Europe/Ljubljana" });
 // Prodajalec v drobnem tisku (6A/6B). Vrne { besedilo, brezTelefona }. Pri platformi brez vpisane firme NEXT DIMENSIONS uporabi firmo in sedez iz POSREDNIK_VRSTICA.
@@ -6298,6 +6313,7 @@ function vraciloMailBesedilo(o, vrsta) {
       };
     }
     const celoten = o.znesek_cents === o.total_cents;   // delno ze vrnjeno narocilo: vracamo ostanek, ne »celoten znesek«
+    const vseVrnjeno = (o.skupaj_vrnjeno_cents ?? o.znesek_cents) >= o.total_cents;   // iz_stripa: po tem vracilu je vrnjeno vse (vstopnice ne veljajo)
     if (vrsta === "iz_stripa") {   // #309: vracilo, narejeno v Stripovi nadzorni plosci (ne odpoved dogodka); delno vracilo: vstopnice ostanejo veljavne (uveljaviVracilo)
       return {
         naslovBesedila: T(`Vračilo opravljeno - naročilo ${o.public_ref}`, `Refund completed - order ${o.public_ref}`), naslovHtml: T("Vračilo opravljeno", "Refund completed"),
@@ -6307,7 +6323,11 @@ function vraciloMailBesedilo(o, vrsta) {
           { naslov: T("Vračilo", "Refund"), krepko: true, vrstice: [
             T(`Vrnili smo vam ${celoten ? "celoten znesek" : "znesek"} ${zn} na način plačila, s katerim ste plačali. Banka ga običajno knjiži v 5 do 10 delovnih dneh.`,
               `We have refunded ${celoten ? "the full amount" : "the amount"} of ${zn} to the payment method you used. Your bank usually posts it within 5 to 10 business days.`),
-            celoten ? T("Vstopnice tega naročila ne veljajo več.", "The tickets of this order are no longer valid.")
+            ...(celoten ? [] : [vseVrnjeno
+              ? T(`S tem je vrnjen celoten znesek naročila (${znesek(o.total_cents, o.currency, jez)}).`, `The full amount of the order (${znesek(o.total_cents, o.currency, "en")}) has now been refunded.`)
+              : T(`Skupaj je za to naročilo vrnjeno ${znesek(o.skupaj_vrnjeno_cents, o.currency, jez)} od ${znesek(o.total_cents, o.currency, jez)}.`,
+                  `In total, ${znesek(o.skupaj_vrnjeno_cents, o.currency, "en")} of ${znesek(o.total_cents, o.currency, "en")} has been refunded for this order.`)]),
+            vseVrnjeno ? T("Vstopnice tega naročila ne veljajo več.", "The tickets of this order are no longer valid.")
               : T("Vstopnice tega naročila ostanejo veljavne.", "The tickets of this order remain valid.")] },
           { naslov: T("Vprašanja", "Questions"), vrstice: [platforma
             ? T(`Odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR} in navedite naročilo ${o.public_ref}.`, `Reply to this email or write to ${POSTA_ODGOVOR} and quote order ${o.public_ref}.`)
@@ -6446,31 +6466,37 @@ async function posljiVraciloKupcu(vid, vrsta) {
 }
 
 // #309 (migracija 053): vracilo, narejeno ZUNAJ Outlyja (Stripova nadzorna plosca), pride kot webhook charge.refunded; placila_stripe.js vracilo() v isti transakciji
-// kot stanje narocila vpise vrstico v vracila_iz_stripa (ena na naboj). Mail »vrnili smo X« kupcu natanko enkrat na naboj, vzorec kot posljiVraciloKupcu (claim v bazi
+// kot stanje narocila vpise vrstico v vracila_iz_stripa (ena na Stripovo vracilo, Martin 20. 10. 2026). Mail »vrnili smo X« kupcu natanko enkrat na vracilo, vzorec kot posljiVraciloKupcu (claim v bazi
 // + mnozica v teku + mail_poslano_at po uspehu Resenda). Poslje ga webhook po COMMIT-u (brez cakanja) in pospravljalec mailov (gostPosljiNeposlane); posiljanje gre skozi
 // semafor potrdil (potrdiloPosta), zato ne zasede procesa. Pogoj VRACILO_IZ_STRIPA_POGOJ: naroceno brez vrstice v `vracila` (razen `preklicano`) - nase vracilo
 // (odpoved dogodka, inactive_order) kupca obvesca obdelovalec vracil; vrstica `vracila` vedno nastane PRED klicem Stripa, zato dirke z webhookom ni.
 // Pogoj sme postati resnicen pozneje (npr. vrstica `preklicano`): mail se le ODLOZI (brez claima, poskus se ne porabi), pospravljalec gleda 30 dni nazaj.
 const VRACILO_IZ_STRIPA_POGOJ = `NOT EXISTS (SELECT 1 FROM vracila vv WHERE vv.order_id = s.order_id AND vv.stanje <> 'preklicano')`;
 const vraciloIzStripaVTeku = new Set();
-async function posljiVraciloIzStripa(chargeId) {
+// Po COMMIT-u webhooka charge.refunded: vsa neposlana vracila tega naboja (vsako Stripovo vracilo svoj mail), po vrsti.
+async function posljiVracilaIzStripaNaboja(chargeId) {
+  if (!resend) return;
+  const r = await pool.query("SELECT vracilo_id FROM vracila_iz_stripa WHERE charge_id = $1 AND mail_poslano_at IS NULL ORDER BY skupaj_vrnjeno_cents, created_at", [String(chargeId)]);
+  for (const x of r.rows) await posljiVraciloIzStripa(x.vracilo_id);
+}
+async function posljiVraciloIzStripa(vracId) {
   if (!resend) return false;
-  const kljuc = String(chargeId);
+  const kljuc = String(vracId);
   if (vraciloIzStripaVTeku.has(kljuc)) return false;
   vraciloIzStripaVTeku.add(kljuc);
   try {
     if (!(await potrdiloPostaVstopi())) return false;   // polna vrsta: pospravljalec poskusi pozneje (poskus se se ni porabil)
     try { return await vraciloIzStripaPosljiEno(kljuc); }
-    catch (err) { console.error(`Resend napaka (vracilo iz Stripa, naboj ${kljuc}):`, err && (err.message || String(err))); return false; }
+    catch (err) { console.error(`Resend napaka (vracilo iz Stripa, ${kljuc}):`, err && (err.message || String(err))); return false; }
     finally { potrdiloPostaIzstopi(); }
   } finally { vraciloIzStripaVTeku.delete(kljuc); }
 }
-async function vraciloIzStripaPosljiEno(chargeId) {
+async function vraciloIzStripaPosljiEno(vracId) {
   const k = await pool.query(
     `UPDATE vracila_iz_stripa s SET mail_poskusi = s.mail_poskusi + 1, mail_prevzeto_at = NOW()
-      WHERE s.charge_id = $1 AND s.mail_poslano_at IS NULL AND s.mail_poskusi < $2 AND ${VRACILO_IZ_STRIPA_POGOJ}
+      WHERE s.vracilo_id = $1 AND s.mail_poslano_at IS NULL AND s.mail_poskusi < $2 AND ${VRACILO_IZ_STRIPA_POGOJ}
         AND (s.mail_prevzeto_at IS NULL OR s.mail_prevzeto_at < NOW() - ($3::bigint[])[s.mail_poskusi + 1] * INTERVAL '1 millisecond')
-      RETURNING s.order_id, s.znesek_cents, s.valuta, s.mail_poskusi AS poskus`, [chargeId, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+      RETURNING s.order_id, s.znesek_cents, s.skupaj_vrnjeno_cents, s.valuta, s.mail_poskusi AS poskus`, [vracId, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
   if (!k.rows.length) return false;
   const v = k.rows[0];
   const o = (await pool.query(
@@ -6480,23 +6506,23 @@ async function vraciloIzStripaPosljiEno(chargeId) {
   // Tik pred Resendom se enkrat: je medtem nastala vrstica `vracila` (npr. odpoved dogodka po vracilu v plosci)? Potem kupca obvesca obdelovalec vracil;
   // claim sprostimo brez porabe poskusa. (Okna med tem branjem in Resendom ni mogoce zapreti; oba maila bi bila resnicna.)
   if ((await pool.query("SELECT 1 FROM vracila vv WHERE vv.order_id = $1 AND vv.stanje <> 'preklicano' LIMIT 1", [v.order_id])).rows.length) {
-    await pool.query("UPDATE vracila_iz_stripa SET mail_poskusi = GREATEST(mail_poskusi - 1, 0), mail_prevzeto_at = NULL WHERE charge_id = $1 AND mail_poslano_at IS NULL", [chargeId]);
+    await pool.query("UPDATE vracila_iz_stripa SET mail_poskusi = GREATEST(mail_poskusi - 1, 0), mail_prevzeto_at = NULL WHERE vracilo_id = $1 AND mail_poslano_at IS NULL", [vracId]);
     return false;
   }
   if (!/^[^@\s]+@[^@\s]+$/.test(o.buyer_email || "") || /@outly\.invalid$/i.test(o.buyer_email)) {
     // izbrisan racun / anonimiziran gost: naslova ni vec. Claim zahteva poskusi < max, zato je ta vrstica (in alarm) natanko enkrat; brez e-naslova v dnevniku.
-    await pool.query("UPDATE vracila_iz_stripa SET mail_poskusi = $2 WHERE charge_id = $1 AND mail_poslano_at IS NULL", [chargeId, GOST_POSTA_POSKUSOV]);
+    await pool.query("UPDATE vracila_iz_stripa SET mail_poskusi = $2 WHERE vracilo_id = $1 AND mail_poslano_at IS NULL", [vracId, GOST_POSTA_POSKUSOV]);
     console.error(`[vracila] POZOR: kupec narocila ${o.public_ref} ni obvescen o vracilu iz Stripove plosce (naslov izbrisan ali neveljaven) - obvesti rocno`);
     return false;
   }
-  const { besedilo, html } = vraciloMailBesedilo({ ...o, currency: v.valuta || o.currency, znesek_cents: v.znesek_cents }, "iz_stripa");
+  const { besedilo, html } = vraciloMailBesedilo({ ...o, currency: v.valuta || o.currency, znesek_cents: v.znesek_cents, skupaj_vrnjeno_cents: v.skupaj_vrnjeno_cents }, "iz_stripa");
   const r = await gostResendPosli({ to: o.buyer_email, subject: `${VRACILO_MAIL.vrnjeno.zadeva}: ${o.event_title} (${o.public_ref})`.slice(0, 200), html, text: besedilo });
   if (r && r.error) {
     console.error(`Resend napaka (vracilo iz Stripa, ${o.public_ref}, poskus ${v.poskus}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
     if (v.poskus >= GOST_POSTA_POSKUSOV) console.error(`[vracila] POZOR: obvestila o vracilu iz Stripove plosce za narocilo ${o.public_ref} NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov)`);
     return false;
   }
-  await pool.query("UPDATE vracila_iz_stripa SET mail_poslano_at = NOW() WHERE charge_id = $1", [chargeId]);
+  await pool.query("UPDATE vracila_iz_stripa SET mail_poslano_at = NOW() WHERE vracilo_id = $1", [vracId]);
   console.log(`[vracila] mail kupcu (vracilo iz Stripove plosce) poslan: narocilo ${o.public_ref}`);
   return true;
 }
@@ -6504,11 +6530,11 @@ async function vraciloIzStripaPosljiEno(chargeId) {
 async function vraciloIzStripaPosljiNeposlane() {
   if (!resend) return;
   const r = await pool.query(
-    `SELECT s.charge_id FROM vracila_iz_stripa s
+    `SELECT s.vracilo_id FROM vracila_iz_stripa s
       WHERE s.mail_poslano_at IS NULL AND s.mail_poskusi < $1 AND s.created_at > NOW() - INTERVAL '30 days' AND ${VRACILO_IZ_STRIPA_POGOJ}
         AND (s.mail_prevzeto_at IS NULL OR s.mail_prevzeto_at < NOW() - ($2::bigint[])[s.mail_poskusi + 1] * INTERVAL '1 millisecond')
-      ORDER BY s.created_at LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
-  for (const x of r.rows) await posljiVraciloIzStripa(x.charge_id);
+      ORDER BY s.created_at, s.skupaj_vrnjeno_cents LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+  for (const x of r.rows) await posljiVraciloIzStripa(x.vracilo_id);
 }
 
 // Spor (chargeback): obvestilo LASTNIKU kluba ob odprtju in ob zaprtju. Prejemniki: e-naslov racuna lastnika (clubs.owner_user_id) in kontaktni e-naslov kluba.
@@ -9012,13 +9038,13 @@ async function posljiVabiloEkipi(toEmail, clubName, role) {
     const r = await resend.emails.send({
       from, to: toEmail,
       subject: zadevaMaila(`${clubName} invited you to their team on ${appName}`),
-      html: `
+      html: nogaMaila({ html: `
     <div style="font-family: Arial, sans-serif; line-height:1.5">
       <h2>${ubeziHtml(appName)} – Club team</h2>
       <p><b>${ubeziHtml(clubName)}</b> has invited you to work with them as <b>${vloga}</b>.</p>
       <p>Open the ${ubeziHtml(appName)} app, go to <b>Profile → My clubs</b> and tap the bell to accept or reject the invitation.</p>
       <p>If you don't know this club, simply reject the invitation or ignore this email.</p>
-    </div>`,
+    </div>` }).html,
     });
     if (r && r.error) console.error("Resend napaka (vabilo):", JSON.stringify(r.error));
   } catch (e) { console.error("Resend napaka (vabilo):", e); }

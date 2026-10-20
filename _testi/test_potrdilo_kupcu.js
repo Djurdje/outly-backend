@@ -535,6 +535,14 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     sprosti();
     await pocakaj(1500);
     assert(mailiNa("pd@outly.si").length === 1, "natanko en mail po webhooku", mailiNa("pd@outly.si").length);
+    // ZVPot-1 7(1) drugi stavek (pravnik 2026-10-20): VSAK mail ima celotno ime firme in sedez posiljatelja (noga, nogaMaila v index.js)
+    {
+      const FIRMA = "NEXT DIMENSIONS, družba za marketing, d.o.o., Trebče 81, 3256 Bistrica ob Sotli";
+      const vsi = R.poslano.concat(R.zamudnjena || []);
+      const brezNoge = vsi.filter(m => !String(m.text || "").includes("Pošiljatelj / Sender: " + FIRMA) || !String(m.html || "").includes(FIRMA));
+      const vrste = [...new Set(vsi.map(m => String(m.subject).split(":")[0]))].join(" | ");
+      assert(vsi.length > 0 && brezNoge.length === 0, `noga s firmo in sedezem v vseh ${vsi.length} mailih (${vrste})`, brezNoge.map(m => m.subject).slice(0, 5));
+    }
   } catch (e) {
     fail++; console.log("  ✗ IZJEMA v testu:", e && e.stack || e);
   } finally {

@@ -4,9 +4,9 @@
  *   DATABASE_URL="postgres://postgres:postgres@localhost:5432/outly" node _testi/test_vracilo_iz_stripa.js
  * Vzorec kot test_potrdilo_kupcu.js: lokalni JWKS, lazni Stripe (STRIPE_API_BASE), lazni Resend (RESEND_BASE_URL), backend na svojem portu.
  *
- *   1  polno vracilo v plosci: natanko en mail na naboj (podvojen in ponovljen webhook ga ne podvojita), celoten znesek, vstopnice ne veljajo; gost dobi mail na svoj naslov
- *   2  delno vracilo: delni znesek, vstopnice ostanejo veljavne; drugo delno vracilo po poslanem mailu ne poslje drugega (enkrat na naboj);
- *      dve delni vracili pred mailom (Resend je padel): en mail s skupnim zneskom, ko Resend spet dela (pospravljalec)
+ *   1  polno vracilo v plosci: natanko en mail na Stripovo vracilo (podvojen in ponovljen webhook ga ne podvojita), celoten znesek, vstopnice ne veljajo; gost dobi mail na svoj naslov
+ *   2  vsako vracilo svoj mail (Martin 20. 10. 2026): znesek vracila + skupaj vrnjeno, delno = vstopnice veljavne, zadnje = »vrnjen celoten znesek«, vstopnice ne veljajo;
+ *      dve vracili med izpadom Resenda = dva maila; socasna webhooka dveh vracil = natanko dva maila; naboj brez seznama vracil (nadomestna pot)
  *   3  nase vracilo (vrstica v `vracila`): mail o vracilu iz plosce NE gre (obvesca obdelovalec vracil); vrstica `preklicano` ga ne ustavi
  *   4  prodajalec platforma (I50): brez »posrednik« in brez »klub«
  *   5  mail ne blokira webhooka (Resend visi): webhook 200 takoj, mail pozneje natanko enkrat; Resend napaka: webhook 200
@@ -81,7 +81,13 @@ const stripeServer = http.createServer((req, res) => {
     const odg = (st, o) => { res.writeHead(st, { "content-type": "application/json", "request-id": "req_test" }); res.end(JSON.stringify(o)); };
     const u = req.url.split("?")[0];
     const m = u.match(/^\/v1\/charges\/(ch_\w+)$/);
-    if (req.method === "GET" && m) return S.ch[m[1]] ? odg(200, S.ch[m[1]]) : odg(404, { error: { type: "invalid_request_error", message: "No such charge" } });
+    if (req.method === "GET" && m) {
+      const ch = S.ch[m[1]];
+      if (!ch) return odg(404, { error: { type: "invalid_request_error", message: "No such charge" } });
+      const { vracila, brezSeznama, ...o } = ch;
+      const razsiri = [...new URL(req.url, "http://x").searchParams].some(([k, v]) => /^expand/.test(k) && v === "refunds");
+      return odg(200, razsiri && !brezSeznama ? { ...o, refunds: { object: "list", has_more: false, data: vracila } } : o);   // brezSeznama: kot stari lazni Stripe (nadomestna pot)
+    }
     return odg(404, { error: { type: "invalid_request_error", message: "Lazni Stripe: neznana pot " + req.method + " " + u } });
   });
 });
@@ -96,7 +102,14 @@ async function webhook(objekt, id) {
   return { status: r.status, body: j, ms: Date.now() - t0 };
 }
 // Vracilo v plosci: Stripe poveca amount_refunded naboja in poslje charge.refunded.
-const vrniVPlosci = (chId, skupajVrnjeno, id) => { S.ch[chId].amount_refunded = skupajVrnjeno; S.ch[chId].refunded = skupajVrnjeno >= S.ch[chId].amount; return webhook({ id: chId, object: "charge" }, id); };
+// Vracilo v plosci: Stripe ustvari vracilo re_… (brez nasega metadata), poveca amount_refunded naboja in poslje charge.refunded.
+let stVracil = 0;
+const vrniBrezWebhooka = (chId, skupajVrnjeno) => {
+  const ch = S.ch[chId], znesek = skupajVrnjeno - ch.amount_refunded;
+  ch.vracila.push({ id: "re_izs_" + (++stVracil), object: "refund", amount: znesek, status: "succeeded", charge: chId, created: 1760000000 + stVracil, metadata: {} });
+  ch.amount_refunded = skupajVrnjeno; ch.refunded = skupajVrnjeno >= ch.amount;
+};
+const vrniVPlosci = (chId, skupajVrnjeno, id) => { vrniBrezWebhooka(chId, skupajVrnjeno); return webhook({ id: chId, object: "charge" }, id); };
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
@@ -134,15 +147,16 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { S.ch[chId].amount_refunded = 
         [ref, uporabnik, ev, kolicina, cena, skupaj, racun === "platform" ? 0 : Math.round(skupaj * 0.1), pi, email || gost || `u${uporabnik}@outly.si`, racun, "cs_test_izs_" + stRef, gost]);
       const id = r.rows[0].id;
       await pool.query("INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)", [id, ev, kolicina]);
-      S.ch[ch] = { id: ch, object: "charge", payment_intent: pi, amount: skupaj, amount_refunded: 0, refunded: false, currency: "eur", metadata: { order_id: String(id) } };
+      S.ch[ch] = { id: ch, object: "charge", payment_intent: pi, amount: skupaj, amount_refunded: 0, refunded: false, currency: "eur", metadata: { order_id: String(id) }, vracila: [] };
       return { id, ref, ch, email: email || gost || `u${uporabnik}@outly.si` };
     };
     const vrstica = async (id) => (await pool.query("SELECT status, refunded_cents FROM orders WHERE id=$1", [id])).rows[0];
-    const zapis = async (ch) => (await pool.query("SELECT * FROM vracila_iz_stripa WHERE charge_id=$1", [ch])).rows[0];
+    const zapisi = async (ch) => (await pool.query("SELECT * FROM vracila_iz_stripa WHERE charge_id=$1 ORDER BY skupaj_vrnjeno_cents", [ch])).rows;
+    const zapis = async (ch) => (await zapisi(ch))[0];
     const vstopnice = async (id) => (await pool.query("SELECT status FROM tickets WHERE order_id=$1", [id])).rows.map(x => x.status);
 
     // ================================================================
-    console.log("\n# 1. Polno vracilo v plosci: natanko en mail na naboj");
+    console.log("\n# 1. Polno vracilo v plosci: natanko en mail na vracilo");
     const O1 = await narocilo({ uporabnik: U.ana, kolicina: 2 });
     let w = await vrniVPlosci(O1.ch, 4000, "evt_izs_polno");
     assert(w.status === 200, "webhook charge.refunded: 200", w);
@@ -155,14 +169,14 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { S.ch[chId].amount_refunded = 
     assert(w.status === 200, "drug dogodek za isti naboj: 200", w);
     await pocakaj(1200);
     let m = mailPo(O1.ref);
-    assert(m.length === 1 && m[0].to === O1.email, "natanko en mail na naboj, na naslov narocila", m.map(x => x.to));
+    assert(m.length === 1 && m[0].to === O1.email, "natanko en mail na vracilo (ponovljen in drug dogodek ga ne podvojita), na naslov narocila", m.map(x => x.to));
     const t1 = m[0] ? m[0].text : "";
     assert(m[0] && m[0].subject === `Vračilo / Refund: Plosca noc (${O1.ref})` && m[0].reply_to === "luka@outly.si", "zadeva dvojezicna, reply_to", m[0] && m[0].subject);
     assert(t1.includes("Vrnili smo vam celoten znesek 40,00 EUR") && t1.includes("We have refunded the full amount of 40.00 EUR") && t1.includes("Vstopnice tega naročila ne veljajo več.") && t1.includes("The tickets of this order are no longer valid."), "besedilo: celoten znesek iz Stripa (SL in EN), vstopnice ne veljajo", t1);
     assert(t1.includes(`Naročilo ${O1.ref}: 2 vstopnice`) && t1.includes("Glede dogodka se obrnite na klub (Stripe Club)") && !/odpovedan|cancelled/i.test(t1), "besedilo: narocilo, klub; NI »dogodek odpovedan«");
     assert(t1.indexOf("Vračilo opravljeno") < t1.indexOf("Refund completed"), "slovenski blok pred angleskim");
     const z1 = await zapis(O1.ch);
-    assert(z1 && z1.znesek_cents === 4000 && z1.valuta === "EUR" && z1.mail_poslano_at && z1.mail_poskusi === 1, "vracila_iz_stripa: 4000 c, EUR, poslano, en poskus", z1);
+    assert(z1 && /^re_izs_/.test(z1.vracilo_id) && z1.znesek_cents === 4000 && z1.skupaj_vrnjeno_cents === 4000 && z1.valuta === "EUR" && z1.mail_poslano_at && z1.mail_poskusi === 1 && (await zapisi(O1.ch)).length === 1, "vracila_iz_stripa: ena vrstica (re_), 4000 c, EUR, poslano, en poskus", z1);
     assert(!log.includes(O1.email), "dnevnik brez e-naslova kupca");
     // gost (nakup brez racuna): mail na naslov nakupa
     const Og = await narocilo({ gost: "gost.plosca@example.com" });
@@ -170,18 +184,26 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { S.ch[chId].amount_refunded = 
     assert(w.status === 200 && await cakaj(() => mailiNa("gost.plosca@example.com").length === 1), "gost: mail o vracilu na naslov nakupa");
 
     // ================================================================
-    console.log("\n# 2. Delno vracilo: delni znesek, enkrat na naboj");
+    console.log("\n# 2. Delna vracila: vsako vracilo svoj mail (Martin 20. 10. 2026), znesek vracila + skupaj vrnjeno");
     const O2 = await narocilo({ uporabnik: U.bor, kolicina: 3 });
     w = await vrniVPlosci(O2.ch, 1000);
     assert(w.status === 200 && (await vrstica(O2.id)).status === "partially_refunded", "delno: partially_refunded");
-    assert(await cakaj(() => mailPo(O2.ref).length >= 1), "mail o delnem vracilu");
+    assert(await cakaj(() => mailPo(O2.ref).length >= 1), "mail o prvem delnem vracilu");
     m = mailPo(O2.ref);
     assert(m[0].text.includes("Vrnili smo vam znesek 10,00 EUR") && m[0].text.includes("We have refunded the amount of 10.00 EUR") && !/celoten|full amount/.test(m[0].text), "delni znesek iz Stripa, brez »celoten«", m[0].text);
+    assert(m[0].text.includes("Skupaj je za to naročilo vrnjeno 10,00 EUR od 60,00 EUR.") && m[0].text.includes("In total, 10.00 EUR of 60.00 EUR has been refunded"), "skupaj vrnjeno (SL in EN)", m[0].text);
     assert(m[0].text.includes("Vstopnice tega naročila ostanejo veljavne.") && (await vstopnice(O2.id)).every(s => s === "valid"), "delno: vstopnice ostanejo veljavne (besedilo = stanje)");
     w = await vrniVPlosci(O2.ch, 1500);
+    assert(w.status === 200 && await cakaj(() => mailPo(O2.ref).length >= 2), "drugo delno vracilo: drugi mail");
     await pocakaj(1200);
-    assert(w.status === 200 && mailPo(O2.ref).length === 1 && (await zapis(O2.ch)).znesek_cents === 1000 && (await vrstica(O2.id)).refunded_cents === 1500, "drugo delno vracilo po poslanem mailu: brez drugega maila (enkrat na naboj), refunded_cents 1500", [mailPo(O2.ref).length]);
-    // dve delni vracili, preden mail odide (Resend je padel): en mail s SKUPNIM zneskom
+    m = mailPo(O2.ref);
+    assert(m.length === 2 && m[1].text.includes("Vrnili smo vam znesek 5,00 EUR") && m[1].text.includes("Skupaj je za to naročilo vrnjeno 15,00 EUR od 60,00 EUR.") && (await vrstica(O2.id)).refunded_cents === 1500, "drugi mail: 5 EUR tega vracila, skupaj 15 EUR; ni tretjega", m.map(x => x.text.slice(0, 90)));
+    w = await vrniVPlosci(O2.ch, 6000);
+    assert(w.status === 200 && await cakaj(() => mailPo(O2.ref).length >= 3), "tretje vracilo (ostanek): tretji mail");
+    m = mailPo(O2.ref);
+    assert(m[2].text.includes("Vrnili smo vam znesek 45,00 EUR") && m[2].text.includes("S tem je vrnjen celoten znesek naročila (60,00 EUR).") && m[2].text.includes("Vstopnice tega naročila ne veljajo več.") && m[2].text.includes("The tickets of this order are no longer valid.")
+      && (await vstopnice(O2.id)).every(s => s === "refunded"), "zadnje vracilo: »vrnjen celoten znesek«, vstopnice ne veljajo (besedilo = stanje)", m[2].text);
+    // dve vracili, preden mail odide (Resend je padel): dva maila, vsak s svojim zneskom
     R.napaka = true;
     const O3 = await narocilo({ uporabnik: U.bor, kolicina: 2 });
     const zavrnjeni3 = R.zavrnjenih;
@@ -189,12 +211,32 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { S.ch[chId].amount_refunded = 
     assert(w.status === 200, "Resend zavrne: webhook vseeno 200", w);
     assert(await cakaj(() => R.zavrnjenih > zavrnjeni3), "prvi poskus: Resend ga je zavrnil", [R.zavrnjenih, zavrnjeni3]);
     w = await vrniVPlosci(O3.ch, 800);
-    assert(w.status === 200 && (await zapis(O3.ch)).znesek_cents === 800, "drugo delno pred mailom: znesek se poveca na 800", await zapis(O3.ch));
+    assert(w.status === 200 && (await zapisi(O3.ch)).map(x => [x.znesek_cents, x.skupaj_vrnjeno_cents]).join() === "500,500,300,800", "dve vrstici: 500 (skupaj 500) in 300 (skupaj 800)", await zapisi(O3.ch));
     R.napaka = false;
-    assert(await cakaj(() => mailPo(O3.ref).length >= 1, 10000), "pospravljalec poslje, ko Resend spet dela");
+    assert(await cakaj(() => mailPo(O3.ref).length >= 2, 10000), "pospravljalec poslje oba, ko Resend spet dela");
     await pocakaj(1200);
-    assert(mailPo(O3.ref).length === 1 && mailPo(O3.ref)[0].text.includes("Vrnili smo vam znesek 8,00 EUR"), "natanko en mail, skupni znesek 8 EUR", mailPo(O3.ref).map(x => x.text.slice(0, 120)));
+    assert(mailPo(O3.ref).length === 2 && mailPo(O3.ref).some(x => x.text.includes("Vrnili smo vam znesek 5,00 EUR")) && mailPo(O3.ref).some(x => x.text.includes("Vrnili smo vam znesek 3,00 EUR") && x.text.includes("vrnjeno 8,00 EUR od 40,00 EUR")), "natanko dva maila (5 EUR in 3 EUR, skupaj 8)", mailPo(O3.ref).map(x => x.text.slice(0, 120)));
     assert(/Resend napaka \(vracilo iz Stripa/.test(log) && !log.includes(`u${U.bor}@outly.si`), "napaka Resenda v dnevniku brez e-naslova");
+    // socasna webhooka dveh vracil (oba prebereta svez naboj z obema vraciloma) + ponovitev: natanko dva maila
+    const O3b = await narocilo({ uporabnik: U.ana, kolicina: 1, cena: 2500 });
+    vrniBrezWebhooka(O3b.ch, 1000); vrniBrezWebhooka(O3b.ch, 2500);
+    const [wa, wb] = await Promise.all([webhook({ id: O3b.ch, object: "charge" }, "evt_izs_soc_a"), webhook({ id: O3b.ch, object: "charge" }, "evt_izs_soc_b")]);
+    const wc = await webhook({ id: O3b.ch, object: "charge" }, "evt_izs_soc_a");
+    assert(wa.status === 200 && wb.status === 200 && wc.body.duplicate === true, "socasna webhooka: oba 200, ponovitev duplicate", [wa.status, wb.status, wc.body]);
+    assert(await cakaj(() => mailPo(O3b.ref).length >= 2), "dva maila");
+    await pocakaj(1500);
+    assert(mailPo(O3b.ref).length === 2 && (await zapisi(O3b.ch)).length === 2 && mailPo(O3b.ref).some(x => x.text.includes("Vrnili smo vam znesek 15,00 EUR") && x.text.includes("S tem je vrnjen celoten znesek")), "socasno: natanko dva maila (10 in 15 EUR), brez dvojnika", mailPo(O3b.ref).map(x => x.text.slice(0, 80)));
+    // naboj brez seznama vracil (nadomestna pot): vsako povecanje amount_refunded en mail
+    const O3c = await narocilo({ uporabnik: U.ana, kolicina: 2 });
+    S.ch[O3c.ch].brezSeznama = true;
+    w = await vrniVPlosci(O3c.ch, 700);
+    assert(w.status === 200 && await cakaj(() => mailPo(O3c.ref).length >= 1), "brez seznama: prvi mail");
+    w = await webhook({ id: O3c.ch, object: "charge" });   // isti znesek (ponovljen dogodek za isto vracilo): ni novega vracila
+    await pocakaj(800);
+    w = await vrniVPlosci(O3c.ch, 1000);
+    assert(w.status === 200 && await cakaj(() => mailPo(O3c.ref).length >= 2), "brez seznama: drugo povecanje, drugi mail");
+    await pocakaj(800);
+    assert(mailPo(O3c.ref).length === 2 && mailPo(O3c.ref)[1].text.includes("Vrnili smo vam znesek 3,00 EUR") && (await zapisi(O3c.ch)).map(x => x.vracilo_id).join() === `${O3c.ch}@700,${O3c.ch}@1000`, "brez seznama: 7 EUR in 3 EUR, kljuca <ch>@<skupaj>", (await zapisi(O3c.ch)).map(x => x.vracilo_id));
 
     // ================================================================
     console.log("\n# 3. Nase vracilo (vrstica v `vracila`): mail iz plosce NE gre");
@@ -250,6 +292,14 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { S.ch[chId].amount_refunded = 
     await pocakaj(800);
     assert(mailPo(O8.ref).length === 0 && (log.match(/ni obvescen o vracilu iz Stripove plosce/g) || []).length === 1 && !/izbrisan-99/.test(log), "brez maila, natanko en alarm brez e-naslova", (log.match(/ni obvescen o vracilu/g) || []).length);
     assert(!/TypeError|ReferenceError|Unhandled/.test(log), "dnevnik brez nepricakovanih napak", log.slice(-500));
+    // ZVPot-1 7(1) drugi stavek (pravnik 2026-10-20): VSAK mail ima celotno ime firme in sedez posiljatelja (noga, nogaMaila v index.js)
+    {
+      const FIRMA = "NEXT DIMENSIONS, družba za marketing, d.o.o., Trebče 81, 3256 Bistrica ob Sotli";
+      const vsi = R.poslano.concat(R.zamudnjena || []);
+      const brezNoge = vsi.filter(m => !String(m.text || "").includes("Pošiljatelj / Sender: " + FIRMA) || !String(m.html || "").includes(FIRMA));
+      const vrste = [...new Set(vsi.map(m => String(m.subject).split(":")[0]))].join(" | ");
+      assert(vsi.length > 0 && brezNoge.length === 0, `noga s firmo in sedezem v vseh ${vsi.length} mailih (${vrste})`, brezNoge.map(m => m.subject).slice(0, 5));
+    }
   } catch (e) {
     fail++; console.log("  ✗ IZJEMA v testu:", e && e.stack || e);
   } finally {

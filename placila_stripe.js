@@ -324,20 +324,45 @@ async function vracilo(c, charge) {
   }
   const o = r.rows[0];
   if (!["paid", "partially_refunded", "refunded"].includes(o.status)) return;
+  const prej = Number(o.refunded_cents) || 0;   // vrnjeno pred tem dogodkom (samo za nadomestno pot brez seznama vracil)
   const u = await uveljaviVracilo(c, o, Number(charge.amount_refunded) || 0, charge.id);
   console.log(`[stripe] vracilo: narocilo ${o.public_ref}, ${u.vrnjeno} c${u.polno ? " (polno)" : ""}`);
-  // #309: obvestilo kupcu natanko enkrat na NABOJ (vracila_iz_stripa, 053), v ISTI transakciji kot stanje narocila. Mail gre po COMMIT-u (naVraciluIzStripa) in ga
-  // ponavlja pospravljalec; NE gre, dokler ima naroceno vrstico v `vracila` (nase vracilo: kupca obvesca obdelovalec). Znesek = skupaj vrnjeno na naboju po Stripu
-  // (delno vracilo = delni znesek), dokler mail ni poslan, ga novejsi dogodek lahko poveca. Brez maila: guest lista, 0 EUR, testni nacin (test_ PI).
-  const zn = Math.min(o.total_cents, Math.max(0, Number(charge.amount_refunded) || 0));
-  if (zn > 0 && o.total_cents > 0 && o.guest_list_id === null && !/^test_/.test(pi)) {
+  await zapisiVracilaIzStripa(c, o, charge, pi, prej);
+}
+
+// #309 (Martin 20. 10. 2026): kupec dobi mail o VSAKEM vracilu, ki ga admin naredi v Stripovi nadzorni plosci (vracila_iz_stripa, 053), natanko enkrat na Stripovo
+// vracilo (PK vracilo_id = re_...), v ISTI transakciji kot stanje narocila (vrstica narocila je zaklenjena: socasni webhooki istega naboja se zvrstijo, ON CONFLICT
+// prepreci dvojnik). Mail gre po COMMIT-u (naVraciluIzStripa) in ga ponavlja pospravljalec. Nasa vracila (metadata.vracilo_id; vrstica v `vracila` nastane PRED klicem
+// Stripa) in zavrnjena (failed/canceled) vracila vrstice ne dobijo. Skupaj vrnjeno = vsota nezavrnjenih vracil naboja do vkljucno tega (po casu `created`).
+// Brez seznama vracil v objektu (svezObjekt ga razsiri; lazni Stripe v nekaterih testih ga nima): eno povecanje amount_refunded = eno vracilo '<ch>@<skupaj>'.
+// Brez maila: guest lista, 0 EUR, testni nacin (test_ PI), narocilo z vrstico v `vracila` (razen `preklicano`).
+const VRACILO_ZAVRNJENO = ["failed", "canceled"];
+async function zapisiVracilaIzStripa(c, o, charge, pi, prej) {
+  const total = Number(o.total_cents) || 0;
+  if (total <= 0 || o.guest_list_id !== null || /^test_/.test(pi)) return;
+  const valuta = charge.currency ? String(charge.currency).toUpperCase().slice(0, 3) : null;
+  const seznam = charge.refunds && Array.isArray(charge.refunds.data) ? charge.refunds.data : null;
+  let vrstice = [];
+  if (seznam) {
+    const veljavna = seznam.filter((x) => x && x.id && !VRACILO_ZAVRNJENO.includes(x.status) && Number(x.amount) > 0)
+      .sort((x, y) => (Number(x.created) || 0) - (Number(y.created) || 0) || String(x.id).localeCompare(String(y.id)));
+    let skupaj = 0;
+    for (const x of veljavna) {
+      skupaj += Number(x.amount);
+      const nase = !!(x.metadata && /^\d+$/.test(String(x.metadata.vracilo_id || "")));
+      if (!nase) vrstice.push({ id: String(x.id), znesek: Math.min(total, Number(x.amount)), skupaj: Math.min(total, skupaj) });
+    }
+  } else {
+    const skupaj = Math.min(total, Math.max(0, Number(charge.amount_refunded) || 0));
+    if (skupaj > prej) vrstice = [{ id: `${charge.id}@${skupaj}`, znesek: skupaj - prej, skupaj }];
+  }
+  for (const v of vrstice) {
     await c.query(
-      // Nase vracilo (vrstica v `vracila` nastane PRED klicem Stripa) vrstice ne dobi: pospravljalec mailov tako ne pregleduje mnozice odpovedanih narocil.
-      `INSERT INTO vracila_iz_stripa (charge_id, order_id, znesek_cents, valuta)
-       SELECT $1::text, $2::bigint, $3::int, $4::text WHERE NOT EXISTS (SELECT 1 FROM vracila v WHERE v.order_id = $2::bigint AND v.stanje <> 'preklicano')
-       ON CONFLICT (charge_id) DO UPDATE SET znesek_cents = GREATEST(vracila_iz_stripa.znesek_cents, EXCLUDED.znesek_cents), posodobljeno_at = NOW()
-        WHERE vracila_iz_stripa.mail_poslano_at IS NULL`,
-      [String(charge.id), o.id, zn, charge.currency ? String(charge.currency).toUpperCase().slice(0, 3) : null]);
+      `INSERT INTO vracila_iz_stripa (vracilo_id, charge_id, order_id, znesek_cents, skupaj_vrnjeno_cents, valuta)
+       SELECT $1::text, $2::text, $3::bigint, $4::int, GREATEST($5::int, $4::int), $6::text
+        WHERE NOT EXISTS (SELECT 1 FROM vracila v WHERE v.order_id = $3::bigint AND v.stanje <> 'preklicano')
+       ON CONFLICT (vracilo_id) DO NOTHING`,
+      [v.id, String(charge.id), o.id, v.znesek, v.skupaj, valuta]);
   }
 }
 
@@ -405,7 +430,11 @@ async function svezObjekt(s, d) {
   const o = d.data && d.data.object;
   if (!o || !o.id) return o;
   if (d.type.startsWith("checkout.session.")) return s.checkout.sessions.retrieve(o.id);
-  if (d.type === "charge.refunded") return s.charges.retrieve(o.id);
+  if (d.type === "charge.refunded") {   // #309: s seznamom vracil (mail o vsakem vracilu iz plosce); vec kot 10 vracil: celoten seznam
+    const ch = await s.charges.retrieve(o.id, { expand: ["refunds"] });
+    if (ch && ch.refunds && ch.refunds.has_more) ch.refunds = await s.refunds.list({ charge: o.id, limit: 100 });
+    return ch;
+  }
   if (d.type === "account.updated") return s.accounts.retrieve(o.id);
   if (d.type.startsWith("charge.dispute.")) return s.disputes.retrieve(o.id);
   if (d.type === "refund.updated" || d.type === "refund.failed" || d.type === "charge.refund.updated") return s.refunds.retrieve(o.id);

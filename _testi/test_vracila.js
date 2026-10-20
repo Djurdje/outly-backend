@@ -1476,6 +1476,14 @@ assert(await cakaj(() => vrnMaili().some(m => m.subject.includes(refVVal))), "N3
     assert(r.status === 200 && r.body.message === "Event deleted.", "dogodek brez placanih narocil: izbris kot doslej");
     assert(pozorX() === 1, "Z(#285): POZOR za anonimiziranega gosta po vseh obhodih se vedno natanko enkrat (ne ob vsakem obhodu)", pozorX());
     assert(!/\[vracila\] tek:|Unhandled|TypeError|ReferenceError/.test(log), "dnevnik brez nepricakovanih napak obdelovalca");
+    // ZVPot-1 7(1) drugi stavek (pravnik 2026-10-20): VSAK mail ima celotno ime firme in sedez posiljatelja (noga, nogaMaila v index.js)
+    {
+      const FIRMA = "NEXT DIMENSIONS, družba za marketing, d.o.o., Trebče 81, 3256 Bistrica ob Sotli";
+      const vsi = R.poslano.concat(R.zamudnjena || []);
+      const brezNoge = vsi.filter(m => !String(m.text || "").includes("Pošiljatelj / Sender: " + FIRMA) || !String(m.html || "").includes(FIRMA));
+      const vrste = [...new Set(vsi.map(m => String(m.subject).split(":")[0]))].join(" | ");
+      assert(vsi.length > 0 && brezNoge.length === 0, `noga s firmo in sedezem v vseh ${vsi.length} mailih (${vrste})`, brezNoge.map(m => m.subject).slice(0, 5));
+    }
   } catch (e) { fail++; console.log("  ✗ NEPRICAKOVANA NAPAKA:", e); }
   finally {
     srv.kill();
