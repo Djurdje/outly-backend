@@ -332,7 +332,9 @@ async function vracilo(c, charge) {
   const zn = Math.min(o.total_cents, Math.max(0, Number(charge.amount_refunded) || 0));
   if (zn > 0 && o.total_cents > 0 && o.guest_list_id === null && !/^test_/.test(pi)) {
     await c.query(
-      `INSERT INTO vracila_iz_stripa (charge_id, order_id, znesek_cents, valuta) VALUES ($1, $2, $3, $4)
+      // Nase vracilo (vrstica v `vracila` nastane PRED klicem Stripa) vrstice ne dobi: pospravljalec mailov tako ne pregleduje mnozice odpovedanih narocil.
+      `INSERT INTO vracila_iz_stripa (charge_id, order_id, znesek_cents, valuta)
+       SELECT $1::text, $2::bigint, $3::int, $4::text WHERE NOT EXISTS (SELECT 1 FROM vracila v WHERE v.order_id = $2::bigint AND v.stanje <> 'preklicano')
        ON CONFLICT (charge_id) DO UPDATE SET znesek_cents = GREATEST(vracila_iz_stripa.znesek_cents, EXCLUDED.znesek_cents), posodobljeno_at = NOW()
         WHERE vracila_iz_stripa.mail_poslano_at IS NULL`,
       [String(charge.id), o.id, zn, charge.currency ? String(charge.currency).toUpperCase().slice(0, 3) : null]);

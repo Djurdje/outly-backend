@@ -202,8 +202,18 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { S.ch[chId].amount_refunded = 
     w = await vrniVPlosci(O4.ch, 2000);
     await pocakaj(1500);
     assert(w.status === 200 && (await vrstica(O4.id)).status === "refunded" && mailPo(O4.ref).length === 0, "nase vracilo: stanje narocila kot doslej, mail iz plosce ne gre (obvesca obdelovalec)", mailPo(O4.ref).length);
-    const z4 = await zapis(O4.ch);
-    assert(z4 && z4.mail_poskusi === 0 && z4.mail_poslano_at === null, "vrstica obstaja, poskus ni porabljen (odlozeno, ne izgubljeno)", z4);
+    assert(!(await zapis(O4.ch)), "nase vracilo: vrstice v vracila_iz_stripa ni (pospravljalec je ne pregleduje)");
+    // vrstica `vracila` nastane PO vracilu v plosci (npr. odpoved dogodka med cakanjem na mail): mail se odlozi, poskus se ne porabi
+    R.napaka = true;
+    const O4b = await narocilo({ uporabnik: U.cene });
+    w = await vrniVPlosci(O4b.ch, 1000);
+    assert(w.status === 200 && await cakaj(async () => ((await zapis(O4b.ch)) || {}).mail_poskusi >= 1), "delno v plosci, prvi mail ne uspe");
+    await pool.query("INSERT INTO vracila (order_id, event_id, razlog, stanje) VALUES ($1, $2, 'event_cancelled', 'caka')", [O4b.id, ev]);
+    const p4 = (await zapis(O4b.ch)).mail_poskusi;
+    R.napaka = false;
+    await pocakaj(1500);
+    const z4 = await zapis(O4b.ch);
+    assert(mailPo(O4b.ref).length === 0 && z4.mail_poslano_at === null && z4.mail_poskusi === p4, "vrstica `vracila` po vracilu v plosci: mail odlozen, poskus ni porabljen", [mailPo(O4b.ref).length, z4.mail_poskusi, p4]);
     const O5 = await narocilo({ uporabnik: U.cene });
     await pool.query("INSERT INTO vracila (order_id, event_id, razlog, stanje) VALUES ($1, $2, 'event_cancelled', 'preklicano')", [O5.id, ev]);
     w = await vrniVPlosci(O5.ch, 2000);
