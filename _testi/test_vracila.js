@@ -290,6 +290,8 @@ async function webhook(tip, objekt, id) {
     assert(w.status === 200, "webhook charge.refunded (delno, nadzorna plosca): 200", w);
     let o6 = await vrsticaN(A6.id);
     assert(o6.status === "partially_refunded" && o6.refunded_cents === 500, "A6: partially_refunded, 500 c", [o6.status, o6.refunded_cents]);
+    // #309: mail o delnem vracilu iz plosce gre asinhrono po COMMIT-u; pocakaj nanj PRED odpovedjo (vrstica `vracila` ga sicer upraviceno odlozi, STATE)
+    assert(await cakaj(() => R.poslano.some(m => String(m.subject).includes(A6.ref) && /Vstopnice tega naročila ostanejo veljavne/.test(m.text || ""))), "#309 A6: mail o delnem vracilu iz plosce poslan pred odpovedjo");
 
     // ================================================================
     console.log("\n# 2. Odpoved dogodka A: hitro, brez Stripa v zahtevku");
@@ -357,7 +359,9 @@ async function webhook(tip, objekt, id) {
     // ================================================================
     console.log("\n# 5. Obvestila kupcem (Martin 12. 10.: takoj »odpovedan, vracilo na poti« po zamiku, nato »vrnili smo«; natanko enkrat vsak)");
     const odpMaili = () => R.poslano.filter(m => /Event cancelled/.test(m.subject));
-    const vrnMaili = () => R.poslano.filter(m => /^Vračilo \/ Refund/.test(m.subject));
+    // #309: mail o vracilu iz Stripove nadzorne plosce ima isto zadevo, besedilo pa govori o naroclilu (»Vstopnice tega naročila ...«), ne o odpovedanem dogodku.
+    const izStripa = (m) => /Vstopnice tega naročila (ne veljajo več|ostanejo veljavne)/.test(m.text || "");
+    const vrnMaili = () => R.poslano.filter(m => /^Vračilo \/ Refund/.test(m.subject) && !izStripa(m));
     assert(await cakaj(() => odpMaili().length >= 9 && vrnMaili().length >= 6), "9 mailov »odpovedan« + 6 mailov »vrnili smo«", [odpMaili().length, vrnMaili().length]);
     await pocakaj(700);
     assert(odpMaili().length === 9 && vrnMaili().length === 6, "natanko 9 + 6 (A12 anonimiziran brez maila; 0 EUR/test samo prvi; A9 rocno samo prvi)", [odpMaili().length, vrnMaili().length]);
@@ -374,6 +378,11 @@ async function webhook(tip, objekt, id) {
     const m6b = vrnMaili().find(m => m.subject.includes(A6.ref));
     assert(m6b && /15,00 EUR/.test(m6b.text) && /15\.00 EUR/.test(m6b.text) && !/celoten|Celoten|full amount/.test(m6b.text) && /Vrnili smo vam znesek 15,00 EUR/.test(m6b.text) && /We have refunded the amount of 15\.00 EUR/.test(m6b.text),
       "G1 A6 (delno vrnjeno): mail »vrnili smo« = 15 EUR, brez »celoten / full amount«", m6b && m6b.text);
+    // #309: A6 je bil pred odpovedjo DELNO vrnjen v Stripovi plosci (500 c): kupec je o tem dobil en mail (znesek 5 EUR, vstopnice ostanejo veljavne), nase vracilo ga ne podvoji
+    const iz6 = R.poslano.filter(m => izStripa(m) && m.subject.includes(A6.ref));
+    assert(iz6.length === 1 && /Vrnili smo vam znesek 5,00 EUR/.test(iz6[0].text) && /We have refunded the amount of 5\.00 EUR/.test(iz6[0].text) && /Vstopnice tega naročila ostanejo veljavne/.test(iz6[0].text) && !/posrednik|intermediary/.test(iz6[0].text),
+      "#309 A6: en mail o delnem vracilu iz plosce (5 EUR, vstopnice ostanejo veljavne)", iz6.map(m => m.text.slice(0, 200)));
+    assert(R.poslano.filter(izStripa).length === 1, "#309: nasa vracila (vrstice v `vracila`) ne sprozijo maila o vracilu iz plosce", R.poslano.filter(izStripa).map(m => m.subject));
     // #244: mail »odpovedan« za placano naroceno NE pravi »vam ni treba storiti nicesar«, ampak opozori na navodila ponudnika placil (in da kartice/gesla ne zahtevamo)
     assert(m1 && !/ni treba storiti ničesar|don't need to do anything/.test(m1.text) && /ponudnik plačilnih storitev/.test(m1.text) && /payment provider/.test(m1.text)
       && /nikoli ne bomo prosili za številko kartice ali geslo/.test(m1.text) && /never ask for your card number or password/.test(m1.text) && /Vračilo sprožimo samodejno/.test(m1.text),
@@ -1469,6 +1478,14 @@ assert(await cakaj(() => vrnMaili().some(m => m.subject.includes(refVVal))), "N3
     assert(r.status === 200 && r.body.message === "Event deleted.", "dogodek brez placanih narocil: izbris kot doslej");
     assert(pozorX() === 1, "Z(#285): POZOR za anonimiziranega gosta po vseh obhodih se vedno natanko enkrat (ne ob vsakem obhodu)", pozorX());
     assert(!/\[vracila\] tek:|Unhandled|TypeError|ReferenceError/.test(log), "dnevnik brez nepricakovanih napak obdelovalca");
+    // ZVPot-1 7(1) drugi stavek (pravnik 2026-10-20): VSAK mail ima celotno ime firme in sedez posiljatelja (noga, nogaMaila v index.js)
+    {
+      const FIRMA = "NEXT DIMENSIONS, družba za marketing, d.o.o., Trebče 81, 3256 Bistrica ob Sotli";
+      const vsi = R.poslano.concat(R.zamudnjena || []);
+      const brezNoge = vsi.filter(m => !String(m.text || "").includes("Pošiljatelj / Sender: " + FIRMA) || !String(m.html || "").includes(FIRMA));
+      const vrste = [...new Set(vsi.map(m => String(m.subject).split(":")[0]))].join(" | ");
+      assert(vsi.length > 0 && brezNoge.length === 0, `noga s firmo in sedezem v vseh ${vsi.length} mailih (${vrste})`, brezNoge.map(m => m.subject).slice(0, 5));
+    }
   } catch (e) { fail++; console.log("  ✗ NEPRICAKOVANA NAPAKA:", e); }
   finally {
     srv.kill();

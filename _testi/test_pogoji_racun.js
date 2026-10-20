@@ -197,14 +197,15 @@ const mailiNa = (email) => poslano.filter(m => m.to === email || (Array.isArray(
     let m = mailiNa("bor@outly.si");
     assert(m.length === 1, "bor: en mail", m.length);
     const t = m[0] ? m[0].text : "", h = m[0] ? m[0].html : "";
-    assert(t.includes("You accepted the Outly terms, version 1.1: https://outly.si/terms"), "besedilo (en): vrstica z razlicico", t);
-    assert(t.includes("Sprejeli ste pogoje uporabe Outly, različica 1.1: https://outly.si/terms"), "besedilo (sl): vrstica z razlicico");
+    // kratko potrdilo (20. 10. 2026, pravnik 6B): pogoji z razlicico so zadnji stavek drobnega tiska
+    assert(t.includes("Outly terms of use, version 1.1: https://outly.si/terms"), "besedilo (en): vrstica z razlicico", t);
+    assert(t.includes("Pogoji uporabe Outly, različica 1.1: https://outly.si/terms"), "besedilo (sl): vrstica z razlicico");
     assert(!t.includes("Outly terms of use: https://outly.si/terms") && !t.includes("Pogoji uporabe Outly: https://outly.si/terms"), "splosna vrstica je zamenjana, ne podvojena");
     assert(h.includes("version 1.1") && h.includes("različica 1.1") && h.includes("https://outly.si/terms"), "HTML: razlicica v obeh blokih (sl, en)");
     m = mailiNa("gina@outly.si");
     assert(m.length >= 1 && m.some(x => x.text.includes("version 1.1") && x.text.includes("VIP table T2")), "VIP potrdilo vsebuje razlicico", m.map(x => x.subject));
     m = mailiNa("cene@outly.si");
-    assert(m.length === 1 && m[0].text.includes("Outly terms of use: https://outly.si/terms") && !/version/.test(m[0].text.split("TERMS\n")[1].split("\n")[0]), "narocilo brez razlicice: splosna vrstica kot doslej", m[0] && m[0].text.slice(0, 120));
+    assert(m.length === 1 && m[0].text.includes("Outly terms of use: https://outly.si/terms") && m[0].text.includes("Pogoji uporabe Outly: https://outly.si/terms") && !/terms of use, version|različica/.test(m[0].text), "narocilo brez razlicice: splosna vrstica kot doslej", m[0] && m[0].text.slice(0, 120));
     m = mailiNa("ana@outly.si").map(x => x.text);
     assert(m.some(x => x.includes("version 1.1")) && m.some(x => x.includes("Outly terms of use")), "ana: nakup brez polja ima splosno vrstico, nakup z poljem razlicico");
     assert(!/Resend napaka|\[potrdilo\] POZOR/.test(log), "brez napak v dnevniku", log.slice(-300));

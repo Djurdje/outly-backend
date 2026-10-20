@@ -395,9 +395,10 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       const mailZa = (ref) => R.poslano.find(m => /Potrdilo|Confirm|Order|Naro/i.test(String(m.subject) + String(m.text || "")) && String(m.text || "").includes(ref) && /Seller|Prodajalec/i.test(String(m.text || "")));
       assert(await cakaj(async () => !!mailZa(refO1) && !!mailZa(refN1), 15000), "potrdili kupcu (platforma in navaden klub) poslani", R.poslano.map(m => m.subject));
       const mO = mailZa(refO1), mN = mailZa(refN1);
-      assert(mO && /Vstopnico prodaja[^\n]*NEXT DIMENSIONS/.test(mO.text) && /The ticket is sold by[^\n]*NEXT DIMENSIONS/.test(mO.text), "PLATFORMA: potrdilo (sl in en) pravi, da vstopnico prodaja NEXT DIMENSIONS", mO && mO.text);
-      assert(mO && !/posrednik|intermediary|Vstopnico prodaja klub|sold by the club/i.test(mO.text) && !/posrednik|intermediary/i.test(mO.html || ""), "PLATFORMA: potrdilo BREZ stavka o posredniku in brez »klub«", mO && mO.text);
-      assert(mN && /Vstopnico prodaja klub: /.test(mN.text) && /Outly je samo posrednik: NEXT DIMENSIONS/.test(mN.text) && /Outly is only the intermediary: NEXT DIMENSIONS/.test(mN.text) && /The ticket is sold by the club: /.test(mN.text), "NAVADEN KLUB: potrdilo nespremenjeno (klub + Outly je samo posrednik)", mN && mN.text);
+      // Kratko potrdilo (20. 10. 2026, pravnik 6A/6B): »Prodajalec in organizator: …« v drobnem tisku; pri platformi brez posrednika in brez »klub« (T9)
+      assert(mO && /Prodajalec in organizator: [^\n]*NEXT DIMENSIONS/.test(mO.text) && /Seller and organiser: [^\n]*NEXT DIMENSIONS/.test(mO.text), "PLATFORMA: potrdilo (sl in en) pravi, da vstopnico prodaja NEXT DIMENSIONS", mO && mO.text);
+      assert(mO && !/posrednik|intermediary|Vstopnico prodaja klub|sold by the club|obrnite se na klub|contact the club|klub vam lahko|Pritožbe glede dogodka: prodajalec/i.test(mO.text) && !/posrednik|intermediary/i.test(mO.html || ""), "PLATFORMA: potrdilo BREZ stavka o posredniku in brez »klub« (T9)", mO && mO.text);
+      assert(mN && /Prodajalec in organizator: /.test(mN.text) && /Outly je samo posrednik: NEXT DIMENSIONS/.test(mN.text) && /Outly is only the intermediary: NEXT DIMENSIONS/.test(mN.text) && /Seller and organiser: /.test(mN.text), "NAVADEN KLUB: potrdilo (prodajalec klub + Outly je samo posrednik)", mN && mN.text);
       const sO = (await api(bZ, "GET", `/events/${evO}`)).body.seller, sN = (await api(bZ, "GET", `/events/${evN}`)).body.seller;
       assert(sO && sO.is_platform === true && sN && !("is_platform" in sN) && Object.keys(sN).length === 8, "javni seller: platforma ima is_platform true, navaden klub ima nespremenjenih 8 polj", [sO, sN]);
       assert((await api(bZ, "GET", `/clubs/2`)).body.seller.is_platform === true && !("is_platform" in (await api(bZ, "GET", `/clubs/1`)).body.seller), "GET /clubs/:id: isto");
@@ -654,10 +655,11 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     // Pomocniki: mail po zadevi in referenci; »posrednik« v besedilu ali HTML-ju.
     const mailPo = (zadeva, ref) => R.poslano.find(m => zadeva.test(String(m.subject)) && String(m.subject).includes(ref));
     const posrednik = /posrednik|intermediary/i;
-    const jePlatformaBesedilo = (m) => !!m && /Vstopnico prodaja[^\n]*NEXT DIMENSIONS/.test(m.text) && /The ticket is sold by[^\n]*NEXT DIMENSIONS/.test(m.text)
+    // Mail gostu ima razdelek »Vstopnico prodaja …«, kratko potrdilo kupcu (20. 10. 2026) »Prodajalec in organizator: …«
+    const jePlatformaBesedilo = (m) => !!m && /(Vstopnico prodaja|Prodajalec in organizator: )[^\n]*NEXT DIMENSIONS/.test(m.text) && /(The ticket is sold by|Seller and organiser: )[^\n]*NEXT DIMENSIONS/.test(m.text)
       && !posrednik.test(m.text) && !posrednik.test(m.html || "") && !/Vstopnico prodaja klub|sold by the club/i.test(m.text);
-    const jeKlubBesedilo = (m) => !!m && /Vstopnico prodaja klub: /.test(m.text) && /Outly je samo posrednik: NEXT DIMENSIONS/.test(m.text) && /Outly is only the intermediary: NEXT DIMENSIONS/.test(m.text);
-    const ZAD_KUPEC = /^Vaše naročilo \/ Your order/, ZAD_GOST = /^Vaše vstopnice \/ Your tickets/;
+    const jeKlubBesedilo = (m) => !!m && /(Vstopnico prodaja klub|Prodajalec in organizator): /.test(m.text) && /Outly je samo posrednik: NEXT DIMENSIONS/.test(m.text) && /Outly is only the intermediary: NEXT DIMENSIONS/.test(m.text);
+    const ZAD_KUPEC = /^Vaše vstopnice \/ Your tickets: .*, \d{1,2}\. \d{1,2}\. \d{4} \(/, ZAD_GOST = /^Vaše vstopnice \/ Your tickets: [^(]*\(order /;   // potrdilo kupcu ima od 20. 10. 2026 datum v zadevi, mail gostu »(order …)«
     const gostNar = (zeton) => api(bZ, "GET", "/guest/order", null, undefined, { "x-guest-token": zeton });
     {
       const evP0 = await dogodek(2, "Outly brezplacno P2", 0), evN0 = await dogodek(1, "Navadna noc brezplacno P2", 0);
@@ -688,6 +690,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       g = await gostNar(zetGN0);
       assert(g.status === 200 && g.body.seller && !("is_platform" in g.body.seller) && Object.keys(g.body.seller).length === 8 && !("is_platform" in g.body.order.seller), "9c: navaden klub 0 EUR: GET /guest/order seller brez is_platform, 8 polj", g.body.seller);
       assert(await cakaj(async () => !!mailPo(ZAD_GOST, refGN0), 15000) && jeKlubBesedilo(mailPo(ZAD_GOST, refGN0)), "9c: navaden klub 0 EUR: mail gostu s posrednikom (nespremenjeno)", (mailPo(ZAD_GOST, refGN0) || {}).text);
+      assert(((mailPo(ZAD_GOST, refGN0) || {}).text || "").includes("Glede dogodka: obrnite se na klub (podatki zgoraj)."), "9c T9 kontrola: navaden klub ostane »obrnite se na klub«");
       // 9d S3: oznaka je zamrznjena ob nakupu; sprememba zastavice kluba po nakupu je ne premakne
       await api(bZ, "PATCH", "/admin/api/clubs/2", T.admin, { isOfficial: false });
       await api(bZ, "PATCH", "/admin/api/clubs/1", T.admin, { isOfficial: true });
@@ -733,6 +736,9 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       assert(w.status === 200 && (await nar(GM)).status === "paid" && (await nar(GM)).stripe_account_id === "platform", "10a: placano (pravilen znesek), oznaka platform", [(await nar(GM)).status]);
       assert(await cakaj(async () => !!mailPo(ZAD_GOST, refGM), 15000), "10a: mail gostu poslan", R.poslano.map(m => m.subject).slice(-5));
       assert(jePlatformaBesedilo(mailPo(ZAD_GOST, refGM)), "10a: mail gostu (placano, uradni profil): NEXT DIMENSIONS, BREZ »posrednik« in brez »klub«", (mailPo(ZAD_GOST, refGM) || {}).text);
+      { const t = (mailPo(ZAD_GOST, refGM) || {}).text || "";   // T9 (pravnik 2026-10-20): pri dogodku Outly organizator, ne klub
+        assert(t.includes("Glede dogodka: obrnite se na organizatorja (podatki zgoraj).") && t.includes("About the event: contact the organiser (details above).") && !/obrnite se na klub|contact the club|klub vam lahko|the club may/.test(t),
+          "10a T9: mail gostu pri prodajalcu platformi pise »organizator«, ne »klub«", t.slice(0, 600)); }
       // 10b Stripe vracilo ob odpovedi ZAVRNE (refund failed): ni_uspelo -> po roku mail `ni_izvedeno`
       const evNIo = await dogodek(2, "Outly ni izvedeno", 1000), evNIn = await dogodek(1, "Navadna ni izvedeno", 1000);
       r = await nakup(T.kupec1, evNIo); const NIo = r.body.order.id; const piNIo = placaj((await nar(NIo)).stripe_checkout_session_id);
