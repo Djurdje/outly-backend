@@ -7746,11 +7746,26 @@ const STREZBA_CTE = `s AS (
    WHERE o.table_id IS NOT NULL
   ON CONFLICT (order_id) DO NOTHING RETURNING id)`;
 
-// POST /business/tickets/scan — skener na vratih. Telo: { qr } (ali { serial } za ročni vnos).
+// POST /business/tickets/scan — skener na vratih. Telo: { qr } (ali { serial } za ročni vnos), neobvezno client_scan_id.
 // Preveri podpis, lastništvo, stanje; vstopnico označi kot uporabljeno. Ponovni sken -> 409.
+// Idempotentnost (#308, po vzoru scan-batch): odjemalec za en poskus vpisa ustvari client_scan_id (UUID) in ga ob ponovitvi
+// (izgubljen odgovor, timeout) poslje enakega. V tickets.scan_device ostane zaznamek "scan|<client_scan_id>" (namesto user-agenta).
+// Ponovitev = isti zaznamek IN isti uporabnik IN najvec SKEN_PONOVITEV_MS po vpisu -> 200 "ok" z izvirnim used_at (replayed: true);
+// drug id, brez id ali kasneje -> 409 already_used. Casovna meja omeji skodo hrosca odjemalca, ki bi isti id poslal za vec skenov
+// (kopija vstopnice bi sicer dobila "ok"); izgubljen odgovor se ponovi v sekundah.
+// Brez polja (stari odjemalci) je vedenje enako kot prej. Neveljaven client_scan_id sken NE zavrne (vrata ne smejo pasti zaradi napake
+// odjemalca): prezre se (staro vedenje) in odgovor ima client_scan_id_ignored: true. Brez zaklepov in brez dodatnega kroga do baze na uspesni poti.
 app.post("/business/tickets/scan", requireAuthSken, requireClubSken("owner", "manager", "doorman"), async (req, res) => {
   try {
     const b = req.body || {};
+    // null/odsotno = staro vedenje. Neveljaven format (napacen tip, prazen, predolg, drugi znaki) se PREZRE: sken poteka kot brez polja,
+    // odgovor dobi client_scan_id_ignored: true (vidno ob razvoju), gost na vratih pa ni zavrnjen zaradi napake odjemalca.
+    let zaznamek = null, idPrezrt = false;
+    if (b.client_scan_id !== undefined && b.client_scan_id !== null) {
+      if (typeof b.client_scan_id === "string" && SKEN_ID_VZOREC.test(b.client_scan_id)) zaznamek = `scan|${b.client_scan_id}`;
+      else idPrezrt = true;
+    }
+    const json = (status, telo) => res.status(status).json(idPrezrt ? { ...telo, client_scan_id_ignored: true } : telo);
     let serial = null, ev = null;
     if (b.qr !== undefined) {
       const v = preveriQr(b.qr);
@@ -7766,11 +7781,15 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken("owner", "ma
 
     const r = await skenPool.query(
       `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, e.club_id, e.title AS event_title, e.start_at, e.end_at, e.status AS event_status, o.status AS order_status, o.public_ref, o.buyer_email,
-              ${STOLPCI_IMETNIKA}, ${SQL_SPOR_ODPRT} AS payment_disputed
+              ${STOLPCI_IMETNIKA}, ${SQL_SPOR_ODPRT} AS payment_disputed, t.scan_device AS zaznamek_skena, t.used_by_user_id AS skeniral_id
        FROM tickets t JOIN events e ON e.id = t.event_id JOIN orders o ON o.id = t.order_id ${JOIN_IMETNIK} WHERE t.serial = $1`, [serial]
     );
     if (r.rows.length === 0) return res.status(404).json({ result: "unknown", message: "Ticket not found." });
-    const t = r.rows[0];
+    // zaznamek_skena (user-agent ali zaznamek) in skeniral_id sta notranja: ne gresta v odgovor (`ticket: t`).
+    const { zaznamek_skena, skeniral_id, ...t } = r.rows[0];
+    // Ponovitev istega poskusa (#308): isti zaznamek IN isti uporabnik (zaznamek izbere odjemalec; kot jePonovitev v scan-batch).
+    const jePonovitev = (zap, uid, usedAt) => zaznamek !== null && zap === zaznamek && uid !== null && uid !== undefined && Number(uid) === Number(req.user.userId)
+      && usedAt instanceof Date && Date.now() - usedAt.getTime() <= SKEN_PONOVITEV_MS;
     if (t.is_guest) delete t.buyer_email;   // gost brez racuna: vratar ne vidi e-naslova (migracija 033); na zaslonu je imetnik »Guest«
     // Guest lista (035, I24): vratar vidi uporabnisko ime imetnika in gostitelja (is_guest_list, guest_list_host_username), nikoli e-naslova
     // (buyer_email = gostitelj, holder_email = povabljeni prijatelj); skener pokaze »Guest list · @host«.
@@ -7783,7 +7802,10 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken("owner", "ma
     // Odpovedan dogodek: narocila ostanejo placana (vracilo je rocno), vstopnice pa na vratih ne smejo vec veljati.
     if (t.event_status === "cancelled") return res.status(409).json({ result: "event_cancelled", message: "This event was cancelled.", ticket: t });
     if (!["paid", "partially_refunded"].includes(t.order_status)) return res.status(409).json({ result: "unpaid", message: "Order is not paid." });
-    if (t.status === "used") return res.status(409).json({ result: "already_used", message: "Ticket was already scanned.", used_at: t.used_at, ticket: t });
+    if (t.status === "used") {
+      if (jePonovitev(zaznamek_skena, skeniral_id, t.used_at)) return res.status(200).json({ result: "ok", message: "Welcome in.", used_at: t.used_at, ticket: t, table_service_created: false, replayed: true });
+      return json(409, { result: "already_used", message: "Ticket was already scanned.", used_at: t.used_at, ticket: t });
+    }
     if (t.status !== "valid") return res.status(409).json({ result: t.status, message: `Ticket is ${t.status}.`, ticket: t });
     // Spor (chargeback) na naroceno: vstopnica ne velja (#190). Ze uporabljena vstopnica ostane »already_used« (zgoraj).
     if (t.payment_disputed) return res.status(409).json({ result: "payment_disputed", message: "The payment for this ticket is disputed (chargeback). Do not admit; send the guest to the club manager.", ticket: t });
@@ -7801,16 +7823,20 @@ app.post("/business/tickets/scan", requireAuthSken, requireClubSken("owner", "ma
           WHERE id=$1 AND status='valid' AND serial=$4 RETURNING id, serial, status, used_at, order_id),
        ${STREZBA_CTE}
        SELECT u.id, u.serial, u.status, u.used_at, EXISTS (SELECT 1 FROM s) AS table_service_created, (SELECT id FROM s) AS table_service_id FROM u`,
-      [t.id, req.user.userId, String(req.headers["user-agent"] || "").slice(0, 100), serial]
+      [t.id, req.user.userId, zaznamek ?? String(req.headers["user-agent"] || "").slice(0, 100), serial]
     );
     if (u.rows.length === 0) {
-      const z = await skenPool.query(`SELECT status, serial FROM tickets WHERE id=$1`, [t.id]);
+      const z = await skenPool.query(`SELECT status, serial, used_at, used_by_user_id, scan_device FROM tickets WHERE id=$1`, [t.id]);
       const s = z.rows[0];
       if (s && s.serial !== serial) return res.status(409).json({ result: "transferred", message: "This ticket was passed on to someone else. Ask them to show their new code." });
-      return res.status(409).json({ result: "already_used", message: "Ticket was already scanned." });
+      // Socasna ponovitev z istim client_scan_id (prvi zahtevek je zapisal vmes): tudi ta dobi "ok" z izvirnim used_at.
+      if (s && s.status === "used" && jePonovitev(s.scan_device, s.used_by_user_id, s.used_at)) {
+        return res.status(200).json({ result: "ok", message: "Welcome in.", used_at: s.used_at, ticket: { ...t, status: "used", used_at: s.used_at }, table_service_created: false, replayed: true });
+      }
+      return json(409, { result: "already_used", message: "Ticket was already scanned.", ...(s && s.status === "used" ? { used_at: s.used_at } : {}) });
     }
     const { table_service_created, table_service_id, ...tu } = u.rows[0];
-    res.status(200).json({ result: "ok", message: "Welcome in.", ticket: { ...t, ...tu }, table_service_created });
+    json(200, { result: "ok", message: "Welcome in.", used_at: tu.used_at, ticket: { ...t, ...tu }, table_service_created });
     // Push natakarju (040, I29): SAMO po odgovoru, brez await, mimo skenPool (poizvedbe prejemnikov gredo na glavni pool). Sken ne caka na push in ne pade zaradi njega.
     if (table_service_id) void pushStrezba(klub, [table_service_id]);
     return;
@@ -7897,6 +7923,8 @@ const SKEN_BATCH_NAJVEC = 500;
 const SKEN_NAJZGODNEJE_MS = Date.UTC(2020, 0, 1);
 const SKEN_REZERVA_PRED_ZACETKOM_MS = SKEN_OKNO_PRED_MS; // vrata se odprejo pred zacetkom dogodka (isto kot casovno okno skena, I25)
 const SKEN_ID_VZOREC = /^[A-Za-z0-9._:-]{1,64}$/;
+// POST /scan (#308): ponovitev istega client_scan_id velja kot "ok" samo toliko casa po vpisu (izgubljen odgovor se ponovi v sekundah).
+const SKEN_PONOVITEV_MS = 10 * 60 * 1000;
 const SERIAL_VZOREC = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const jsonVelik = express.json({ limit: "1mb" });
 // Rok paketa ob zasedeni bazi (S1, 17. 10. 2026): ko je element ze padel z zacasno napako baze (zaklep vrstice -> lock_timeout) in paket
