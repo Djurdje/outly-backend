@@ -3091,7 +3091,8 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
       min_age:            b.minAge           ?? b.min_age,
       genres:             b.genres,
       status:             b.status,
-      ticket_price_cents: b.ticketPriceCents ?? b.ticket_price_cents,
+      // Izrecen null = dogodek brez vstopnic na Outlyju (ustavitev prodaje); izpuscen kljuc = brez spremembe. Samo `??` bi null spremenil v undefined.
+      ticket_price_cents: b.ticketPriceCents ?? b.ticket_price_cents ?? (b.ticketPriceCents === null || b.ticket_price_cents === null ? null : undefined),
       currency:           b.currency,
       ticket_url:         b.ticketUrl        ?? b.ticket_url,
       capacity:           b.capacity,
