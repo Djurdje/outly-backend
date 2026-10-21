@@ -2489,6 +2489,7 @@ const STOLPCI_DOGODKA = `
         -- Ne zavisi od uporabnika: sme v javni predpomnilnik (I17), ki zaostane najvec 3 s.
         sales_paused,
         (status = 'published' AND NOT sales_paused AND start_at > NOW()
+          AND NOT COALESCE((SELECT ch.hidden FROM clubs ch WHERE ch.id = events.club_id), FALSE)
           AND (sales_open_at IS NULL OR sales_open_at <= NOW()) AND (sales_close_at IS NULL OR sales_close_at >= NOW())) AS on_sale,
         ${STOLPCI_PRIZORISCA}`;
 
