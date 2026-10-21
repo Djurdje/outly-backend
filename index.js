@@ -4338,6 +4338,9 @@ stripePlacila.zazeni();
 // Vracila (#190, vracila_stripe.js): odpoved dogodka -> vrsta `vracila`, obdelovalec v ozadju (ne v zahtevku). posljiNeposlane: obvestila kupcem in lastnikom klubov (po vrsti, razmik za Resend).
 const vracilaStripe = require("./vracila_stripe").ustvari({ pool, posljiNeposlane: () => vracilaObvestilaNeposlana() });
 vracilaStripe.zazeni();
+// Davcno potrjeni racuni lastnih dogodkov Outly (I52, migracija 054): delavec v ozadju na glavnem poolu (nikoli skenPool). Privzeto RACUNI_PONUDNIK izklopljen:
+// dolg racuna se zapise (zakljuci, uveljaviVracilo), stevilk in klicev ni. Potrdilo kupcu (I32) se v tem koraku NE spremeni.
+require("./racuni").ustvari({ pool }).zazeni();
 app.post("/stripe/webhook", express.raw({ type: "*/*", limit: "1mb" }), stripePlacila.webhook);
 
 // Klub, za katerega gre (requireClub). Admin brez izbranega kluba ga mora izbrati (glava X-Outly-Club).

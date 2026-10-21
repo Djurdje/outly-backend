@@ -182,7 +182,8 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { vrniBrezWebhooka(chId, skupaj
     // gost (nakup brez racuna): mail na naslov nakupa
     const Og = await narocilo({ gost: "gost.plosca@example.com" });
     w = await vrniVPlosci(Og.ch, 2000);
-    assert(w.status === 200 && await cakaj(() => mailiNa("gost.plosca@example.com").length === 1), "gost: mail o vracilu na naslov nakupa");
+    // Samo maili o vracilu: naroceno je vstavljeno kot `paid`, zato pospravljalec gostu poslje se mail z vstopnicami (prej: dirka, ali je ta prisel pred preverbo).
+    assert(w.status === 200 && await cakaj(() => mailiNa("gost.plosca@example.com").filter(m => /^Vračilo \/ Refund:/.test(String(m.subject))).length === 1), "gost: mail o vracilu na naslov nakupa");
 
     // ================================================================
     console.log("\n# 2. Delna vracila: vsako vracilo svoj mail (Martin 20. 10. 2026), znesek vracila + skupaj vrnjeno");

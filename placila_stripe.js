@@ -29,6 +29,7 @@
 //   - znesek 0 EUR: ne gre v Stripe (Checkout ima najmanjsi znesek), narocilo je takoj `paid` brez provizije (index.js, #191)
 "use strict";
 const Stripe = require("stripe");
+const racuni = require("./racuni");   // I52: dolg racuna (zakljuci) in dobropis (uveljaviVracilo) v isti transakciji; racuni.js placil ne uvaza (brez kroga)
 
 // Pripeta razlicica API-ja: oblika dogodkov in parametrov se ne spremeni z nadgradnjo paketa.
 const API_VERZIJA = "2025-03-31.basil";
@@ -230,6 +231,9 @@ async function zakljuci(c, seja) {
       WHERE id = $1`, [o.id, pi, seja.id]);
   const stevilo = o.table_id ? o.table_seats : o.quantity;
   await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [o.id, o.event_id, stevilo]);
+  // I52 (054): prodajalec je platforma (NEXT DIMENSIONS) -> dolg davcno potrjenega racuna v ISTI transakciji (en INSERT, brez omrezja; ON CONFLICT ob ponovitvi).
+  // Stevilko in potrditev doda delavec racuni.js v ozadju. Navaden klub, 0 EUR in testni promet: racuni.SQL_RACUN_DOLGOVAN ne velja, nic se ne zapise.
+  if (o.stripe_account_id === PLATFORMNI_RACUN) await racuni.vpisiDolgRacuna(c, o.id);
   // #276 S2: spor je lahko prisel PREJ kot `checkout.session.completed` (narocila po PaymentIntentu se ni bilo): vrstica v `spori` je brez order_id, vstopnice
   // na vratih bi veljale. Zdaj ko je narocilo placano, spor povezemo z njim (sken ga bere po order_id; mail lastniku in povrnitev ob `lost` ujame obdelovalec).
   if (pi) {
@@ -287,13 +291,20 @@ async function posodobiKlub(c, racun) {
 // Stanje narocila po vracilu: refunded_cents (nikoli navzdol), stanje, ob polnem vracilu vstopnice `refunded`. Ena funkcija za webhook `charge.refunded`
 // (Stripova nadzorna plosca ali nase vracilo) IN obdelovalec vracil (vracila_stripe.js): isto stanje, idempotentno (drugic ne spremeni nicesar).
 // o: { id, public_ref, total_cents, refunded_cents, status } (vrstica ze zaklenjena); vrnjenoCents: skupaj vrnjeno po Stripu (absolutno, ne prirastek).
-async function uveljaviVracilo(c, o, vrnjenoCents, chargeId) {
-  const vrnjeno = Math.min(o.total_cents, Math.max(o.refunded_cents || 0, Number(vrnjenoCents) || 0));
+// dobropis (I52, neobvezno): { vir, uspelo } = id Stripovega vracila (re_...) tega povecanja in njegov izid (true = succeeded, null = se ni znan); false = dobropisa tu
+// NE vpisi (klicatelj ga vpise sam po seznamu Stripovih vracil: webhook charge.refunded, racuni.dobropisiZaVracila). Brez parametra: nadomestni vir, izid neznan.
+async function uveljaviVracilo(c, o, vrnjenoCents, chargeId, dobropis) {
+  const prej = Math.max(0, Number(o.refunded_cents) || 0);
+  const vrnjeno = Math.min(o.total_cents, Math.max(prej, Number(vrnjenoCents) || 0));
   const polno = vrnjeno >= o.total_cents;
   const stanje = polno ? "refunded" : (vrnjeno > 0 ? "partially_refunded" : o.status);
   await c.query("UPDATE orders SET refunded_cents = $2, status = $3, stripe_charge_id = COALESCE(stripe_charge_id, $4) WHERE id = $1",
     [o.id, vrnjeno, stanje, chargeId || null]);
   if (polno) await c.query("UPDATE tickets SET status = 'refunded' WHERE order_id = $1 AND status = 'valid'", [o.id]);
+  // I52 (054): dobropis za TO povecanje refunded_cents (refunded_cents nikoli navzdol, vrstica narocila zaklenjena: vsako povecanje natanko enkrat, UNIQUE vir).
+  // Brez izvirnega racuna (navaden klub, 0 EUR, testni promet, narocilo izpred 054) vpisiDobropis ne naredi nicesar. Stevilko dobi sele za izvirnim racunom (racuni.js).
+  // Dobropis se IZDA sele za izvedeno vracilo (vracilo_uspelo = TRUE; pending caka, zavrnjeno -> preklican), racuni.js.
+  if (vrnjeno > prej && dobropis !== false) await racuni.vpisiDobropis(c, o.id, vrnjeno - prej, vrnjeno, (dobropis && dobropis.vir) || null, dobropis ? dobropis.uspelo : null);
   return { vrnjeno, polno, stanje };
 }
 
@@ -325,7 +336,10 @@ async function vracilo(c, charge) {
   const o = r.rows[0];
   if (!["paid", "partially_refunded", "refunded"].includes(o.status)) return;
   const prej = Number(o.refunded_cents) || 0;   // vrnjeno pred tem dogodkom (samo za nadomestno pot brez seznama vracil)
-  const u = await uveljaviVracilo(c, o, Number(charge.amount_refunded) || 0, charge.id);
+  const seznamVracil = charge.refunds && Array.isArray(charge.refunds.data) ? charge.refunds.data : null;
+  const u = await uveljaviVracilo(c, o, Number(charge.amount_refunded) || 0, charge.id, seznamVracil ? false : undefined);
+  // I52: en dobropis na Stripovo vracilo (vir re_..., znesek vracila, izid iz stanja vracila); brez seznama nadomestni vir v uveljaviVracilo (izid neznan, se ne izda).
+  if (seznamVracil) await racuni.dobropisiZaVracila(c, o.id, seznamVracil);
   console.log(`[stripe] vracilo: narocilo ${o.public_ref}, ${u.vrnjeno} c${u.polno ? " (polno)" : ""}`);
   await zapisiVracilaIzStripa(c, o, charge, pi, prej);
 }

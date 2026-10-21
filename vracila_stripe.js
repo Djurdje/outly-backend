@@ -31,6 +31,7 @@
 // Ko je `stripe_vracilo_id` zapisan, se korak A in njegove preverbe NIKOLI ne ponovijo (webhook je naroceno medtem lahko ze oznacil `refunded`): nadaljuje se s korakom B.
 "use strict";
 const placila = require("./placila_stripe");
+const racuni = require("./racuni");   // I52: izid vracila -> dobropis se izda sele za izvedeno vracilo
 
 const celo = (ime, privzeto, najmanj, najvec) => { const n = Number.parseInt(process.env[ime], 10); return Number.isInteger(n) && n >= najmanj && n <= najvec ? n : privzeto; };
 const spi = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -127,13 +128,15 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     `UPDATE vracila SET stanje = $2, napaka = $3, opravljeno_at = CASE WHEN $2 = 'opravljeno' THEN NOW() ELSE opravljeno_at END,
             ni_izvedeno_od_at = CASE WHEN $2 IN ('ni_uspelo', 'rocno') THEN NOW() ELSE ni_izvedeno_od_at END WHERE id = $1 AND stanje = 'v_teku'`, [id, stanje, napaka || null]);
 
+  // I52: vir dobropisa = nase Stripovo vracilo, izid = njegovo stanje (succeeded -> dobropis se sme izdati; pending/requires_action -> caka na izid; brez vracila: neznano).
+  const dobropisVracila = (v) => ({ vir: v.stripe_vracilo_id || null, uspelo: v.stripe_vracilo_id && v.stripe_stanje === "succeeded" ? true : null });
   // Lokalno stanje narocila po vracilu (isto kot webhook charge.refunded: placila.uveljaviVracilo), idempotentno. Odpoved dogodka vrne VSE (kupec dobi celoten znesek).
   // Za inactive_order narocila ne spreminjamo (ostane cancelled/failed, vstopnic ni).
   async function uveljaviLokalno(v) {
     if (v.razlog !== "event_cancelled") return;
     await vTransakciji(async (c) => {
       const o = (await c.query("SELECT id, public_ref, total_cents, refunded_cents, status FROM orders WHERE id = $1 FOR UPDATE", [v.order_id])).rows[0];
-      if (o && ["paid", "partially_refunded", "refunded"].includes(o.status)) await placila.uveljaviVracilo(c, o, o.total_cents, null);
+      if (o && ["paid", "partially_refunded", "refunded"].includes(o.status)) await placila.uveljaviVracilo(c, o, o.total_cents, null, dobropisVracila(v));   // I52: vir in izid dobropisa = nase Stripovo vracilo
     });
   }
 
@@ -146,7 +149,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
         const z = await c.query("SELECT 1 FROM vracila WHERE id = $1 AND stanje = ANY($2::text[]) FOR UPDATE", [v.id, samoIzStanj]);
         if (!z.rowCount) return false;
       }
-      if (v.razlog === "event_cancelled" && o && ["paid", "partially_refunded", "refunded"].includes(o.status)) await placila.uveljaviVracilo(c, o, o.total_cents, null);
+      if (v.razlog === "event_cancelled" && o && ["paid", "partially_refunded", "refunded"].includes(o.status)) await placila.uveljaviVracilo(c, o, o.total_cents, null, dobropisVracila(v));
       await c.query(
         `UPDATE vracila SET stanje = 'opravljeno', opravljeno_at = NOW(), napaka = $2, znesek_cents = $3, brez_stripa = $4${samoIzStanj ? ", ni_izvedeno_od_at = NULL" : ""} WHERE id = $1`,
         [v.id, opomba || null, znesek, !!brezStripa]);
@@ -333,6 +336,8 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   // Naroceno ostane `refunded` (Stripe vracilo je bilo sprejeto, denar pa se je vrnil platformi): rocna obravnava.
   async function uskladiVracilo(re) {
     if (!re || !re.id) return;
+    // I52: izid Stripovega vracila za dobropis (tudi vracilo iz nadzorne plosce): succeeded -> dobropis se sme izdati, failed/canceled -> preklican + POZOR. Brez klica Stripa.
+    try { await racuni.izidVracila(pool, re.id, re.status); } catch (e) { console.error("[racuni] izid vracila:", e && e.message); }
     const status = String(re.status || "").slice(0, 20);
     // Stripova zavrnitev vrstice, ki je ze v rocno/ni_uspelo: rok za mail kupcu `ni_izvedeno` (#251) steje od zavrnitve, v ISTEM zapisu kot stripe_stanje
     // (obdelovalec mailov sicer vmes vidi `failed` s starim rokom in poslje takoj).
