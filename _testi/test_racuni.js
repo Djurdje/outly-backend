@@ -18,6 +18,9 @@
  *   8  I16: ponudnik visi -> webhook, nakup in sken ostanejo hitri, potrdilo kupcu pride, nobena povezava ne caka v transakciji med klicem ponudnika;
  *      vse stevilke A001-1 so na koncu neprekinjene
  *   9  rok klica ponudnika tece sele po mestu v semaforju (cakanje v vrsti ne porabi poskusa)
+ *  10  S2: dobropis se izda sele za izvedeno vracilo: pending -> brez izdaje, succeeded -> izdaja, failed -> preklican + POZOR, ponovni poskus = nov dobropis
+ *  11  S1: vpis dobropisa (FK) med odprto izdajo istega racuna ne caka; cakanje na stevec ne drzi vrstice racuna
+ *  12  M1: ponudnik, ki se nikoli ne odzove, ne zasede semaforja (trd rok)
  */
 const crypto = require("crypto");
 const fs = require("fs");
@@ -134,7 +137,7 @@ const stripeServer = http.createServer((req, res) => {
     if (req.method === "GET" && (m = u.match(/^\/v1\/charges\/(\w+)$/))) {
       const ch = S.ch[m[1]]; if (!ch) return napaka(404, "resource_missing", "No such charge");
       const razsiri = [...url.searchParams].some(([k, v]) => /^expand/.test(k) && v === "refunds");
-      return odg(200, razsiri ? { ...ch, refunds: { object: "list", has_more: false, data: S.refundi.filter((x) => x.charge === ch.id).map(({ params, kljuc: _k, ...x }) => x) } } : ch);
+      return odg(200, razsiri ? { ...ch, refunds: { object: "list", has_more: false, data: S.refundi.filter((x) => x.charge === ch.id).map((x) => S.reById[x.id]) } } : ch);
     }
     if (req.method === "GET" && (m = u.match(/^\/v1\/refunds\/(re_\w+)$/))) return S.reById[m[1]] ? odg(200, S.reById[m[1]]) : napaka(404, "resource_missing", "No such refund");
     if (req.method === "GET" && u === "/v1/refunds") return odg(200, { object: "list", has_more: false, data: S.refundi.filter((r) => r.payment_intent === url.searchParams.get("payment_intent")) });
@@ -151,10 +154,10 @@ const stripeServer = http.createServer((req, res) => {
     return napaka(404, null, "Lazni Stripe: neznana pot " + req.method + " " + u);
   });
 });
-function vrni(piId, znesek, metadata = {}) {
+function vrni(piId, znesek, metadata = {}, status = "succeeded") {
   const pi = S.pi[piId], ch = S.ch[pi.latest_charge];
   ch.amount_refunded += znesek;
-  const re = { id: "re_r" + (++S.stR), object: "refund", amount: znesek, status: "succeeded", payment_intent: pi.id, charge: ch.id, metadata, created: Math.floor(Date.now() / 1000) + S.stR };
+  const re = { id: "re_r" + (++S.stR), object: "refund", amount: znesek, status, payment_intent: pi.id, charge: ch.id, metadata, created: Math.floor(Date.now() / 1000) + S.stR };
   S.reById[re.id] = re; S.refundi.push({ ...re });
   return re;
 }
@@ -306,7 +309,7 @@ async function ustavi(o) { if (!o || o.srv.exitCode !== null) return; const kone
     const reB = vrni(X1.pi, 1000);
     const wv = await webhook(bB, "charge.refunded", { id: S.pi[X1.pi].latest_charge });
     rr = await racuniNarocila(X1.id);
-    assert(wv.status === 200 && rr.length === 2 && rr[1].vrsta === "dobropis" && rr[1].znesek_cents === -1000 && rr[1].vir === reB.id && Number(rr[1].ref_racun_id) === Number(rr[0].id) && rr[1].stanje === "caka",
+    assert(wv.status === 200 && rr.length === 2 && rr[1].vrsta === "dobropis" && rr[1].znesek_cents === -1000 && rr[1].vir === reB.id && Number(rr[1].ref_racun_id) === Number(rr[0].id) && rr[1].stanje === "caka" && rr[1].vracilo_uspelo === true,
       "B: vracilo 10 EUR v plosci -> dobropis -1000, vir = id Stripovega vracila, sklic na racun, `caka`", rr);
     await webhook(bB, "charge.refunded", { id: S.pi[X1.pi].latest_charge });
     assert((await racuniNarocila(X1.id)).length === 2, "B: ponovljen webhook charge.refunded: brez dvojnika dobropisa");
@@ -574,6 +577,109 @@ async function ustavi(o) { if (!o || o.srv.exitCode !== null) return; const kone
       const st9 = (await pool.query("SELECT stanje, poskusi, naknadno FROM racuni WHERE order_id = ANY($1::bigint[]) ORDER BY order_id", [id9])).rows;
       assert(st9.every((x) => x.stanje === "potrjen" && x.poskusi === 0 && x.naknadno === false) && ref9.every((r) => klicaZa(r).length === 1),
         "en hkraten klic, 3 racuni v vrsti: vsi potrjeni v prvem poskusu, vsak natanko en klic (rok ne tece med cakanjem v vrsti)", [st9, ref9.map((r) => klicaZa(r).length)]);
+    }
+
+    // ================================================================
+    console.log("\n# 10. S2: dobropis se izda sele, ko je Stripovo vracilo izvedeno (pending -> ni izdaje, succeeded -> izdaja, failed -> preklican + POZOR)");
+    {
+      A = zagon(PORT_A, { RACUNI_PONUDNIK: "lazni", RACUNI_LAZNI_URL: `http://127.0.0.1:${PONUDNIK_PORT}/potrdi`, RACUNI_TICK_MS: "150", RACUNI_PREMOR_MS: "250", RACUNI_ODLOG_MS: "100",
+        RACUNI_ROK_MS: "1200", RACUNI_POSPRAVI_MS: "0", VRACILA_TICK_MS: "0" });
+      await cakajStreznik(bA);
+      P.privzeto = "ok";
+      const Y = await kupiInPlacaj(bA, T.ana, evO, 2), Z = await kupiInPlacaj(bA, T.bor, evO, 1);
+      assert(await cakaj(async () => (await racuniNarocila(Y.id))[0]?.stanje === "potrjen" && (await racuniNarocila(Z.id))[0]?.stanje === "potrjen", 8000), "S2: izvirna racuna potrjena");
+      const ch = (x) => S.pi[x.pi].latest_charge;
+      // pending
+      const reP = vrni(Y.pi, 1000, {}, "pending");
+      await webhook(bA, "charge.refunded", { id: ch(Y) });
+      await pocakaj(800);
+      let d = (await racuniNarocila(Y.id)).filter((x) => x.vrsta === "dobropis");
+      assert(d.length === 1 && d[0].vir === reP.id && d[0].vracilo_uspelo === null && d[0].stanje === "caka" && d[0].stevilka === null && klicaZa(Y.ref).filter((k) => k.vrsta === "dobropis").length === 0,
+        "pending: dobropis vpisan, izid neznan, NI izdan (brez stevilke) in NI poslan ponudniku", d);
+      // succeeded (webhook refund.updated -> svez objekt)
+      S.reById[reP.id].status = "succeeded";
+      await webhook(bA, "refund.updated", { id: reP.id });
+      assert(await cakaj(async () => (await racuniNarocila(Y.id)).some((x) => x.vrsta === "dobropis" && x.stanje === "potrjen"), 8000), "succeeded (refund.updated): dobropis izdan in potrjen", await racuniNarocila(Y.id));
+      // failed
+      const reF = vrni(Z.pi, 1000, {}, "pending");
+      await webhook(bA, "charge.refunded", { id: ch(Z) });
+      S.reById[reF.id].status = "failed"; S.ch[ch(Z)].amount_refunded -= 1000;
+      const prejLog = A.log.length;
+      await webhook(bA, "refund.failed", { id: reF.id });
+      assert(await cakaj(async () => (await racuniNarocila(Z.id)).some((x) => x.vir === reF.id && x.stanje === "preklican"), 5000), "failed (refund.failed): dobropis preklican pred izdajo", await racuniNarocila(Z.id));
+      await webhook(bA, "charge.refunded", { id: ch(Z) });   // ponovljen webhook z zavrnjenim vracilom v seznamu
+      await pocakaj(800);
+      d = (await racuniNarocila(Z.id)).filter((x) => x.vrsta === "dobropis");
+      assert(d.length === 1 && d[0].stevilka === null && d[0].vracilo_uspelo === false && klicaZa(Z.ref).filter((k) => k.vrsta === "dobropis").length === 0,
+        "failed: dobropis NI izdan, ponudnik ga ni dobil, ponovljen webhook ne doda novega", d);
+      assert(new RegExp(`\\[racuni\\] POZOR: Stripe vracilo ${reF.id} je failed: dobropis \\d+ \\(narocilo ${Z.id}\\) NI izdan`).test(A.log.slice(prejLog)), "failed: [racuni] POZOR");
+      assert(await zavrne("UPDATE racuni SET stanje='caka' WHERE vir=$1", [reF.id]) === true && await zavrne("DELETE FROM racuni WHERE vir=$1", [reF.id]) === true, "preklican dobropis: ne nazaj v caka, ne izbris (sled)");
+      // ponovni poskus vracila (novo Stripovo vracilo) -> natanko en nov dobropis, izdan
+      const reS = vrni(Z.pi, 1000, {}, "succeeded");
+      await webhook(bA, "charge.refunded", { id: ch(Z) });
+      assert(await cakaj(async () => (await racuniNarocila(Z.id)).some((x) => x.vir === reS.id && x.stanje === "potrjen"), 8000), "ponovni poskus vracila: nov dobropis (nov vir) izdan in potrjen");
+      d = (await racuniNarocila(Z.id)).filter((x) => x.vrsta === "dobropis");
+      assert(d.length === 2 && d.filter((x) => x.stanje === "potrjen").length === 1 && d.filter((x) => x.stanje === "preklican").length === 1, "Z: en preklican + en potrjen dobropis, brez dvojnika", d.map((x) => [x.vir, x.stanje]));
+      await ustavi(A);
+    }
+
+    // ================================================================
+    console.log("\n# 11. S1: vpis dobropisa (webhook) ne caka na izdajo istega racuna; cakanje na stevec ne drzi vrstice racuna");
+    {
+      const oS = (await pool.query(`INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, status, paid_at, buyer_email, stripe_account_id)
+        VALUES ('OUT-S1A', (SELECT id FROM users WHERE email='cene@outly.si'), $1, 2, 1, 500, 500, 'paid', NOW(), 'cene@outly.si', 'platform') RETURNING id`, [evO])).rows[0].id;
+      const rS = Number((await pool.query("INSERT INTO racuni (order_id, vrsta, znesek_cents, naslednji_poskus_at) VALUES ($1, 'racun', 500, NOW() + INTERVAL '30 days') RETURNING id", [oS])).rows[0].id);
+      const c1 = await pool.connect(), c2 = await pool.connect(), c0 = await pool.connect();
+      try {
+        // (a) izdaja istega racuna je odprta (stevilka zapisana, transakcija se ni potrjena), webhook vpise dobropis z FK na ta racun in drzi vrstico narocila
+        await c1.query("BEGIN");
+        const iz = await racuni.izdajVTransakciji(c1, rS, { prostor: "S1", naprava: "1" });
+        await c2.query("BEGIN"); await c2.query("SET LOCAL lock_timeout = 1000");
+        await c2.query("SELECT 1 FROM orders WHERE id = $1 FOR UPDATE", [oS]);
+        const t0 = Date.now(); let napaka = null;
+        try { await racuni.vpisiDobropis(c2, oS, 200, 200, "re_s1_a", true); } catch (e) { napaka = e.code || e.message; }
+        const ms = Date.now() - t0;
+        assert(iz.stanje === "izdan" && napaka === null && ms < 200, `vpis dobropisa med odprto izdajo racuna: brez lock_timeout (55P03), ${ms} ms (< 200 ms)`, [iz, napaka, ms]);
+        await c2.query("ROLLBACK"); await c1.query("COMMIT");
+        // (b) druga izdaja drzi stevec; izdaja racuna rS2 caka na stevec - vrstica rS2 pri tem NI zaklenjena (webhook jo lahko zaklene takoj)
+        const oS3 = (await pool.query(`INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, status, paid_at, buyer_email, stripe_account_id)
+          VALUES ('OUT-S1B', (SELECT id FROM users WHERE email='cene@outly.si'), $1, 2, 1, 300, 300, 'paid', NOW(), 'cene@outly.si', 'platform') RETURNING id`, [evO])).rows[0].id;
+        const rS3 = Number((await pool.query("INSERT INTO racuni (order_id, vrsta, znesek_cents, naslednji_poskus_at) VALUES ($1, 'racun', 300, NOW() + INTERVAL '30 days') RETURNING id", [oS3])).rows[0].id);
+        await c0.query("BEGIN");
+        await c0.query("SELECT zadnja FROM racuni_zaporedje WHERE prostor = 'S1' AND naprava = '1' FOR UPDATE");   // druga izdaja drzi stevec
+        await c1.query("BEGIN");
+        const cakajoca = racuni.izdajVTransakciji(c1, rS3, { prostor: "S1", naprava: "1" });
+        await pocakaj(150);
+        await c2.query("BEGIN"); await c2.query("SET LOCAL lock_timeout = 300");
+        const t1 = Date.now(); let n2 = null;
+        try { await c2.query("SELECT 1 FROM racuni WHERE id = $1 FOR UPDATE", [rS3]); } catch (e) { n2 = e.code || e.message; }
+        const ms2 = Date.now() - t1;
+        await c2.query("ROLLBACK");
+        assert(n2 === null && ms2 < 100, `izdaja caka na stevec, vrstica racuna pa je prosta (zaklep v ${ms2} ms)`, [n2, ms2]);
+        await c0.query("ROLLBACK");
+        const iz3 = await cakajoca; await c1.query("COMMIT");
+        assert(iz3.stanje === "izdan" && iz3.stevilka === 2, "po sprostitvi stevca racun izdan z naslednjo stevilko (2)", iz3);
+      } finally { for (const c of [c0, c1, c2]) { await c.query("ROLLBACK").catch(() => {}); c.release(); } }
+    }
+
+    // ================================================================
+    console.log("\n# 12. M1: ponudnik, ki prezre signal in se nikoli ne odzove, ne zasede semaforja (trd rok)");
+    {
+      const id12 = [];
+      for (let i = 0; i < 3; i++) {
+        const o = (await pool.query(`INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, status, paid_at, buyer_email, stripe_account_id)
+          VALUES ($1, (SELECT id FROM users WHERE email='cene@outly.si'), $2, 2, 1, 100, 100, 'paid', NOW(), 'cene@outly.si', 'platform') RETURNING id`, ["OUT-NIK" + i, evO])).rows[0].id;
+        await pool.query("INSERT INTO racuni (order_id, vrsta, znesek_cents) VALUES ($1, 'racun', 100)", [o]);
+        id12.push(o);
+      }
+      let klicev = 0;
+      const nikoli = { ime: "nikoli", potrdi: () => { klicev++; return new Promise(() => {}); } };
+      const w12 = racuni.ustvari({ pool, env: { RACUNI_VZPOREDNO: "1", RACUNI_ROK_MS: "300", RACUNI_TICK_MS: "0", RACUNI_PREMOR_MS: "60000" }, ponudnik: nikoli });
+      const t0 = Date.now();
+      const izid = await Promise.race([w12.tek().then(() => "koncan"), pocakaj(5000).then(() => "visi")]);
+      const st = (await pool.query("SELECT stanje, poskusi, naknadno, zadnja_napaka FROM racuni WHERE order_id = ANY($1::bigint[])", [id12])).rows;
+      assert(izid === "koncan" && Date.now() - t0 < 3000 && klicev === 3 && st.every((x) => x.stanje === "izdan" && x.poskusi === 1 && x.naknadno && /rok 300 ms/.test(x.zadnja_napaka)),
+        `tek se konca v ${Date.now() - t0} ms: vsi 3 klici poslani (semafor 1 se sprosti ob roku), racuni izdani z oznako naknadno`, [izid, klicev, st]);
     }
   } catch (e) {
     fail++; console.error("NAPAKA TESTA:", e);

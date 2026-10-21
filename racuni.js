@@ -56,18 +56,73 @@ async function vpisiDolgRacuna(c, orderId) {
   return r.rows.length ? r.rows[0].id : null;
 }
 
-// Dobropis v transakciji klicatelja, ki je pravkar povecal refunded_cents (vrstica narocila zaklenjena). delta > 0 (centi), vir = id Stripovega vracila ali null.
-// Brez izvirnega racuna (navaden klub, test, 0 EUR, narocilo izpred 054) se ne zgodi nic. Nadomestni vir 'narocilo-<id>@<skupaj vrnjeno>' je enolicen: povecanje
-// refunded_cents na isto vsoto se zgodi natanko enkrat (nikoli navzdol, uveljaviVracilo).
-async function vpisiDobropis(c, orderId, deltaCents, skupajVrnjeno, virVracila) {
+// Izid Stripovega vracila -> racuni.vracilo_uspelo (pregled PR #315, S2): dobropis se IZDA sele, ko je vracilo izvedeno (succeeded). Do takrat NULL (pending,
+// requires_action, neznano), delavec ga ne prevzame. Zavrnjeno (failed/canceled) pred izdajo -> `preklican` + POZOR (dokument ni nikoli izdan).
+const VRACILO_ZAVRNJENO = ["failed", "canceled"];
+const izidIzStanja = (st) => (st === "succeeded" ? true : (VRACILO_ZAVRNJENO.includes(st) ? false : null));
+
+// Dobropis v transakciji klicatelja, ki je pravkar povecal refunded_cents (vrstica narocila zaklenjena). delta > 0 (centi), vir = id Stripovega vracila ali null,
+// uspelo = izid vracila (true | null). Brez izvirnega racuna (navaden klub, test, 0 EUR, narocilo izpred 054) se ne zgodi nic. Nadomestni vir
+// 'narocilo-<id>@<skupaj vrnjeno>' (izid neznan: dobropis ostane neizdan, alarm pospravljalca) je enolicen: povecanje refunded_cents na isto vsoto natanko enkrat.
+async function vpisiDobropis(c, orderId, deltaCents, skupajVrnjeno, virVracila, uspelo = null) {
   const delta = Math.trunc(Number(deltaCents) || 0);
   if (delta <= 0) return null;
-  const vir = virVracila && /^[\w@.:-]{1,120}$/.test(String(virVracila)) ? String(virVracila) : `narocilo-${orderId}@${Math.trunc(Number(skupajVrnjeno) || 0)}`;
+  const imaVir = virVracila && /^[\w@.:-]{1,120}$/.test(String(virVracila));
+  const vir = imaVir ? String(virVracila) : `narocilo-${orderId}@${Math.trunc(Number(skupajVrnjeno) || 0)}`;
   const r = await c.query(
-    `INSERT INTO racuni (order_id, vrsta, ref_racun_id, vir, znesek_cents, valuta)
-     SELECT r.order_id, 'dobropis', r.id, $2, -LEAST($3::int, r.znesek_cents), r.valuta FROM racuni r WHERE r.order_id = $1 AND r.vrsta = 'racun'
-     ON CONFLICT (vir) DO NOTHING RETURNING id`, [orderId, vir, delta]);
+    `INSERT INTO racuni (order_id, vrsta, ref_racun_id, vir, znesek_cents, valuta, vracilo_uspelo)
+     SELECT r.order_id, 'dobropis', r.id, $2, -LEAST($3::int, r.znesek_cents), r.valuta, $4 FROM racuni r WHERE r.order_id = $1 AND r.vrsta = 'racun'
+     ON CONFLICT (vir) DO NOTHING RETURNING id`, [orderId, vir, delta, imaVir && uspelo === true ? true : null]);
   return r.rows.length ? r.rows[0].id : null;
+}
+
+// Izid vracila za dobropis z virom `reId` (webhook charge.refunded z razsirjenim seznamom, refund.updated / refund.failed, preverba obdelovalca vracil).
+// db = transakcija klicatelja ali pool (en kratek UPDATE po UNIQUE viru, brez omrezja). Vrne 'uspelo' | 'preklican' | 'izdan_zavrnjen' | null.
+async function izidVracila(db, reId, stanje) {
+  const izid = izidIzStanja(String(stanje || ""));
+  if (!reId || izid === null) return null;
+  if (izid) {
+    const u = await db.query(`UPDATE racuni SET vracilo_uspelo = TRUE, naslednji_poskus_at = NOW() WHERE vir = $1 AND vrsta = 'dobropis' AND stanje = 'caka' AND vracilo_uspelo IS NULL RETURNING id`, [String(reId)]);
+    return u.rows.length ? "uspelo" : null;
+  }
+  const p = await db.query(
+    `UPDATE racuni SET vracilo_uspelo = FALSE, stanje = 'preklican', zadnja_napaka = $2, prevzeto_at = NULL
+      WHERE vir = $1 AND vrsta = 'dobropis' AND stanje = 'caka' AND stevilka IS NULL RETURNING id, order_id`, [String(reId), `Stripe vracilo ${String(reId).slice(0, 60)}: ${stanje}`]);
+  if (p.rows.length) {
+    console.error(`[racuni] POZOR: Stripe vracilo ${reId} je ${stanje}: dobropis ${p.rows[0].id} (narocilo ${p.rows[0].order_id}) NI izdan in je preklican (kupec denarja ni dobil). Ce bo vracilo narejeno znova, dobropis nastane za novo vracilo.`);
+    return "preklican";
+  }
+  const z = await db.query(`SELECT id, order_id, stanje FROM racuni WHERE vir = $1 AND vrsta = 'dobropis' AND stevilka IS NOT NULL`, [String(reId)]);
+  if (z.rows.length) {
+    console.error(`[racuni] POZOR: Stripe vracilo ${reId} je ${stanje}, dobropis ${z.rows[0].id} (narocilo ${z.rows[0].order_id}) pa je ze IZDAN (${z.rows[0].stanje}): kupec denarja ni dobil, dobropis ostane - uredi rocno z racunovodkinjo.`);
+    return "izdan_zavrnjen";
+  }
+  return null;
+}
+
+// Webhook charge.refunded s seznamom Stripovih vracil (svezObjekt: expand refunds): en dobropis na Stripovo vracilo (vir = re_..., UNIQUE) z njegovim zneskom
+// in izidom; zavrnjena vracila preklicejo se neizdan dobropis. Vsota neprekljicanih dobropisov nikoli ne preseze racuna (preklican se ne steje, zato vracilo,
+// narejeno znova po zavrnjenem, dobi svoj dobropis). Vrstica narocila je zaklenjena (klicatelj), zato sta webhook in obdelovalec vracil zaporedna.
+async function dobropisiZaVracila(c, orderId, seznam) {
+  const vracila = (Array.isArray(seznam) ? seznam : []).filter((x) => x && x.id && Number(x.amount) > 0)
+    .sort((x, y) => (Number(x.created) || 0) - (Number(y.created) || 0) || String(x.id).localeCompare(String(y.id)));
+  for (const x of vracila) {
+    const izid = izidIzStanja(String(x.status || ""));
+    if (izid === false) { await izidVracila(c, x.id, x.status); continue; }
+    const r = await c.query(
+      `INSERT INTO racuni (order_id, vrsta, ref_racun_id, vir, znesek_cents, valuta, vracilo_uspelo)
+       SELECT r.order_id, 'dobropis', r.id, $2, -$3::int, r.valuta, $4 FROM racuni r
+        WHERE r.order_id = $1 AND r.vrsta = 'racun' AND NOT EXISTS (SELECT 1 FROM racuni x WHERE x.vir = $2)
+          AND COALESCE((SELECT -SUM(d.znesek_cents) FROM racuni d WHERE d.ref_racun_id = r.id AND d.stanje <> 'preklican'), 0) + $3::int <= r.znesek_cents
+       ON CONFLICT (vir) DO NOTHING RETURNING id`, [orderId, String(x.id), Math.trunc(Number(x.amount)), izid]);
+    if (!r.rows.length) {
+      const ze = await c.query("SELECT 1 FROM racuni WHERE vir = $1", [String(x.id)]);
+      if (ze.rows.length) { if (izid) await izidVracila(c, x.id, x.status); }
+      else if ((await c.query("SELECT 1 FROM racuni WHERE order_id = $1 AND vrsta = 'racun'", [orderId])).rows.length) {
+        console.error(`[racuni] POZOR: Stripovo vracilo ${x.id} (${x.amount} c, narocilo ${orderId}) bi preseglo znesek racuna z ze vpisanimi dobropisi: dobropis NI vpisan, preveri rocno.`);
+      }
+    }
+  }
 }
 
 // --- Cas in stevilka ---
@@ -239,18 +294,28 @@ function semafor(n) {
 }
 
 // Stevilka racuna v transakciji klicatelja (c ze v BEGIN). Vrne { stanje: 'izdan', stevilka, izdan_at } | { stanje: 'odlozeno' } | { stanje: <obstojece> }.
-// Vrstni red zaklepov je vedno: vrstica racuna -> vrstica stevca (brez mrtve zanke). Stevec se poveca za 1 v isti transakciji, v kateri se zapise stevilka:
-// ROLLBACK vrne oboje (brez lukenj). Cas izdaje = ura PO zaklepu stevca, zato si stevilke in casi sledijo v istem vrstnem redu.
+// Vrstni red zaklepov (pregled PR #315, S1): (0) preverba BREZ zaklepa (neizdajljiv dobropis ne vzame stevca), (1) vrstica stevca, (2) sele nato vrstica racuna
+// (FOR NO KEY UPDATE) s ponovno preverbo. Cakanje na stevec (serializirana izdaja) tako ne drzi vrstice racuna: webhook, ki ji spremeni izid vracila, caka najvec
+// ms. Zapis stevilke ne potrebuje polnega zaklepa (racuni_stevilka_key je delni indeks, ne UNIQUE omejitev), zato INSERT dobropisa (FK KEY SHARE) ne caka nikoli.
+// Nihce drug ne zaklepa najprej racuna in nato stevca (brez mrtve zanke). Stevec se poveca za 1 v isti transakciji, v kateri se zapise stevilka: ROLLBACK vrne
+// oboje (brez lukenj). Cas izdaje = ura PO zaklepu stevca, zato si stevilke in casi sledijo v istem vrstnem redu.
+const SQL_IZDAJLJIV = `SELECT r.id, r.vrsta, r.stanje, r.vracilo_uspelo, ref.stevilka AS ref_stevilka FROM racuni r LEFT JOIN racuni ref ON ref.id = r.ref_racun_id WHERE r.id = $1`;
+function razlogNeizdaje(r) {
+  if (!r) return "ni";
+  if (r.stanje !== "caka") return r.stanje;
+  if (r.vrsta === "dobropis" && (r.ref_stevilka === null || r.ref_stevilka === undefined)) return "odlozeno";   // nikoli pred izvirnim racunom
+  if (r.vrsta === "dobropis" && r.vracilo_uspelo !== true) return "odlozeno";   // S2: samo za izvedeno vracilo
+  return null;
+}
 async function izdajVTransakciji(c, id, { prostor = PROSTOR, naprava = NAPRAVA } = {}) {
-  const r = (await c.query(
-    `SELECT r.id, r.vrsta, r.stanje, ref.stevilka AS ref_stevilka FROM racuni r LEFT JOIN racuni ref ON ref.id = r.ref_racun_id WHERE r.id = $1 FOR NO KEY UPDATE OF r`, [id])).rows[0];   // NO KEY: ne caka na / ne blokira FK (KEY SHARE) ob vpisu dobropisa v webhooku
-  if (!r) return { stanje: "ni" };
-  if (r.stanje !== "caka") return { stanje: r.stanje };
-  if (r.vrsta === "dobropis" && (r.ref_stevilka === null || r.ref_stevilka === undefined)) return { stanje: "odlozeno" };   // nikoli pred izvirnim racunom
+  const pred = razlogNeizdaje((await c.query(SQL_IZDAJLJIV, [id])).rows[0]);
+  if (pred) return { stanje: pred };
   for (let i = 0; i < 2; i++) {
     const leto = (await c.query(`SELECT EXTRACT(YEAR FROM clock_timestamp() AT TIME ZONE '${CASOVNI_PAS}')::int AS leto`)).rows[0].leto;
     await c.query("INSERT INTO racuni_zaporedje (prostor, naprava, leto) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", [prostor, naprava, leto]);
     await c.query("SELECT zadnja FROM racuni_zaporedje WHERE prostor = $1 AND naprava = $2 AND leto = $3 FOR UPDATE", [prostor, naprava, leto]);
+    const zdaj = razlogNeizdaje((await c.query(SQL_IZDAJLJIV + " FOR NO KEY UPDATE OF r", [id])).rows[0]);   // stanje se je lahko spremenilo med cakanjem na stevec
+    if (zdaj) return { stanje: zdaj };
     const cas = (await c.query(`SELECT clock_timestamp() AS cas, EXTRACT(YEAR FROM clock_timestamp() AT TIME ZONE '${CASOVNI_PAS}')::int AS leto`)).rows[0];
     if (cas.leto !== leto) continue;   // novo leto med cakanjem na zaklep: stevilka iz novega zaporedja (zaklep starega se ob COMMIT sprosti, stevec ni spremenjen)
     const z = (await c.query("UPDATE racuni_zaporedje SET zadnja = zadnja + 1 WHERE prostor = $1 AND naprava = $2 AND leto = $3 RETURNING zadnja", [prostor, naprava, leto])).rows[0].zadnja;
@@ -260,7 +325,7 @@ async function izdajVTransakciji(c, id, { prostor = PROSTOR, naprava = NAPRAVA }
   throw new Error("menjava leta med izdajo racuna");
 }
 
-function ustvari({ pool, env = process.env }) {
+function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   // vstavljen: samo testi (lastna implementacija ponudnika)
   const TICK_MS = celo(env, "RACUNI_TICK_MS", 2000, 0, 3600000);                 // 0 = delavec ne tece (tudi ob izbranem ponudniku)
   const VZPOREDNO = celo(env, "RACUNI_VZPOREDNO", 4, 1, 50);                     // hkratni klici ponudnika
   const DB_VZPOREDNO = celo(env, "RACUNI_DB_VZPOREDNO", 2, 1, 10);               // hkratne kratke transakcije delavca (stevilcenje je tako ali tako zaporedno)
@@ -275,7 +340,7 @@ function ustvari({ pool, env = process.env }) {
   const PRORACUN_MS = 45000;
   const PREMORI = [5e3, 30e3, 120e3, 600e3, 1800e3, 3600e3];
 
-  const izbira = izberiPonudnika(env);
+  const izbira = vstavljen ? { ime: vstavljen.ime || "test", ponudnik: vstavljen, opozorilo: null } : izberiPonudnika(env);
   const ponudnik = izbira.ponudnik;
   const klici = semafor(VZPOREDNO);
   const baza = semafor(DB_VZPOREDNO);
@@ -329,10 +394,14 @@ function ustvari({ pool, env = process.env }) {
     let izid;
     try {
       // Brez drzane povezave. Rok tece sele, ko klic dobi mesto v semaforju (sicer bi klic, ki caka v vrsti dlje od roka, padel, preden bi bil poslan).
+      // Trd rok (pregled #315, M1): Promise.race s casovnikom. Ponudnik, ki signal prezre in se nikoli ne odzove, NE zasede semaforja za vedno (mesto se sprosti ob roku).
       izid = await klici(async () => {
         const ctl = new AbortController();
-        const t = setTimeout(() => ctl.abort(), ROK_MS);
-        try { return await ponudnik.potrdi(pz.podatki, { signal: ctl.signal }); } finally { clearTimeout(t); }
+        let t;
+        const klic = Promise.resolve().then(() => ponudnik.potrdi(pz.podatki, { signal: ctl.signal }));
+        klic.catch(() => {});   // pozen odgovor/napaka po roku se zavrze (brez unhandledRejection)
+        const rok = new Promise((_, zavrni) => { t = setTimeout(() => { ctl.abort(); zavrni(new NapakaPonudnika(`rok ${ROK_MS} ms potekel`)); }, ROK_MS); });
+        try { return await Promise.race([klic, rok]); } finally { clearTimeout(t); }
       });
     } catch (e) { izid = { napaka: e }; }
     if (!izid || izid.napaka) {
@@ -377,7 +446,7 @@ function ustvari({ pool, env = process.env }) {
   async function prevzemi(n) {
     const r = await poizvedba(
       `UPDATE racuni SET prevzeto_at = NOW()
-        WHERE id IN (SELECT id FROM racuni WHERE stanje IN ('caka', 'izdan') AND naslednji_poskus_at <= NOW()
+        WHERE id IN (SELECT id FROM racuni WHERE stanje IN ('caka', 'izdan') AND naslednji_poskus_at <= NOW() AND (vrsta = 'racun' OR vracilo_uspelo IS TRUE)
                        AND (prevzeto_at IS NULL OR prevzeto_at < NOW() - ($2::bigint * INTERVAL '1 millisecond'))
                      ORDER BY id LIMIT $1 FOR NO KEY UPDATE SKIP LOCKED)
         RETURNING id`, [n, ZASTARELO_MS]);
@@ -425,14 +494,16 @@ function ustvari({ pool, env = process.env }) {
           WHERE r.vrsta = 'racun' AND o.refunded_cents > d.vrnjeno AND o.refunded_cents <= r.znesek_cents
           LIMIT 500
          ON CONFLICT (vir) DO NOTHING RETURNING order_id`);
-      if (b.rows.length) console.error(`[racuni] POZOR: ${b.rows.length} vracil ni imelo dobropisa (narocila ${b.rows.slice(0, 10).map((x) => x.order_id).join(", ")}); vpisana v vrsto.`);
+      if (b.rows.length) console.error(`[racuni] POZOR: ${b.rows.length} vracil ni imelo dobropisa (narocila ${b.rows.slice(0, 10).map((x) => x.order_id).join(", ")}); vpisana kot dobropis z NEZNANIM izidom vracila (se ne izda, dokler izida ne potrdi clovek).`);
       if (Date.now() - zadnjiAlarm > 6 * 3600000) {
         const c = (await poizvedba(
           `SELECT COUNT(*) FILTER (WHERE stanje IN ('caka', 'izdan') AND created_at < NOW() - ($1::bigint * INTERVAL '1 millisecond'))::int AS stari,
-                  COUNT(*) FILTER (WHERE stanje = 'napaka')::int AS napake FROM racuni WHERE stanje <> 'potrjen'`, [ALARM_PO_MS])).rows[0];
+                  COUNT(*) FILTER (WHERE stanje = 'napaka')::int AS napake,
+                  COUNT(*) FILTER (WHERE vrsta = 'dobropis' AND stanje = 'caka' AND vracilo_uspelo IS NULL AND created_at < NOW() - ($1::bigint * INTERVAL '1 millisecond'))::int AS neznani
+             FROM racuni WHERE stanje NOT IN ('potrjen', 'preklican')`, [ALARM_PO_MS])).rows[0];
         if (c.stari > 0 || c.napake > 0) {
           zadnjiAlarm = Date.now();
-          console.error(`[racuni] POZOR: ${c.stari} racunov/dobropisov ni potrjenih ze vec kot ${Math.round(ALARM_PO_MS / 3600000)} h, ${c.napake} v stanju napaka (ponudnik: ${izbira.ime}). Zakonski rok za naknadno potrditev sta 2 delovna dneva (ZDavPR 9).`);
+          console.error(`[racuni] POZOR: ${c.stari} racunov/dobropisov ni potrjenih ze vec kot ${Math.round(ALARM_PO_MS / 3600000)} h (od tega ${c.neznani} dobropisov z neznanim izidom Stripovega vracila), ${c.napake} v stanju napaka (ponudnik: ${izbira.ime}). Zakonski rok za naknadno potrditev sta 2 delovna dneva (ZDavPR 9).`);
         }
       }
     } catch (e) { console.error("[racuni] pospravljanje:", kratko(e)); }
@@ -450,6 +521,6 @@ function ustvari({ pool, env = process.env }) {
 }
 
 module.exports = {
-  ustvari, izdajVTransakciji, vpisiDolgRacuna, vpisiDobropis, vsebinaRacuna, blokRacuna, qrPodatek, qrMatrikaRacuna, stevilkaRacuna, izberiPonudnika, NapakaPonudnika,
+  ustvari, izdajVTransakciji, vpisiDolgRacuna, vpisiDobropis, dobropisiZaVracila, izidVracila, vsebinaRacuna, blokRacuna, qrPodatek, qrMatrikaRacuna, stevilkaRacuna, izberiPonudnika, NapakaPonudnika,
   SQL_RACUN_DOLGOVAN, IZDAJATELJ, DDV_KLAVZULA, PROSTOR, NAPRAVA, OPERATER, NACIN_PLACILA, PLATFORMNI_RACUN,
 };

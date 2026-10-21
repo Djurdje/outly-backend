@@ -291,8 +291,9 @@ async function posodobiKlub(c, racun) {
 // Stanje narocila po vracilu: refunded_cents (nikoli navzdol), stanje, ob polnem vracilu vstopnice `refunded`. Ena funkcija za webhook `charge.refunded`
 // (Stripova nadzorna plosca ali nase vracilo) IN obdelovalec vracil (vracila_stripe.js): isto stanje, idempotentno (drugic ne spremeni nicesar).
 // o: { id, public_ref, total_cents, refunded_cents, status } (vrstica ze zaklenjena); vrnjenoCents: skupaj vrnjeno po Stripu (absolutno, ne prirastek).
-// virVracila (neobvezno): id Stripovega vracila (re_...), ki je to povecanje povzrocilo; zapise se kot `vir` dobropisa (I52).
-async function uveljaviVracilo(c, o, vrnjenoCents, chargeId, virVracila) {
+// dobropis (I52, neobvezno): { vir, uspelo } = id Stripovega vracila (re_...) tega povecanja in njegov izid (true = succeeded, null = se ni znan); false = dobropisa tu
+// NE vpisi (klicatelj ga vpise sam po seznamu Stripovih vracil: webhook charge.refunded, racuni.dobropisiZaVracila). Brez parametra: nadomestni vir, izid neznan.
+async function uveljaviVracilo(c, o, vrnjenoCents, chargeId, dobropis) {
   const prej = Math.max(0, Number(o.refunded_cents) || 0);
   const vrnjeno = Math.min(o.total_cents, Math.max(prej, Number(vrnjenoCents) || 0));
   const polno = vrnjeno >= o.total_cents;
@@ -302,18 +303,9 @@ async function uveljaviVracilo(c, o, vrnjenoCents, chargeId, virVracila) {
   if (polno) await c.query("UPDATE tickets SET status = 'refunded' WHERE order_id = $1 AND status = 'valid'", [o.id]);
   // I52 (054): dobropis za TO povecanje refunded_cents (refunded_cents nikoli navzdol, vrstica narocila zaklenjena: vsako povecanje natanko enkrat, UNIQUE vir).
   // Brez izvirnega racuna (navaden klub, 0 EUR, testni promet, narocilo izpred 054) vpisiDobropis ne naredi nicesar. Stevilko dobi sele za izvirnim racunom (racuni.js).
-  if (vrnjeno > prej) await racuni.vpisiDobropis(c, o.id, vrnjeno - prej, vrnjeno, virVracila || null);
+  // Dobropis se IZDA sele za izvedeno vracilo (vracilo_uspelo = TRUE; pending caka, zavrnjeno -> preklican), racuni.js.
+  if (vrnjeno > prej && dobropis !== false) await racuni.vpisiDobropis(c, o.id, vrnjeno - prej, vrnjeno, (dobropis && dobropis.vir) || null, dobropis ? dobropis.uspelo : null);
   return { vrnjeno, polno, stanje };
-}
-// Id Stripovega vracila, ki je povecal vrnjeno z `prej` (eno samo novo nezavrnjeno vracilo na naboju); sicer null (dobropis dobi nadomestni vir).
-function novoVraciloNaboja(charge, prej) {
-  const seznam = charge && charge.refunds && Array.isArray(charge.refunds.data) ? charge.refunds.data : null;
-  if (!seznam) return null;
-  const veljavna = seznam.filter((x) => x && x.id && !["failed", "canceled"].includes(x.status) && Number(x.amount) > 0)
-    .sort((x, y) => (Number(x.created) || 0) - (Number(y.created) || 0) || String(x.id).localeCompare(String(y.id)));
-  let skupaj = 0; const nova = [];
-  for (const x of veljavna) { skupaj += Number(x.amount); if (skupaj > prej) nova.push(String(x.id)); }
-  return nova.length === 1 ? nova[0] : null;
 }
 
 // Vracilo (iz Stripove nadzorne plosce ali API-ja): refunded_cents + stanje; ob polnem vracilu vstopnice `refunded`.
@@ -344,7 +336,10 @@ async function vracilo(c, charge) {
   const o = r.rows[0];
   if (!["paid", "partially_refunded", "refunded"].includes(o.status)) return;
   const prej = Number(o.refunded_cents) || 0;   // vrnjeno pred tem dogodkom (samo za nadomestno pot brez seznama vracil)
-  const u = await uveljaviVracilo(c, o, Number(charge.amount_refunded) || 0, charge.id, novoVraciloNaboja(charge, prej));
+  const seznamVracil = charge.refunds && Array.isArray(charge.refunds.data) ? charge.refunds.data : null;
+  const u = await uveljaviVracilo(c, o, Number(charge.amount_refunded) || 0, charge.id, seznamVracil ? false : undefined);
+  // I52: en dobropis na Stripovo vracilo (vir re_..., znesek vracila, izid iz stanja vracila); brez seznama nadomestni vir v uveljaviVracilo (izid neznan, se ne izda).
+  if (seznamVracil) await racuni.dobropisiZaVracila(c, o.id, seznamVracil);
   console.log(`[stripe] vracilo: narocilo ${o.public_ref}, ${u.vrnjeno} c${u.polno ? " (polno)" : ""}`);
   await zapisiVracilaIzStripa(c, o, charge, pi, prej);
 }

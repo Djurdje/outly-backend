@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 95cUH65dV4u9GCz1pGUzIPv8ZiZjvUObMEwWACJ8VeeYtNuj9VN7cWR81Jca6Ft
+\restrict ZlPqgHNcqXqamyukszoITrulxzLOrYI8ejkAMSIWuGmyApdtBIYUVcgGi4AhAF6
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -55,7 +55,8 @@ CREATE FUNCTION public.racuni_varuj() RETURNS trigger
 BEGIN
   -- Nova vrstica je vedno samo dolg (`caka`, brez stevilke, ZOI, EOR): stevilka pride IZKLJUCNO iz stevca (spodaj, prehod caka -> izdan).
   IF TG_OP = 'INSERT' THEN
-    IF NEW.stanje <> 'caka' OR NEW.stevilka IS NOT NULL OR NEW.zoi IS NOT NULL OR NEW.eor IS NOT NULL OR NEW.ponudnik_id IS NOT NULL OR NEW.naknadno THEN
+    IF NEW.stanje <> 'caka' OR NEW.stevilka IS NOT NULL OR NEW.zoi IS NOT NULL OR NEW.eor IS NOT NULL OR NEW.ponudnik_id IS NOT NULL OR NEW.naknadno
+       OR NEW.vracilo_uspelo IS FALSE THEN
       RAISE EXCEPTION 'racuni: nov racun mora biti v stanju caka brez stevilke, ZOI in EOR' USING ERRCODE = 'restrict_violation';
     END IF;
     RETURN NEW;
@@ -82,6 +83,18 @@ BEGIN
      OR (OLD.ponudnik IS NOT NULL AND NEW.ponudnik IS DISTINCT FROM OLD.ponudnik) OR (OLD.ponudnik_id IS NOT NULL AND NEW.ponudnik_id IS DISTINCT FROM OLD.ponudnik_id)
      OR (OLD.potrjen_at IS NOT NULL AND NEW.potrjen_at IS DISTINCT FROM OLD.potrjen_at) THEN
     RAISE EXCEPTION 'racuni: ZOI, EOR in podatkov ponudnika racuna % ni dovoljeno spreminjati', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  -- Izid vracila (vracilo_uspelo) se sme spremeniti samo, dokler dobropis ni izdan in ni preklican; po izdaji je zamrznjen (izdan dobropis = vracilo izvedeno).
+  IF NEW.vracilo_uspelo IS DISTINCT FROM OLD.vracilo_uspelo AND (OLD.stevilka IS NOT NULL OR OLD.stanje <> 'caka') THEN
+    RAISE EXCEPTION 'racuni: izida vracila dobropisa % po izdaji ali preklicu ni dovoljeno spreminjati', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  -- Dobropis se izda samo za izvedeno vracilo; preklican je koncno stanje in nastane samo iz `caka` (brez stevilke).
+  -- Zakaj preklican in ne DELETE: vrstica ni izdan dokument, a hrani sled (kdaj in zakaj je vracilo padlo, vir) in zapre vir (UNIQUE), da ponovljen webhook
+  -- ne naredi novega dobropisa za isto zavrnjeno vracilo; brisanje bi oboje izgubilo.
+  IF (OLD.stevilka IS NULL AND NEW.stevilka IS NOT NULL AND OLD.vrsta = 'dobropis' AND NEW.vracilo_uspelo IS NOT TRUE)
+     OR (NEW.stanje = 'preklican' AND OLD.stanje NOT IN ('caka', 'preklican'))
+     OR (OLD.stanje = 'preklican' AND NEW.stanje <> 'preklican') THEN
+    RAISE EXCEPTION 'racuni: nedovoljen prehod dobropisa % (% -> %, vracilo %)', OLD.id, OLD.stanje, NEW.stanje, NEW.vracilo_uspelo USING ERRCODE = 'restrict_violation';
   END IF;
   IF (OLD.stanje <> 'caka' AND NEW.stanje = 'caka') OR (OLD.stanje = 'potrjen' AND NEW.stanje <> 'potrjen') OR (OLD.naknadno AND NOT NEW.naknadno) THEN
     RAISE EXCEPTION 'racuni: nedovoljen prehod stanja racuna % (% -> %)', OLD.id, OLD.stanje, NEW.stanje USING ERRCODE = 'restrict_violation';
@@ -1209,6 +1222,7 @@ CREATE TABLE public.racuni (
     ref_racun_id bigint,
     vir text,
     stanje text DEFAULT 'caka'::text NOT NULL,
+    vracilo_uspelo boolean,
     znesek_cents integer NOT NULL,
     valuta character(3) DEFAULT 'EUR'::bpchar NOT NULL,
     prostor text,
@@ -1233,11 +1247,13 @@ CREATE TABLE public.racuni (
     CONSTRAINT racuni_ponudnik_check CHECK (((ponudnik IS NULL) OR ((char_length(ponudnik) >= 1) AND (char_length(ponudnik) <= 40)))),
     CONSTRAINT racuni_ponudnik_id_check CHECK (((ponudnik_id IS NULL) OR ((char_length(ponudnik_id) >= 1) AND (char_length(ponudnik_id) <= 200)))),
     CONSTRAINT racuni_potrjen_chk CHECK (((stanje <> 'potrjen'::text) OR ((eor IS NOT NULL) AND (potrjen_at IS NOT NULL)))),
+    CONSTRAINT racuni_preklican_chk CHECK (((stanje <> 'preklican'::text) OR ((vrsta = 'dobropis'::text) AND (vracilo_uspelo = false)))),
     CONSTRAINT racuni_prostor_check CHECK (((prostor IS NULL) OR (prostor ~ '^[0-9A-Za-z]{1,20}$'::text))),
-    CONSTRAINT racuni_stanje_check CHECK ((stanje = ANY (ARRAY['caka'::text, 'izdan'::text, 'potrjen'::text, 'napaka'::text]))),
+    CONSTRAINT racuni_stanje_check CHECK ((stanje = ANY (ARRAY['caka'::text, 'izdan'::text, 'potrjen'::text, 'napaka'::text, 'preklican'::text]))),
     CONSTRAINT racuni_stevilka_check CHECK (((stevilka IS NULL) OR (stevilka >= 1))),
-    CONSTRAINT racuni_stevilka_chk CHECK ((((stevilka IS NULL) = (izdan_at IS NULL)) AND ((stevilka IS NULL) = (prostor IS NULL)) AND ((stevilka IS NULL) = (naprava IS NULL)) AND ((stevilka IS NULL) = (leto IS NULL)) AND ((stanje = 'caka'::text) = (stevilka IS NULL)))),
+    CONSTRAINT racuni_stevilka_chk CHECK ((((stevilka IS NULL) = (izdan_at IS NULL)) AND ((stevilka IS NULL) = (prostor IS NULL)) AND ((stevilka IS NULL) = (naprava IS NULL)) AND ((stevilka IS NULL) = (leto IS NULL)) AND ((stanje = ANY (ARRAY['caka'::text, 'preklican'::text])) = (stevilka IS NULL)))),
     CONSTRAINT racuni_vir_check CHECK (((vir IS NULL) OR ((char_length(vir) >= 1) AND (char_length(vir) <= 120)))),
+    CONSTRAINT racuni_vracilo_chk CHECK (((vrsta = 'dobropis'::text) OR (vracilo_uspelo IS NULL))),
     CONSTRAINT racuni_vrsta_check CHECK ((vrsta = ANY (ARRAY['racun'::text, 'dobropis'::text]))),
     CONSTRAINT racuni_vrsta_chk CHECK ((((vrsta = 'racun'::text) AND (ref_racun_id IS NULL) AND (vir IS NULL) AND (znesek_cents > 0)) OR ((vrsta = 'dobropis'::text) AND (ref_racun_id IS NOT NULL) AND (vir IS NOT NULL) AND (znesek_cents < 0)))),
     CONSTRAINT racuni_zoi_check CHECK (((zoi IS NULL) OR (zoi ~ '^[0-9a-f]{32}$'::text)))
@@ -2210,14 +2226,6 @@ ALTER TABLE ONLY public.racuni
 
 
 --
--- Name: racuni racuni_stevilka_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.racuni
-    ADD CONSTRAINT racuni_stevilka_key UNIQUE (prostor, naprava, leto, stevilka);
-
-
---
 -- Name: racuni racuni_vir_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2763,6 +2771,13 @@ CREATE UNIQUE INDEX racuni_narocilo_racun_key ON public.racuni USING btree (orde
 --
 
 CREATE INDEX racuni_ref_idx ON public.racuni USING btree (ref_racun_id) WHERE (ref_racun_id IS NOT NULL);
+
+
+--
+-- Name: racuni_stevilka_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX racuni_stevilka_key ON public.racuni USING btree (prostor, naprava, leto, stevilka) WHERE (stevilka IS NOT NULL);
 
 
 --
@@ -3647,5 +3662,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 95cUH65dV4u9GCz1pGUzIPv8ZiZjvUObMEwWACJ8VeeYtNuj9VN7cWR81Jca6Ft
+\unrestrict ZlPqgHNcqXqamyukszoITrulxzLOrYI8ejkAMSIWuGmyApdtBIYUVcgGi4AhAF6
 

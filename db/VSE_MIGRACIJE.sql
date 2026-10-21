@@ -2780,7 +2780,10 @@ COMMENT ON TABLE vracila_iz_stripa IS 'Vracila, narejena zunaj Outlyja (Stripova
 --                    (uveljaviVracilo); stevilko, cas izdaje in potrditev doda delavec v ozadju (racuni.js), nikoli pot nakupa ali skena (I16).
 --   vrsta            racun | dobropis. Dobropis: negativen znesek (delta vracila), ref_racun_id = izvirni racun, vir = id Stripovega vracila (re_...) ali
 --                    'narocilo-<id>-vrnjeno-<skupaj>' (UNIQUE: ponovljen webhook ne naredi dvojnika). Dobropisi so v ISTEM zaporedju kot racuni (FURS vpr. 197, 198).
---   stanje           caka (dolg, brez stevilke) -> izdan (stevilka + cas izdaje zamrznjena) -> potrjen (EOR) | napaka (trajna zavrnitev, alarm).
+--   stanje           caka (dolg, brez stevilke) -> izdan (stevilka + cas izdaje zamrznjena) -> potrjen (EOR) | napaka (trajna zavrnitev, alarm);
+--                    dobropis tudi caka -> preklican (Stripe je vracilo zavrnil PRED izdajo: dokument ni nikoli izdan, stevilke nima, ostane za sled).
+--   vracilo_uspelo   samo dobropis: NULL = izid Stripovega vracila se ni znan (pending / requires_action), TRUE = vracilo izvedeno (succeeded), FALSE = zavrnjeno.
+--                    Dobropis se IZDA (stevilka, ponudnik) sele pri TRUE: kupec mora denar res dobiti, preden FURS dobi dobropis.
 --   prostor/naprava/leto/stevilka/izdan_at   stevilka racuna in cas izdaje; ko so zapisani, se ne spremenijo vec (sprozilec racuni_varuj).
 --   zoi, eor         zascitna oznaka izdajatelja (32 hex) in enkratna identifikacijska oznaka FURS. Zapiseta se enkrat (iz NULL), nato nikoli vec.
 --   message_id       UUID sporocila (ostane enak ob ponovitvi, FURS MessageID / kljuc idempotence pri ponudniku).
@@ -2791,6 +2794,7 @@ COMMENT ON TABLE vracila_iz_stripa IS 'Vracila, narejena zunaj Outlyja (Stripova
 -- RESTRICT: racun je racunovodski dokument (kot vracila -> orders); narocila se anonimizirajo, ne brisejo.
 -- Brisanje vrstic in sprememba izdanih polj: sprozilec zavrne (ZDavP-2 38/8: program ne sme omogocati spreminjanja zapisov brez hrambe izvornih podatkov).
 -- Nova vrstica je samo `caka` (brez stevilke, ZOI, EOR); stevilka se dodeli samo kot trenutna vrednost stevca (ki se v isti transakciji poveca za 1).
+-- Dobropis dobi stevilko sele, ko je Stripovo vracilo izvedeno (vracilo_uspelo = TRUE); zavrnjeno vracilo pred izdajo -> `preklican` (ne DELETE, glej sprozilec).
 -- TRUNCATE sprozilec NE zavrne (testne skripte praznijo `orders ... CASCADE`); v produkciji ga nobena pot ne izvaja.
 --
 -- Zaklep: nove tabele; REFERENCES orders vzame kratek SHARE ROW EXCLUSIVE na `orders` (kot 053). Obstojece vrstice se ne spreminjajo.
@@ -2810,7 +2814,8 @@ CREATE TABLE IF NOT EXISTS racuni (
     vrsta                TEXT        NOT NULL CHECK (vrsta IN ('racun', 'dobropis')),
     ref_racun_id         BIGINT      REFERENCES racuni(id) ON DELETE RESTRICT,
     vir                  TEXT        UNIQUE CHECK (vir IS NULL OR char_length(vir) BETWEEN 1 AND 120),
-    stanje               TEXT        NOT NULL DEFAULT 'caka' CHECK (stanje IN ('caka', 'izdan', 'potrjen', 'napaka')),
+    stanje               TEXT        NOT NULL DEFAULT 'caka' CHECK (stanje IN ('caka', 'izdan', 'potrjen', 'napaka', 'preklican')),
+    vracilo_uspelo       BOOLEAN,
     znesek_cents         INTEGER     NOT NULL,
     valuta               CHAR(3)     NOT NULL DEFAULT 'EUR',
     prostor              TEXT        CHECK (prostor IS NULL OR prostor ~ '^[0-9A-Za-z]{1,20}$'),
@@ -2838,16 +2843,22 @@ CREATE TABLE IF NOT EXISTS racuni (
     CONSTRAINT racuni_stevilka_chk CHECK (
         (stevilka IS NULL) = (izdan_at IS NULL) AND (stevilka IS NULL) = (prostor IS NULL)
         AND (stevilka IS NULL) = (naprava IS NULL) AND (stevilka IS NULL) = (leto IS NULL)
-        AND (stanje = 'caka') = (stevilka IS NULL)),
-    CONSTRAINT racuni_potrjen_chk CHECK (stanje <> 'potrjen' OR (eor IS NOT NULL AND potrjen_at IS NOT NULL)),
-    CONSTRAINT racuni_stevilka_key UNIQUE (prostor, naprava, leto, stevilka)
+        AND (stanje IN ('caka', 'preklican')) = (stevilka IS NULL)),
+    CONSTRAINT racuni_preklican_chk CHECK (stanje <> 'preklican' OR (vrsta = 'dobropis' AND vracilo_uspelo = FALSE)),
+    CONSTRAINT racuni_vracilo_chk CHECK (vrsta = 'dobropis' OR vracilo_uspelo IS NULL),
+    CONSTRAINT racuni_potrjen_chk CHECK (stanje <> 'potrjen' OR (eor IS NOT NULL AND potrjen_at IS NOT NULL))
 );
+
+-- Stevilka je enolicna v (prostor, naprava, leto). NAMERNO delni unikatni INDEKS (ne UNIQUE omejitev): stolpci delnega indeksa niso »kljuc« za tuje kljuce,
+-- zato zapis stevilke ob izdaji (FOR NO KEY UPDATE) ne potrebuje polnega zaklepa vrstice in ne blokira KEY SHARE, ki ga vzame INSERT dobropisa (ref_racun_id)
+-- v transakciji webhooka (ta drzi tudi vrstico narocila). Z UNIQUE omejitvijo je vpis dobropisa cakal na izdajo istega racuna (lock_timeout, pregled PR #315, S1).
+CREATE UNIQUE INDEX IF NOT EXISTS racuni_stevilka_key ON racuni (prostor, naprava, leto, stevilka) WHERE stevilka IS NOT NULL;
 
 -- Natanko en racun na narocilo (dobropisov je lahko vec, vsak s svojim virom).
 CREATE UNIQUE INDEX IF NOT EXISTS racuni_narocilo_racun_key ON racuni (order_id) WHERE vrsta = 'racun';
 CREATE INDEX IF NOT EXISTS racuni_narocilo_idx ON racuni (order_id);
 CREATE INDEX IF NOT EXISTS racuni_ref_idx ON racuni (ref_racun_id) WHERE ref_racun_id IS NOT NULL;
--- Vrsta dela delavca (racuni.js): samo nedokoncane vrstice.
+-- Vrsta dela delavca (racuni.js): samo nedokoncane vrstice (preklican ni delo). Dobropis po viru (izid Stripovega vracila).
 CREATE INDEX IF NOT EXISTS racuni_delo_idx ON racuni (naslednji_poskus_at, id) WHERE stanje IN ('caka', 'izdan');
 
 -- Hramba (ZDavP-2 38/8): brez brisanja; izdana polja se zapisejo enkrat in se ne spreminjajo; potrjen je koncno stanje; stevilka samo iz stevca.
@@ -2855,7 +2866,8 @@ CREATE OR REPLACE FUNCTION racuni_varuj() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   -- Nova vrstica je vedno samo dolg (`caka`, brez stevilke, ZOI, EOR): stevilka pride IZKLJUCNO iz stevca (spodaj, prehod caka -> izdan).
   IF TG_OP = 'INSERT' THEN
-    IF NEW.stanje <> 'caka' OR NEW.stevilka IS NOT NULL OR NEW.zoi IS NOT NULL OR NEW.eor IS NOT NULL OR NEW.ponudnik_id IS NOT NULL OR NEW.naknadno THEN
+    IF NEW.stanje <> 'caka' OR NEW.stevilka IS NOT NULL OR NEW.zoi IS NOT NULL OR NEW.eor IS NOT NULL OR NEW.ponudnik_id IS NOT NULL OR NEW.naknadno
+       OR NEW.vracilo_uspelo IS FALSE THEN
       RAISE EXCEPTION 'racuni: nov racun mora biti v stanju caka brez stevilke, ZOI in EOR' USING ERRCODE = 'restrict_violation';
     END IF;
     RETURN NEW;
@@ -2882,6 +2894,18 @@ BEGIN
      OR (OLD.ponudnik IS NOT NULL AND NEW.ponudnik IS DISTINCT FROM OLD.ponudnik) OR (OLD.ponudnik_id IS NOT NULL AND NEW.ponudnik_id IS DISTINCT FROM OLD.ponudnik_id)
      OR (OLD.potrjen_at IS NOT NULL AND NEW.potrjen_at IS DISTINCT FROM OLD.potrjen_at) THEN
     RAISE EXCEPTION 'racuni: ZOI, EOR in podatkov ponudnika racuna % ni dovoljeno spreminjati', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  -- Izid vracila (vracilo_uspelo) se sme spremeniti samo, dokler dobropis ni izdan in ni preklican; po izdaji je zamrznjen (izdan dobropis = vracilo izvedeno).
+  IF NEW.vracilo_uspelo IS DISTINCT FROM OLD.vracilo_uspelo AND (OLD.stevilka IS NOT NULL OR OLD.stanje <> 'caka') THEN
+    RAISE EXCEPTION 'racuni: izida vracila dobropisa % po izdaji ali preklicu ni dovoljeno spreminjati', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  -- Dobropis se izda samo za izvedeno vracilo; preklican je koncno stanje in nastane samo iz `caka` (brez stevilke).
+  -- Zakaj preklican in ne DELETE: vrstica ni izdan dokument, a hrani sled (kdaj in zakaj je vracilo padlo, vir) in zapre vir (UNIQUE), da ponovljen webhook
+  -- ne naredi novega dobropisa za isto zavrnjeno vracilo; brisanje bi oboje izgubilo.
+  IF (OLD.stevilka IS NULL AND NEW.stevilka IS NOT NULL AND OLD.vrsta = 'dobropis' AND NEW.vracilo_uspelo IS NOT TRUE)
+     OR (NEW.stanje = 'preklican' AND OLD.stanje NOT IN ('caka', 'preklican'))
+     OR (OLD.stanje = 'preklican' AND NEW.stanje <> 'preklican') THEN
+    RAISE EXCEPTION 'racuni: nedovoljen prehod dobropisa % (% -> %, vracilo %)', OLD.id, OLD.stanje, NEW.stanje, NEW.vracilo_uspelo USING ERRCODE = 'restrict_violation';
   END IF;
   IF (OLD.stanje <> 'caka' AND NEW.stanje = 'caka') OR (OLD.stanje = 'potrjen' AND NEW.stanje <> 'potrjen') OR (OLD.naknadno AND NOT NEW.naknadno) THEN
     RAISE EXCEPTION 'racuni: nedovoljen prehod stanja racuna % (% -> %)', OLD.id, OLD.stanje, NEW.stanje USING ERRCODE = 'restrict_violation';
@@ -2975,7 +2999,7 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('051_vracila_mail_ni_izvedeno.sql', '53da48bc08cfdd25'),
     ('052_vracila_valuta.sql', '17794d8146de5e87'),
     ('053_vracila_iz_stripa.sql', '36d88020963c0bea'),
-    ('054_racuni.sql', 'eb3be262d65b8e7b')
+    ('054_racuni.sql', '4332d49a2e4b4cb0')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
