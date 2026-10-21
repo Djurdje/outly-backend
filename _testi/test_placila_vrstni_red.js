@@ -145,7 +145,8 @@ const placi = (sejaId, pi) => Object.assign(S.seje[sejaId], { status: "complete"
     assert((await narocilo(a.id)).status === "pending", "narocilo ostane pending");
     assert(!/POZOR: charge\.refunded evt_vracilo_a/.test(log), "sveze zamujeno vracilo: brez alarma (samo dnevnik)");
     w = await webhook("charge.refunded", { id: "ch_a", object: "charge" }, { id: "evt_vracilo_stara", created: Math.floor(Date.now() / 1000) - 2 * 3600 });
-    assert(w.status === 503 && /POZOR: charge\.refunded evt_vracilo_stara caka na placilo ze 12\d min/.test(log), "vracilo, ki caka ze > 1 h: 503 + alarm (Sentry)", { w, log: log.slice(-300) });
+    // #303: dnevnik pride po cevi stdout/stderr loceno od HTTP odgovora (lahko za njim) -> cakamo na pogoj, ne beremo takoj
+    assert(w.status === 503 && await cakaj(() => /POZOR: charge\.refunded evt_vracilo_stara caka na placilo ze 12\d min/.test(log)), "vracilo, ki caka ze > 1 h: 503 + alarm (Sentry)", { w, log: log.slice(-300) });
     placi(a.seja, "pi_a");
     w = await webhook("checkout.session.completed", { id: a.seja, object: "checkout.session" }, { id: "evt_placilo_a" });
     assert(w.status === 200 && (await narocilo(a.id)).status === "paid", "completed (zamujen): narocilo paid", w);
@@ -196,8 +197,9 @@ const placi = (sejaId, pi) => Object.assign(S.seje[sejaId], { status: "complete"
     assert(w.status === 200 && sp.stanje === "won" && String(sp.order_id) === String(c.id), "dispute.closed: won, povezava ostane", sp);
 
     assert(await cakaj(() => mailiNa("lastnik@outly.si").some(m => /Payment dispute/.test(m.subject))), "S1: mail lastniku kluba o sporu PRIDE tudi, ce je spor prisel pred placilom", R.poslano.map(m => m.subject));
-    sp = (await pool.query("SELECT mail_odprt_poslano_at FROM spori WHERE id='dp_c'")).rows[0];
-    assert(sp.mail_odprt_poslano_at, "S1: mail_odprt_poslano_at zapisan");
+    // #303: posljiSporMail najprej poslje mail, sele nato zapise mail_odprt_poslano_at (asinhrono po COMMIT-u webhooka) -> cakamo na zapis
+    assert(await cakaj(async () => !!(await pool.query("SELECT mail_odprt_poslano_at FROM spori WHERE id='dp_c'")).rows[0].mail_odprt_poslano_at),
+      "S1: mail_odprt_poslano_at zapisan", (await pool.query("SELECT mail_odprt_poslano_at, mail_odprt_poskusi FROM spori WHERE id='dp_c'")).rows[0]);
 
     console.log("\n# S2: izgubljen spor PRED placilom: povrnitev od kluba se po povezavi sprozi");
     const iv = await kupi("ivo", 1);
@@ -280,7 +282,7 @@ const placi = (sejaId, pi) => Object.assign(S.seje[sejaId], { status: "complete"
     assert((await vstopnice(g.id)).length === 0, "vstopnic ni");
     assert(vg.length === 1 && vg[0].razlog === "inactive_order" && vg[0].znesek_cents === 3000, "vracilo v vrsti (inactive_order)", vg);
     assert(await sold() === soldG - 2, "zaloga sproscena");
-    assert(/placilo za neaktivno narocilo/.test(log), "alarm v dnevniku");
+    assert(await cakaj(() => /placilo za neaktivno narocilo/.test(log)), "alarm v dnevniku");   // #303: dnevnik po cevi, lahko za HTTP odgovorom
     w = await webhook("checkout.session.completed", { id: g.seja, object: "checkout.session" });
     assert(w.status === 200 && (await pool.query("SELECT 1 FROM vracila WHERE order_id=$1", [g.id])).rows.length === 1, "ponovna dostava: se vedno ena vrstica vracila");
 
