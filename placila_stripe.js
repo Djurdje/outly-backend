@@ -6,7 +6,7 @@
 // IZJEMA (I50, Martin v seji menedzerja 19. 10. 2026): dogodek, katerega prodajalec (events.club_id) ima clubs.is_official = TRUE, prodaja NEXT DIMENSIONS sam
 // (platforma): Checkout seja BREZ transfer_data, BREZ on_behalf_of, BREZ application_fee_amount (placilo gre neposredno na platformni racun), provizija naroclila 0,
 // racun kluba (stripe_account_id, stripe_charges_enabled) ni pogoj, nacin placila doloca samo platformni kljuc. Vracila brez reverse_transfer in brez vracila provizije
-// (vracila_stripe.js), spor ne bremeni nobenega kluba (spor() spodaj). VSAKO naroclilo take prodaje (tudi 0 EUR in testni nacin) nosi orders.stripe_account_id = PLATFORMNI_RACUN
+// (vracila_stripe.js), spor ne bremeni nobenega kluba (spor() spodaj). VSAKO narocilo take prodaje (tudi 0 EUR in testni nacin) nosi orders.stripe_account_id = PLATFORMNI_RACUN
 // (»platform«; izrecna oznaka PRODAJALCA, zamrznjena ob nakupu, NE NULL: NULL ima testni in brezplacni nakup navadnega kluba). Ali je denar sel skozi Stripe, oznaka NE pove:
 // to odlocata total_cents = 0 in PI `test_` (vracila, finance, maili), kot pri navadnem klubu.
 // Kartica se nikoli ne vnasa v nas vmesnik: kupec placa na Stripovi gostovani strani (Checkout).
@@ -244,7 +244,7 @@ async function zakljuci(c, seja) {
               mail_odprt_prevzeto_at = CASE WHEN mail_odprt_poslano_at IS NULL THEN NULL ELSE mail_odprt_prevzeto_at END,
               mail_zaprt_poskusi = CASE WHEN mail_zaprt_poslano_at IS NULL THEN 0 ELSE mail_zaprt_poskusi END,
               mail_zaprt_prevzeto_at = CASE WHEN mail_zaprt_poslano_at IS NULL THEN NULL ELSE mail_zaprt_prevzeto_at END,
-              -- I50: spor na naroclilo, ki ga je prodajala platforma, nima kluba, od katerega bi povrnitev terjali: ostane NULL (ni dolgovano), izgubo nosi Outly.
+              -- I50: spor na narocilo, ki ga je prodajala platforma, nima kluba, od katerega bi povrnitev terjali: ostane NULL (ni dolgovano), izgubo nosi Outly.
               povrnitev_stanje = CASE WHEN stanje = 'lost' AND povrnitev_stanje = 'rocno' AND povrnitev_napaka LIKE 'spor brez narocila%' THEN (CASE WHEN $3::boolean THEN NULL ELSE 'caka' END) ELSE povrnitev_stanje END,
               povrnitev_napaka = CASE WHEN stanje = 'lost' AND povrnitev_stanje = 'rocno' AND povrnitev_napaka LIKE 'spor brez narocila%' THEN NULL ELSE povrnitev_napaka END
         WHERE order_id IS NULL AND payment_intent_id = $2 RETURNING id`, [o.id, pi, o.stripe_account_id === PLATFORMNI_RACUN]);
@@ -383,7 +383,7 @@ async function zapisiVracilaIzStripa(c, o, charge, pi, prej) {
 // Spor (chargeback, #190): zapis stanja v `spori` in alarm. Takoj ob odprtju spora vstopnice naroceno na vratih ne veljajo vec (sken: payment_disputed, brez klica Stripa: indeksiran
 // EXISTS po `spori`); ob `won`/`warning_closed`/`prevented` spet veljajo, ob `lost` ostanejo neveljavne. Ob `lost` se v isti transakciji vrstici nastavi povrnitev_stanje='caka':
 // transfer reversal od kluba izvede obdelovalec (vracila_stripe.js, Martin 12. 10. 2026: izgubljen spor nosi klub).
-// I50: spor na naroclilo, ki ga je prodajala platforma (SQL_NAROCILO_PLATFORMNO), ne sprozi povrnitve od kluba (povrnitev_stanje ostane NULL) in ne obvesti nobenega lastnika.
+// I50: spor na narocilo, ki ga je prodajala platforma (SQL_NAROCILO_PLATFORMNO), ne sprozi povrnitve od kluba (povrnitev_stanje ostane NULL) in ne obvesti nobenega lastnika.
 // Objekt je svez iz Stripa (svezObjekt), zato zaporedje dogodkov (created/updated/closed) ni pomembno: vedno zapisemo trenutno stanje.
 // Narocilo najdemo po PaymentIntentu ali naboju (charge); spor brez narocila se zapise (order_id NULL) in sproži alarm.
 // Stripovi statusi (docs.stripe.com/api/disputes/object): warning_needs_response, warning_under_review, warning_closed, needs_response, under_review, won, lost, prevented.
@@ -615,8 +615,43 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
         try { await preveriEno(o); }
         catch (e) { console.error(`[stripe] pospravljanje narocila ${o.public_ref}:`, e.message); }
       }
+      await preveriPreklicane(s);
     } catch (e) { console.error("[stripe] pospravljanje:", e.message); }
     finally { tece = false; }
+  }
+
+  // M4 (pregled #316, I53): narocilo, ki smo ga preklicali PRED iztekom seje (pavza prodaje, izbris racuna, seja ustvarjena po preklicu), ima lahko pri Stripu
+  // se odprto placilno okno (expire po COMMIT-u ni uspel ali proces se je vmes ponovno zagnal) ali placilo, katerega webhook se je izgubil. Enkrat (na proces)
+  // vprasamo Stripe: odprta seja -> expire; placana -> zakljuci() (narocilo je cancelled: vstopnic ni, vracilo inactive_order, I37). Samo zadnjih 40 min
+  // (rok seje je 30 min). Indeksa namenoma ni (pregled #316 S1: CREATE INDEX ON orders v migraciji z ALTER events = mrtva zanka z nakupom): poizvedba enkrat na 5 min
+  // je pri danasnji velikosti `orders` (tisoci vrstic) zanemarljiva (ob rasti: indeks v SAMOSTOJNI migraciji brez drugih zaklepov). PREKLIC_PO_S: najmanj toliko
+  // po preklicu (da expire po COMMIT-u konca prvi).
+  const preverjeniPreklici = new Map();   // id narocila -> cas; samo koncni izid (expired/complete), zato napaka Stripa pomeni ponovitev ob naslednjem teku
+  const PREKLIC_PO_S = Number.isFinite(Number(process.env.STRIPE_PREKLIC_PO_S)) ? Number(process.env.STRIPE_PREKLIC_PO_S) : 60;
+  async function preveriPreklicane(s) {
+    const zdaj = Date.now();
+    for (const [id, t] of preverjeniPreklici) if (zdaj - t > 3600000) preverjeniPreklici.delete(id);
+    const r = await pool.query(
+      `SELECT id, public_ref, stripe_checkout_session_id FROM orders
+        WHERE status = 'cancelled' AND stripe_checkout_session_id IS NOT NULL AND stripe_payment_intent_id IS NULL
+          AND cancelled_at > NOW() - INTERVAL '40 minutes' AND cancelled_at <= NOW() - ($1::int * INTERVAL '1 second')
+          AND (checkout_expires_at IS NULL OR cancelled_at < checkout_expires_at)
+        ORDER BY cancelled_at LIMIT 50`, [PREKLIC_PO_S]);
+    for (const o of r.rows) {
+      if (preverjeniPreklici.has(String(o.id))) continue;
+      if (jeLive() && /^cs_test_/.test(o.stripe_checkout_session_id)) { preverjeniPreklici.set(String(o.id), zdaj); continue; }   // I36: zivi kljuc sandbox seje ne pozna
+      try {
+        let seja = await s.checkout.sessions.retrieve(o.stripe_checkout_session_id);
+        if (seja.status === "open") {
+          seja = await s.checkout.sessions.expire(seja.id);
+          console.log(`[stripe] pospravljeno: preklicano narocilo ${o.public_ref} je imelo odprto placilno okno, zaprto`);
+        }
+        if (seja.status === "complete" && seja.payment_status === "paid") {
+          await vTransakciji(async (c) => { await zakljuci(c, seja); });   // cancelled -> vrniNeaktivno (vracilo v vrsti), vstopnic ni
+        }
+        if (seja.status === "expired" || seja.status === "complete") preverjeniPreklici.set(String(o.id), zdaj);
+      } catch (e) { console.error(`[stripe] preverba preklicanega narocila ${o.public_ref}:`, e.message); }
+    }
   }
 
   // Potekel checkout_url (#149): seja ima rok (expires_at), cakajoce narocilo pa ostane `pending`, dokler ga ne pospravi pospravljalec

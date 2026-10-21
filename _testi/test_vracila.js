@@ -787,8 +787,10 @@ async function webhook(tip, objekt, id) {
     ad = await api("GET", "/admin/api/events?status=published", T.admin);
     const eS1 = ad.body.find(x => x.id === evS1);
     assert(eS1 && eS1.paid_orders === 2 && eS1.paid_cents === 2000 + 2500, "S1: GET /admin/api/events ima paid_orders (2) in paid_cents (4500, brez ze vrnjenega)", eS1 && [eS1.paid_orders, eS1.paid_cents]);
-    const html = require("fs").readFileSync(require("path").join(__dirname, "..", "admin", "index.html"), "utf8");
-    assert(/window\.confirm\(besedilo\)/.test(html) && /x\.paid_orders/.test(html) && /VRNE v celoti/.test(html) && /status === "cancelled"/.test(html), "S1: admin panel pred »Umakni« pokaze potrditveno okno s stevilom placanih narocil");
+    // Od faze 1 panela (21. 10. 2026) je odpoved v admin/dogodki.js: lastno potrditveno okno (potrdi, ne window.confirm) s stevilom placanih narocil in vpisom.
+    const html = require("fs").readFileSync(require("path").join(__dirname, "..", "admin", "dogodki.js"), "utf8");
+    assert(/novo === "cancelled"/.test(html) && /s\.paid_orders/.test(html) && /denar samodejno v celoti nazaj/.test(html) && /vpis: "ODPOVEJ"/.test(html) && /await potrdi\(/.test(html),
+      "S1: admin panel pred odpovedjo pokaze potrditveno okno s stevilom placanih narocil");
 
     // S2: Stripe vracilo sprejme kot pending -> `potrditev`; izid z webhookom (succeeded -> opravljeno + mail »vrnili smo«; failed -> ni_uspelo + alarm) ali preverbo
     const evP = await dogodek("Pending noc", 2000);

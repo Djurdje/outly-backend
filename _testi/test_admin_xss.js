@@ -164,6 +164,36 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
   sprehod($("s_tabela"), (e) => { if (e.nodeType === 1 && e.tagName === "tr" && e.children.some(c => c.tagName === "td")) trsS.push(e); });
   assert(trsS.map(t => gumbov(t.children[t.children.length - 1])).join() === "1,1,0,0,0", "spori: gumb samo pri povrnitvi ni_uspelo/rocno", trsS.map(t => gumbov(t)));
 
+  // --- 5. moduli panela (faza 1, 21. 10. 2026: admin/dialog.js, admin/dogodki.js) in brez window.confirm ---
+  for (const ime of ["dialog.js", "dogodki.js"]) {
+    const kod = fs.readFileSync(path.join(__dirname, "..", "admin", ime), "utf8");
+    const k5 = [];
+    for (const m of kod.matchAll(NEVARNO)) {
+      const rep = kod.slice(m.index, m.index + 60);
+      if (/^\.innerHTML\s*=\s*(""|'')\s*[;,)}]/.test(rep)) continue;
+      k5.push(rep.split("\n")[0]);
+    }
+    assert(k5.length === 0, `admin/${ime}: brez innerHTML/outerHTML/insertAdjacentHTML/eval s podatki`, k5);
+    assert(!/\bconfirm\s*\(/.test(kod), `admin/${ime}: brez window.confirm (blokirajo ga orodja; panel ima svoje okno)`);
+  }
+  assert(!/\bconfirm\s*\(/.test(skripta), "admin/index.html: brez window.confirm (vse potrditve prek potrdi() iz dialog.js)");
+  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
+  // dialog.js: vsebina iz podatkov gre v DOM kot besedilo (izvajalno, lažni DOM)
+  {
+    const kod = fs.readFileSync(path.join(__dirname, "..", "admin", "dialog.js"), "utf8");
+    const body = new El("body"); body.classList = { add() {}, remove() {} };
+    const okno = { potrdi: null };
+    const docD = { createElement: (t) => new El(t), createTextNode: (t) => new Besedilo(t), body, activeElement: null, addEventListener() {}, removeEventListener() {} };
+    El.prototype.focus = function () {}; El.prototype.remove = function () {}; El.prototype.querySelectorAll = function () { return []; };
+    Object.defineProperty(El.prototype, "isConnected", { get() { return true; }, configurable: true });
+    new Function("window", "document", kod)(okno, docD);
+    mora(typeof okno.potrdi === "function", "dialog.js ne izvozi window.potrdi");
+    okno.potrdi({ naslov: ZLO[1], vsebina: ZLO[0], potrdiBesedilo: ZLO[2], vpis: "ODPOVEJ", razlog: "obvezen" });
+    const p5 = pregled(body);
+    assert(p5.elementi.every(t => new Set(["body", "div", "h3", "label", "input", "textarea", "button"]).has(t)), "dialog.js: nizi iz podatkov ne postanejo elementi", [...new Set(p5.elementi)]);
+    for (const z of [ZLO[0], ZLO[1], ZLO[2]]) assert(p5.besedila.includes(z), "dialog.js: niz konča kot besedilo: " + z);
+  }
+
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -199,6 +199,23 @@ async function pocakaj(fn, rokMs) {
       assert(r.koda === 1 && /MIGRACIJE_MAPA je dovoljena samo v testih/.test(r.izpis), `MIGRACIJE_MAPA z ${ime}=${v} -> zavrnjena (koda 1)`, r.izpis.slice(-200));
     }
     assert((await vnos("907_test_env.sql")) === 0 && (await stolpec("zaklep_test_i")) === 0, "nic od tega se ni dotaknilo baze");
+
+    fs.rmSync(path.join(mapa, "907_test_env.sql"));   // zavrnjena (ostala bi cakajoca)
+    console.log("\n# 8. Mrtva zanka (40P01) s hkratnim zahtevkom: migracija se ponovi kot pri lock_timeout (pregled #316 S1)");
+    // Drzalec ima orders, migracija vzame tickets in caka na orders (prva caka -> po deadlock_timeout 1 s je ona zrtev), drzalec nato zahteva tickets.
+    piši("909_test_deadlock.sql", "ALTER TABLE tickets ADD COLUMN zaklep_test_dl INT;\nALTER TABLE orders ADD COLUMN zaklep_test_dl INT;\n");
+    await drzalec.query("BEGIN"); await drzalec.query("LOCK TABLE orders IN ACCESS SHARE MODE");
+    const dlP = zaganjajMigracijo({ ...env, MIGRACIJA_LOCK_TIMEOUT: "5s", MIGRACIJA_PONOVITVE: "2", MIGRACIJA_PREMOR: "1000ms" }, 40000);
+    const migCakaOrders = await pocakaj(async () => (await ctrl.query(
+      "SELECT 1 FROM pg_stat_activity WHERE datname=$1 AND wait_event_type='Lock' AND query LIKE '%zaklep_test_dl%'", [IME_BAZE])).rowCount > 0, 10000);
+    assert(migCakaOrders, "migracija drzi tickets in caka na orders");
+    const drzBere = drzalec.query("SELECT count(*) FROM tickets").then(() => "ok", (e) => e.code);
+    const izidDrz = await drzBere;
+    await drzalec.query("ROLLBACK").catch(() => {});
+    const dl = await dlP;
+    assert(izidDrz === "ok", "hkratni zahtevek je dobil tickets (zrtev mrtve zanke je migracija)", izidDrz);
+    assert(/deadlock/i.test(dl.izpis) && /poskus 1\/3/.test(dl.izpis), "izpis: mrtva zanka, ponovni poskus", dl.izpis.slice(-400));
+    assert(dl.koda === 0 && (await vnos("909_test_deadlock.sql")) === 1, "migracija uspe v ponovnem poskusu (prej: PADLA ob 40P01)", { koda: dl.koda, izpis: dl.izpis.slice(-300) });
   } finally {
     for (const c of [drzalec, bralec, ctrl]) if (c) await c.end().catch(() => {});
     await vzd.query(`DROP DATABASE IF EXISTS ${IME_BAZE} WITH (FORCE)`).catch(() => {});
