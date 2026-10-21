@@ -306,7 +306,8 @@ async function nakupDovoljenje(req, res) {
   return true;
 }
 const NAKUP_ZASEDEN = "Server busy. Please try again.";
-function napakaZasedenosti(err) { return !!err && (err.code === "55P03" || err.code === "57014"); }   // lock_timeout / statement_timeout
+// lock_timeout / statement_timeout / mrtva zanka (40P01: Postgres je transakcijo prekinil in vrnil nazaj; ponovitev je varna, pregled #316 M10)
+function napakaZasedenosti(err) { return !!err && (err.code === "55P03" || err.code === "57014" || err.code === "40P01"); }
 // Middleware PRED omeji(): razprodan dogodek/miza dobi 409 brez porabe nakupnih poskusov (20/uro na IP) in brez semaforja.
 function zavrniRazprodano(req, res, next) {
   const id = celoId(req.params.id);
@@ -3248,6 +3249,8 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
         await c.query("ROLLBACK");
         return res.status(409).json(NAPAKA_DOGODEK_MINIL_DATUM);
       }
+      // Pavza (I53): izkljucen advisory zaklep dogodka PO zaklepu vrstice; nakupi in zapis seje ga vzamejo deljenega tik pred COMMIT-om (pavzaPredCommitom).
+      if (dovoljeno.sales_paused === true) await c.query("SELECT pg_advisory_xact_lock($1::int, $2::int)", [PAVZA_ZAKLEP_RAZRED, d.id]);
       const polja = Object.keys(dovoljeno).filter((k) => dovoljeno[k] !== undefined);
       const st = (await c.query(`SELECT ${polja.map((k) => `"${k}"`).join(", ")}, NOW() AS zdaj FROM events WHERE id = $1`, [d.id])).rows[0];
       prej = st;
@@ -4740,18 +4743,22 @@ async function nakupStripeSeja(res, d, { oid, opis, kolicina, cenaEnoteCents, ra
     let zapisano;
     try {
       // Samo cakajoce narocilo (055, I53): ce ga je pavza prodaje medtem preklicala, seje ne zapisemo in jo takoj zapremo (kupec ne dobi povezave).
-      // M1 (pregled #316): pavza se preveri V ISTI izjavi; FOR SHARE na vrstici dogodka pocaka na COMMIT hkratnega PATCH-a pavze (ta drzi FOR NO KEY UPDATE)
-      // in nato prebere svezo vrednost. Brez tega bi seja, zapisana tik po pavzi, ostala odprta (ponovni korak pavze je samo v pomnilniku procesa).
+      // M1 (pregled #316): pavza se preveri v ISTI izjavi kot zapis seje, v kratki transakciji z deljenim advisory zaklepom dogodka (kot pavzaPredCommitom):
+      // pocaka na COMMIT hkratne pavze, nato UPDATE prebere svezo vrednost. Brez tega bi seja, zapisana tik po pavzi, ostala odprta
+      // (ponovni korak pavze je samo v pomnilniku procesa). Zaklep pred vrstico narocila: pavza (ki preklice to narocilo) ne caka na nas.
+      await c2.query("BEGIN");
+      await c2.query("SELECT pg_advisory_xact_lock_shared($1::int, $2::int)", [PAVZA_ZAKLEP_RAZRED, eventId]);
       zapisano = (await c2.query(
         `UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4)
-          WHERE id=$1 AND status='pending' AND NOT (SELECT ev.sales_paused FROM events ev WHERE ev.id = orders.event_id FOR SHARE) RETURNING id`,
+          WHERE id=$1 AND status='pending' AND NOT (SELECT ev.sales_paused FROM events ev WHERE ev.id = orders.event_id) RETURNING id`,
         [oid, seja.id, seja.url, seja.expires_at])).rows.length;
       // Zavrnjeno: narocilo preklicemo (ce se caka; kupec ni placal nicesar, pristojbine ni) in sejo zabelezimo (pospravljalec jo najde, ce expire spodaj ne uspe).
       if (!zapisano) await c2.query(
         `UPDATE orders SET stripe_checkout_session_id = COALESCE(stripe_checkout_session_id, $2), checkout_expires_at = COALESCE(checkout_expires_at, to_timestamp($3)),
                 status = CASE WHEN status = 'pending' THEN 'cancelled' ELSE status END, cancelled_at = CASE WHEN status = 'pending' THEN NOW() ELSE cancelled_at END
           WHERE id=$1`, [oid, seja.id, seja.expires_at]);
-    } catch (e) { c2.release(e); c2 = null; throw e; }   // pokvarjene povezave ne vracamo v pool
+      await c2.query("COMMIT");
+    } catch (e) { await c2.query("ROLLBACK").catch(() => {}); c2.release(e); c2 = null; throw e; }   // pokvarjene povezave ne vracamo v pool
     if (!zapisano) {
       c2.release(); c2 = null;
       const sS = placilaStripe.stripe();
@@ -4911,11 +4918,20 @@ async function vstopniceNarocil(idsNarocil, db = pool) {
 // klub viden, dogodek se ne sme biti zacet, okno prodaje mora biti odprto.
 // Vrne [status, besedilo] ali null. zahtevajCeno: vstopnice potrebujejo ticket_price_cents
 // (dogodek z zunanjo prodajo nima vstopnic na Outlyju); mize ga ne rabijo.
-// M2 (pregled #316): zadnja preverba pavze tik pred COMMIT-om nakupa (vstopnice, gost, miza). FOR SHARE pocaka na COMMIT hkratne pavze (PATCH drzi
-// FOR NO KEY UPDATE) in prebere svezo vrednost; brez tega bi brezplacen/testni nakup (takoj `paid`), ki je dogodek prebral pred pavzo, uspel po njej.
-// Pri vstopnicah ima transakcija vrstico dogodka ze zaklenjeno (sprozilec rezerviraj_zalogo, FOR UPDATE), zato tam to ne caka. Vrne true, ce je ustavljena.
+// M2 (pregled #316): zadnja preverba pavze tik pred COMMIT-om nakupa (vstopnice, gost, miza): pocaka na COMMIT hkratne pavze in prebere svezo vrednost;
+// brez tega bi brezplacen/testni nakup (takoj `paid`), ki je dogodek prebral pred pavzo, uspel po njej. Vrne true, ce je ustavljena.
+// Zaklep je ADVISORY na dogodek (pregled #316 M10), ne vrstica `events`: deljen pri nakupu, izkljucen pri pavzi (PATCH ga vzame PO zaklepu vrstice dogodka).
+// Zaklep vrstice (FOR SHARE) bi se pri nakupu mize (drzi club_tables FOR SHARE) zaklenil s PUT /business/events/:id/vip (dogodek -> mize). Advisory razreda
+// PAVZA_ZAKLEP_RAZRED ne vzame nihce drug, nakup ga vzame ZADNJEGA, pavza pa ne caka na nic, kar drzi nakup -> brez mrtve zanke. Branje po zaklepu je nov stavek
+// (READ COMMITTED: svez posnetek), zato vidi commitano pavzo.
+const PAVZA_ZAKLEP_RAZRED = 73112;   // dvodelni advisory kljuc (razred, id dogodka); 73110 = cakajoca narocila
+// En krozni klic (dva stavka v enem sporocilu, preprost protokol): nakup vstopnic drzi vrstico dogodka (sprozilec zaloge) do COMMIT-a, zato vsak dodaten klic
+// podaljsa zaporedje nakupov (test_obremenitev). Vsak stavek ima v READ COMMITTED svoj posnetek: drugi vidi pavzo, commitano med cakanjem na zaklep.
 async function pavzaPredCommitom(c, eventId) {
-  const r = await c.query("SELECT sales_paused FROM events WHERE id = $1 FOR SHARE", [eventId]);
+  const id = Number(eventId);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error("pavzaPredCommitom: neveljaven id dogodka");
+  const izid = await c.query(`SELECT pg_advisory_xact_lock_shared(${PAVZA_ZAKLEP_RAZRED}, ${id}); SELECT sales_paused FROM events WHERE id = ${id}`);
+  const r = Array.isArray(izid) ? izid[izid.length - 1] : izid;
   return !!(r.rows[0] && r.rows[0].sales_paused);
 }
 // Pavza prodaje (055, I53): `sales_paused` velja za VSE nakupne poti (vstopnice, gost, VIP miza), ker vse klicejo to funkcijo. Klicatelj MORA brati
@@ -9138,10 +9154,9 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_layout_source, e.sales_paused,
               e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
-         FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1
-          -- M2 (I53): FOR SHARE vrstice dogodka PRED zaklepom mize: hkratna pavza (FOR NO KEY UPDATE) se zaporedi z nakupom (nakup vidi pavzo ali pavza vidi
-          -- narocilo). Vrstni red zaklepov dogodek -> miza je isti kot v PUT /business/events/:id/vip (brez mrtve zanke). Samo OF e: klub ostane nezaklenjen.
-          FOR SHARE OF e`, [id]);
+         FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
+    // Brez zaklepa dogodka tu (pregled #316 M10): zaklep vrstice dogodka PRED advisory zaklepi uporabnika (omejitevBrezplacnih/omejitevCakajocih) bi bil obraten
+    // vrstni red kot pri nakupu vstopnic (advisory, nato dogodek v sprozilcu) -> mrtva zanka istega kupca. Pavzo pred COMMIT-om preveri pavzaPredCommitom (M2).
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
     const e = er.rows[0];
     // Demo klub (050): 409 PRED mizo, zalogo in Stripom; izjema vloga admin.

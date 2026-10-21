@@ -2958,7 +2958,8 @@ COMMENT ON TABLE racuni_zaporedje IS 'Stevec zaporednih stevilk racunov po prost
 --   cilj_tip, cilj_id   npr. ('event', '35'); TEXT, da kasneje sprejme tudi druge cilje (order, user, club) brez migracije.
 --   prej, potem         JSONB objekta {polje: vrednost} samo s spremenjenimi polji.
 --
--- Zaklep: nova tabela nima tujih kljucev, zato ne zaklepa nobene obstojece tabele. ADD COLUMN z nespremenljivo privzeto vrednostjo je v PostgreSQL 16 samo
+-- Zaklep: nova tabela nima tujih kljucev, zato ne zaklepa nobene obstojece tabele; migracija se `orders` ne dotakne (indeksa za pospravljalec namenoma ni:
+-- CREATE INDEX ON orders bi drzal SHARE na orders, medtem ko ALTER events caka -> mrtva zanka z nakupom, pregled #316 S1). ADD COLUMN z nespremenljivo privzeto vrednostjo je v PostgreSQL 16 samo
 -- sprememba kataloga (brez prepisa tabele), a vzame kratek ACCESS EXCLUSIVE na `events`. Sken (skenPool, lock_timeout 1 s) ob tem vrne 503 + Retry-After in telefon preklopi na sken brez povezave (I16). migrate.js nastavi lock_timeout in
 -- migracijo ob izteku ponovi. Deploy ne med dogodkom.
 
@@ -2980,16 +2981,10 @@ CREATE INDEX IF NOT EXISTS admin_dejanja_cas_idx ON admin_dejanja (cas DESC);
 
 COMMENT ON TABLE admin_dejanja IS 'Dnevnik admin dejanj (055, admin panel faza 1): kdo, kdaj, kaj, prej/potem; vpis v isti transakciji kot sprememba. Brez osebnih podatkov kupcev.';
 
--- Pospravljalec (placila_stripe.js preveriPreklicane, I53): preklicana narocila s sejo brez placila, zadnjih 40 min. Delni indeks je majhen; gradnja vzame kratek
--- SHARE na `orders` (nakupi pocakajo za cas gradnje, pri danasnji velikosti manj kot sekunda).
-CREATE INDEX IF NOT EXISTS orders_preklic_seja_idx ON orders (cancelled_at)
-    WHERE status = 'cancelled' AND stripe_checkout_session_id IS NOT NULL AND stripe_payment_intent_id IS NULL;
-
 -- Stolpec na `events` ZADNJI: ACCESS EXCLUSIVE na events se drzi do COMMIT, zato pred njim ni nicesar, kar bi cakalo.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS sales_paused BOOLEAN NOT NULL DEFAULT FALSE;
 
 COMMENT ON COLUMN events.sales_paused IS 'Pavza prodaje (055): TRUE = nakup vstopnic, miz in gosta 409 »Ticket sales are paused.«, cena ostane; odprta placilna okna se zaprejo (I53).';
-
 
 -- =============================================================================
 -- Vpis v evidenco
@@ -3050,7 +3045,7 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('052_vracila_valuta.sql', '17794d8146de5e87'),
     ('053_vracila_iz_stripa.sql', '36d88020963c0bea'),
     ('054_racuni.sql', '4332d49a2e4b4cb0'),
-    ('055_pavza_prodaje_admin_dejanja.sql', 'cb8dfe5d74f06926')
+    ('055_pavza_prodaje_admin_dejanja.sql', '4484a2cbd89b9f33')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

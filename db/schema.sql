@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict PFESLWUz5AhKLkH1xfDvsiDn5F31HeoaTlgYDdqjdXXCsjDIMbHFezAyvdYMeTG
+\restrict 0wcyspXjwdY7PF7xgvFHhUamC3aelcdZwZFh557LZ4OcRVsvzSxXs1fVVIb3izp
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -2802,13 +2802,6 @@ CREATE UNIQUE INDEX orders_pi_key ON public.orders USING btree (stripe_payment_i
 
 
 --
--- Name: orders_preklic_seja_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX orders_preklic_seja_idx ON public.orders USING btree (cancelled_at) WHERE ((status = 'cancelled'::text) AND (stripe_checkout_session_id IS NOT NULL) AND (stripe_payment_intent_id IS NULL));
-
-
---
 -- Name: orders_public_ref_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3753,5 +3746,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict PFESLWUz5AhKLkH1xfDvsiDn5F31HeoaTlgYDdqjdXXCsjDIMbHFezAyvdYMeTG
+\unrestrict 0wcyspXjwdY7PF7xgvFHhUamC3aelcdZwZFh557LZ4OcRVsvzSxXs1fVVIb3izp
 

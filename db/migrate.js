@@ -234,9 +234,12 @@ async function glavno() {
           break;
         } catch (e) {
           await odjemalec.query("ROLLBACK").catch(() => {});
-          if (e.code === "55P03" && poskus < ponovitve) {
+          // 40P01 (deadlock_detected): Postgres je prekinil migracijo, ker se je zaklenila s hkratnim zahtevkom (npr. nakup); transakcija je vrnjena nazaj,
+          // ponovitev je varna enako kot pri lock_timeout (pregled #316 S1).
+          if ((e.code === "55P03" || e.code === "40P01") && poskus < ponovitve) {
             // Kratek izvoz ali poročilo naj ne podre deploya: počakamo in poskusimo znova (migracija je bila vrnjena nazaj).
-            console.log(`zaklep zaseden (lock timeout ${lockTimeout}), poskus ${poskus + 1}/${ponovitve + 1}; počakam ${premor}`);
+            console.log(e.code === "40P01" ? `mrtva zanka s hkratnim zahtevkom (deadlock), poskus ${poskus + 1}/${ponovitve + 1}; počakam ${premor}`
+              : `zaklep zaseden (lock timeout ${lockTimeout}), poskus ${poskus + 1}/${ponovitve + 1}; počakam ${premor}`);
             await spi(vMs(premor));
             process.stdout.write(`  → ${d} ... `);
             continue;

@@ -623,7 +623,9 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
   // M4 (pregled #316, I53): narocilo, ki smo ga preklicali PRED iztekom seje (pavza prodaje, izbris racuna, seja ustvarjena po preklicu), ima lahko pri Stripu
   // se odprto placilno okno (expire po COMMIT-u ni uspel ali proces se je vmes ponovno zagnal) ali placilo, katerega webhook se je izgubil. Enkrat (na proces)
   // vprasamo Stripe: odprta seja -> expire; placana -> zakljuci() (narocilo je cancelled: vstopnic ni, vracilo inactive_order, I37). Samo zadnjih 40 min
-  // (rok seje je 30 min); delni indeks orders_preklic_seja_idx (055). PREKLIC_PO_S: najmanj toliko po preklicu (da expire po COMMIT-u konca prvi).
+  // (rok seje je 30 min). Indeksa namenoma ni (pregled #316 S1: CREATE INDEX ON orders v migraciji z ALTER events = mrtva zanka z nakupom): poizvedba enkrat na 5 min
+  // je pri danasnji velikosti `orders` (tisoci vrstic) zanemarljiva (ob rasti: indeks v SAMOSTOJNI migraciji brez drugih zaklepov). PREKLIC_PO_S: najmanj toliko
+  // po preklicu (da expire po COMMIT-u konca prvi).
   const preverjeniPreklici = new Map();   // id narocila -> cas; samo koncni izid (expired/complete), zato napaka Stripa pomeni ponovitev ob naslednjem teku
   const PREKLIC_PO_S = Number.isFinite(Number(process.env.STRIPE_PREKLIC_PO_S)) ? Number(process.env.STRIPE_PREKLIC_PO_S) : 60;
   async function preveriPreklicane(s) {

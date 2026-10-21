@@ -22,6 +22,7 @@
  *  P13 (M2) brezplacen nakup (vstopnice, gost, miza), ki je dogodek prebral pred COMMIT-om pavze: 409, brez narocila (prej: paid vstopnice po pavzi)
  *  P14 (M4) pospravljalec: preklicano narocilo z odprto sejo -> seja zaprta; s placano sejo -> vracilo inactive_order, brez vstopnic
  *  P15 (M5) admin, ki je v nekem klubu vratar: PATCH tujega dogodka 200 (prej 403); vratar brez vloge admin ostane 403
+ *  P16 (M10) isti kupec hkrati kupuje vstopnico in VIP mizo istega dogodka (vec krogov): nikoli 500 (prej mrtva zanka 40P01 -> 500)
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -346,6 +347,18 @@ let srv = null, log = "";
     assert(o12 && o12.status === "cancelled" && o12.checkout_url === null, "narocilo cancelled, brez checkout_url (kupec ne dobi povezave)", o12);
     assert(o12 && o12.seja && await cakajPogoj(() => S.potekle.includes(o12.seja), 3000), "seja zabelezena in zaprta pri Stripu", { o12, potekle: S.potekle });
 
+    console.log("\n# P12b (M1): pavza prek PATCH, medtem ko je nakup mize v Stripu (narocilo preklice pavza, seja se ne zapise)");
+    const E12b = await dogodekC("M1b noc", 1500);
+    await pool.query("TRUNCATE omejitve");
+    S.zamik = 1200;
+    const p12b = api("POST", `/events/${E12b}/tables/1/orders`, T.dana, {});
+    assert(await cakajPogoj(() => S.vLetu >= 1, 5000), "nakup mize v klicu Stripa");
+    r = await api("PATCH", `/events/${E12b}`, T.admin, { salesPaused: true });
+    assert(r.status === 200, "PATCH pavze med nakupom -> 200 (ne caka na Stripe)", r.status);
+    const r12b = await p12b; S.zamik = 0;
+    const o12b = (await pool.query("SELECT status, checkout_url FROM orders WHERE event_id = $1", [E12b])).rows[0];
+    assert(r12b.status === 409 && o12b.status === "cancelled" && o12b.checkout_url === null, "nakup 409, narocilo cancelled, brez povezave", { r12b, o12b });
+
     console.log("\n# P13 (M2): brezplacen nakup, ki je dogodek prebral pred COMMIT-om pavze");
     for (const [ime, kupi] of [
       ["vstopnice", (ev) => api("POST", `/events/${ev}/orders`, T.dana, { quantity: 1 })],
@@ -357,7 +370,9 @@ let srv = null, log = "";
       await pool.query("TRUNCATE omejitve");
       const cz = await pool.connect();
       await cz.query("BEGIN");
-      await cz.query("SELECT 1 FROM events WHERE id = $1 FOR NO KEY UPDATE", [ev]);   // kot PATCH pavze: zaklep vrstice, pavza se ni commitana
+      // kot PATCH pavze (index.js): zaklep vrstice, nato izkljucen advisory zaklep dogodka (razred 73112), pavza se ni commitana
+      await cz.query("SELECT 1 FROM events WHERE id = $1 FOR NO KEY UPDATE", [ev]);
+      await cz.query("SELECT pg_advisory_xact_lock(73112, $1::int)", [ev]);
       await cz.query("UPDATE events SET sales_paused = TRUE WHERE id = $1", [ev]);
       const pr = kupi(ev);
       await pocakaj(600);
@@ -396,6 +411,22 @@ let srv = null, log = "";
     assert(r.status === 403, "vratar kluba (brez vloge admin) -> 403 kot doslej (I5)", r);
     r = await api("DELETE", `/events/${E14}`, T.ana);
     assert(r.status === 403, "vratar DELETE -> 403", r);
+
+    console.log("\n# P16 (M10): hkraten nakup vstopnice in mize istega kupca");
+    const statusi = [];
+    for (let krog = 0; krog < 12; krog++) {
+      const ev = await dogodekC("M10 " + krog, krog % 2 ? 0 : 1500);
+      if (krog % 2) await pool.query("INSERT INTO event_tables (event_id, table_id, price_cents) VALUES ($1, 1, 0)", [ev]);
+      await pool.query("TRUNCATE omejitve");
+      const [a, b] = await Promise.all([
+        api("POST", `/events/${ev}/tables/1/orders`, T.cene, {}),
+        api("POST", `/events/${ev}/orders`, T.cene, { quantity: 1 }),
+      ]);
+      statusi.push(a.status, b.status);
+      await pool.query("UPDATE orders SET status = 'cancelled', cancelled_at = NOW() WHERE event_id = $1 AND status = 'pending'", [ev]);
+    }
+    assert(statusi.every((x) => [201, 409, 503].includes(x)) && !statusi.includes(500), "nikoli 500 (samo 201/409/503)", statusi);
+    assert(!/deadlock detected/.test(log) || /503/.test(statusi.join()), "mrtva zanka ne pride do kupca kot 500", (log.match(/deadlock detected/g) || []).length);
   } catch (e) {
     fail++; console.error("NAPAKA TESTA:", e);
   } finally {
