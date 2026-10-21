@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict aDR5GNN2WizqfAn6258Yb9Far0FEsbozwlHNbzFSJk6IZGCRY5DkbYNgeo819cd
+\restrict 95cUH65dV4u9GCz1pGUzIPv8ZiZjvUObMEwWACJ8VeeYtNuj9VN7cWR81Jca6Ft
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -53,6 +53,13 @@ CREATE FUNCTION public.racuni_varuj() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
+  -- Nova vrstica je vedno samo dolg (`caka`, brez stevilke, ZOI, EOR): stevilka pride IZKLJUCNO iz stevca (spodaj, prehod caka -> izdan).
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.stanje <> 'caka' OR NEW.stevilka IS NOT NULL OR NEW.zoi IS NOT NULL OR NEW.eor IS NOT NULL OR NEW.ponudnik_id IS NOT NULL OR NEW.naknadno THEN
+      RAISE EXCEPTION 'racuni: nov racun mora biti v stanju caka brez stevilke, ZOI in EOR' USING ERRCODE = 'restrict_violation';
+    END IF;
+    RETURN NEW;
+  END IF;
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'racuni: brisanje racuna % ni dovoljeno (ZDavP-2 38/8, hramba 10 let)', OLD.id USING ERRCODE = 'restrict_violation';
   END IF;
@@ -65,6 +72,11 @@ BEGIN
   IF OLD.stevilka IS NOT NULL AND (NEW.prostor IS DISTINCT FROM OLD.prostor OR NEW.naprava IS DISTINCT FROM OLD.naprava
      OR NEW.leto IS DISTINCT FROM OLD.leto OR NEW.stevilka IS DISTINCT FROM OLD.stevilka OR NEW.izdan_at IS DISTINCT FROM OLD.izdan_at) THEN
     RAISE EXCEPTION 'racuni: stevilke in casa izdaje izdanega racuna % ni dovoljeno spreminjati (ZDavP-2 38/8)', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  -- Dodelitev stevilke (NULL -> N): N mora biti trenutna vrednost stevca istega prostora, naprave in leta (stevec se v isti transakciji poveca za 1, racuni_zaporedje_varuj).
+  IF OLD.stevilka IS NULL AND NEW.stevilka IS NOT NULL AND NOT EXISTS (
+       SELECT 1 FROM racuni_zaporedje z WHERE z.prostor = NEW.prostor AND z.naprava = NEW.naprava AND z.leto = NEW.leto AND z.zadnja = NEW.stevilka) THEN
+    RAISE EXCEPTION 'racuni: stevilka % racuna % ni trenutna vrednost stevca (% % %)', NEW.stevilka, OLD.id, NEW.prostor, NEW.naprava, NEW.leto USING ERRCODE = 'restrict_violation';
   END IF;
   IF (OLD.zoi IS NOT NULL AND NEW.zoi IS DISTINCT FROM OLD.zoi) OR (OLD.eor IS NOT NULL AND NEW.eor IS DISTINCT FROM OLD.eor)
      OR (OLD.ponudnik IS NOT NULL AND NEW.ponudnik IS DISTINCT FROM OLD.ponudnik) OR (OLD.ponudnik_id IS NOT NULL AND NEW.ponudnik_id IS DISTINCT FROM OLD.ponudnik_id)
@@ -86,6 +98,12 @@ CREATE FUNCTION public.racuni_zaporedje_varuj() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.zadnja <> 0 THEN
+      RAISE EXCEPTION 'racuni_zaporedje: nov stevec % % % se zacne z 0 (prva stevilka je 1)', NEW.prostor, NEW.naprava, NEW.leto USING ERRCODE = 'restrict_violation';
+    END IF;
+    RETURN NEW;
+  END IF;
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'racuni_zaporedje: brisanje stevca ni dovoljeno' USING ERRCODE = 'restrict_violation';
   END IF;
@@ -3031,14 +3049,14 @@ CREATE TRIGGER orders_sprosti AFTER UPDATE OF status ON public.orders FOR EACH R
 -- Name: racuni racuni_varuj; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER racuni_varuj BEFORE DELETE OR UPDATE ON public.racuni FOR EACH ROW EXECUTE FUNCTION public.racuni_varuj();
+CREATE TRIGGER racuni_varuj BEFORE INSERT OR DELETE OR UPDATE ON public.racuni FOR EACH ROW EXECUTE FUNCTION public.racuni_varuj();
 
 
 --
 -- Name: racuni_zaporedje racuni_zaporedje_varuj; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER racuni_zaporedje_varuj BEFORE DELETE OR UPDATE ON public.racuni_zaporedje FOR EACH ROW EXECUTE FUNCTION public.racuni_zaporedje_varuj();
+CREATE TRIGGER racuni_zaporedje_varuj BEFORE INSERT OR DELETE OR UPDATE ON public.racuni_zaporedje FOR EACH ROW EXECUTE FUNCTION public.racuni_zaporedje_varuj();
 
 
 --
@@ -3629,5 +3647,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict aDR5GNN2WizqfAn6258Yb9Far0FEsbozwlHNbzFSJk6IZGCRY5DkbYNgeo819cd
+\unrestrict 95cUH65dV4u9GCz1pGUzIPv8ZiZjvUObMEwWACJ8VeeYtNuj9VN7cWR81Jca6Ft
 

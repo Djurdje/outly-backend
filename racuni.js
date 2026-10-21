@@ -243,7 +243,7 @@ function semafor(n) {
 // ROLLBACK vrne oboje (brez lukenj). Cas izdaje = ura PO zaklepu stevca, zato si stevilke in casi sledijo v istem vrstnem redu.
 async function izdajVTransakciji(c, id, { prostor = PROSTOR, naprava = NAPRAVA } = {}) {
   const r = (await c.query(
-    `SELECT r.id, r.vrsta, r.stanje, ref.stevilka AS ref_stevilka FROM racuni r LEFT JOIN racuni ref ON ref.id = r.ref_racun_id WHERE r.id = $1 FOR UPDATE OF r`, [id])).rows[0];
+    `SELECT r.id, r.vrsta, r.stanje, ref.stevilka AS ref_stevilka FROM racuni r LEFT JOIN racuni ref ON ref.id = r.ref_racun_id WHERE r.id = $1 FOR NO KEY UPDATE OF r`, [id])).rows[0];   // NO KEY: ne caka na / ne blokira FK (KEY SHARE) ob vpisu dobropisa v webhooku
   if (!r) return { stanje: "ni" };
   if (r.stanje !== "caka") return { stanje: r.stanje };
   if (r.vrsta === "dobropis" && (r.ref_stevilka === null || r.ref_stevilka === undefined)) return { stanje: "odlozeno" };   // nikoli pred izvirnim racunom
@@ -322,15 +322,19 @@ function ustvari({ pool, env = process.env }) {
     if (!pz || pz.vrstica.stanje !== "izdan") { await sprosti(id); return; }
     const r = pz.vrstica;
     if (r.vrsta === "dobropis" && r.ref_stanje !== "potrjen") {   // dobropis gre ponudniku sele po potrjenem izvirnem racunu
-      await sprosti(id, ", naslednji_poskus_at = NOW() + ($2::bigint * INTERVAL '1 millisecond')", [ODLOG_MS]);
+      // izvirni racun v `napaka` (rocna obravnava): dobropis caka redkeje (alarm za racun ze tece), sicer ODLOG_MS
+      await sprosti(id, ", naslednji_poskus_at = NOW() + ($2::bigint * INTERVAL '1 millisecond')", [r.ref_stanje === "napaka" ? Math.max(ODLOG_MS, 600000) : ODLOG_MS]);
       return;
     }
     let izid;
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), ROK_MS);
-    try { izid = await klici(() => ponudnik.potrdi(pz.podatki, { signal: ctl.signal })); }   // brez drzane povezave
-    catch (e) { izid = { napaka: e }; }
-    finally { clearTimeout(t); }
+    try {
+      // Brez drzane povezave. Rok tece sele, ko klic dobi mesto v semaforju (sicer bi klic, ki caka v vrsti dlje od roka, padel, preden bi bil poslan).
+      izid = await klici(async () => {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), ROK_MS);
+        try { return await ponudnik.potrdi(pz.podatki, { signal: ctl.signal }); } finally { clearTimeout(t); }
+      });
+    } catch (e) { izid = { napaka: e }; }
     if (!izid || izid.napaka) {
       const e = (izid && izid.napaka) || new Error("prazen odgovor");
       const trajna = e instanceof NapakaPonudnika && e.trajna;
@@ -375,7 +379,7 @@ function ustvari({ pool, env = process.env }) {
       `UPDATE racuni SET prevzeto_at = NOW()
         WHERE id IN (SELECT id FROM racuni WHERE stanje IN ('caka', 'izdan') AND naslednji_poskus_at <= NOW()
                        AND (prevzeto_at IS NULL OR prevzeto_at < NOW() - ($2::bigint * INTERVAL '1 millisecond'))
-                     ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED)
+                     ORDER BY id LIMIT $1 FOR NO KEY UPDATE SKIP LOCKED)
         RETURNING id`, [n, ZASTARELO_MS]);
     return r.rows.map((x) => Number(x.id)).sort((a, b) => a - b);
   }

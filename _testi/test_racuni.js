@@ -17,6 +17,7 @@
  *   7  ~200 hkratnih izdaj (tretjina razveljavljenih transakcij): stevilke 1..N brez vrzeli in brez dvojnikov; cas izdaje sledi stevilki
  *   8  I16: ponudnik visi -> webhook, nakup in sken ostanejo hitri, potrdilo kupcu pride, nobena povezava ne caka v transakciji med klicem ponudnika;
  *      vse stevilke A001-1 so na koncu neprekinjene
+ *   9  rok klica ponudnika tece sele po mestu v semaforju (cakanje v vrsti ne porabi poskusa)
  */
 const crypto = require("crypto");
 const fs = require("fs");
@@ -88,6 +89,7 @@ const ponudnikServer = http.createServer((req, res) => {
     const uspeh = () => odg(200, { eor: crypto.randomUUID(), zoi: crypto.createHash("md5").update(String(p.message_id)).digest("hex"), ponudnik_id: "doc-" + p.id });
     if (nacin && typeof nacin === "object" && nacin.zacasna > 0) { nacin.zacasna--; klic.izid = "zacasna"; return odg(503, { error: "busy" }); }
     if (nacin === "trajna") { klic.izid = "trajna"; return odg(400, { error: "invalid invoice" }); }
+    if (nacin === "pocasi") { klic.izid = "ok"; return setTimeout(uspeh, 250); }
     if (nacin === "visi") {
       klic.izid = "visi";
       const t = setTimeout(() => odg(503, { error: "timeout" }), 10000);
@@ -442,6 +444,17 @@ async function ustavi(o) { if (!o || o.srv.exitCode !== null) return; const kone
     const napakaVr = (await racuniNarocila(o5.id))[0];
     assert(await zavrne("UPDATE racuni SET stanje = 'caka', stevilka = NULL, izdan_at = NULL, prostor = NULL, naprava = NULL, leto = NULL WHERE id=$1", [napakaVr.id]) === true, "izdan racun nazaj v caka (brez stevilke) -> zavrnjeno");
     assert(await zavrne("UPDATE racuni SET zadnja_napaka = 'opomba admina' WHERE id=$1", [napakaVr.id]) === false, "sprememba polja vrste dela (zadnja_napaka) je dovoljena");
+    assert(await zavrne(`INSERT INTO racuni (order_id, vrsta, znesek_cents, stanje, prostor, naprava, leto, stevilka, izdan_at) VALUES ($1, 'racun', 100, 'izdan', 'A001', '1', 2026, 999, NOW())`, [n0.body.order.id]) === true,
+      "INSERT racuna z ze dodeljeno stevilko (mimo stevca) -> zavrnjeno");
+    assert(await zavrne("INSERT INTO racuni_zaporedje (prostor, naprava, leto, zadnja) VALUES ('Z9', '9', 2030, 5)") === true, "nov stevec, ki ne zacne z 0 -> zavrnjeno");
+    {
+      const caka = (await pool.query("INSERT INTO racuni (order_id, vrsta, znesek_cents, naslednji_poskus_at) VALUES ($1, 'racun', 100, NOW() + INTERVAL '30 days') RETURNING id", [star])).rows[0].id;
+      const leto = (await pool.query("SELECT leto, zadnja FROM racuni_zaporedje WHERE prostor='A001' AND naprava='1' ORDER BY leto DESC LIMIT 1")).rows[0];
+      assert(await zavrne("UPDATE racuni SET stanje='izdan', prostor='A001', naprava='1', leto=$2, stevilka=$3, izdan_at=NOW() WHERE id=$1", [caka, leto.leto, Number(leto.zadnja) + 5]) === true,
+        "rocna dodelitev stevilke, ki ni vrednost stevca (luknja) -> zavrnjeno");
+      assert(await zavrne("UPDATE racuni SET stanje='izdan', prostor='A001', naprava='1', leto=$2, stevilka=$3, izdan_at=NOW() WHERE id=$1", [caka, leto.leto, Number(leto.zadnja)]) !== false,
+        "rocna dodelitev ze uporabljene stevilke stevca (dvojnik) -> zavrnjeno (unikat 23505)");
+    }
     assert((await pool.query("SELECT 1 FROM racuni WHERE id=$1 AND stevilka=$2", [izd.id, izd.stevilka])).rowCount === 1, "racun ostane nespremenjen");
 
     // ================================================================
@@ -542,6 +555,25 @@ async function ustavi(o) { if (!o || o.srv.exitCode !== null) return; const kone
       const okLeta = leta.every((l) => { const s = vse.filter((x) => x.leto === l).map((x) => Number(x.stevilka)); return s.every((n, i) => n === i + 1) && Number(zap.rows.find((z) => z.leto === l).zadnja) === s.length; });
       assert(vse.length >= 15 && okLeta, `A001-1: ${vse.length} racunov in dobropisov v enem zaporedju 1..N brez vrzeli, stevec = N`, vse.map((x) => x.stevilka));
       assert(!/TypeError|ReferenceError/.test(A.log), "A: v dnevniku ni izjem", A.log.split("\n").filter((l) => /TypeError|ReferenceError/.test(l)).slice(0, 3));
+    }
+
+    // ================================================================
+    console.log("\n# 9. Rok klica tece sele po mestu v semaforju (regresija, pregled PR #315)");
+    {
+      await ustavi(A);   // delavec procesa A ne sme prevzemati teh vrstic
+      // 3 racuni v vrsti, ponudnik odgovori v 250 ms, en hkraten klic, rok 400 ms: tretji caka v vrsti ~500 ms (> rok), a mora biti poslan in potrjen v PRVEM poskusu.
+      const ref9 = [], id9 = [];
+      for (let i = 0; i < 3; i++) {
+        const o = (await pool.query(`INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, status, paid_at, buyer_email, stripe_account_id)
+          VALUES ($1, (SELECT id FROM users WHERE email='cene@outly.si'), $2, 2, 1, 100, 100, 'paid', NOW(), 'cene@outly.si', 'platform') RETURNING id, public_ref`, ["OUT-SEM" + i, evO])).rows[0];
+        await pool.query("INSERT INTO racuni (order_id, vrsta, znesek_cents) VALUES ($1, 'racun', 100)", [o.id]);
+        ref9.push(o.public_ref); id9.push(o.id); P.nacin[o.public_ref] = "pocasi";
+      }
+      const w9 = racuni.ustvari({ pool, env: { RACUNI_PONUDNIK: "lazni", RACUNI_LAZNI_URL: `http://127.0.0.1:${PONUDNIK_PORT}/potrdi`, RACUNI_VZPOREDNO: "1", RACUNI_DB_VZPOREDNO: "3", RACUNI_ROK_MS: "400", RACUNI_TICK_MS: "0", RACUNI_PREMOR_MS: "60000" } });
+      await w9.tek();
+      const st9 = (await pool.query("SELECT stanje, poskusi, naknadno FROM racuni WHERE order_id = ANY($1::bigint[]) ORDER BY order_id", [id9])).rows;
+      assert(st9.every((x) => x.stanje === "potrjen" && x.poskusi === 0 && x.naknadno === false) && ref9.every((r) => klicaZa(r).length === 1),
+        "en hkraten klic, 3 racuni v vrsti: vsi potrjeni v prvem poskusu, vsak natanko en klic (rok ne tece med cakanjem v vrsti)", [st9, ref9.map((r) => klicaZa(r).length)]);
     }
   } catch (e) {
     fail++; console.error("NAPAKA TESTA:", e);

@@ -23,6 +23,7 @@
 -- Na racunu NI e-naslova ali imena kupca (poenostavljeni racun potrosniku, hramba 10 let; pravna analiza 20. 10. 2026, 4.1/12).
 -- RESTRICT: racun je racunovodski dokument (kot vracila -> orders); narocila se anonimizirajo, ne brisejo.
 -- Brisanje vrstic in sprememba izdanih polj: sprozilec zavrne (ZDavP-2 38/8: program ne sme omogocati spreminjanja zapisov brez hrambe izvornih podatkov).
+-- Nova vrstica je samo `caka` (brez stevilke, ZOI, EOR); stevilka se dodeli samo kot trenutna vrednost stevca (ki se v isti transakciji poveca za 1).
 -- TRUNCATE sprozilec NE zavrne (testne skripte praznijo `orders ... CASCADE`); v produkciji ga nobena pot ne izvaja.
 --
 -- Zaklep: nove tabele; REFERENCES orders vzame kratek SHARE ROW EXCLUSIVE na `orders` (kot 053). Obstojece vrstice se ne spreminjajo.
@@ -83,9 +84,16 @@ CREATE INDEX IF NOT EXISTS racuni_ref_idx ON racuni (ref_racun_id) WHERE ref_rac
 -- Vrsta dela delavca (racuni.js): samo nedokoncane vrstice.
 CREATE INDEX IF NOT EXISTS racuni_delo_idx ON racuni (naslednji_poskus_at, id) WHERE stanje IN ('caka', 'izdan');
 
--- Hramba (ZDavP-2 38/8): brez brisanja; izdana polja se zapisejo enkrat in se ne spreminjajo; potrjen je koncno stanje.
+-- Hramba (ZDavP-2 38/8): brez brisanja; izdana polja se zapisejo enkrat in se ne spreminjajo; potrjen je koncno stanje; stevilka samo iz stevca.
 CREATE OR REPLACE FUNCTION racuni_varuj() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  -- Nova vrstica je vedno samo dolg (`caka`, brez stevilke, ZOI, EOR): stevilka pride IZKLJUCNO iz stevca (spodaj, prehod caka -> izdan).
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.stanje <> 'caka' OR NEW.stevilka IS NOT NULL OR NEW.zoi IS NOT NULL OR NEW.eor IS NOT NULL OR NEW.ponudnik_id IS NOT NULL OR NEW.naknadno THEN
+      RAISE EXCEPTION 'racuni: nov racun mora biti v stanju caka brez stevilke, ZOI in EOR' USING ERRCODE = 'restrict_violation';
+    END IF;
+    RETURN NEW;
+  END IF;
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'racuni: brisanje racuna % ni dovoljeno (ZDavP-2 38/8, hramba 10 let)', OLD.id USING ERRCODE = 'restrict_violation';
   END IF;
@@ -99,6 +107,11 @@ BEGIN
      OR NEW.leto IS DISTINCT FROM OLD.leto OR NEW.stevilka IS DISTINCT FROM OLD.stevilka OR NEW.izdan_at IS DISTINCT FROM OLD.izdan_at) THEN
     RAISE EXCEPTION 'racuni: stevilke in casa izdaje izdanega racuna % ni dovoljeno spreminjati (ZDavP-2 38/8)', OLD.id USING ERRCODE = 'restrict_violation';
   END IF;
+  -- Dodelitev stevilke (NULL -> N): N mora biti trenutna vrednost stevca istega prostora, naprave in leta (stevec se v isti transakciji poveca za 1, racuni_zaporedje_varuj).
+  IF OLD.stevilka IS NULL AND NEW.stevilka IS NOT NULL AND NOT EXISTS (
+       SELECT 1 FROM racuni_zaporedje z WHERE z.prostor = NEW.prostor AND z.naprava = NEW.naprava AND z.leto = NEW.leto AND z.zadnja = NEW.stevilka) THEN
+    RAISE EXCEPTION 'racuni: stevilka % racuna % ni trenutna vrednost stevca (% % %)', NEW.stevilka, OLD.id, NEW.prostor, NEW.naprava, NEW.leto USING ERRCODE = 'restrict_violation';
+  END IF;
   IF (OLD.zoi IS NOT NULL AND NEW.zoi IS DISTINCT FROM OLD.zoi) OR (OLD.eor IS NOT NULL AND NEW.eor IS DISTINCT FROM OLD.eor)
      OR (OLD.ponudnik IS NOT NULL AND NEW.ponudnik IS DISTINCT FROM OLD.ponudnik) OR (OLD.ponudnik_id IS NOT NULL AND NEW.ponudnik_id IS DISTINCT FROM OLD.ponudnik_id)
      OR (OLD.potrjen_at IS NOT NULL AND NEW.potrjen_at IS DISTINCT FROM OLD.potrjen_at) THEN
@@ -111,11 +124,17 @@ BEGIN
 END $$;
 
 DROP TRIGGER IF EXISTS racuni_varuj ON racuni;
-CREATE TRIGGER racuni_varuj BEFORE UPDATE OR DELETE ON racuni FOR EACH ROW EXECUTE FUNCTION racuni_varuj();
+CREATE TRIGGER racuni_varuj BEFORE INSERT OR UPDATE OR DELETE ON racuni FOR EACH ROW EXECUTE FUNCTION racuni_varuj();
 
--- Stevec brez lukenj: samo +1 (ali brez spremembe), kljuci se ne spreminjajo, brez brisanja.
+-- Stevec brez lukenj: zacne z 0, samo +1 (ali brez spremembe), kljuci se ne spreminjajo, brez brisanja.
 CREATE OR REPLACE FUNCTION racuni_zaporedje_varuj() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.zadnja <> 0 THEN
+      RAISE EXCEPTION 'racuni_zaporedje: nov stevec % % % se zacne z 0 (prva stevilka je 1)', NEW.prostor, NEW.naprava, NEW.leto USING ERRCODE = 'restrict_violation';
+    END IF;
+    RETURN NEW;
+  END IF;
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'racuni_zaporedje: brisanje stevca ni dovoljeno' USING ERRCODE = 'restrict_violation';
   END IF;
@@ -127,7 +146,7 @@ BEGIN
 END $$;
 
 DROP TRIGGER IF EXISTS racuni_zaporedje_varuj ON racuni_zaporedje;
-CREATE TRIGGER racuni_zaporedje_varuj BEFORE UPDATE OR DELETE ON racuni_zaporedje FOR EACH ROW EXECUTE FUNCTION racuni_zaporedje_varuj();
+CREATE TRIGGER racuni_zaporedje_varuj BEFORE INSERT OR UPDATE OR DELETE ON racuni_zaporedje FOR EACH ROW EXECUTE FUNCTION racuni_zaporedje_varuj();
 
 COMMENT ON TABLE racuni IS 'Davcno potrjeni racuni in dobropisi NEXT DIMENSIONS za lastne dogodke Outly (054, ZDavPR): dolg ob placilu, stevilka A001-1-N in potrditev v ozadju (racuni.js). Brez brisanja (ZDavP-2 38/8).';
 COMMENT ON TABLE racuni_zaporedje IS 'Stevec zaporednih stevilk racunov po prostoru, napravi in poslovnem letu (054). Brez lukenj: vrstica, zaklenjena v transakciji izdaje, ne SEQUENCE.';
