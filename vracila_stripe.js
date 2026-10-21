@@ -133,7 +133,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
     if (v.razlog !== "event_cancelled") return;
     await vTransakciji(async (c) => {
       const o = (await c.query("SELECT id, public_ref, total_cents, refunded_cents, status FROM orders WHERE id = $1 FOR UPDATE", [v.order_id])).rows[0];
-      if (o && ["paid", "partially_refunded", "refunded"].includes(o.status)) await placila.uveljaviVracilo(c, o, o.total_cents, null);
+      if (o && ["paid", "partially_refunded", "refunded"].includes(o.status)) await placila.uveljaviVracilo(c, o, o.total_cents, null, v.stripe_vracilo_id || null);   // I52: vir dobropisa = nase Stripovo vracilo
     });
   }
 
@@ -146,7 +146,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
         const z = await c.query("SELECT 1 FROM vracila WHERE id = $1 AND stanje = ANY($2::text[]) FOR UPDATE", [v.id, samoIzStanj]);
         if (!z.rowCount) return false;
       }
-      if (v.razlog === "event_cancelled" && o && ["paid", "partially_refunded", "refunded"].includes(o.status)) await placila.uveljaviVracilo(c, o, o.total_cents, null);
+      if (v.razlog === "event_cancelled" && o && ["paid", "partially_refunded", "refunded"].includes(o.status)) await placila.uveljaviVracilo(c, o, o.total_cents, null, v.stripe_vracilo_id || null);
       await c.query(
         `UPDATE vracila SET stanje = 'opravljeno', opravljeno_at = NOW(), napaka = $2, znesek_cents = $3, brez_stripa = $4${samoIzStanj ? ", ni_izvedeno_od_at = NULL" : ""} WHERE id = $1`,
         [v.id, opomba || null, znesek, !!brezStripa]);

@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–053, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–054, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict d0k4WGNvcxckVa5hmFnddAXUsEzpbfWo8hhEggE72t1Ec62Bxs9RIg4VBnR5aLg
+\restrict aDR5GNN2WizqfAn6258Yb9Far0FEsbozwlHNbzFSJk6IZGCRY5DkbYNgeo819cd
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -43,6 +43,58 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 --
 
 COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+--
+-- Name: racuni_varuj(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.racuni_varuj() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'racuni: brisanje racuna % ni dovoljeno (ZDavP-2 38/8, hramba 10 let)', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id OR NEW.order_id IS DISTINCT FROM OLD.order_id OR NEW.vrsta IS DISTINCT FROM OLD.vrsta
+     OR NEW.ref_racun_id IS DISTINCT FROM OLD.ref_racun_id OR NEW.vir IS DISTINCT FROM OLD.vir
+     OR NEW.znesek_cents IS DISTINCT FROM OLD.znesek_cents OR NEW.valuta IS DISTINCT FROM OLD.valuta
+     OR NEW.message_id IS DISTINCT FROM OLD.message_id OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'racuni: osnovnih podatkov racuna % ni dovoljeno spreminjati', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF OLD.stevilka IS NOT NULL AND (NEW.prostor IS DISTINCT FROM OLD.prostor OR NEW.naprava IS DISTINCT FROM OLD.naprava
+     OR NEW.leto IS DISTINCT FROM OLD.leto OR NEW.stevilka IS DISTINCT FROM OLD.stevilka OR NEW.izdan_at IS DISTINCT FROM OLD.izdan_at) THEN
+    RAISE EXCEPTION 'racuni: stevilke in casa izdaje izdanega racuna % ni dovoljeno spreminjati (ZDavP-2 38/8)', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF (OLD.zoi IS NOT NULL AND NEW.zoi IS DISTINCT FROM OLD.zoi) OR (OLD.eor IS NOT NULL AND NEW.eor IS DISTINCT FROM OLD.eor)
+     OR (OLD.ponudnik IS NOT NULL AND NEW.ponudnik IS DISTINCT FROM OLD.ponudnik) OR (OLD.ponudnik_id IS NOT NULL AND NEW.ponudnik_id IS DISTINCT FROM OLD.ponudnik_id)
+     OR (OLD.potrjen_at IS NOT NULL AND NEW.potrjen_at IS DISTINCT FROM OLD.potrjen_at) THEN
+    RAISE EXCEPTION 'racuni: ZOI, EOR in podatkov ponudnika racuna % ni dovoljeno spreminjati', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF (OLD.stanje <> 'caka' AND NEW.stanje = 'caka') OR (OLD.stanje = 'potrjen' AND NEW.stanje <> 'potrjen') OR (OLD.naknadno AND NOT NEW.naknadno) THEN
+    RAISE EXCEPTION 'racuni: nedovoljen prehod stanja racuna % (% -> %)', OLD.id, OLD.stanje, NEW.stanje USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+
+
+--
+-- Name: racuni_zaporedje_varuj(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.racuni_zaporedje_varuj() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'racuni_zaporedje: brisanje stevca ni dovoljeno' USING ERRCODE = 'restrict_violation';
+  END IF;
+  IF NEW.prostor IS DISTINCT FROM OLD.prostor OR NEW.naprava IS DISTINCT FROM OLD.naprava OR NEW.leto IS DISTINCT FROM OLD.leto
+     OR NEW.zadnja NOT IN (OLD.zadnja, OLD.zadnja + 1) THEN
+    RAISE EXCEPTION 'racuni_zaporedje: stevec % % % se sme samo povecati za 1 (% -> %)', OLD.prostor, OLD.naprava, OLD.leto, OLD.zadnja, NEW.zadnja USING ERRCODE = 'restrict_violation';
+  END IF;
+  RETURN NEW;
+END $$;
 
 
 --
@@ -1129,6 +1181,101 @@ ALTER SEQUENCE public.orders_id_seq OWNED BY public.orders.id;
 
 
 --
+-- Name: racuni; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.racuni (
+    id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    vrsta text NOT NULL,
+    ref_racun_id bigint,
+    vir text,
+    stanje text DEFAULT 'caka'::text NOT NULL,
+    znesek_cents integer NOT NULL,
+    valuta character(3) DEFAULT 'EUR'::bpchar NOT NULL,
+    prostor text,
+    naprava text,
+    leto integer,
+    stevilka bigint,
+    izdan_at timestamp with time zone,
+    zoi text,
+    eor uuid,
+    message_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    ponudnik text,
+    ponudnik_id text,
+    potrjen_at timestamp with time zone,
+    naknadno boolean DEFAULT false NOT NULL,
+    poskusi integer DEFAULT 0 NOT NULL,
+    naslednji_poskus_at timestamp with time zone DEFAULT now() NOT NULL,
+    prevzeto_at timestamp with time zone,
+    zadnja_napaka text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT racuni_leto_check CHECK (((leto IS NULL) OR ((leto >= 2000) AND (leto <= 2999)))),
+    CONSTRAINT racuni_naprava_check CHECK (((naprava IS NULL) OR (naprava ~ '^[0-9A-Za-z]{1,20}$'::text))),
+    CONSTRAINT racuni_ponudnik_check CHECK (((ponudnik IS NULL) OR ((char_length(ponudnik) >= 1) AND (char_length(ponudnik) <= 40)))),
+    CONSTRAINT racuni_ponudnik_id_check CHECK (((ponudnik_id IS NULL) OR ((char_length(ponudnik_id) >= 1) AND (char_length(ponudnik_id) <= 200)))),
+    CONSTRAINT racuni_potrjen_chk CHECK (((stanje <> 'potrjen'::text) OR ((eor IS NOT NULL) AND (potrjen_at IS NOT NULL)))),
+    CONSTRAINT racuni_prostor_check CHECK (((prostor IS NULL) OR (prostor ~ '^[0-9A-Za-z]{1,20}$'::text))),
+    CONSTRAINT racuni_stanje_check CHECK ((stanje = ANY (ARRAY['caka'::text, 'izdan'::text, 'potrjen'::text, 'napaka'::text]))),
+    CONSTRAINT racuni_stevilka_check CHECK (((stevilka IS NULL) OR (stevilka >= 1))),
+    CONSTRAINT racuni_stevilka_chk CHECK ((((stevilka IS NULL) = (izdan_at IS NULL)) AND ((stevilka IS NULL) = (prostor IS NULL)) AND ((stevilka IS NULL) = (naprava IS NULL)) AND ((stevilka IS NULL) = (leto IS NULL)) AND ((stanje = 'caka'::text) = (stevilka IS NULL)))),
+    CONSTRAINT racuni_vir_check CHECK (((vir IS NULL) OR ((char_length(vir) >= 1) AND (char_length(vir) <= 120)))),
+    CONSTRAINT racuni_vrsta_check CHECK ((vrsta = ANY (ARRAY['racun'::text, 'dobropis'::text]))),
+    CONSTRAINT racuni_vrsta_chk CHECK ((((vrsta = 'racun'::text) AND (ref_racun_id IS NULL) AND (vir IS NULL) AND (znesek_cents > 0)) OR ((vrsta = 'dobropis'::text) AND (ref_racun_id IS NOT NULL) AND (vir IS NOT NULL) AND (znesek_cents < 0)))),
+    CONSTRAINT racuni_zoi_check CHECK (((zoi IS NULL) OR (zoi ~ '^[0-9a-f]{32}$'::text)))
+);
+
+
+--
+-- Name: TABLE racuni; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.racuni IS 'Davcno potrjeni racuni in dobropisi NEXT DIMENSIONS za lastne dogodke Outly (054, ZDavPR): dolg ob placilu, stevilka A001-1-N in potrditev v ozadju (racuni.js). Brez brisanja (ZDavP-2 38/8).';
+
+
+--
+-- Name: racuni_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.racuni_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: racuni_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.racuni_id_seq OWNED BY public.racuni.id;
+
+
+--
+-- Name: racuni_zaporedje; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.racuni_zaporedje (
+    prostor text NOT NULL,
+    naprava text NOT NULL,
+    leto integer NOT NULL,
+    zadnja bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT racuni_zaporedje_leto_check CHECK (((leto >= 2000) AND (leto <= 2999))),
+    CONSTRAINT racuni_zaporedje_naprava_check CHECK ((naprava ~ '^[0-9A-Za-z]{1,20}$'::text)),
+    CONSTRAINT racuni_zaporedje_prostor_check CHECK ((prostor ~ '^[0-9A-Za-z]{1,20}$'::text)),
+    CONSTRAINT racuni_zaporedje_zadnja_check CHECK ((zadnja >= 0))
+);
+
+
+--
+-- Name: TABLE racuni_zaporedje; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.racuni_zaporedje IS 'Stevec zaporednih stevilk racunov po prostoru, napravi in poslovnem letu (054). Brez lukenj: vrstica, zaklenjena v transakciji izdaje, ne SEQUENCE.';
+
+
+--
 -- Name: reports; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1781,6 +1928,13 @@ ALTER TABLE ONLY public.orders ALTER COLUMN id SET DEFAULT nextval('public.order
 
 
 --
+-- Name: racuni id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.racuni ALTER COLUMN id SET DEFAULT nextval('public.racuni_id_seq'::regclass);
+
+
+--
 -- Name: reports id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -2027,6 +2181,38 @@ ALTER TABLE ONLY public.omejitve
 
 ALTER TABLE ONLY public.orders
     ADD CONSTRAINT orders_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: racuni racuni_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.racuni
+    ADD CONSTRAINT racuni_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: racuni racuni_stevilka_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.racuni
+    ADD CONSTRAINT racuni_stevilka_key UNIQUE (prostor, naprava, leto, stevilka);
+
+
+--
+-- Name: racuni racuni_vir_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.racuni
+    ADD CONSTRAINT racuni_vir_key UNIQUE (vir);
+
+
+--
+-- Name: racuni_zaporedje racuni_zaporedje_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.racuni_zaporedje
+    ADD CONSTRAINT racuni_zaporedje_pkey PRIMARY KEY (prostor, naprava, leto);
 
 
 --
@@ -2534,6 +2720,34 @@ CREATE INDEX orders_user_idx ON public.orders USING btree (user_id, created_at D
 
 
 --
+-- Name: racuni_delo_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX racuni_delo_idx ON public.racuni USING btree (naslednji_poskus_at, id) WHERE (stanje = ANY (ARRAY['caka'::text, 'izdan'::text]));
+
+
+--
+-- Name: racuni_narocilo_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX racuni_narocilo_idx ON public.racuni USING btree (order_id);
+
+
+--
+-- Name: racuni_narocilo_racun_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX racuni_narocilo_racun_key ON public.racuni USING btree (order_id) WHERE (vrsta = 'racun'::text);
+
+
+--
+-- Name: racuni_ref_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX racuni_ref_idx ON public.racuni USING btree (ref_racun_id) WHERE (ref_racun_id IS NOT NULL);
+
+
+--
 -- Name: reports_reporter_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2811,6 +3025,20 @@ CREATE TRIGGER orders_rezerviraj BEFORE INSERT ON public.orders FOR EACH ROW EXE
 --
 
 CREATE TRIGGER orders_sprosti AFTER UPDATE OF status ON public.orders FOR EACH ROW EXECUTE FUNCTION public.sprosti_zalogo();
+
+
+--
+-- Name: racuni racuni_varuj; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER racuni_varuj BEFORE DELETE OR UPDATE ON public.racuni FOR EACH ROW EXECUTE FUNCTION public.racuni_varuj();
+
+
+--
+-- Name: racuni_zaporedje racuni_zaporedje_varuj; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER racuni_zaporedje_varuj BEFORE DELETE OR UPDATE ON public.racuni_zaporedje FOR EACH ROW EXECUTE FUNCTION public.racuni_zaporedje_varuj();
 
 
 --
@@ -3190,6 +3418,22 @@ ALTER TABLE ONLY public.orders
 
 
 --
+-- Name: racuni racuni_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.racuni
+    ADD CONSTRAINT racuni_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: racuni racuni_ref_racun_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.racuni
+    ADD CONSTRAINT racuni_ref_racun_id_fkey FOREIGN KEY (ref_racun_id) REFERENCES public.racuni(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: reports reports_reporter_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3385,5 +3629,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict d0k4WGNvcxckVa5hmFnddAXUsEzpbfWo8hhEggE72t1Ec62Bxs9RIg4VBnR5aLg
+\unrestrict aDR5GNN2WizqfAn6258Yb9Far0FEsbozwlHNbzFSJk6IZGCRY5DkbYNgeo819cd
 
