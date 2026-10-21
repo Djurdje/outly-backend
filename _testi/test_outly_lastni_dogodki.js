@@ -647,8 +647,8 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     r = await api(bZ, "PATCH", "/admin/api/clubs/2", T.admin, { isOfficial: true });
     assert(r.status === 200 && r.body.is_official === true, "stikali vrnjeni");
     const html = require("fs").readFileSync(require("path").join(__dirname, "..", "admin", "index.html"), "utf8");
-    assert(/Vse prodaje tega kluba gredo na račun NEXT DIMENSIONS, provizije ni, klub ne dobi denarja\./.test(html) && /window\.confirm\([^)]*has_stripe_account|has_stripe_account[\s\S]{0,400}window\.confirm/.test(html) && /star\.has_stripe_account \|\| star\.order_count > 0/.test(html),
-      "panel: opozorilo ob stikalu + confirm ob vklopu pri klubu s Stripe racunom ali narocili");
+    assert(/Vse prodaje tega kluba gredo na račun NEXT DIMENSIONS, provizije ni, klub ne dobi denarja\./.test(html) && /potrdi\(\{[^\n]*has_stripe_account|has_stripe_account[\s\S]{0,400}potrdi\(\{/.test(html) && /star\.has_stripe_account \|\| star\.order_count > 0/.test(html),
+      "panel: opozorilo ob stikalu + potrditveno okno (potrdi, dialog.js) ob vklopu pri klubu s Stripe racunom ali narocili");
 
     // ================================================================
     console.log("\n# 9. P2: 0 EUR in testni nacin pri uradnem profilu: prodajalec je platforma (potrdilo, mail gostu, GET /guest/order), oznaka zamrznjena ob nakupu");

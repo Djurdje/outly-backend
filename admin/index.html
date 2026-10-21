@@ -104,6 +104,7 @@
   .skrito{display:none!important}
   img.mini{width:34px;height:34px;border-radius:6px;object-fit:cover;background:var(--panel2);vertical-align:middle}
 </style>
+<link rel="stylesheet" href="dogodki.css">
 </head>
 <body>
 <div class="wrap">
@@ -282,19 +283,22 @@
       </div>
     </section>
 
-    <!-- DOGODKI -->
+    <!-- DOGODKI (faza 1, 21. 10. 2026: admin/dogodki.js, admin/dogodki.css) -->
     <section id="z-dogodki" class="skrito">
-      <div class="skupina">
-        <h2>Dogodki (vsi, tudi osnutki in odpovedani)
-          <span class="desno">
-            <select id="dStatus" style="width:auto" onchange="naloziDogodke()">
-              <option value="">vsi</option><option value="published">objavljeni</option>
-              <option value="draft">osnutki</option><option value="cancelled">odpovedani</option>
-            </select>
-            <button class="tih mali" onclick="naloziDogodke()">Osveži</button>
-          </span></h2>
+      <div id="dg_seznam" class="skupina">
+        <h2>Dogodki <span class="desno"><span id="dg_stevec" class="dg-stevec" aria-live="polite"></span><button class="tih mali" id="dg_osvezi" type="button">Osveži</button></span></h2>
+        <div class="dg-filtri">
+          <label for="dg_q" class="vh">Išči</label><input id="dg_q" type="search" placeholder="Išči po naslovu, klubu, mestu ali #" autocomplete="off">
+          <label for="dg_status" class="vh">Stanje</label>
+          <select id="dg_status"><option value="">vsa stanja</option><option value="published">objavljeni</option><option value="draft">osnutki</option><option value="cancelled">odpovedani</option></select>
+          <label for="dg_prodaja" class="vh">Prodaja</label>
+          <select id="dg_prodaja"><option value="">prodaja: vse</option><option value="tece">prodaja teče</option><option value="ustavljena">prodaja ustavljena</option></select>
+          <label for="dg_klub" class="vh">Klub</label><select id="dg_klub"><option value="">vsi klubi</option></select>
+          <label class="kljukica" for="dg_prih"><input id="dg_prih" type="checkbox"> samo prihajajoči</label>
+        </div>
         <div class="tabela" id="dTabela"></div>
       </div>
+      <div id="dg_urejevalnik" class="skrito"></div>
     </section>
 
     <!-- GUEST LISTS (migracija 035): dogodek + gostitelj + stevilo mest; gostitelj nato v aplikaciji povabi prijatelje -->
@@ -323,8 +327,11 @@
     </section>
   </div>
 </div>
-<div id="obvestila"></div>
+<div id="obvestila" aria-live="polite"></div>
 
+<!-- Moduli panela (DECISIONS 21. 10. 2026: vec datotek, brez ogrodja in gradnje). Nalozita se PRED glavno skripto: ta jih uporabi ob zagonu. -->
+<script src="dialog.js"></script>
+<script src="dogodki.js"></script>
 <script>
 // Panel teče na istem naslovu kot backend (Express streže /admin), zato je
 // osnova kar location.origin. Za lokalni test: ?api=http://localhost:3000
@@ -481,14 +488,17 @@ function pokaziPanel() {
   $("jaz").innerHTML = `<span>${ubezi(v.email)}</span><span class="znacka">${ubezi(v.role)}</span><button class="tih mali" onclick="odjava()">Odjava</button>`;
   $("pGeslo").value = "";
   $("prijava").classList.add("skrito"); $("panel").classList.remove("skrito");
+  if (/^#\/dogodki/.test(location.hash)) { pokaziZavihek("dogodki"); naloziPregled(); return; }   // deljena povezava na dogodek
   pokaziZavihek("pregled"); naloziPregled();
 }
 
 // ---------- zavihki ----------
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => pokaziZavihek(b.dataset.z));
-const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: naloziDogodke, guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila, pomoc: naloziPomoc };
+const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: () => (window.naloziDogodke ? window.naloziDogodke() : obvesti("Zavihek Dogodki se ni naložil (dogodki.js). Osveži stran.", "slabo")), guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila, pomoc: naloziPomoc };
 function pokaziZavihek(z) {
-  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("aktiven", b.dataset.z === z));
+  // Povezava na dogodek (#/dogodki/35) velja samo v zavihku Dogodki; drug zavihek jo pobriše.
+  if (z !== "dogodki" && /^#\/dogodki/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search);
+  document.querySelectorAll("nav button").forEach(b => { b.classList.toggle("aktiven", b.dataset.z === z); if (b.dataset.z === z) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
   document.querySelectorAll("section[id^=z-]").forEach(s => s.classList.toggle("skrito", s.id !== "z-" + z));
   nalozi[z]();
 }
@@ -654,7 +664,7 @@ async function kShrani() {
     // I50: vklop »uradni profil« preusmeri ves denar kluba na platformo; pri klubu s Stripe računom ali naročili izrecna potrditev.
     const star = id ? klubi.find(x => String(x.id) === String(id)) : null;
     if (t.isOfficial && star && !star.is_official && (star.has_stripe_account || star.order_count > 0)
-        && !window.confirm(`Klub »${star.name}« ima ${star.has_stripe_account ? "Stripe račun" : "naročila"}${star.has_stripe_account && star.order_count > 0 ? " in naročila" : ""} (naročil: ${star.order_count || 0}).\n\nVse prodaje tega kluba gredo na račun NEXT DIMENSIONS, provizije ni, klub ne dobi denarja.\n\nVklopim uradni profil?`)) return;
+        && !(await potrdi({ naslov: "Vklopim uradni profil?", nevarno: true, potrdiBesedilo: "Vklopi uradni profil", vsebina: `Klub »${star.name}« ima ${star.has_stripe_account ? "Stripe račun" : "naročila"}${star.has_stripe_account && star.order_count > 0 ? " in naročila" : ""} (naročil: ${star.order_count || 0}).\n\nVse prodaje tega kluba gredo na račun NEXT DIMENSIONS, provizije ni, klub ne dobi denarja.` }))) return;
     $("kShrani").disabled = true;
     try {
       const r = id ? await klic("PATCH", "/admin/api/clubs/" + id, t) : await klic("POST", "/admin/api/clubs", t);
@@ -727,40 +737,6 @@ async function uVloga(id) {
 async function uOdkleni(id) { await varno(async () => { const r = await klic("PATCH", "/admin/api/users/" + id, { unlock: true }); obvesti(`${r.email} odklenjen.`, "ok"); naloziUporabnike(); }); }
 async function uPotrdi(id) { await varno(async () => { const r = await klic("PATCH", "/admin/api/users/" + id, { emailVerified: true }); obvesti(`${r.email}: e-naslov potrjen.`, "ok"); naloziUporabnike(); }); }
 
-// ---------- dogodki ----------
-async function naloziDogodke() {
-  await varno(async () => {
-    const s = $("dStatus").value;
-    const d = await klic("GET", "/admin/api/events" + (s ? "?status=" + s : ""));
-    const st = { published: '<span class="znacka ok">objavljen</span>', draft: '<span class="znacka siva">osnutek</span>', cancelled: '<span class="znacka slabo">odpovedan</span>' };
-    tabela($("dTabela"), ["#", "Dogodek", "Klub", "Začetek", "Cena", "Stanje", ""], d.map(x => `
-      <tr>
-        <td class="mono">${ubezi(x.id)}</td>
-        <td><b>${ubezi(x.title)}</b><span class="drobno">${ubezi([(x.genres || []).join(", "), x.min_age ? x.min_age + "+" : ""].filter(Boolean).join(" · "))}</span></td>
-        <td>${ubezi(x.club_name)}${x.club_hidden ? ' <span class="znacka slabo">klub skrit</span>' : ""}</td>
-        <td class="mono">${datum(x.start_at)}${x.end_at ? `<span class="drobno">do ${datum(x.end_at)}</span>` : ""}</td>
-        <td class="mono">${evri(x.ticket_price_cents)}</td>
-        <td>${st[x.status] || ubezi(x.status)}</td>
-        <td><div class="vrsta">${x.status !== "cancelled" ? `<button class="nevarno mali" onclick="dStatus(${cel(x.id)},'cancelled',${Number(x.paid_orders) || 0},${Number(x.paid_cents) || 0},${Number(x.test_paid_orders) || 0},${Number(x.test_paid_cents) || 0})">Umakni</button>` : ""}${x.status !== "published" ? `<button class="dobro mali" onclick="dStatus(${cel(x.id)},'published')">Objavi</button>` : ""}</div></td>
-      </tr>`), "Ni dogodkov.");
-  });
-}
-async function dStatus(id, status, placanaNarocila, placanoCenti, testnaNarocila, testnoCenti) {
-  // Umik = ODPOVED dogodka (#190, Martin 12. 10. 2026): vsi kupci dobijo celoten znesek nazaj (glavnico vrne klub, Outly provizijo), vstopnice prenehajo veljati, kupci dobijo mail.
-  // Vracila tecejo v ozadju cez ~minuto in jih ni mogoce preklicati, ko so enkrat izvedena. Zato izrecna potrditev s stevilom placanih narocil.
-  // #236: paid_* so samo PRAVA naročila; testna (lazni nacin, Stripe sandbox) so v test_paid_* in se prikazejo posebej (ni pravi denar), odpoved obravnava VSA placana (lazna samo v bazi, sandbox v Stripe sandboxu, ob zivem kljucu rocno: vracila_stripe.js).
-  if (status === "cancelled") {
-    const n = Number(placanaNarocila) || 0, nt = Number(testnaNarocila) || 0;
-    const testno = nt > 0 ? `Še ${nt} testnih naročil (${evri(Number(testnoCenti) || 0)}, ni pravi denar). Odpoved jih obravnava kot doslej: lažna samo v bazi, sandbox v Stripe sandboxu (ob živem ključu označena za ročno vračilo).` : "";
-    let besedilo;
-    if (n > 0) besedilo = `Umik dogodka pomeni ODPOVED.\n\nVsem kupcem (${n} plačanih naročil, skupaj ${evri(Number(placanoCenti) || 0)}) se denar samodejno VRNE v celoti, njihove vstopnice prenehajo veljati in dobijo e-pošto o odpovedi. Vračil po izvedbi ni mogoče preklicati.${testno ? "\n\n" + testno : ""}\n\nNadaljujem?`;
-    else if (nt > 0) besedilo = `Umik dogodka pomeni odpoved. Pravih plačanih naročil ni, zato noben pravi kupec ne dobi vračila.\n\n${testno}\n\nNadaljujem?`;
-    else besedilo = "Umik dogodka pomeni odpoved. Plačanih naročil ni, zato nihče ne dobi vračila.\n\nNadaljujem?";
-    if (!window.confirm(besedilo)) return;
-  }
-  await varno(async () => { const r = await klic("PATCH", "/admin/api/events/" + id, { status }); obvesti(`"${r.title}" → ${status}.`, "ok"); naloziDogodke(); naloziPregled(); });
-}
-
 // ---------- guest lists ----------
 // Brez nastavljanja HTML-ja iz podatkov: vsi podatki (imena, e-naslovi, opombe) gredo v DOM samo prek textContent / createTextNode / setAttribute (XSS).
 function h(tag, lastnosti, ...otroci) {
@@ -823,7 +799,7 @@ async function gShrani(id) {
   });
 }
 async function gPreklici(id, host) {
-  if (!confirm(`Preklicati listo gostitelja ${host}? Vse neuporabljene vstopnice liste (tudi povabljenih) postanejo neveljavne.`)) return;
+  if (!(await potrdi({ naslov: "Prekličem listo?", nevarno: true, potrdiBesedilo: "Prekliči listo", vsebina: `Preklicati listo gostitelja ${host}? Vse neuporabljene vstopnice liste (tudi povabljenih) postanejo neveljavne.` }))) return;
   await varno(async () => { await klic("DELETE", "/admin/api/guest-lists/" + id); obvesti(`Lista #${id} preklicana.`, "ok"); await naloziGuestListe(); });
 }
 async function naloziGuestListe() {
@@ -953,7 +929,7 @@ function vTabela(el, glave, vrstice, prazno) {
 }
 const V_NAPAKA_STIL = "max-width:300px;white-space:pre-wrap;word-break:break-word";
 async function vRetry(url, opis, sporocilo, gumb, opombaOb409 = "") {
-  if (!window.confirm(opis)) return;
+  if (!(await potrdi({ naslov: "Poskusim znova?", potrdiBesedilo: "Poskusi znova", vsebina: opis }))) return;   // dialog.js (window.confirm blokirajo orodja)
   gumb.disabled = true;
   try {
     await klic("POST", url);

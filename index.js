@@ -2484,6 +2484,12 @@ const STOLPCI_DOGODKA = `
         ${VIP_OD_CENTOV} AS vip_from_cents,
         -- Vir razporeda VIP miz (migracija 039): club = tloris kluba, event = razpored tega dogodka. DODANO polje.
         vip_layout_source,
+        -- Pavza prodaje (055, I53). DODANI polji: sales_paused = admin/klub je prodajo ustavil (cena ostane); on_sale = nakup (vstopnic ali miz) je ta trenutek
+        -- odprt po stanju, pavzi, zacetku in oknu prodaje (isti pogoji kot napakaProdaje brez cene; zalogo pove availability, ceno ticket_price_cents).
+        -- Ne zavisi od uporabnika: sme v javni predpomnilnik (I17), ki zaostane najvec 3 s.
+        sales_paused,
+        (status = 'published' AND NOT sales_paused AND start_at > NOW()
+          AND (sales_open_at IS NULL OR sales_open_at <= NOW()) AND (sales_close_at IS NULL OR sales_close_at >= NOW())) AS on_sale,
         ${STOLPCI_PRIZORISCA}`;
 
 // Lahka razlicica seznama (GET /events?lite=true, #114): brez `description` (pri 200 dogodkih je to vecina teze odgovora).
@@ -2517,6 +2523,8 @@ function dodajNacinPlacila(vrstice) {
     // Demo klub (050): nakup je zavrnjen za vse (tudi 0 EUR), zato "unavailable"; razlog javno NI (kot pri ostalih razlogih, I34): odjemalec ga bere iz `is_demo`.
     // Ne zavisi od uporabnika (I17): vloga admin sme kupiti kljub temu (odjemalec naj prijavljenemu adminu gumb pokaze; strezniku odlocitev vedno pripada).
     if (r.is_demo === true) r.payment_mode = "unavailable";
+    // Pavza prodaje (055, I53): nakup je 409, zato "unavailable" (obstojeca vrednost: star iOS/splet gumb onemogocita in pokazeta »Tickets aren't on sale«).
+    if (r.sales_paused === true) r.payment_mode = "unavailable";
     delete r.club_stripe_ready;
     delete r.club_seller_raw;
   }
@@ -3037,7 +3045,8 @@ async function dogodekZaUrejanje(req, res) {
   if (r.rows.length === 0) { res.status(404).send("Event not found."); return null; }
 
   const d = r.rows[0];
-  if (req.klub.role !== "admin" && Number(d.club_id) !== Number(req.klub.clubId)) {
+  // Vloga admin iz baze (I5) sme tuj dogodek tudi, ce je sam lastnik/clan nekega kluba (req.klub je tedaj njegov klub, ne { role: 'admin' }).
+  if (!jeAdminDogodka(req) && Number(d.club_id) !== Number(req.klub.clubId)) {
     res.status(403).send("You can only manage events of your own club.");
     return null;
   }
@@ -3051,6 +3060,36 @@ async function dogodekZaUrejanje(req, res) {
 // (brez tega bi 409 pokazal »This is already in use.«). Nov odjemalec naj bere `error`.
 const NAPAKA_DOGODEK_MINIL = { error: "event_finished", message: "This event has already started or taken place, so it can't be cancelled. Contact Outly for refunds." };
 const NAPAKA_DOGODEK_MINIL_DATUM = { error: "event_finished", message: "This event has already started or taken place, so its date can't be changed. Contact Outly." };
+// --- dnevnik admin dejanj (055, I53) ---
+// Vrstica se vpise v ISTI transakciji `c` kot sprememba (klicatelj jo commita ali vrne skupaj). Brez osebnih podatkov kupcev: samo polja cilja.
+async function zapisiAdminDejanje(c, req, dejanje, ciljTip, ciljId, prej, potem, razlog) {
+  await c.query(
+    `INSERT INTO admin_dejanja (admin_user_id, dejanje, cilj_tip, cilj_id, prej, potem, razlog)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)`,
+    [req.user.userId, dejanje, ciljTip, String(ciljId), prej === null || prej === undefined ? null : JSON.stringify(prej),
+     potem === null || potem === undefined ? null : JSON.stringify(potem), razlog || null]);
+}
+// Primerljiva vrednost za dnevnik (Date -> ISO, NUMERIC/BIGINT niz ostane niz).
+const vrednostDnevnika = (v) => (v instanceof Date ? v.toISOString() : v === undefined ? null : v);
+// {prej, potem} samo za polja, ki so se res spremenila; null, ce se ni nic.
+function razlikaPolj(polja, star, nov) {
+  const prej = {}, potem = {};
+  for (const k of polja) {
+    const a = vrednostDnevnika(star[k]), b = vrednostDnevnika(nov[k]);
+    if (JSON.stringify(a) === JSON.stringify(b)) continue;
+    prej[k] = a; potem[k] = b;
+  }
+  return Object.keys(potem).length ? { prej, potem } : null;
+}
+// Ime dejanja po najpomembnejsi spremembi (dnevnik ima vedno vsa spremenjena polja).
+function dejanjeDogodka(prej, potem) {
+  if (potem.status === "cancelled") return "event.cancel";
+  if (potem.status === "published") return "event.publish";
+  if (potem.status === "draft") return "event.unpublish";
+  if (potem.sales_paused === true) return "event.sales_pause";
+  if (potem.sales_paused === false) return "event.sales_resume";
+  return "event.update";
+}
 const jeAdminDogodka = (req) => (req.klub && req.klub.role === "admin") || (req.user && req.user.role === "admin");   // vloga iz baze (I5)
 // V TRANSAKCIJI: zaklene vrstico dogodka (FOR UPDATE; zaporedi DELETE/PATCH istega dogodka in nakupe, ki zaklenejo isto vrstico) in presteje narocila.
 // Sken vrstice dogodka NE zaklepa (I16, sken ostane hiter): sken, ki se zgodi v istih milisekundah kot odpoved (med to poizvedbo in COMMIT), lahko unovci
@@ -3156,6 +3195,13 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
       if (!Number.isInteger(c) || c < 0) return res.status(400).send("ticketPriceCents must be a non-negative integer.");
     }
 
+    // Pavza prodaje (055, I53): samo boolean; izpuscen kljuc = brez spremembe.
+    const pavzaV = b.salesPaused !== undefined ? b.salesPaused : b.sales_paused;
+    if (pavzaV !== undefined) {
+      if (typeof pavzaV !== "boolean") return res.status(400).send("salesPaused must be true or false.");
+      dovoljeno.sales_paused = pavzaV;
+    }
+
     const sets = [], vrednosti = [];
     for (const [k, v] of Object.entries(dovoljeno)) {
       if (v === undefined) continue;
@@ -3166,34 +3212,64 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
 
     vrednosti.push(d.id);
     const sqlPosodobi = `UPDATE events SET ${sets.join(", ")} WHERE id = $${vrednosti.length} RETURNING *`;
-    let r;
-    // #255 (I42): odpoved (status -> cancelled) ali premik datuma gre skozi zaklep vrstice in preverbo; vse drugo kot doslej. Admin sme vedno.
+    let r, prej = null, pavzaOd = null, preklicanih = 0;
+    // #255 (I42): odpoved (status -> cancelled) ali premik datuma gre skozi zaklep vrstice in preverbo; admin sme vedno.
+    // Vse v ENI transakciji z zaklepom vrstice dogodka (FOR UPDATE: zaporedi hkratne PATCH/DELETE istega dogodka; sken vrstice ne zaklepa, I16):
+    //  - admin (I53): stare vrednosti spremenjenih polj in vrstica `admin_dejanja` v ISTI transakciji (sprememba brez vrstice ali vrstica brez spremembe ni mogoca);
+    //  - pavza prodaje (055, I53): ob prehodu v ustavljeno se v isti transakciji preklicejo cakajoca narocila z odprtim placilnim oknom, Stripove seje
+    //    se zaprejo PO COMMIT-u v ozadju (pavza_prodaje.js); povezave med klici Stripa ne drzimo.
     const odpoved = dovoljeno.status === "cancelled";
     const datum = dovoljeno.start_at !== undefined || dovoljeno.end_at !== undefined;
-    if (!jeAdminDogodka(req) && (odpoved || datum)) {
-      const c = await pool.connect();
-      try {
-        await c.query("BEGIN");
-        const z = await zaklepDogodkaZaOdpoved(c, d.id);
-        if (!z) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
-        if (odpoved && z.status !== "cancelled" && odpovedZaklenjena(z)) {
-          await c.query("ROLLBACK");
-          return res.status(409).json(NAPAKA_DOGODEK_MINIL);
-        }
-        if (datum && z.za_vracilo > 0 && jeDogodekMinil(z.start_at, z.end_at) &&
-            ((dovoljeno.start_at !== undefined && !istiCas(dovoljeno.start_at, z.start_at)) ||
-             (dovoljeno.end_at !== undefined && !istiCas(dovoljeno.end_at, z.end_at)))) {
-          await c.query("ROLLBACK");
-          return res.status(409).json(NAPAKA_DOGODEK_MINIL_DATUM);
-        }
-        r = await c.query(sqlPosodobi, vrednosti);
-        await c.query("COMMIT");
-      } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
-      finally { c.release(); }
-    } else {
-      r = await pool.query(sqlPosodobi, vrednosti);
-    }
+    const admin = jeAdminDogodka(req);
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      // Odpoved/datum neadmina: polna preverba I42 (steje narocila). Sicer samo kratek zaklep vrstice (FOR NO KEY UPDATE: ne caka na tuje kljuce novih narocil).
+      const z = !admin && (odpoved || datum) ? await zaklepDogodkaZaOdpoved(c, d.id)
+        : (await c.query("SELECT id FROM events WHERE id = $1 FOR NO KEY UPDATE", [d.id])).rows[0];
+      if (!z) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+      if (!admin && odpoved && z.status !== "cancelled" && odpovedZaklenjena(z)) {
+        await c.query("ROLLBACK");
+        return res.status(409).json(NAPAKA_DOGODEK_MINIL);
+      }
+      if (!admin && datum && z.za_vracilo > 0 && jeDogodekMinil(z.start_at, z.end_at) &&
+          ((dovoljeno.start_at !== undefined && !istiCas(dovoljeno.start_at, z.start_at)) ||
+           (dovoljeno.end_at !== undefined && !istiCas(dovoljeno.end_at, z.end_at)))) {
+        await c.query("ROLLBACK");
+        return res.status(409).json(NAPAKA_DOGODEK_MINIL_DATUM);
+      }
+      const polja = Object.keys(dovoljeno).filter((k) => dovoljeno[k] !== undefined);
+      const st = (await c.query(`SELECT ${polja.map((k) => `"${k}"`).join(", ")}, NOW() AS zdaj FROM events WHERE id = $1`, [d.id])).rows[0];
+      prej = st;
+      r = await c.query(sqlPosodobi, vrednosti);
+      if (st.sales_paused !== true && r.rows[0].sales_paused === true) {
+        pavzaOd = st.zdaj;
+        preklicanih = await pavzaProdaje.prekliciCakajoca(c, d.id);
+      }
+      if (admin) {
+        const dnevnik = razlikaPolj(polja, st, r.rows[0]);
+        if (dnevnik) await zapisiAdminDejanje(c, req, dejanjeDogodka(dnevnik.prej, dnevnik.potem), "event", d.id, dnevnik.prej, dnevnik.potem);
+      }
+      await c.query("COMMIT");
+    } catch (e) {
+      await c.query("ROLLBACK").catch(() => {});
+      // U2: kapaciteta pod ze prodanim (omejitev events_sold_chk) je napaka vnosa, ne strežnika.
+      if (e && e.code === "23514" && e.constraint === "events_sold_chk") {
+        const sold = (await pool.query("SELECT sold_count FROM events WHERE id = $1", [d.id]).catch(() => ({ rows: [] }))).rows[0];
+        return res.status(400).json({ error: "capacity_below_sold", message: `Capacity can't be lower than the number of tickets already sold${sold ? ` (${sold.sold_count})` : ""}.`, sold: sold ? sold.sold_count : null });
+      }
+      // Preklic cakajocih narocil ob pavzi (zaklep dogodek -> narocila) se lahko redko zaklene s hkratnim webhookom (narocilo -> dogodek prek sprozilca):
+      // Postgres eno od transakcij prekine; tu nic ni spremenjeno, odjemalec ponovi.
+      if (e && (e.code === "40P01" || e.code === "55P03")) return res.status(503).set("Retry-After", "2").send("The event is busy. Please try again.");
+      throw e;
+    } finally { c.release(); }
     razprodanoPozabi("v:" + d.id);   // capacity ali status se je morda spremenil
+    if (pavzaOd) {
+      console.log(`[pavza] dogodek ${d.id}: prodaja ustavljena (uporabnik ${req.user.userId}), preklicanih cakajocih narocil ${preklicanih}`);
+      void pavzaOkna.zazeni(d.id, pavzaOd);   // po COMMIT-u, brez await: odgovor ne caka na Stripe
+    } else if (prej && prej.sales_paused === true && r.rows[0].sales_paused === false) {
+      console.log(`[pavza] dogodek ${d.id}: prodaja spet tece (uporabnik ${req.user.userId})`);
+    }
 
     // Dogodek je sele zdaj postal objavljen -> sledilci kluba dobijo obvestilo (migracija 019).
     if (d.status !== "published" && r.rows[0].status === "published") {
@@ -3234,6 +3310,7 @@ app.delete("/events/:id", requireAuth, requireClub("owner", "manager"), async (r
       if (!z) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
       if (z.narocil === 0) {
         await c.query("DELETE FROM events WHERE id=$1", [d.id]);
+        if (jeAdminDogodka(req)) await zapisiAdminDejanje(c, req, "event.delete", "event", d.id, { status: z.status }, null);   // I53: v isti transakciji
         await c.query("COMMIT");
         return res.status(200).json({ message: "Event deleted." });
       }
@@ -3243,6 +3320,7 @@ app.delete("/events/:id", requireAuth, requireClub("owner", "manager"), async (r
       }
       r = await c.query("UPDATE events SET status='cancelled' WHERE id=$1 RETURNING *", [d.id]);
       vVrsti = await vracilaStripe.vrstiZaDogodek(c, d.id);
+      if (jeAdminDogodka(req) && z.status !== "cancelled") await zapisiAdminDejanje(c, req, "event.cancel", "event", d.id, { status: z.status }, { status: "cancelled" });   // I53
       await c.query("COMMIT");
     } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
     finally { c.release(); }
@@ -3920,7 +3998,7 @@ admin.get("/events", async (req, res) => {
     const r = await pool.query(
       `SELECT e.id, e.club_id, c.name AS club_name, c.hidden AS club_hidden, e.title, e.poster_url,
               e.start_at, e.end_at, e.min_age, e.genres, e.status, e.ticket_price_cents, e.currency,
-              e.ticket_url, e.created_at, ${PRIZORISCE_E},
+              e.ticket_url, e.created_at, e.capacity, e.sold_count, e.sales_paused, e.sales_open_at, e.sales_close_at, e.vip_enabled, ${PRIZORISCE_E},
               -- #190: koliko placanih narocil (brez guest liste) bi odpoved vrnila kupcem; admin panel to pokaze v potrditvenem oknu pred »Umakni«
               -- #236: paid_orders/paid_cents = samo PRAVI promet; testna (lazni nacin, Stripe sandbox) locena v test_paid_*; odpoved vrne vsa placana narocila (panel pokaze oboje)
               (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = e.id AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}) AS paid_orders,
@@ -3936,19 +4014,97 @@ admin.get("/events", async (req, res) => {
 
 // Umik dogodka: status -> cancelled. Ne briše: če bodo kdaj prodane vstopnice,
 // so naročila računovodski dokument (glej DELETE /events/:id).
+// Odpoved gre prek sprozilca events_odpoved + sweep vracil (I37). Od faze 1 panela (055, I53): zapis v admin_dejanja v ISTI transakciji, zaklep vrstice
+// (FOR NO KEY UPDATE: hkratni PATCH istega dogodka pocaka), objava obvesti sledilce kot PATCH /events/:id (U1; prej jih panel ni obvestil).
+// Neobvezen `reason` (do 500 znakov) gre v dnevnik.
 admin.patch("/events/:id", async (req, res) => {
+  const id = celoId4(req.params.id);
+  if (!id) return res.status(400).send("Invalid event id.");
+  const b = req.body || {};
+  const status = b.status;
+  if (!["draft", "published", "cancelled"].includes(status)) return res.status(400).send("status must be draft, published or cancelled.");
+  const razlog = b.reason === undefined || b.reason === null ? null : String(b.reason).trim().slice(0, 500) || null;
+  const c = await pool.connect();
+  let r, star;
   try {
-    const id = celoId(req.params.id);
-    if (!id) return res.status(400).send("Invalid event id.");
-    const status = (req.body || {}).status;
-    if (!["draft", "published", "cancelled"].includes(status)) return res.status(400).send("status must be draft, published or cancelled.");
-    const r = await pool.query(
+    await c.query("BEGIN");
+    star = (await c.query("SELECT id, club_id, status FROM events WHERE id = $1 FOR NO KEY UPDATE", [id])).rows[0];
+    if (!star) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+    r = await c.query(
       `UPDATE events SET status=$2 WHERE id=$1
        RETURNING id, club_id, title, start_at, status`, [id, status]
     );
-    if (r.rows.length === 0) return res.status(404).send("Event not found.");
-    console.log(`Admin ${req.user.userId} dogodek ${id} -> ${status}`);
-    return res.status(200).json(r.rows[0]);
+    if (star.status !== status) {
+      await zapisiAdminDejanje(c, req, dejanjeDogodka({ status: star.status }, { status }), "event", id, { status: star.status }, { status }, razlog);
+    }
+    await c.query("COMMIT");
+  } catch (e) { await c.query("ROLLBACK").catch(() => {}); console.error(e); return res.status(500).send("Server error."); }
+  finally { c.release(); }
+  razprodanoPozabi("v:" + id);
+  console.log(`Admin ${req.user.userId} dogodek ${id} -> ${status}`);
+  if (star.status !== "published" && status === "published") {
+    try { await obvestiSledilce(id, star.club_id); }
+    catch (e) { console.error("Obvescanje sledilcev ni uspelo:", e.message); }
+  }
+  return res.status(200).json(r.rows[0]);
+});
+
+// GET /admin/api/events/:id — vsa urejljiva polja dogodka (za urejevalnik v panelu) + stevci + zadnjih 30 vrstic dnevnika (055, I53).
+// Samo branje v READ ONLY transakciji s casovno mejo (glavni pool nima statement_timeout); vse po indeksih (orders_event_idx, tickets_event_idx, admin_dejanja_cilj_idx).
+// Brez osebnih podatkov kupcev (samo stevila); dnevnik ima e-naslov ADMINA, ki je dejanje naredil (ne kupca).
+admin.get("/events/:id", async (req, res) => {
+  const id = celoId4(req.params.id);
+  if (!id) return res.status(400).send("Invalid event id.");
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN READ ONLY");
+    await c.query("SET LOCAL statement_timeout = 3000");
+    const er = await c.query(
+      `SELECT e.id, e.club_id, cl.name AS club_name, cl.hidden AS club_hidden, cl.is_demo AS club_is_demo, e.title, e.description, e.poster_url,
+              e.start_at, e.end_at, e.min_age, e.genres, e.status, e.ticket_price_cents, e.currency, e.ticket_url, e.capacity, e.sold_count,
+              e.sales_paused, e.sales_open_at, e.sales_close_at, e.vip_enabled, e.recap_video_url, e.created_at,
+              e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng
+         FROM events e JOIN clubs cl ON cl.id = e.club_id WHERE e.id = $1`, [id]);
+    if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+    const st = (await c.query(
+      `SELECT (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}) AS paid_orders,
+              (SELECT COALESCE(SUM(o.total_cents - o.refunded_cents), 0)::int FROM orders o WHERE o.event_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}) AS paid_cents,
+              (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}) AS test_paid_orders,
+              (SELECT COALESCE(SUM(o.total_cents - o.refunded_cents), 0)::int FROM orders o WHERE o.event_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}) AS test_paid_cents,
+              (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = $1 AND o.status = 'pending') AS pending_orders,
+              (SELECT COUNT(*)::int FROM tickets t WHERE t.event_id = $1 AND t.status = 'used') AS checked_in`, [id])).rows[0];
+    const dn = await c.query(
+      `SELECT a.id, a.cas, a.dejanje, a.prej, a.potem, a.razlog, u.email AS admin_email
+         FROM admin_dejanja a LEFT JOIN users u ON u.id = a.admin_user_id
+        WHERE a.cilj_tip = 'event' AND a.cilj_id = $1 ORDER BY a.cas DESC, a.id DESC LIMIT 30`, [String(id)]);
+    await c.query("COMMIT");
+    return res.json({ event: er.rows[0], stats: st, audit: dn.rows });
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    console.error(e); return res.status(500).send("Server error.");
+  } finally { c.release(); }
+});
+
+// GET /admin/api/audit?target_type=event&target_id=35&limit=50 — dnevnik admin dejanj (055, I53), najnovejse najprej. Brez filtra vse (najvec 200).
+admin.get("/audit", async (req, res) => {
+  try {
+    const p = [], pogoji = [];
+    const tip = req.query.target_type, cilj = req.query.target_id;
+    if (tip !== undefined) {
+      if (typeof tip !== "string" || !/^[a-z_]{1,30}$/.test(tip)) return res.status(400).send("Invalid target_type.");
+      p.push(tip); pogoji.push(`a.cilj_tip = $${p.length}`);
+    }
+    if (cilj !== undefined) {
+      if (typeof cilj !== "string" || !/^[\w-]{1,60}$/.test(cilj)) return res.status(400).send("Invalid target_id.");
+      p.push(cilj); pogoji.push(`a.cilj_id = $${p.length}`);
+    }
+    const lim = Math.min(200, Math.max(1, celoId(req.query.limit) || 50));
+    p.push(lim);
+    const r = await pool.query(
+      `SELECT a.id, a.cas, a.dejanje, a.cilj_tip AS target_type, a.cilj_id AS target_id, a.prej, a.potem, a.razlog, u.email AS admin_email
+         FROM admin_dejanja a LEFT JOIN users u ON u.id = a.admin_user_id
+        ${pogoji.length ? "WHERE " + pogoji.join(" AND ") : ""} ORDER BY a.cas DESC, a.id DESC LIMIT $${p.length}`, p);
+    return res.json(r.rows);
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
@@ -4330,6 +4486,9 @@ function testniNacinPlacil() {
 // STRIPE (issue #19): Checkout + Connect Express. Logika je v placila_stripe.js; tu so poti.
 // ---------------------------
 const placilaStripe = require("./placila_stripe");
+// Pavza prodaje (055, I53): prekinitev odprtih placilnih oken dogodka po COMMIT-u (PATCH /events/:id).
+const pavzaProdaje = require("./pavza_prodaje");
+const pavzaOkna = pavzaProdaje.ustvari({ pool, stripe: placilaStripe.stripe, jeLive: placilaStripe.jeLive, razprodanoPozabi: (id) => razprodanoPozabi("v:" + id) });
 // naPlacano: po COMMIT-u webhooka/pospravljalca poslje mail: gostu z vstopnicami (nakup brez racuna, migracija 033) ALI kupcu z racunom potrdilo (042, #95).
 // Vsaka od obeh poti sama preveri, ali je narocilo njeno (user_id NULL + guest_email / user_id + receipt_mail_attempts), druga ne stori nicesar.
 // naSporu: po COMMIT-u webhooka charge.dispute.* obvesti lastnika kluba (mail; #190). Samo stanje in obvestilo: denarja ne premika, vstopnice ne razveljavi.
@@ -4542,13 +4701,21 @@ async function nakupStripeSeja(res, d, { oid, opis, kolicina, cenaEnoteCents, ra
   // Branje narocila na SE DRZANI povezavi, PRED sprostitvijo: po sprostitvi bi pool.query ob zasedenem poolu lahko padel in pustil narocilo brez seje.
   let nr;
   try {
-    nr = (await d.c.query("SELECT id, public_ref, currency, application_fee_cents FROM orders WHERE id=$1", [oid])).rows[0];
+    // Pavza prodaje (055, I53): PATCH, ki je prodajo ustavil med nasim branjem dogodka in tem trenutkom, je narocilo ze preklical (status ni vec `pending`)
+    // ali pa je dogodek zdaj ustavljen: seje ne ustvarimo. Ostane le okno med tem branjem in zapisom seje (zapre ga pavza_prodaje.js, korak 2).
+    nr = (await d.c.query(
+      `SELECT o.id, o.public_ref, o.currency, o.application_fee_cents, o.status, e.sales_paused
+         FROM orders o JOIN events e ON e.id = o.event_id WHERE o.id=$1`, [oid])).rows[0];
   } catch (e) {
     console.error(`[stripe] branje narocila ${oid} ni uspelo:`, e && (e.message || e));
     d.sprosti(e);   // pokvarjena povezava ne v pool; sele nato oznaka prek poola (brez drzanja ene in cakanja na drugo)
     return neuspeh(pool, 502, "Payment provider is unavailable. Please try again.");
   }
   d.sprosti();
+  if (nr.status !== "pending" || nr.sales_paused === true) {
+    console.log(`[pavza] narocilo ${nr.public_ref}: prodaja dogodka je bila ustavljena med nakupom, placilno okno ni odprto`);
+    return neuspeh(pool, 409, NAPAKA_PAVZA_PRODAJE);
+  }
   let c2 = null;
   try {
     if (!(await stripeVstopi())) {
@@ -4560,11 +4727,23 @@ async function nakupStripeSeja(res, d, { oid, opis, kolicina, cenaEnoteCents, ra
       seja = await placilaStripe.ustvariCheckout({ narocilo: nr, opis, kolicina, cenaEnoteCents, racunKluba, platformno, email, eventId, odjemalec, povratna, locale });
     } finally { stripeIzstopi(); }
     c2 = await pool.connect();
+    let zapisano;
     try {
-      await c2.query(
-        "UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4) WHERE id=$1",
-        [oid, seja.id, seja.url, seja.expires_at]);
+      // Samo cakajoce narocilo (055, I53): ce ga je pavza prodaje medtem preklicala, seje ne zapisemo in jo takoj zapremo (kupec ne dobi povezave).
+      zapisano = (await c2.query(
+        "UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4) WHERE id=$1 AND status='pending' RETURNING id",
+        [oid, seja.id, seja.url, seja.expires_at])).rows.length;
+      if (!zapisano) await c2.query("UPDATE orders SET stripe_checkout_session_id = COALESCE(stripe_checkout_session_id, $2) WHERE id=$1", [oid, seja.id]);
     } catch (e) { c2.release(e); c2 = null; throw e; }   // pokvarjene povezave ne vracamo v pool
+    if (!zapisano) {
+      c2.release(); c2 = null;
+      const sS = placilaStripe.stripe();
+      if (sS) Promise.resolve().then(() => sS.checkout.sessions.expire(seja.id))
+        .then(() => console.log(`[pavza] narocilo ${nr.public_ref}: seja ${seja.id} ustvarjena po preklicu, zaprta`))
+        .catch((e) => console.error(`[pavza] POZOR: seja ${seja.id} narocila ${nr.public_ref} ni zaprta (${e && e.message}); ce bo placana, vrne zakljuci()`));
+      res.status(409).send(NAPAKA_PAVZA_PRODAJE);
+      return null;
+    }
   } catch (e) {
     if (c2) c2.release();
     console.error(`[stripe] Checkout seja za narocilo ${oid} ni uspela:`, e && (e.message || e));
@@ -4715,8 +4894,14 @@ async function vstopniceNarocil(idsNarocil, db = pool) {
 // klub viden, dogodek se ne sme biti zacet, okno prodaje mora biti odprto.
 // Vrne [status, besedilo] ali null. zahtevajCeno: vstopnice potrebujejo ticket_price_cents
 // (dogodek z zunanjo prodajo nima vstopnic na Outlyju); mize ga ne rabijo.
+// Pavza prodaje (055, I53): `sales_paused` velja za VSE nakupne poti (vstopnice, gost, VIP miza), ker vse klicejo to funkcijo. Klicatelj MORA brati
+// e.sales_paused (manjkajoc stolpec v SELECT-u = undefined = pavza se ne bi upostevala; test_prodaja_pavza.js to ujame za vse tri poti).
+// Besedilo vsebuje »not on sale«: star iOS (APIErrorMessages) in splet (napake.js) ga po tem podnizu prevedeta v »This event is not on sale.«
+// (brez tega bi 409 pokazal »This is already in use.«). Nov odjemalec naj bere `sales_paused` / `on_sale` na dogodku.
+const NAPAKA_PAVZA_PRODAJE = "Ticket sales are paused. This event is not on sale right now.";
 function napakaProdaje(e, { zahtevajCeno }) {
   if (e.status !== "published" || e.hidden) return [409, "Event is not on sale."];
+  if (e.sales_paused === true) return [409, NAPAKA_PAVZA_PRODAJE];
   if (zahtevajCeno && e.ticket_price_cents === null) return [409, "This event has no tickets on Outly."];
   const zdaj = Date.now();
   if (new Date(e.start_at).getTime() < zdaj) return [409, "Event has already started."];
@@ -5024,7 +5209,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     }
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
-              e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
+              e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.sales_paused, e.vat_rate, c.hidden,
               c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]
@@ -5459,7 +5644,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     }
     const er = await c.query(
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
-              e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden,
+              e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.sales_paused, e.vat_rate, c.hidden,
               c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
        FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [g.eventId]
@@ -8825,7 +9010,7 @@ app.get("/events/:id/vip", async (req, res) => {
     const id = vipId(req.params.id);
     if (!id) return res.status(400).send("Invalid event id.");
     const er = await pool.query(
-      `SELECT e.id, e.club_id, e.vip_enabled, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.min_age,
+      `SELECT e.id, e.club_id, e.vip_enabled, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.sales_paused, e.min_age,
               e.vip_layout_source, e.floor_plan, c.is_demo, ${sqlPlacilaPripravljena("c.")} AS club_stripe_ready,
               ${sqlProdajalecSurov("c")} AS seller_raw
          FROM events e JOIN clubs c ON c.id = e.club_id
@@ -8872,7 +9057,8 @@ app.get("/events/:id/vip", async (req, res) => {
       on_sale: napakaProdaje({ ...e, hidden: false }, { zahtevajCeno: false }) === null,
       // kot pri dogodku (#149); #220: ob sk_live_ + nepopolnih podatkih prodajalca (I34) "unavailable", razen ce je kupljiva miza za 0 EUR
       // Demo klub (050): "unavailable" (nakup mize je 409 demo_club, razen vloge admin); `is_demo` = prodajalec (events.club_id) je demo klub. Razloga javno ni (I34).
-      payment_mode: e.is_demo ? "unavailable" : javniNacinProdajalca(placilaStripe.nacinPlacilaZ(e.club_stripe_ready === true), e.seller_raw,
+      // Pavza prodaje (055, I53): nakup mize je 409, zato "unavailable" kot pri demo klubu; on_sale je ze false (napakaProdaje).
+      payment_mode: e.is_demo || e.sales_paused === true ? "unavailable" : javniNacinProdajalca(placilaStripe.nacinPlacilaZ(e.club_stripe_ready === true), e.seller_raw,
         Math.max(0, ...mize.map(t => Number(t.price_cents) || 0)), mize.some(t => t.available !== false && Number(t.price_cents) === 0)),
       is_demo: e.is_demo === true,
       seller: prodajalec(e.seller_raw),   // prodajalec = events.club_id (043, #94)
@@ -8923,7 +9109,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
       if (obst) { await c.query("ROLLBACK"); return await idemOdgovori(res, c, obst, idemV); }
     }
     const er = await c.query(
-      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_layout_source,
+      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_layout_source, e.sales_paused,
               e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
          FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
