@@ -18,6 +18,10 @@
  *      samo admin; neveljaven salesPaused -> 400
  *  P9  admin panel PATCH /admin/api/events/:id: objava obvesti sledilce (club_event_notifications) kot PATCH /events/:id, odpoved zapise vrstico z razlogom
  *  P10 transakcija: ce vpis v admin_dejanja pade (sprozilec v testu), PATCH vrne 500 in dogodek ostane nespremenjen
+ *  P12 (M1) seja, ustvarjena po pavzi (pocasen Stripe, pavza vmes): ni zapisana, narocilo cancelled, seja zaprta, 409 (prej: odprto okno)
+ *  P13 (M2) brezplacen nakup (vstopnice, gost, miza), ki je dogodek prebral pred COMMIT-om pavze: 409, brez narocila (prej: paid vstopnice po pavzi)
+ *  P14 (M4) pospravljalec: preklicano narocilo z odprto sejo -> seja zaprta; s placano sejo -> vracilo inactive_order, brez vstopnic
+ *  P15 (M5) admin, ki je v nekem klubu vratar: PATCH tujega dogodka 200 (prej 403); vratar brez vloge admin ostane 403
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -63,7 +67,15 @@ async function api(method, p, token, body, glave = {}) {
 }
 
 // Lazni Stripe: ustvari sejo, vrne sejo, expire (belezi), PaymentIntent.
-const S = { seje: {}, st: 0, potekle: [], expireNapak: 0 };
+const S = { seje: {}, st: 0, potekle: [], expireNapak: 0, zamik: 0, vLetu: 0 };
+function ustvariSejo(p, odg) {
+  const id = "cs_test_p" + (++S.st);
+  const kol = Number(p["line_items[0][quantity]"]), cena = Number(p["line_items[0][price_data][unit_amount]"]);
+  S.seje[id] = { id, object: "checkout.session", url: `https://checkout.stripe.test/c/pay/${id}`, status: "open", payment_status: "unpaid",
+    amount_total: kol * cena, currency: p["line_items[0][price_data][currency]"], livemode: false,
+    metadata: { order_id: p["metadata[order_id]"] }, client_reference_id: p.client_reference_id, expires_at: Number(p.expires_at), payment_intent: null };
+  return odg(200, S.seje[id]);
+}
 const stripeServer = http.createServer((req, res) => {
   let d = ""; req.on("data", x => d += x);
   req.on("end", () => {
@@ -72,12 +84,8 @@ const stripeServer = http.createServer((req, res) => {
     const u = req.url.split("?")[0];
     let m;
     if (req.method === "POST" && u === "/v1/checkout/sessions") {
-      const id = "cs_test_p" + (++S.st);
-      const kol = Number(p["line_items[0][quantity]"]), cena = Number(p["line_items[0][price_data][unit_amount]"]);
-      S.seje[id] = { id, object: "checkout.session", url: `https://checkout.stripe.test/c/pay/${id}`, status: "open", payment_status: "unpaid",
-        amount_total: kol * cena, currency: p["line_items[0][price_data][currency]"], livemode: false,
-        metadata: { order_id: p["metadata[order_id]"] }, client_reference_id: p.client_reference_id, expires_at: Number(p.expires_at), payment_intent: null };
-      return odg(200, S.seje[id]);
+      S.vLetu++;
+      return setTimeout(() => { S.vLetu--; ustvariSejo(p, odg); }, S.zamik);
     }
     if (req.method === "POST" && (m = u.match(/^\/v1\/checkout\/sessions\/(cs_\w+)\/expire$/))) {
       if (S.expireNapak > 0) { S.expireNapak--; return odg(500, { error: { type: "api_error", message: "zacasna napaka (test)" } }); }
@@ -108,7 +116,7 @@ let srv = null, log = "";
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   await new Promise(r => stripeServer.listen(STRIPE_PORT, r));
   srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test",
-    STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_POSPRAVI_MS: "3600000",
+    STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_POSPRAVI_MS: "700", STRIPE_PREKLIC_PO_S: "1",
     APP_URL: "https://outly.test", TEST_PLACILA: "", GOST_NAKUP_TEST: "1", GOST_NAKUP_NA_URO: "1000", REZERVACIJE_CISCENJE_MS: "0",
     VRACILA_TICK_MS: "0", VRACILA_SWEEP_MS: "0", JAVNI_PREDPOMNILNIK_MS: "0",
     PAVZA_STRIPE_PREMOR_MS: "20", PAVZA_KMALU_MS: "400", PAVZA_PONOVNO_MS: "1500" }, stdio: ["ignore", "pipe", "pipe"] });
@@ -318,6 +326,76 @@ let srv = null, log = "";
     const sejaK = (await narocilo(k.body.order.id)).seja;
     assert(r.status === 200 && (await narocilo(k.body.order.id)).status === "cancelled", "pavza preklice nakup", r.body);
     assert(await cakajPogoj(() => S.potekle.includes(sejaK), 5000), "seja zaprta po dveh zacasnih napakah (ponovitev)", S.potekle);
+
+    // ---------- 2. krog pregleda (M1, M2, M4, M5) ----------
+    const dogodekC = async (naslov, cena) => (await pool.query(
+      "INSERT INTO events (club_id, title, start_at, status, ticket_price_cents, capacity, min_age, vip_enabled) VALUES (1,$1,$2,'published',$3,100,0,TRUE) RETURNING id", [naslov, cezDan, cena])).rows[0].id;
+    const vsiPotekli = () => S.potekle.length;
+
+    console.log("\n# P12 (M1): seja, ustvarjena po pavzi, ne sme odpreti placilnega okna");
+    const E12 = await dogodekC("M1 noc", 1500);
+    await pool.query("TRUNCATE omejitve");
+    S.zamik = 1200;
+    const p12 = api("POST", `/events/${E12}/tables/2/orders`, T.cene, {});
+    assert(await cakajPogoj(() => S.vLetu >= 1, 5000), "nakup mize je v klicu Stripa (narocilo pending, seje se ni)");
+    // pavza, ki narocila NE preklice (narocilo je nastalo po koraku preklica: simulirano z neposrednim UPDATE, ki ga ponovni korak v pomnilniku ne vidi)
+    await pool.query("UPDATE events SET sales_paused = TRUE WHERE id = $1", [E12]);
+    const r12 = await p12; S.zamik = 0;
+    const o12 = (await pool.query("SELECT status, checkout_url, stripe_checkout_session_id AS seja FROM orders WHERE event_id = $1", [E12])).rows[0];
+    assert(r12.status === 409 && PAVZA.test(r12.body), "nakup -> 409 (seja po pavzi ni zapisana)", r12);
+    assert(o12 && o12.status === "cancelled" && o12.checkout_url === null, "narocilo cancelled, brez checkout_url (kupec ne dobi povezave)", o12);
+    assert(o12 && o12.seja && await cakajPogoj(() => S.potekle.includes(o12.seja), 3000), "seja zabelezena in zaprta pri Stripu", { o12, potekle: S.potekle });
+
+    console.log("\n# P13 (M2): brezplacen nakup, ki je dogodek prebral pred COMMIT-om pavze");
+    for (const [ime, kupi] of [
+      ["vstopnice", (ev) => api("POST", `/events/${ev}/orders`, T.dana, { quantity: 1 })],
+      ["gost", (ev) => api("POST", `/guest/events/${ev}/orders`, null, { email: `m2-${ev}@example.com`, quantity: 1, accept_terms: true, terms_version: "2026-10-01" })],
+      ["miza", (ev) => api("POST", `/events/${ev}/tables/3/orders`, T.dana, {})],
+    ]) {
+      const ev = await dogodekC("M2 " + ime, 0);
+      if (ime === "miza") await pool.query("INSERT INTO event_tables (event_id, table_id, price_cents) VALUES ($1, 3, 0)", [ev]);
+      await pool.query("TRUNCATE omejitve");
+      const cz = await pool.connect();
+      await cz.query("BEGIN");
+      await cz.query("SELECT 1 FROM events WHERE id = $1 FOR NO KEY UPDATE", [ev]);   // kot PATCH pavze: zaklep vrstice, pavza se ni commitana
+      await cz.query("UPDATE events SET sales_paused = TRUE WHERE id = $1", [ev]);
+      const pr = kupi(ev);
+      await pocakaj(600);
+      await cz.query("COMMIT"); cz.release();
+      const rr = await pr;
+      const n = (await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE event_id = $1", [ev])).rows[0].n;
+      const t = (await pool.query("SELECT COUNT(*)::int AS n FROM tickets WHERE event_id = $1", [ev])).rows[0].n;
+      assert(rr.status === 409 && PAVZA.test(rr.body) && n === 0 && t === 0, `${ime} 0 EUR med pavzo -> 409, brez narocila in vstopnic`, { status: rr.status, body: rr.body, n, t });
+    }
+
+    console.log("\n# P14 (M4): pospravljalec preveri preklicana narocila s sejo");
+    const E14 = await dogodekC("M4 noc", 1500);
+    await pool.query("TRUNCATE omejitve");
+    const a14 = await api("POST", `/events/${E14}/orders`, T.ana, { quantity: 1 });
+    await pool.query("TRUNCATE omejitve");
+    const b14 = await api("POST", `/events/${E14}/orders`, T.bor, { quantity: 2 });
+    assert(a14.status === 201 && b14.status === 201, "dve cakajoci narocili s sejo", [a14.body, b14.body]);
+    const sA = (await narocilo(a14.body.order.id)).seja, sB = (await narocilo(b14.body.order.id)).seja;
+    Object.assign(S.seje[sB], { status: "complete", payment_status: "paid", payment_intent: "pi_m4" });   // placano, webhook izgubljen
+    // preklic mimo poti, ki zapira seje (npr. proces se je ponovno zagnal pred expire)
+    await pool.query("UPDATE orders SET status = 'cancelled', cancelled_at = NOW() - INTERVAL '5 seconds' WHERE id = ANY($1::bigint[])", [[a14.body.order.id, b14.body.order.id]]);
+    assert(await cakajPogoj(() => S.potekle.includes(sA), 6000), "odprta seja preklicanega narocila zaprta (pospravljalec)", S.potekle);
+    assert(await cakajPogoj(async () => (await pool.query("SELECT 1 FROM vracila WHERE order_id = $1 AND razlog = 'inactive_order'", [b14.body.order.id])).rows.length === 1, 6000),
+      "placana seja preklicanega narocila -> vracilo inactive_order v vrsti");
+    const t14 = (await pool.query("SELECT COUNT(*)::int AS n FROM tickets WHERE order_id = $1", [b14.body.order.id])).rows[0].n;
+    assert(t14 === 0 && (await narocilo(b14.body.order.id)).status === "cancelled", "... brez vstopnic, narocilo ostane cancelled", t14);
+
+    console.log("\n# P15 (M5): admin, ki je v nekem klubu vratar, ureja vse dogodke");
+    await pool.query("INSERT INTO club_members (club_id, user_id, role) VALUES (2, (SELECT id FROM users WHERE email='admin@outly.si'), 'doorman')");
+    r = await api("PATCH", `/events/${E14}`, T.admin, { title: "M5 admin ureja" });
+    assert(r.status === 200 && r.body.title === "M5 admin ureja", "admin (vratar v drugem klubu) PATCH tujega dogodka -> 200", r);
+    r = await api("PATCH", `/events/${E14}`, T.admin, { salesPaused: true });
+    assert(r.status === 200 && r.body.sales_paused === true, "... tudi pavza", r);
+    await pool.query("INSERT INTO club_members (club_id, user_id, role) VALUES (1, (SELECT id FROM users WHERE email='ana@outly.si'), 'doorman')");
+    r = await api("PATCH", `/events/${E14}`, T.ana, { title: "vratar ne sme" });
+    assert(r.status === 403, "vratar kluba (brez vloge admin) -> 403 kot doslej (I5)", r);
+    r = await api("DELETE", `/events/${E14}`, T.ana);
+    assert(r.status === 403, "vratar DELETE -> 403", r);
   } catch (e) {
     fail++; console.error("NAPAKA TESTA:", e);
   } finally {

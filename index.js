@@ -3116,7 +3116,16 @@ const istiCas = (nov, star) => {
   return Number.isFinite(t) && Math.floor(t / 60000) === Math.floor(new Date(star).getTime() / 60000);
 };
 
-app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+// M5 (pregled #316): vloga admin (iz baze, I5) ureja VSE dogodke ne glede na lastno clanstvo v klubu (admin, ki je v nekem klubu vratar ali natakar,
+// je prej dobil 403 iz requireClub). Ne-admin gre skozi requireClub("owner", "manager") kot doslej.
+function requireClubUrednikDogodka() {
+  const zaKlub = requireClub("owner", "manager");
+  return (req, res, next) => {
+    if (req.user && req.user.role === "admin") { req.klub = { clubId: null, role: "admin" }; return next(); }
+    return zaKlub(req, res, next);
+  };
+}
+app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, res) => {
   try {
     const d = await dogodekZaUrejanje(req, res);
     if (!d) return;
@@ -3256,7 +3265,7 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
       await c.query("ROLLBACK").catch(() => {});
       // U2: kapaciteta pod ze prodanim (omejitev events_sold_chk) je napaka vnosa, ne strežnika.
       if (e && e.code === "23514" && e.constraint === "events_sold_chk") {
-        const sold = (await pool.query("SELECT sold_count FROM events WHERE id = $1", [d.id]).catch(() => ({ rows: [] }))).rows[0];
+        const sold = (await c.query("SELECT sold_count FROM events WHERE id = $1", [d.id]).catch(() => ({ rows: [] }))).rows[0];   // M8: ze drzimo c (I16, #274)
         return res.status(400).json({ error: "capacity_below_sold", message: `Capacity can't be lower than the number of tickets already sold${sold ? ` (${sold.sold_count})` : ""}.`, sold: sold ? sold.sold_count : null });
       }
       // Preklic cakajocih narocil ob pavzi (zaklep dogodek -> narocila) se lahko redko zaklene s hkratnim webhookom (narocilo -> dogodek prek sprozilca):
@@ -3285,7 +3294,7 @@ app.patch("/events/:id", requireAuth, requireClub("owner", "manager"), async (re
   }
 });
 
-app.delete("/events/:id", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+app.delete("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, res) => {
   try {
     const d = await dogodekZaUrejanje(req, res);
     if (!d) return;
@@ -4731,10 +4740,17 @@ async function nakupStripeSeja(res, d, { oid, opis, kolicina, cenaEnoteCents, ra
     let zapisano;
     try {
       // Samo cakajoce narocilo (055, I53): ce ga je pavza prodaje medtem preklicala, seje ne zapisemo in jo takoj zapremo (kupec ne dobi povezave).
+      // M1 (pregled #316): pavza se preveri V ISTI izjavi; FOR SHARE na vrstici dogodka pocaka na COMMIT hkratnega PATCH-a pavze (ta drzi FOR NO KEY UPDATE)
+      // in nato prebere svezo vrednost. Brez tega bi seja, zapisana tik po pavzi, ostala odprta (ponovni korak pavze je samo v pomnilniku procesa).
       zapisano = (await c2.query(
-        "UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4) WHERE id=$1 AND status='pending' RETURNING id",
+        `UPDATE orders SET stripe_checkout_session_id=$2, checkout_url=$3, checkout_expires_at=to_timestamp($4)
+          WHERE id=$1 AND status='pending' AND NOT (SELECT ev.sales_paused FROM events ev WHERE ev.id = orders.event_id FOR SHARE) RETURNING id`,
         [oid, seja.id, seja.url, seja.expires_at])).rows.length;
-      if (!zapisano) await c2.query("UPDATE orders SET stripe_checkout_session_id = COALESCE(stripe_checkout_session_id, $2) WHERE id=$1", [oid, seja.id]);
+      // Zavrnjeno: narocilo preklicemo (ce se caka; kupec ni placal nicesar, pristojbine ni) in sejo zabelezimo (pospravljalec jo najde, ce expire spodaj ne uspe).
+      if (!zapisano) await c2.query(
+        `UPDATE orders SET stripe_checkout_session_id = COALESCE(stripe_checkout_session_id, $2), checkout_expires_at = COALESCE(checkout_expires_at, to_timestamp($3)),
+                status = CASE WHEN status = 'pending' THEN 'cancelled' ELSE status END, cancelled_at = CASE WHEN status = 'pending' THEN NOW() ELSE cancelled_at END
+          WHERE id=$1`, [oid, seja.id, seja.expires_at]);
     } catch (e) { c2.release(e); c2 = null; throw e; }   // pokvarjene povezave ne vracamo v pool
     if (!zapisano) {
       c2.release(); c2 = null;
@@ -4895,6 +4911,13 @@ async function vstopniceNarocil(idsNarocil, db = pool) {
 // klub viden, dogodek se ne sme biti zacet, okno prodaje mora biti odprto.
 // Vrne [status, besedilo] ali null. zahtevajCeno: vstopnice potrebujejo ticket_price_cents
 // (dogodek z zunanjo prodajo nima vstopnic na Outlyju); mize ga ne rabijo.
+// M2 (pregled #316): zadnja preverba pavze tik pred COMMIT-om nakupa (vstopnice, gost, miza). FOR SHARE pocaka na COMMIT hkratne pavze (PATCH drzi
+// FOR NO KEY UPDATE) in prebere svezo vrednost; brez tega bi brezplacen/testni nakup (takoj `paid`), ki je dogodek prebral pred pavzo, uspel po njej.
+// Pri vstopnicah ima transakcija vrstico dogodka ze zaklenjeno (sprozilec rezerviraj_zalogo, FOR UPDATE), zato tam to ne caka. Vrne true, ce je ustavljena.
+async function pavzaPredCommitom(c, eventId) {
+  const r = await c.query("SELECT sales_paused FROM events WHERE id = $1 FOR SHARE", [eventId]);
+  return !!(r.rows[0] && r.rows[0].sales_paused);
+}
 // Pavza prodaje (055, I53): `sales_paused` velja za VSE nakupne poti (vstopnice, gost, VIP miza), ker vse klicejo to funkcijo. Klicatelj MORA brati
 // e.sales_paused (manjkajoc stolpec v SELECT-u = undefined = pavza se ne bi upostevala; test_prodaja_pavza.js to ujame za vse tri poti).
 // Besedilo vsebuje »not on sale«: star iOS (APIErrorMessages) in splet (napake.js) ga po tem podnizu prevedeta v »This event is not on sale.«
@@ -5276,6 +5299,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
         `INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, q]
       );
     }
+    if (await pavzaPredCommitom(c, e.id)) { await c.query("ROLLBACK"); return res.status(409).send(NAPAKA_PAVZA_PRODAJE); }   // M2, I53
     await c.query("COMMIT");
     opozoriPogoje("POST /events/:id/orders", pogoji.verzija, ref);
 
@@ -5716,6 +5740,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
       await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, g.quantity]);
     }
     const zeton = await gostKujZeton(c, oid);   // v isti transakciji: zeton velja takoj, ko je narocilo vidno
+    if (await pavzaPredCommitom(c, e.id)) { await c.query("ROLLBACK"); return res.status(409).send(NAPAKA_PAVZA_PRODAJE); }   // M2, I53
     await c.query("COMMIT");
     opozoriPogoje("POST /guest/events/:id/orders", g.terms, ref);
 
@@ -9113,7 +9138,10 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
       `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_layout_source, e.sales_paused,
               e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
-         FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
+         FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1
+          -- M2 (I53): FOR SHARE vrstice dogodka PRED zaklepom mize: hkratna pavza (FOR NO KEY UPDATE) se zaporedi z nakupom (nakup vidi pavzo ali pavza vidi
+          -- narocilo). Vrstni red zaklepov dogodek -> miza je isti kot v PUT /business/events/:id/vip (brez mrtve zanke). Samo OF e: klub ostane nezaklenjen.
+          FOR SHARE OF e`, [id]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
     const e = er.rows[0];
     // Demo klub (050): 409 PRED mizo, zalogo in Stripom; izjema vloga admin.
@@ -9201,6 +9229,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     );
     const oid = or.rows[0].id;
     if (placanoTakoj) await c.query(`INSERT INTO tickets (order_id, event_id) SELECT $1, $2 FROM generate_series(1, $3::int)`, [oid, e.id, miza.seats]);
+    if (await pavzaPredCommitom(c, e.id)) { await c.query("ROLLBACK"); return res.status(409).send(NAPAKA_PAVZA_PRODAJE); }   // M2, I53
     await c.query("COMMIT");
     opozoriPogoje("POST /events/:id/tables/:tableId/orders", pogoji.verzija, ref);
 

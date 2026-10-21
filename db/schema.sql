@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–054, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–055, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ZlPqgHNcqXqamyukszoITrulxzLOrYI8ejkAMSIWuGmyApdtBIYUVcgGi4AhAF6
+\restrict PFESLWUz5AhKLkH1xfDvsiDn5F31HeoaTlgYDdqjdXXCsjDIMbHFezAyvdYMeTG
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -218,6 +218,53 @@ $$;
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
+
+--
+-- Name: admin_dejanja; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.admin_dejanja (
+    id bigint NOT NULL,
+    cas timestamp with time zone DEFAULT now() NOT NULL,
+    admin_user_id integer,
+    dejanje text NOT NULL,
+    cilj_tip text NOT NULL,
+    cilj_id text NOT NULL,
+    prej jsonb,
+    potem jsonb,
+    razlog text,
+    CONSTRAINT admin_dejanja_cilj_id_check CHECK (((char_length(cilj_id) >= 1) AND (char_length(cilj_id) <= 60))),
+    CONSTRAINT admin_dejanja_cilj_tip_check CHECK (((char_length(cilj_tip) >= 1) AND (char_length(cilj_tip) <= 30))),
+    CONSTRAINT admin_dejanja_dejanje_check CHECK (((char_length(dejanje) >= 1) AND (char_length(dejanje) <= 60))),
+    CONSTRAINT admin_dejanja_razlog_check CHECK (((razlog IS NULL) OR (char_length(razlog) <= 500)))
+);
+
+
+--
+-- Name: TABLE admin_dejanja; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.admin_dejanja IS 'Dnevnik admin dejanj (055, admin panel faza 1): kdo, kdaj, kaj, prej/potem; vpis v isti transakciji kot sprememba. Brez osebnih podatkov kupcev.';
+
+
+--
+-- Name: admin_dejanja_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.admin_dejanja_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: admin_dejanja_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.admin_dejanja_id_seq OWNED BY public.admin_dejanja.id;
+
 
 --
 -- Name: bottle_packages; Type: TABLE; Schema: public; Owner: -
@@ -745,6 +792,7 @@ CREATE TABLE public.events (
     vip_layout_source text DEFAULT 'club'::text NOT NULL,
     floor_plan jsonb,
     vip_layout_from_club_id integer,
+    sales_paused boolean DEFAULT false NOT NULL,
     CONSTRAINT events_capacity_chk CHECK (((capacity IS NULL) OR (capacity > 0))),
     CONSTRAINT events_end_chk CHECK (((end_at IS NULL) OR (end_at > start_at))),
     CONSTRAINT events_floor_plan_chk CHECK (((floor_plan IS NULL) OR (jsonb_typeof(floor_plan) = 'object'::text))),
@@ -794,6 +842,13 @@ COMMENT ON COLUMN public.events.floor_plan IS 'Tloris razporeda dogodka (039), e
 --
 
 COMMENT ON COLUMN public.events.vip_layout_from_club_id IS 'Klub, iz katerega je kopija razporeda (039; posnetek, poznejse spremembe kluba ne vplivajo). Samo informativno.';
+
+
+--
+-- Name: COLUMN events.sales_paused; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.events.sales_paused IS 'Pavza prodaje (055): TRUE = nakup vstopnic, miz in gosta 409 »Ticket sales are paused.«, cena ostane; odprta placilna okna se zaprejo (I53).';
 
 
 --
@@ -1871,6 +1926,13 @@ COMMENT ON TABLE public.vracila_iz_stripa IS 'Vracila, narejena zunaj Outlyja (S
 
 
 --
+-- Name: admin_dejanja id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.admin_dejanja ALTER COLUMN id SET DEFAULT nextval('public.admin_dejanja_id_seq'::regclass);
+
+
+--
 -- Name: bottle_packages id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -2015,6 +2077,14 @@ ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_
 --
 
 ALTER TABLE ONLY public.vracila ALTER COLUMN id SET DEFAULT nextval('public.vracila_id_seq'::regclass);
+
+
+--
+-- Name: admin_dejanja admin_dejanja_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.admin_dejanja
+    ADD CONSTRAINT admin_dejanja_pkey PRIMARY KEY (id);
 
 
 --
@@ -2351,6 +2421,20 @@ ALTER TABLE ONLY public.vracila_iz_stripa
 
 ALTER TABLE ONLY public.vracila
     ADD CONSTRAINT vracila_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: admin_dejanja_cas_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX admin_dejanja_cas_idx ON public.admin_dejanja USING btree (cas DESC);
+
+
+--
+-- Name: admin_dejanja_cilj_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX admin_dejanja_cilj_idx ON public.admin_dejanja USING btree (cilj_tip, cilj_id, cas DESC);
 
 
 --
@@ -2715,6 +2799,13 @@ CREATE INDEX orders_pending_idx ON public.orders USING btree (created_at) WHERE 
 --
 
 CREATE UNIQUE INDEX orders_pi_key ON public.orders USING btree (stripe_payment_intent_id) WHERE (stripe_payment_intent_id IS NOT NULL);
+
+
+--
+-- Name: orders_preklic_seja_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_preklic_seja_idx ON public.orders USING btree (cancelled_at) WHERE ((status = 'cancelled'::text) AND (stripe_checkout_session_id IS NOT NULL) AND (stripe_payment_intent_id IS NULL));
 
 
 --
@@ -3662,5 +3753,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ZlPqgHNcqXqamyukszoITrulxzLOrYI8ejkAMSIWuGmyApdtBIYUVcgGi4AhAF6
+\unrestrict PFESLWUz5AhKLkH1xfDvsiDn5F31HeoaTlgYDdqjdXXCsjDIMbHFezAyvdYMeTG
 

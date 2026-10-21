@@ -38,6 +38,11 @@ CREATE INDEX IF NOT EXISTS admin_dejanja_cas_idx ON admin_dejanja (cas DESC);
 
 COMMENT ON TABLE admin_dejanja IS 'Dnevnik admin dejanj (055, admin panel faza 1): kdo, kdaj, kaj, prej/potem; vpis v isti transakciji kot sprememba. Brez osebnih podatkov kupcev.';
 
+-- Pospravljalec (placila_stripe.js preveriPreklicane, I53): preklicana narocila s sejo brez placila, zadnjih 40 min. Delni indeks je majhen; gradnja vzame kratek
+-- SHARE na `orders` (nakupi pocakajo za cas gradnje, pri danasnji velikosti manj kot sekunda).
+CREATE INDEX IF NOT EXISTS orders_preklic_seja_idx ON orders (cancelled_at)
+    WHERE status = 'cancelled' AND stripe_checkout_session_id IS NOT NULL AND stripe_payment_intent_id IS NULL;
+
 -- Stolpec na `events` ZADNJI: ACCESS EXCLUSIVE na events se drzi do COMMIT, zato pred njim ni nicesar, kar bi cakalo.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS sales_paused BOOLEAN NOT NULL DEFAULT FALSE;
 
