@@ -261,9 +261,13 @@ function blokRacuna(v, { qrCid } = {}) {
 //   poisci(podatki, { signal }) -> { ponudnik_id, ponudnik_stevilka } | null (iskanje po referenci = message_id), preberi(ref, { signal }) -> { stevilka, eor, zoi, ... }.
 // Napaka NapakaPonudnika: `trajna` (zavrnitev, ponovitev ne pomaga -> `napaka` + POZOR), `konfiguracija` (poverilnice/nastavitev: pocasna ponovitev + POZOR, vrstica NI `napaka`),
 // `neznan` (zahtevek je lahko ze obdelan: pred novo izdajo najprej iskanje po referenci). Privzeto neznan = !trajna.
+// `neposlano` (DOKAZANO, da zahtevek ni prisel do ponudnika: HTTP 429 po statusni kodi, napaka povezave pred posiljanjem telesa, lokalna zavrnitev pred klicem): edini primer,
+// v katerem sme delavec pobrisati `poslano_at`. Besedilo napake NIKOLI ni dokaz (ponudnik lahko dokument ustvari, nato pa vrne napako, npr. pri fiskalizaciji).
+// `nejasno` (iskanje po referenci brez zanesljivega izida: neprepoznana, okrnjena ali nepopolna oblika seznama) -> NI »dokument ne obstaja«.
 class NapakaPonudnika extends Error {
-  constructor(sporocilo, { trajna = false, konfiguracija = false, neznan } = {}) {
-    super(sporocilo); this.name = "NapakaPonudnika"; this.trajna = !!trajna; this.konfiguracija = !!konfiguracija; this.neznan = neznan === undefined ? !trajna : !!neznan;
+  constructor(sporocilo, { trajna = false, konfiguracija = false, neznan, neposlano = false, nejasno = false } = {}) {
+    super(sporocilo); this.name = "NapakaPonudnika"; this.trajna = !!trajna; this.konfiguracija = !!konfiguracija; this.neposlano = !!neposlano; this.nejasno = !!nejasno;
+    this.neznan = neznan === undefined ? (!trajna && !neposlano) : !!neznan;
   }
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -295,6 +299,7 @@ function lazniPonudnik(env) {
 // nejasnem izidu delavec pobere seznam dokumentov obdobja (SalesInvoiceList / CreditNoteList) in poisce dokument s to referenco.
 const ERACUNI_URL_PRIVZETO = "https://e-racuni.com/WebServicesSI/API";
 const ERACUNI_ZAHTEVANI = ["ERACUNI_USERNAME", "ERACUNI_SECRET_KEY", "ERACUNI_TOKEN"];
+// Vzorca razvrscata napako samo za PREMOR in opozorilo. Iz besedila NE sledi, da dokument ni nastal: `poslano_at` ostane (iskanje po referenci pred vsako novo izdajo).
 const VZOREC_OMEJITEV = /too many|rate.?limit|throttl|concurrent|try again|retry|temporar|busy|prevec zahtev|zasedeno|poskusite/i;
 const VZOREC_KONFIGURACIJA = /access denied|privilege|unauthori[sz]|authenticat|credential|invalid (user|login|token|secret|password|api)|wrong (user|password|token)|login|api.{0,20}(not|disabled|inactive)|web ?services?.{0,20}(not|disabled)|cash ?register|business ?unit|certificat|certifikat|fiscaliz.{0,25}(not|disabled|inactive|failed)|not (set ?up|configured|activated|registered|found)/i;
 const skrij = (besedilo, tajno) => { let t = String(besedilo); for (const x of tajno) if (x && x.length >= 4) t = t.split(x).join("***"); return t; };
@@ -313,33 +318,21 @@ function iskaniKljuc(koren, imena) {
   }
   return undefined;
 }
-function imaKljuc(koren, imena) {
-  const iskana = imena.map((x) => x.toLowerCase());
-  const sklad = [koren];
-  for (let n = 0; sklad.length && n < 5000; n++) {
-    const o = sklad.pop();
-    if (!jeObjekt(o)) continue;
-    if (!Array.isArray(o) && Object.keys(o).some((k) => iskana.includes(k.toLowerCase()))) return true;
-    for (const v of Array.isArray(o) ? o : Object.values(o)) if (jeObjekt(v)) sklad.push(v);
-  }
-  return false;
-}
-function dokumentPoReferenci(koren, ref) {
-  const sklad = [koren];
-  for (let n = 0; sklad.length && n < 20000; n++) {
-    const o = sklad.pop();
-    if (!jeObjekt(o)) continue;
-    if (!Array.isArray(o)) { const k = Object.keys(o).find((x) => x.toLowerCase() === "orderreference"); if (k !== undefined && String(o[k]).trim() === ref) return o; }
-    for (const v of Array.isArray(o) ? o : Object.values(o)) if (jeObjekt(v)) sklad.push(v);
-  }
-  return null;
+// Napake povezave, ki DOKAZUJEJO, da telo zahtevka ni bilo poslano (DNS, zavrnjena povezava, rok za vzpostavitev povezave, napaka TLS pri rokovanju). ECONNRESET, »fetch failed«
+// brez kode in rok po vzpostavitvi povezave tega NE dokazujejo.
+const KODE_NEPOSLANO = new Set(["ENOTFOUND", "ECONNREFUSED", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+function neposlanoPriPovezavi(e) {
+  const kode = [e && e.code, e && e.cause && e.cause.code].filter(Boolean).map(String);
+  return kode.some((k) => KODE_NEPOSLANO.has(k) || /^(ERR_TLS_|CERT_|UNABLE_TO_|DEPTH_ZERO_|SELF_SIGNED_)/.test(k));
 }
 const niz = (x) => (x === undefined || x === null ? null : (String(x).trim() || null));
 const datumIso = (t) => { const d = deliCasa(t); return `${d.leto}-${d.mesec}-${d.dan}`; };
+// Obdobje iskanja po referenci: dokument nastane med `poslano_at` in nekaj deset sekund pozneje (rok klica), zato +-15 min (en ali dva dneva, ljubljanski cas).
+const oknoIskanja = (poslanoAt) => { const t = new Date(poslanoAt).getTime(); return { od: datumIso(new Date(t - 15 * 60000)), do: datumIso(new Date(t + 15 * 60000)) }; };
 const pocakajSignal = (ms, signal) => new Promise((resolve, reject) => {
   if (ms <= 0) return resolve();
   const t = setTimeout(resolve, ms);
-  if (signal) signal.addEventListener("abort", () => { clearTimeout(t); reject(new NapakaPonudnika("rok potekel (cakanje na razmak med zahtevki)", { neznan: false })); }, { once: true });
+  if (signal) signal.addEventListener("abort", () => { clearTimeout(t); reject(new NapakaPonudnika("rok potekel (cakanje na razmak med zahtevki)", { neznan: false, neposlano: true })); }, { once: true });
 });
 
 function eracuniPonudnik(env) {
@@ -350,6 +343,7 @@ function eracuniPonudnik(env) {
   const vrstaProdaje = celo(env, "ERACUNI_VRSTA_PRODAJE", 7, 0, 200);   // 7 = »Neobdavcen promet - ne gre v DDV evidence« (NEXT DIMENSIONS ni zavezanec za DDV), preveri v e-racuni
   const kupec = String(env.ERACUNI_KUPEC || "").trim();                  // neobvezna oznaka kupca na poenostavljenem racunu (NI ime osebe); privzeto brez
   const razmak = celo(env, "ERACUNI_RAZMAK_MS", 1000, 0, 60000);        // najmanj toliko med zacetkoma dveh zahtevkov (meja 1/s)
+  const SEZNAM_MEJA = celo(env, "ERACUNI_SEZNAM_MEJA", 100, 2, 100000); // seznam z toliko ali vec elementi je ob iskanju po referenci sumljiv (morda okrnjen): brez negativnega izida
   const tajno = [username, secretKey, token];
   let naslednji = 0;
 
@@ -361,8 +355,12 @@ function eracuniPonudnik(env) {
     try {
       res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ username, secretKey, token, method: metoda, parameters: parametri }), signal, redirect: "error" });
       besedilo = await res.text();
-    } catch (e) { throw napaka(`${metoda}: omrezje: ${e && e.name === "AbortError" ? "rok potekel" : (e && e.message) || e}`, { neznan: true }); }
-    if (res.status === 429) throw napaka(`${metoda}: HTTP 429 (omejitev klicev)`, { neznan: false });
+    } catch (e) {
+      const prekinjen = e && e.name === "AbortError";
+      const dokazano = !prekinjen && neposlanoPriPovezavi(e);
+      throw napaka(`${metoda}: omrezje: ${prekinjen ? "rok potekel" : (e && e.message) || e}${dokazano ? " (zahtevek ni bil poslan)" : ""}`, dokazano ? { neznan: false, neposlano: true } : { neznan: true });
+    }
+    if (res.status === 429) throw napaka(`${metoda}: HTTP 429 (omejitev klicev)`, { neznan: false, neposlano: true });   // po STATUSNI KODI, ne po besedilu
     if (res.status === 408 || res.status >= 500) throw napaka(`${metoda}: HTTP ${res.status}`, { neznan: true });
     if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 405) throw napaka(`${metoda}: HTTP ${res.status} (poverilnice, pravice ali naslov)`, { konfiguracija: true, neznan: false });
     let j = null;
@@ -391,42 +389,77 @@ function eracuniPonudnik(env) {
     ime: "eracuni", stevilcenje: "ponudnik", prostor, naprava,
     najvecVzporednih: 1,   // API: socasnih zahtevkov istega uporabnika ni
     rokMs: 30000,          // klic vkljuci FURS; privzeti rok 5 s bi poslal vsak racun v nejasen izid
-    paket: 5,              // kolikor vrstic naenkrat »prevzame« delavec: ~2 zahtevka/s (razmak) -> prevzem ne zastara (RACUNI_ZASTARELO_MS)
+    paket: 5,              // kolikor vrstic naenkrat »prevzame« delavec (paket x (rok + razmak) < zastaranje prevzema)
+    zastarelo: 300000,     // prevzem vrstice zastara po 5 min (paket 5 x klici do 30 s); poleg tega najem in zeton prevzema (racuni.js, K2)
     async ustvari(p, { signal } = {}) {
-      if (String(p.valuta || "EUR").trim() !== "EUR") throw new NapakaPonudnika(`valuta ${String(p.valuta).slice(0, 5)} ni podprta (samo EUR)`, { trajna: true, neznan: false });
-      if (!Array.isArray(p.postavke) || !p.postavke.length) throw new NapakaPonudnika("racun brez postavk", { trajna: true, neznan: false });
-      const danes = datumIso(new Date());
+      // Lokalne zavrnitve pred klicem: nic ni poslano (`neposlano`), zato se oznaka `poslano_at` pobrise.
+      if (String(p.valuta || "EUR").trim() !== "EUR") throw new NapakaPonudnika(`valuta ${String(p.valuta).slice(0, 5)} ni podprta (samo EUR)`, { trajna: true, neznan: false, neposlano: true });
+      if (!Array.isArray(p.postavke) || !p.postavke.length) throw new NapakaPonudnika("racun brez postavk", { trajna: true, neznan: false, neposlano: true });
       const dobropis = p.vrsta === "dobropis";
+      const datumDobave = /^\d{4}-\d{2}-\d{2}$/.test(String(p.datum_dobave || "")) ? p.datum_dobave : datumIso(new Date());   // M1: datum placila (dobropis: vracila), ne dan izdaje
       const skupno = {
-        dateOfSupplyFrom: danes, type: "Retail", methodOfPayment: nacinPlacila, businessUnit: prostor, cashRegisterCode: naprava, orderReference: p.message_id,
+        dateOfSupplyFrom: datumDobave, type: "Retail", methodOfPayment: nacinPlacila, businessUnit: prostor, cashRegisterCode: naprava, orderReference: p.message_id,
         documentLanguage: "Slovene", remarks: p.ddv_klavzula,
         ...(kupec ? { buyerName: kupec } : {}),   // BREZ e-naslova, imena, naslova in davcne stevilke kupca (poenostavljen racun potrosniku, pravna analiza 4.1/12)
         // Cene so KONCNE (Retail, z morebitnimi davki): cele centi / 100 (najblizje decimalno stevilo; dobropis ima v e-racuni pozitivne zneske).
         Items: p.postavke.map((x) => ({ description: x.opis, quantity: x.kolicina, unit: "kos", price: Math.abs(Math.trunc(Number(x.cena_cents))) / 100, vatTransactionType: vrstaProdaje })),
       };
       if (dobropis) {
-        const ref = p.sklic && (p.sklic.ponudnik_stevilka || p.sklic.ponudnik_id);
-        if (!ref) throw new NapakaPonudnika("dobropis brez sklica na izvirni racun pri ponudniku", { trajna: true, neznan: false });
+        // Sklic je STEVILKA izvirnega dokumenta pri ponudniku (salesInvoiceRef: »2022-00005«); oznaka dokumenta (documentID) ni sklic.
+        const ref = p.sklic && p.sklic.ponudnik_stevilka;
+        if (!ref) throw new NapakaPonudnika("dobropis brez stevilke izvirnega dokumenta pri ponudniku", { trajna: true, neznan: false, neposlano: true });
         const j = await klic("CreditNoteCreate", { CreditNote: { ...skupno, salesInvoiceRef: ref } }, signal);
         return sklicDokumenta(j);
       }
       const j = await klic("SalesInvoiceCreate", { SalesInvoice: skupno }, signal);
       return sklicDokumenta(j);
     },
-    // Iskanje po referenci: seznam dokumentov od dneva pred zahtevkom do danes, filter po `orderReference` v odjemalcu. Oblike odgovora, ki je ne prepozna, NE steje za »ni najden«.
+    // Iskanje po referenci (= pred novo izdajo): seznam dokumentov v ozkem obdobju okoli `poslano_at`, filter po `orderReference` v odjemalcu. API nima filtra po referenci in
+    // oblike seznama (omejitev, strani) dokumentacija ne opisuje, zato je NEGATIVEN izid (return null) dovoljen SAMO, ce je seznam dokazljivo popoln:
+    //   (1) prepoznan zabojnik seznama (SalesInvoices / CreditNotes); prazen odgovor, `{}` in `{status: ok}` NISO »prazen seznam«;
+    //   (2) manj kot ERACUNI_SEZNAM_MEJA elementov (ob mejni dolzini seznam morda okrnjen);
+    //   (3) vsak element na nasi blagajni ima `orderReference` v obliki UUID (nespremenjen, ne okrnjen); ostale blagajne se ne stejejo;
+    //   (4) seznam vsebuje VSE dokumente, za katere v bazi ze vemo, da obstajajo v istem obdobju (`p.znani`): manjka kateri -> seznam je okrnjen ali zamaknjen.
+    // Sicer NapakaPonudnika({ nejasno }): ni trditve »dokumenta ni«. Vec dokumentov z isto referenco = ze nastal dvojnik (trajna napaka, rocna obravnava).
     async poisci(p, { signal } = {}) {
       const dobropis = p.vrsta === "dobropis";
-      const od = p.poslano_at ? new Date(new Date(p.poslano_at).getTime() - 24 * 3600 * 1000) : new Date(Date.now() - 48 * 3600 * 1000);
-      const j = await klic(dobropis ? "CreditNoteList" : "SalesInvoiceList", { dateFrom: datumIso(od), dateTo: datumIso(new Date(Date.now() + 24 * 3600 * 1000)) }, signal);
-      const dok = dokumentPoReferenci(j, p.message_id);
-      if (dok) return sklicDokumenta(dok);
-      const prepoznan = imaKljuc(j, ["SalesInvoices", "SalesInvoice", "CreditNotes", "CreditNote", "documents", "items", "result", "results", "list"]) || Object.keys(j).every((k) => k.toLowerCase() === "status");
-      if (!prepoznan) throw new NapakaPonudnika("iskanje po referenci: oblike odgovora ne prepoznam (ne morem trditi, da dokumenta ni)", { neznan: true });
-      return null;
+      const okno = p.okno && p.okno.od && p.okno.do ? p.okno : { od: datumIso(new Date(Date.now() - 24 * 3600 * 1000)), do: datumIso(new Date(Date.now() + 24 * 3600 * 1000)) };
+      const j = await klic(dobropis ? "CreditNoteList" : "SalesInvoiceList", { dateFrom: okno.od, dateTo: okno.do }, signal);
+      const nejasno = (kaj) => new NapakaPonudnika(`iskanje po referenci ne da zanesljivega izida: ${kaj}`, { neznan: true, nejasno: true });
+      const imeZabojnika = dobropis ? "creditnotes" : "salesinvoices", imeElementa = dobropis ? "creditnote" : "salesinvoice";
+      const odg = jeObjekt(vrhnji(j, "response")) ? vrhnji(j, "response") : j;
+      const zab = Object.keys(odg).find((k) => k.toLowerCase() === imeZabojnika);
+      if (zab === undefined) throw nejasno("oblika seznama ni prepoznana");
+      let vsebina = odg[zab];
+      if (jeObjekt(vsebina) && !Array.isArray(vsebina)) {   // XML v JSON: {SalesInvoice: [...]} ali {SalesInvoice: {...}}
+        const k = Object.keys(vsebina).find((x) => x.toLowerCase() === imeElementa);
+        vsebina = k === undefined ? undefined : vsebina[k];
+        if (jeObjekt(vsebina) && !Array.isArray(vsebina)) vsebina = [vsebina];
+      }
+      if (!Array.isArray(vsebina)) throw nejasno("seznam je prazen ali v neznani obliki");
+      const elementi = vsebina.map((x) => (jeObjekt(x) && !Array.isArray(x) && Object.keys(x).length === 1 && Object.keys(x)[0].toLowerCase() === imeElementa ? x[Object.keys(x)[0]] : x));
+      if (elementi.some((x) => !jeObjekt(x) || Array.isArray(x))) throw nejasno("element seznama ni objekt");
+      if (elementi.length >= SEZNAM_MEJA) throw nejasno(`seznam ima ${elementi.length} elementov (meja ${SEZNAM_MEJA}): morda je okrnjen`);
+      const referenca = (x) => { const v = iskaniKljuc(x, ["orderReference"]); return v === undefined ? null : String(v).trim(); };
+      const nasi = elementi.filter((x) => { const bl = iskaniKljuc(x, ["cashRegisterCode"]); return bl === undefined || String(bl).trim() === naprava; });
+      for (const x of nasi) {
+        const r = referenca(x);
+        if (r === null || !UUID.test(r)) throw nejasno("element seznama nima nespremenjene reference (orderReference)");
+      }
+      const prisotne = new Set(elementi.map(referenca).filter(Boolean));
+      const znani = Array.isArray(p.znani) ? p.znani : [];
+      const manjka = znani.filter((x) => !prisotne.has(x));
+      if (manjka.length) throw nejasno(`v seznamu manjka ${manjka.length} dokumentov, za katere vemo, da obstajajo (seznam okrnjen ali zamaknjen)`);
+      const najdeni = elementi.filter((x) => referenca(x) === p.message_id);
+      if (najdeni.length > 1) throw new NapakaPonudnika(`pri ponudniku obstaja ${najdeni.length} dokumentov z isto referenco ${p.message_id}: DVOJNIK, rocna obravnava (storno)`, { trajna: true, neznan: false });
+      return najdeni.length ? sklicDokumenta(najdeni[0]) : null;
     },
     async preberi(ref, { signal } = {}) {
       const dobropis = ref.vrsta === "dobropis";
-      const j = await klic(dobropis ? "CreditNoteGet" : "SalesInvoiceGet", ref.ponudnik_id ? { documentID: ref.ponudnik_id } : { number: ref.ponudnik_stevilka }, signal);
+      // Dokumentirano je branje po STEVILKI dokumenta (»by document number«); oznaka dokumenta (documentID) je rezerva, ce stevilke nimamo. Dveh polj ne mesamo.
+      const iskano = ref.ponudnik_stevilka ? { number: ref.ponudnik_stevilka } : (ref.ponudnik_id ? { documentID: ref.ponudnik_id } : null);
+      if (!iskano) throw new NapakaPonudnika("dokument pri ponudniku nima ne stevilke ne oznake", { trajna: true, neznan: false, neposlano: true });
+      const j = await klic(dobropis ? "CreditNoteGet" : "SalesInvoiceGet", iskano, signal);
       const bu = niz(iskaniKljuc(j, ["businessUnit"])), bl = niz(iskaniKljuc(j, ["cashRegisterCode"]));
       if ((bu !== null && bu !== prostor) || (bl !== null && bl !== naprava)) {
         throw new NapakaPonudnika(`dokument je izdan na drugi poslovni enoti/blagajni (${String(bu).slice(0, 20)}/${String(bl).slice(0, 20)}, pricakovano ${prostor}/${naprava})`, { konfiguracija: true, neznan: false });
@@ -522,7 +555,11 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   const NEZNAN_PREMOR_MS = celo(env, "RACUNI_NEZNAN_PREMOR_MS", 120000, 0, 86400000);   // izid klica neznan (rok, 5xx, omrezje): najmanj toliko do iskanja po referenci in nove izdaje
   const KONFIG_PREMOR_MS = celo(env, "RACUNI_KONFIG_PREMOR_MS", 600000, 0, 86400000);   // poverilnice/nastavitev pri ponudniku: pocasna ponovitev (+ POZOR), vrstica ni `napaka`
   const ODLOG_MS = celo(env, "RACUNI_ODLOG_MS", 30000, 0, 3600000);             // dobropis caka na stevilko oz. potrditev izvirnega racuna
-  const ZASTARELO_MS = celo(env, "RACUNI_ZASTARELO_MS", 120000, 1000, 3600000); // prevzeto brez zakljucka (proces ugasnjen) se prevzame znova (isti message_id)
+  const ZASTARELO_MS = celo(env, "RACUNI_ZASTARELO_MS", (ponudnik && ponudnik.zastarelo) || 120000, 1000, 3600000); // prevzeto brez zakljucka (proces ugasnjen) se prevzame znova (isti message_id)
+  const NAJEM_MS = celo(env, "RACUNI_NAJEM_MS", 90000, 1000, 3600000);          // najem delavca e-racuni (en delavec v celem sistemu): daljsi od roka klica, podaljsa se pred vsakim klicem
+  const ISKANJE_RAZMAK_MS = celo(env, "RACUNI_ISKANJE_RAZMAK_MS", 600000, 0, 86400000);   // najmanj toliko med dvema stetima iskanjema po referenci; nova izdaja sele po 2 neuspesnih iskanjih
+  const ISKANJE_NEJASNO_MAX = celo(env, "RACUNI_ISKANJE_NEJASNO_MAX", 4, 1, 100);   // toliko iskanj brez zanesljivega izida -> `napaka` (rocna obravnava), nikoli nova izdaja
+  const ID_NAJEMA = crypto.randomUUID();
   const POSPRAVI_MS = celo(env, "RACUNI_POSPRAVI_MS", 600000, 0, 86400000);     // pospravljalec (0 = izklopljen)
   const POSPRAVI_ZAMIK_MS = celo(env, "RACUNI_POSPRAVI_ZAMIK_MS", 300000, 0, 86400000);
   const ALARM_PO_MS = celo(env, "RACUNI_ALARM_PO_MS", 24 * 3600000, 1000, 30 * 86400000);   // racun ni potrjen toliko casa -> POZOR (zakonski rok: 2 delovna dneva)
@@ -548,10 +585,57 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
     });
   }
   const poizvedba = (sql, par) => baza(() => pool.query(sql, par));
-  const sprosti = (id, dodatno = "", par = []) => poizvedba(`UPDATE racuni SET prevzeto_at = NULL${dodatno} WHERE id = $1`, [id, ...par]);
+  // Z zetonom: sprosti samo, ce vrstico se drzi NAS prevzem (po zastaranju jo je lahko prevzel drug in njegovega prevzema ne smemo sprostiti).
+  const sprosti = (id, dodatno = "", par = [], zeton = null) => (zeton
+    ? poizvedba(`UPDATE racuni SET prevzeto_at = NULL${dodatno} WHERE id = $1 AND prevzem_zeton = $${par.length + 2}`, [id, ...par, zeton])
+    : poizvedba(`UPDATE racuni SET prevzeto_at = NULL${dodatno} WHERE id = $1`, [id, ...par]));
+
+  // Zapis delavca pri ponudniku s svojim prevzemom: vrstica mora biti PREVZETA in z NASIM zetonom (K2: prevzem po zastaranju ali prekrivanje instanc ob deployu ne sme
+  // podvojiti izdaje). Mesta v `nastavi` in `pogoj` se zacnejo pri $3 ($1 = id, $2 = zeton). Vrne stevilo spremenjenih vrstic.
+  async function uredi(id, zeton, nastavi, par, pogoj = "TRUE") {
+    const r = await poizvedba(`UPDATE racuni SET ${nastavi} WHERE id = $1 AND prevzem_zeton = $2 AND prevzeto_at IS NOT NULL AND ${pogoj}`, [id, zeton, ...par]);
+    return r.rowCount;
+  }
+
+  // Najem »samo en delavec e-racuni v celem sistemu« (K2): API ne dovoli socasnih zahtevkov istega uporabnika, ob deployu pa tecejo dve instanci. Pridobi ali podaljsa;
+  // ne uspe samo, ce ga drzi drug lastnik, ki mu se ni potekel. Pred VSAKIM klicem ponudniku podaljsan na NAJEM_MS (> rok klica), zato po zrusitvi instance drugi pocaka najvec toliko.
+  async function najemi() {
+    const r = await poizvedba(
+      `INSERT INTO racuni_najem (ime, lastnik, potece_at) VALUES ($1, $2, NOW() + ($3::bigint * INTERVAL '1 millisecond'))
+       ON CONFLICT (ime) DO UPDATE SET lastnik = EXCLUDED.lastnik, potece_at = EXCLUDED.potece_at
+        WHERE racuni_najem.lastnik = EXCLUDED.lastnik OR racuni_najem.potece_at < NOW() RETURNING lastnik`, [ponudnik.ime, ID_NAJEMA, NAJEM_MS]);
+    return r.rows.length === 1;
+  }
+  const spustiNajem = () => poizvedba("UPDATE racuni_najem SET potece_at = NOW() WHERE ime = $1 AND lastnik = $2", [ponudnik.ime, ID_NAJEMA]).catch(() => {});
+  const obstajaDelo = async () => (await poizvedba(
+    `SELECT 1 FROM racuni WHERE stanje IN ('caka', 'izdan') AND naslednji_poskus_at <= NOW() AND (vrsta = 'racun' OR vracilo_uspelo IS TRUE)
+        AND (prevzeto_at IS NULL OR prevzeto_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')) LIMIT 1`, [ZASTARELO_MS])).rows.length > 0;
+
+  // Opozorila delavca se zberejo in izpisejo ENKRAT na tek (en izpis na vrsto dogodka, ne na vrstico): sicer zaostanek stotin racunov izcrpa urni proracun opozoril v sentry.js
+  // in zakrije druga opozorila (placila).
+  let zbir = [];
+  const objavi = (tip, oznaka, besedilo) => { zbir.push({ tip, oznaka, besedilo }); };
+  function izpisiZbir() {
+    const v = zbir; zbir = [];
+    const skupine = new Map();
+    for (const x of v) { if (!skupine.has(x.tip)) skupine.set(x.tip, []); skupine.get(x.tip).push(x); }
+    const NASLOVI = {
+      trajna: (n) => `POZOR: ponudnik ${ponudnik.ime} je ZAVRNIL ${n} racunov/dobropisov (stanje napaka, NISO potrjeni; popravi in ponovi rocno, zakonski rok 2 delovna dneva)`,
+      konfiguracija: (n) => `POZOR: nastavitev pri ponudniku ${ponudnik.ime} (poverilnice, poslovna enota, blagajna) - ${n} racunov caka`,
+      ponovitev: (n) => `${n} racunov: klic ponudniku ${ponudnik.ime} ni uspel, ponovim`,
+      iskanje: (n) => `${n} racunov: izid prejsnjega zahtevka ponudniku ${ponudnik.ime} je neznan, iskanje po referenci se ni zakljucilo (nova izdaja je blokirana)`,
+      obdelava: (n) => `POZOR: obdelava ${n} racunov ni uspela`,
+    };
+    for (const [tip, sez] of skupine) {
+      const primeri = sez.slice(0, 3).map((x) => `${x.oznaka}: ${x.besedilo}`).join(" | ");
+      console.error(`[racuni] ${(NASLOVI[tip] || ((n) => `${n} dogodkov (${tip})`))(sez.length)}. ${primeri}${sez.length > 3 ? ` (in se ${sez.length - 3})` : ""}`);
+    }
+  }
 
   const SQL_PODATKI_RACUNA = `SELECT r.*, ref.prostor AS ref_prostor, ref.naprava AS ref_naprava, ref.stevilka AS ref_stevilka, ref.izdan_at AS ref_izdan_at, ref.stanje AS ref_stanje,
-              ref.eor AS ref_eor, ref.ponudnik_id AS ref_ponudnik_id, ref.ponudnik_stevilka AS ref_ponudnik_stevilka, o.public_ref, o.quantity, o.unit_price_cents, o.total_cents, o.table_label, e.title, e.start_at
+              ref.eor AS ref_eor, ref.ponudnik_id AS ref_ponudnik_id, ref.ponudnik_stevilka AS ref_ponudnik_stevilka, o.public_ref, o.quantity, o.unit_price_cents, o.total_cents, o.table_label, e.title, e.start_at,
+              o.paid_at AS placano_at, r.poslano_at::text AS poslano_niz,
+              (EXTRACT(EPOCH FROM (NOW() - r.iskanje_ne_at)) * 1000)::float8 AS iskanje_pred_ms
          FROM racuni r JOIN orders o ON o.id = r.order_id JOIN events e ON e.id = o.event_id LEFT JOIN racuni ref ON ref.id = r.ref_racun_id WHERE r.id = $1`;
 
   // Podatki za ponudnika (brez e-naslova in imena kupca). Isti message_id ob vsaki ponovitvi.
@@ -628,10 +712,13 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
 
   // ---------------------------------------------------------------------------------------------------------------------------------------------------------
   // Ponudnik, ki SAM dodeli davcno stevilko (e-racuni). Racun ima stanje `caka` (brez stevilke) do trenutka, ko ponudnik vrne `fiscalNumber`; ENO zaporedje je njegovo.
-  //   S1 izdaja:   (ce je zahtevek ze bil poslan, a stevilke ni: NAJPREJ iskanje po referenci = message_id) -> poslano_at -> ustvari -> ponudnik_id, ponudnik_stevilka
-  //   S2 stevilka: preberi -> fiscalNumber (+ EOR, ZOI) -> stevilka, prostor, naprava, leto, izdan_at, stevilka_vir = 'ponudnik' (+ `potrjen`, ce je EOR ze znan)
+  //   S1 izdaja:   (ce je zahtevek ze bil poslan, a stevilke ni: NAJPREJ iskanje po referenci = message_id; nova izdaja sele po 2 veljavnih neuspesnih iskanjih ~10 min narazen)
+  //                -> poslano_at -> ustvari -> ponudnik_id, ponudnik_stevilka
+  //   S2 stevilka: preberi -> fiscalNumber (+ EOR, ZOI) -> stevilka, prostor, naprava, leto, izdan_at (samo ce ga ponudnik vrne), stevilka_vir = 'ponudnik' (+ `potrjen`, ce je EOR znan)
   //   S3 potrditev: izdan brez EOR -> preberi -> eor, zoi -> `potrjen`
   // Nikoli nova izdaja, dokler izid prejsnjega zahtevka ni znan (API nima idempotence): dvojnik bi bil drug davcni racun za isto prodajo in ga ni mogoce izbrisati.
+  // Varovala: (a) `poslano_at` se po posiljanju NE brise, razen ob HTTP 429 ali dokazani napaki povezave pred posiljanjem (NapakaPonudnika.neposlano) - nikoli po besedilu napake;
+  // (b) en delavec e-racuni v celem sistemu (najem v bazi) in zeton prevzema vrstice na vsakem zapisu; (c) iskanje po referenci brez zanesljivega izida ni »ni najden«.
   async function podatkiZaPonudnika(id) {
     const r = (await poizvedba(SQL_PODATKI_RACUNA, [id])).rows[0];
     if (!r) return null;
@@ -643,133 +730,178 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
         id: String(r.id), message_id: r.message_id, vrsta: r.vrsta, naknadno: !!r.naknadno, poslano_at: r.poslano_at ? new Date(r.poslano_at).toISOString() : null,
         znesek_cents: Number(r.znesek_cents), valuta: String(r.valuta || "EUR").trim(), postavke: refStevilka || !dobropis ? postavkeRacuna(r, r) : [],
         ddv_klavzula: DDV_KLAVZULA, nacin_placila: NACIN_PLACILA, narocilo: r.public_ref,
+        datum_dobave: datumIso(!dobropis && r.placano_at ? r.placano_at : r.created_at),   // M1: dan placila (dobropis: dan vracila), ne dan izdaje
         sklic: dobropis ? { stevilka_racuna: refStevilka, ponudnik_id: r.ref_ponudnik_id || null, ponudnik_stevilka: r.ref_ponudnik_stevilka || null, eor: r.ref_eor || null } : null,
       },
     };
   }
 
-  async function napakaPriPonudniku(r, e, korak) {
+  // Podatki za iskanje po referenci: obdobje okoli `poslano_at` in referenca vseh dokumentov iste vrste, za katere ze vemo, da pri ponudniku obstajajo (dokaz popolnosti seznama).
+  async function podatkiZaIskanje(r, poslanoAt) {
+    const okno = oknoIskanja(poslanoAt);
+    const znani = (await poizvedba(
+      `SELECT message_id::text AS m FROM racuni WHERE vrsta = $1 AND id <> $2 AND (ponudnik_id IS NOT NULL OR ponudnik_stevilka IS NOT NULL) AND poslano_at IS NOT NULL
+          AND (poslano_at AT TIME ZONE 'Europe/Ljubljana')::date BETWEEN $3::date AND $4::date ORDER BY poslano_at DESC LIMIT 100`, [r.vrsta, r.id, okno.od, okno.do])).rows.map((x) => x.m);
+    return { okno, znani };
+  }
+
+  async function napakaPriPonudniku(r, e, korak, zeton) {
     const oznaka = `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${r.id})`;
-    if (e.trajna) {
-      await poizvedba("UPDATE racuni SET stanje = 'napaka', poskusi = poskusi + 1, zadnja_napaka = $2, prevzeto_at = NULL WHERE id = $1 AND stanje IN ('caka', 'izdan')", [r.id, kratko(e)]);
-      console.error(`[racuni] POZOR: ${oznaka}: ponudnik ${ponudnik.ime} je ${korak} ZAVRNIL: ${kratko(e)}. Racun NI potrjen; popravi in ponovi rocno (zakonski rok 2 delovna dneva).`);
+    // `poslano_at` se pobrise SAMO, ce je DOKAZANO, da zahtevek ni prisel do ponudnika (429 po statusni kodi, napaka povezave pred posiljanjem, lokalna zavrnitev), je ta poskus
+    // sam nastavil `poslano_at` (prej ni bil poslan noben zahtevek) in gre za izdajo. Besedilo napake ni dokaz (K1: ponudnik lahko dokument ustvari in nato javi napako).
+    const pobrisi = !!(e.neposlano && korak === "ustvari" && !r.poslano_at);
+    const nejasnih = Number(r.iskanja_nejasna) + (e.nejasno ? 1 : 0);
+    if (e.trajna || (e.nejasno && nejasnih >= ISKANJE_NEJASNO_MAX)) {
+      const sporocilo = e.nejasno
+        ? `iskanje po referenci ${nejasnih}x brez zanesljivega izida (${kratko(e)}); v e-racuni preveri, ali obstaja dokument z referenco ${r.message_id}, PREDEN racun ponovis`
+        : `${korak} ZAVRNJEN: ${kratko(e)}${korak === "ustvari" && !pobrisi ? `; zahtevek je bil poslan, zato v e-racuni preveri, ali obstaja dokument z referenco ${r.message_id}` : ""}`;
+      await uredi(r.id, zeton,
+        "stanje = 'napaka', poskusi = poskusi + 1, zadnja_napaka = $3, prevzeto_at = NULL, iskanja_nejasna = $5, poslano_at = CASE WHEN $4::boolean AND ponudnik_id IS NULL AND stevilka IS NULL THEN NULL ELSE poslano_at END",
+        [sporocilo.slice(0, 300), pobrisi, nejasnih], "stanje IN ('caka', 'izdan')");
+      objavi("trajna", oznaka, sporocilo.slice(0, 300));
       return;
     }
     const premorMs = Math.max(premor(Number(r.poskusi) + 1), e.neznan ? NEZNAN_PREMOR_MS : 0, e.konfiguracija ? KONFIG_PREMOR_MS : 0);
-    // Zahtevek zagotovo NI bil obdelan (429) in prej ni bil nobenega neznanega poskusa: oznaka »poslano« se pobrise, da naslednja izdaja ne zahteva iskanja. Sicer ostane.
-    await poizvedba(
-      `UPDATE racuni SET poskusi = poskusi + 1, naknadno = TRUE, zadnja_napaka = $2, prevzeto_at = NULL,
-              poslano_at = CASE WHEN $4::boolean AND ponudnik_id IS NULL AND stevilka IS NULL THEN NULL ELSE poslano_at END,
-              naslednji_poskus_at = NOW() + ($3::bigint * INTERVAL '1 millisecond') WHERE id = $1 AND stanje IN ('caka', 'izdan')`,
-      [r.id, kratko(e), premorMs, !e.neznan && korak === "ustvari" && !r.poslano_at]);
-    if (e.konfiguracija) console.error(`[racuni] POZOR: ${oznaka}: nastavitev pri ponudniku ${ponudnik.ime} (poverilnice, poslovna enota, blagajna): ${kratko(e)}. Racun caka (ponovitev cez ${Math.round(premorMs / 1000)} s).`);
-    else console.error(`[racuni] ${oznaka}: ${korak} pri ponudniku ni uspel (poskus ${Number(r.poskusi) + 1}${e.neznan ? ", izid neznan: najprej iskanje po referenci" : ""}), ponovim: ${kratko(e)}`);
+    await uredi(r.id, zeton,
+      `poskusi = poskusi + 1, naknadno = TRUE, zadnja_napaka = $3, prevzeto_at = NULL, iskanja_nejasna = $5,
+       poslano_at = CASE WHEN $6::boolean AND ponudnik_id IS NULL AND stevilka IS NULL THEN NULL ELSE poslano_at END,
+       naslednji_poskus_at = NOW() + ($4::bigint * INTERVAL '1 millisecond')`,
+      [kratko(e), premorMs, nejasnih, pobrisi], "stanje IN ('caka', 'izdan')");
+    objavi(e.konfiguracija ? "konfiguracija" : "ponovitev", oznaka, `${korak}${e.neznan ? ", izid neznan" : ""}: ${kratko(e)}`);
   }
 
-  async function obdelajPonudnik(id) {
+  async function obdelajPonudnik(id, zeton) {
     const pz = await podatkiZaPonudnika(id);
-    if (!pz) { await sprosti(id); return; }
+    const odpri = (dodatno = "", par = []) => sprosti(id, dodatno, par, zeton);
+    if (!pz) { await odpri(); return; }
     const r = pz.vrstica;
-    if (r.stanje !== "caka" && r.stanje !== "izdan") { await sprosti(id); return; }
-    const odlozi = (ms) => sprosti(id, ", naslednji_poskus_at = NOW() + ($2::bigint * INTERVAL '1 millisecond')", [ms]);
+    if (r.stanje !== "caka" && r.stanje !== "izdan") { await odpri(); return; }
+    const odlozi = (ms) => odpri(", naslednji_poskus_at = NOW() + ($2::bigint * INTERVAL '1 millisecond')", [ms]);
     if (r.vrsta === "dobropis") {
       if (r.stevilka === null && r.vracilo_uspelo !== true) { await odlozi(ODLOG_MS); return; }   // S2: samo za izvedeno vracilo
       // dobropis gre ponudniku sele po potrjenem izvirnem racunu (ima stevilko in oznako dokumenta pri ponudniku); izvirni racun v `napaka`: redkeje
       if (r.ref_stanje !== "potrjen") { await odlozi(r.ref_stanje === "napaka" ? Math.max(ODLOG_MS, 600000) : ODLOG_MS); return; }
     }
+    // Vsak klic ponudniku: najprej najem (en delavec v sistemu), nato semafor + rok. Brez najema klic NI poslan.
+    const klicPonudniku = (fn) => izvediKlic(async (signal) => {
+      if (!(await najemi())) throw new NapakaPonudnika("najem delavca za ponudnika drzi drug proces (klic ni poslan)", { neznan: false, neposlano: true });
+      return fn(signal);
+    });
     let korak = "ustvari";
     try {
       let pid = r.ponudnik_id, pst = r.ponudnik_stevilka;
-      if (r.stevilka === null && !pid) {
+      if (r.stevilka === null && !pid && !pst) {
         if (r.poslano_at) {   // izid prejsnjega zahtevka neznan: NAJPREJ poisci
           korak = "iskanje";
-          const najden = await izvediKlic((signal) => ponudnik.poisci(pz.podatki, { signal }));
+          const ip = await podatkiZaIskanje(r, r.poslano_at);
+          const najden = await klicPonudniku((signal) => ponudnik.poisci({ ...pz.podatki, ...ip }, { signal }));
           if (najden && (najden.ponudnik_id || najden.ponudnik_stevilka)) { pid = najden.ponudnik_id; pst = najden.ponudnik_stevilka; }
+          else {
+            // Veljavno negativno iskanje. Nova izdaja sele po DVEH takih iskanjih, med njima najmanj ISKANJE_RAZMAK_MS (dokument je lahko v seznamu viden z zamikom).
+            const steje = r.iskanje_ne_at === null || r.iskanje_ne_at === undefined || Number(r.iskanje_pred_ms) >= ISKANJE_RAZMAK_MS;
+            const n = Number(r.iskanja_ne) + (steje ? 1 : 0);
+            if (n < 2) {
+              await uredi(id, zeton,
+                `iskanja_ne = $3, iskanje_ne_at = CASE WHEN $4::boolean THEN NOW() ELSE iskanje_ne_at END, iskanja_nejasna = 0, prevzeto_at = NULL,
+                 zadnja_napaka = $5, naslednji_poskus_at = NOW() + ($6::bigint * INTERVAL '1 millisecond')`,
+                [n, steje, `zahtevek je bil poslan, izid neznan: iskanje ${n}/2 dokumenta ni nasla`, Math.max(ISKANJE_RAZMAK_MS, 5000)], "stanje = 'caka'");
+              objavi("iskanje", `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${id})`, `iskanje ${n}/2 dokumenta ni nasla, naslednje cez ${Math.round(ISKANJE_RAZMAK_MS / 1000)} s`);
+              return;
+            }
+          }
         }
         if (!pid && !pst) {
           korak = "ustvari";
-          const o = await izvediKlic(async (signal) => {
-            const rez = await poizvedba(
-              r.poslano_at ? "UPDATE racuni SET poslano_at = NOW() WHERE id = $1 AND stanje = 'caka' AND ponudnik_id IS NULL RETURNING id"
-                : "UPDATE racuni SET poslano_at = NOW() WHERE id = $1 AND stanje = 'caka' AND ponudnik_id IS NULL AND poslano_at IS NULL RETURNING id", [id]);
-            if (!rez.rows.length) throw new NapakaPonudnika("vrstico je medtem obdelal drug proces (zahtevek ni poslan)", { neznan: true });
+          const o = await klicPonudniku(async (signal) => {
+            // Varovalo (K2): zapis »poslano« velja samo ob nasem prevzemu IN ob nespremenjenem prejsnjem poslano_at; sicer klic NI poslan.
+            const ok = await uredi(id, zeton, "poslano_at = NOW(), iskanja_ne = 0, iskanje_ne_at = NULL, iskanja_nejasna = 0", [r.poslano_niz],
+              "stanje = 'caka' AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL AND poslano_at IS NOT DISTINCT FROM $3::timestamptz");
+            if (!ok) throw new NapakaPonudnika("vrstico je medtem prevzel ali spremenil drug proces (zahtevek ni poslan)", { neznan: false, neposlano: true });
             return ponudnik.ustvari(pz.podatki, { signal });
           });
           pid = o && o.ponudnik_id; pst = o && o.ponudnik_stevilka;
           if (!pid && !pst) {   // izdano, a odgovor brez oznake dokumenta: poisci ga po referenci (nikoli nova izdaja)
             korak = "iskanje";
-            const najden = await izvediKlic((signal) => ponudnik.poisci({ ...pz.podatki, poslano_at: new Date().toISOString() }, { signal }));
+            const ip = await podatkiZaIskanje(r, new Date());
+            const najden = await klicPonudniku((signal) => ponudnik.poisci({ ...pz.podatki, ...ip, poslano_at: new Date().toISOString() }, { signal }));
             if (!najden || !(najden.ponudnik_id || najden.ponudnik_stevilka)) throw new NapakaPonudnika("izdaja je uspela, a odgovor nima oznake dokumenta in iskanje ga ne najde", { neznan: true });
             pid = najden.ponudnik_id; pst = najden.ponudnik_stevilka;
           }
         }
-        pid = pid || pst;
-        await poizvedba("UPDATE racuni SET ponudnik = $2, ponudnik_id = $3, ponudnik_stevilka = $4 WHERE id = $1 AND stanje = 'caka' AND ponudnik_id IS NULL", [id, ponudnik.ime, pid, pst || null]);
+        // Oznaka in stevilka dokumenta sta LOCENI polji (S1): nikoli ena namesto druge.
+        const zapisano = await uredi(id, zeton, "ponudnik = $3, ponudnik_id = $4, ponudnik_stevilka = $5", [ponudnik.ime, pid || null, pst || null],
+          "stanje = 'caka' AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL");
+        if (!zapisano) {
+          objavi("obdelava", `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${id})`, `dokument ${pid || pst} pri ponudniku je nastal, a vrstice ni bilo mogoce posodobiti (prevzel jo je drug proces); nadaljuje ta, najde ga z iskanjem po referenci`);
+          return;
+        }
       }
       korak = "branje";
-      const st = await izvediKlic((signal) => ponudnik.preberi({ vrsta: r.vrsta, ponudnik_id: pid, ponudnik_stevilka: pst }, { signal }));
+      const st = await klicPonudniku((signal) => ponudnik.preberi({ vrsta: r.vrsta, ponudnik_id: pid, ponudnik_stevilka: pst }, { signal }));
       const eor = st && typeof st.eor === "string" && UUID.test(st.eor) ? st.eor.toLowerCase() : null;
       const zoi = st && typeof st.zoi === "string" && /^[0-9a-f]{32}$/i.test(st.zoi) ? st.zoi.toLowerCase() : null;
       const neveljaven = !!st && ((st.eor && !eor) || (st.zoi && !zoi));
+      const stDokumenta = st && st.ponudnik_stevilka && st.ponudnik_stevilka.length <= 100 ? st.ponudnik_stevilka : null;   // S2: stevilka dokumenta za sklic dobropisa
+      const izdanAt = st && st.izdan_at instanceof Date ? st.izdan_at : null;   // S3: cas izdaje SAMO ce ga je ponudnik vrnil, nikoli izmisljen
       if (r.stevilka === null) {
         if (!st || !st.stevilka) throw new NapakaPonudnika("davcna stevilka dokumenta pri ponudniku se ni dodeljena", { neznan: false });
-        const danes = datumIso(new Date());
-        const izdan = st.izdan_at instanceof Date ? st.izdan_at : (st.datum && st.datum !== danes ? new Date(`${st.datum}T12:00:00+01:00`) : new Date());
-        const leto = st.datum ? Number(st.datum.slice(0, 4)) : Number(deliCasa(izdan).leto);
+        const leto = st.datum ? Number(st.datum.slice(0, 4)) : Number(deliCasa(izdanAt || new Date()).leto);
         const stanje = neveljaven ? "napaka" : (eor ? "potrjen" : "izdan");
         let u;
         try {
-          u = await poizvedba(
-            `UPDATE racuni SET prostor = $2, naprava = $3, leto = $4, stevilka = $5, izdan_at = $6, stevilka_vir = 'ponudnik', stanje = $7::text, eor = $8::uuid, zoi = COALESCE(zoi, $9),
-                    potrjen_at = CASE WHEN $7::text = 'potrjen' THEN NOW() END, zadnja_napaka = $10, prevzeto_at = NULL WHERE id = $1 AND stanje = 'caka' AND stevilka IS NULL`,
-            [id, ponudnik.prostor, ponudnik.naprava, leto, st.stevilka, izdan, stanje, neveljaven ? null : eor, neveljaven ? null : zoi, neveljaven ? "neveljaven odgovor ponudnika (EOR/ZOI)" : null]);
+          u = await uredi(id, zeton,
+            `prostor = $3, naprava = $4, leto = $5, stevilka = $6, izdan_at = $7, stevilka_vir = 'ponudnik', stanje = $8::text, eor = $9::uuid, zoi = COALESCE(zoi, $10),
+             ponudnik_stevilka = COALESCE(ponudnik_stevilka, $11), potrjen_at = CASE WHEN $8::text = 'potrjen' THEN NOW() END, zadnja_napaka = $12, prevzeto_at = NULL`,
+            [ponudnik.prostor, ponudnik.naprava, leto, st.stevilka, izdanAt, stanje, neveljaven ? null : eor, neveljaven ? null : zoi, stDokumenta, neveljaven ? "neveljaven odgovor ponudnika (EOR/ZOI)" : null],
+            "stanje = 'caka' AND stevilka IS NULL");
         } catch (e) {
           if (e && (e.code === "23505" || e.code === "23001")) {   // stevilka ze obstaja ali sprozilec zavrne (npr. v prostoru so ze stevilke drugega vira): ne ponavljaj
-            await poizvedba("UPDATE racuni SET stanje = 'napaka', zadnja_napaka = $2, prevzeto_at = NULL WHERE id = $1 AND stanje = 'caka'", [id, `stevilka ${st.stevilka} pri ponudniku ni sprejeta: ${kratko(e)}`.slice(0, 300)]);
-            console.error(`[racuni] POZOR: ${r.vrsta} (narocilo ${r.public_ref}, vrstica ${id}): ponudnik ${ponudnik.ime} je dodelil stevilko ${st.stevilka} (dokument ${pid}), a je ni mogoce zapisati: ${kratko(e)}. Zaporedji se RAZHAJATA - preveri rocno.`);
+            await uredi(id, zeton, "stanje = 'napaka', zadnja_napaka = $3, prevzeto_at = NULL", [`stevilka ${st.stevilka} pri ponudniku ni sprejeta: ${kratko(e)}`.slice(0, 300)], "stanje = 'caka'");
+            console.error(`[racuni] POZOR: ${r.vrsta} (narocilo ${r.public_ref}, vrstica ${id}): ponudnik ${ponudnik.ime} je dodelil stevilko ${st.stevilka} (dokument ${pid || pst}), a je ni mogoce zapisati: ${kratko(e)}. Zaporedji se RAZHAJATA - preveri rocno.`);
             return;
           }
           throw e;
         }
-        if (!u.rowCount) console.error(`[racuni] POZOR: ${r.vrsta} (narocilo ${r.public_ref}, vrstica ${id}): dokument ${pid} pri ponudniku ima stevilko ${st.stevilka}, vrstica pa ni vec v stanju caka - preveri rocno.`);
-        else if (neveljaven) console.error(`[racuni] POZOR: ${r.vrsta} (narocilo ${r.public_ref}): ponudnik ${ponudnik.ime} je vrnil neveljaven EOR/ZOI; preveri pri ponudniku, ali je racun potrjen.`);
+        if (!u) console.error(`[racuni] POZOR: ${r.vrsta} (narocilo ${r.public_ref}, vrstica ${id}): dokument ${pid || pst} pri ponudniku ima stevilko ${st.stevilka}, vrstica pa ni vec v stanju caka ali je ni vec nas prevzem - preveri rocno.`);
+        else if (neveljaven) objavi("trajna", `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${id})`, "ponudnik je vrnil neveljaven EOR/ZOI; preveri pri ponudniku, ali je racun potrjen");
         return;
       }
       // S3: stevilka je znana, EOR se ne
       if (neveljaven) {
-        await poizvedba("UPDATE racuni SET stanje = 'napaka', zadnja_napaka = $2, prevzeto_at = NULL WHERE id = $1 AND stanje = 'izdan'", [id, "neveljaven odgovor ponudnika (EOR/ZOI)"]);
-        console.error(`[racuni] POZOR: ${r.vrsta} (narocilo ${r.public_ref}): ponudnik ${ponudnik.ime} je vrnil neveljaven EOR/ZOI; preveri pri ponudniku, ali je racun potrjen.`);
+        await uredi(id, zeton, "stanje = 'napaka', zadnja_napaka = $3, prevzeto_at = NULL", ["neveljaven odgovor ponudnika (EOR/ZOI)"], "stanje = 'izdan'");
+        objavi("trajna", `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${id})`, "ponudnik je vrnil neveljaven EOR/ZOI; preveri pri ponudniku, ali je racun potrjen");
         return;
       }
       if (!eor) throw new NapakaPonudnika("EOR se ni na voljo (davcno potrjevanje pri ponudniku se ni koncano)", { neznan: false });
-      await poizvedba(
-        `UPDATE racuni SET stanje = 'potrjen', eor = $2, zoi = COALESCE(zoi, $3), potrjen_at = NOW(), zadnja_napaka = NULL, prevzeto_at = NULL WHERE id = $1 AND stanje = 'izdan'`, [id, eor, zoi]);
+      await uredi(id, zeton,
+        `stanje = 'potrjen', eor = $3, zoi = COALESCE(zoi, $4), izdan_at = COALESCE(izdan_at, $5), ponudnik_stevilka = COALESCE(ponudnik_stevilka, $6),
+         potrjen_at = NOW(), zadnja_napaka = NULL, prevzeto_at = NULL`, [eor, zoi, izdanAt, stDokumenta], "stanje = 'izdan'");
     } catch (e) {
-      if (e instanceof NapakaPonudnika) { await napakaPriPonudniku(r, e, korak); return; }
+      if (e instanceof NapakaPonudnika) { await napakaPriPonudniku(r, e, korak, zeton); return; }
       throw e;
     }
   }
 
-  async function obdelaj(id) {
+  async function obdelaj(id, zeton) {
     try {
-      if (stevilcenjePonudnik) { await obdelajPonudnik(id); return; }
+      if (stevilcenjePonudnik) { await obdelajPonudnik(id, zeton); return; }
       const iz = await vTransakciji((c) => izdajVTransakciji(c, id));
       if (iz.stanje === "odlozeno") { await sprosti(id, ", naslednji_poskus_at = NOW() + ($2::bigint * INTERVAL '1 millisecond')", [ODLOG_MS]); return; }
       if (iz.stanje !== "izdan") { await sprosti(id); return; }
       await potrdi(id);
     } catch (e) {
-      console.error(`[racuni] obdelava racuna ${id}:`, kratko(e));
-      await sprosti(id, ", naslednji_poskus_at = NOW() + ($2::bigint * INTERVAL '1 millisecond')", [premor(1)]).catch(() => {});
+      if (stevilcenjePonudnik) objavi("obdelava", `racun ${id}`, kratko(e)); else console.error(`[racuni] obdelava racuna ${id}:`, kratko(e));
+      await sprosti(id, ", naslednji_poskus_at = NOW() + ($2::bigint * INTERVAL '1 millisecond')", [premor(1)], stevilcenjePonudnik ? zeton : null).catch(() => {});
     }
   }
 
-  async function prevzemi(n) {
+  async function prevzemi(n, zeton) {
     const r = await poizvedba(
-      `UPDATE racuni SET prevzeto_at = NOW()
+      `UPDATE racuni SET prevzeto_at = NOW(), prevzem_zeton = $3
         WHERE id IN (SELECT id FROM racuni WHERE stanje IN ('caka', 'izdan') AND naslednji_poskus_at <= NOW() AND (vrsta = 'racun' OR vracilo_uspelo IS TRUE)
                        AND (prevzeto_at IS NULL OR prevzeto_at < NOW() - ($2::bigint * INTERVAL '1 millisecond'))
                      ORDER BY id LIMIT $1 FOR NO KEY UPDATE SKIP LOCKED)
-        RETURNING id`, [n, ZASTARELO_MS]);
+        RETURNING id`, [n, ZASTARELO_MS, zeton]);
     return r.rows.map((x) => Number(x.id)).sort((a, b) => a - b);
   }
 
@@ -777,18 +909,28 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   async function tek() {
     if (tece || !ponudnik) return 0;
     tece = true;
-    let skupaj = 0;
+    let skupaj = 0, imamNajem = false;
     try {
+      if (stevilcenjePonudnik) {   // samo ce je delo, in samo en delavec v celem sistemu (K2)
+        if (!(await obstajaDelo())) return 0;
+        imamNajem = await najemi();
+        if (!imamNajem) return 0;
+      }
+      const zeton = crypto.randomUUID();
       const konec = Date.now() + PRORACUN_MS;
       for (;;) {
-        const ids = await prevzemi(PAKET);
+        const ids = await prevzemi(PAKET, zeton);
         if (!ids.length) break;
         skupaj += ids.length;
-        await Promise.all(ids.map((id) => obdelaj(id)));
+        await Promise.all(ids.map((id) => obdelaj(id, zeton)));
         if (Date.now() > konec) break;
       }
     } catch (e) { console.error("[racuni] tek:", kratko(e)); }
-    finally { tece = false; }
+    finally {
+      tece = false;
+      if (imamNajem) await spustiNajem();
+      if (zbir.length) izpisiZbir();
+    }
     return skupaj;
   }
 
@@ -828,10 +970,12 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
       }
       // Stevilke ponudnika: luknja v zaporedju (manjka N-1, ceprav N obstaja ze dalj casa) = ponudnik je stevilko porabil za dokument, ki ga nimamo (rocni racun na isti
       // blagajni, dvojnik, napaka pri ponudniku). Zaporedje je njegovo, zato samo opozorilo (ZDavPR 5/5): najmanjsa stevilka vsake vrste (prostor, naprava, leto) je izhodisce.
+      // Omejitev (M3, ni popravljeno): stevilcenje je od 22. 10. 2026 NEPREKINJENO (interni akt 6/2), poizvedba pa deli po `leto`, zato luknje na prehodu leta (zadnja
+      // stevilka starega leta : prva novega) ne zazna. Cena poizvedbe raste s stevilom racunov (indeks po prostoru/napravi/letu/stevilki jo drzi poceni, a ni omejena).
       if (Date.now() - zadnjaLuknja > 6 * 3600000) {
         const l = (await poizvedba(
           `SELECT g.prostor, g.naprava, g.leto, g.stevilka - 1 AS manjka FROM racuni g
-            WHERE g.stevilka_vir = 'ponudnik' AND g.stevilka > 1 AND g.izdan_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')
+            WHERE g.stevilka_vir = 'ponudnik' AND g.stevilka > 1 AND COALESCE(g.izdan_at, g.potrjen_at, g.poslano_at, g.created_at) < NOW() - ($1::bigint * INTERVAL '1 millisecond')
               AND g.stevilka > (SELECT MIN(m.stevilka) FROM racuni m WHERE m.prostor = g.prostor AND m.naprava = g.naprava AND m.leto = g.leto AND m.stevilka_vir = 'ponudnik')
               AND NOT EXISTS (SELECT 1 FROM racuni p WHERE p.prostor = g.prostor AND p.naprava = g.naprava AND p.leto = g.leto AND p.stevilka = g.stevilka - 1)
             ORDER BY g.leto, g.stevilka LIMIT 10`, [LUKNJA_PO_MS])).rows;
