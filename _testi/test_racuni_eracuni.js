@@ -121,7 +121,7 @@ const nastavi = (v, n = 1) => { F.vedenje = v ? { ustvari: v, preostalo: n } : n
 
 const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}/WebServicesSI/API`, ERACUNI_USERNAME: TAJNO.user, ERACUNI_SECRET_KEY: TAJNO.key, ERACUNI_TOKEN: TAJNO.token,
   ERACUNI_RAZMAK_MS: "20", RACUNI_TICK_MS: "0", RACUNI_POSPRAVI_MS: "0", RACUNI_PREMOR_MS: "50", RACUNI_NEZNAN_PREMOR_MS: "0", RACUNI_KONFIG_PREMOR_MS: "400", RACUNI_ROK_MS: "600",
-  RACUNI_ODLOG_MS: "50", RACUNI_LUKNJA_PO_MS: "0", RACUNI_ISKANJE_RAZMAK_MS: "0" };
+  RACUNI_ODLOG_MS: "50", RACUNI_LUKNJA_PO_MS: "0", RACUNI_ISKANJE_RAZMAK_MS: "0", ERACUNI_SEZNAM_PREVERJEN: "1" };
 
 (async () => {
   await new Promise((r) => streznik.listen(PORT, r));
@@ -650,6 +650,33 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       const k = logOd(l1).filter((l) => /POZOR.*nastavitev pri ponudniku/.test(l));
       assert(k.length === 1 && /6 racunov/.test(k[0]), "napacna nastavitev pri 6 racunih -> ENA vrstica POZOR", logOd(l1));
       await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() + INTERVAL '1 day' WHERE id = ANY($1::bigint[])", [ids]);
+    }
+
+
+    // ================================================================
+    console.log("\n# 21. Uspeh brez oznake dokumenta + prazen seznam: NIKOLI druga izdaja (pregled #318, 2. krog); seznam brez zivega preverjanja ne vodi v izdajo");
+    {
+      // brez znanih dokumentov v obdobju (prazen seznam je tedaj »veljaven«), kot v reprodukciji pregledovalca
+      await pool.query("UPDATE racuni SET poslano_at = poslano_at - INTERVAL '10 days' WHERE poslano_at IS NOT NULL");
+      const R = await nov(1, 2100); const w = deloven(); const c0 = klicov("SalesInvoiceCreate"), d0 = F.docs.length;
+      nastavi("brezOznake", 50); F.listOblika = "prazenSeznam";
+      await tek(w, 12, 40, true);
+      nastavi(null); F.listOblika = "ok";
+      const r = await vrstica(R.id);
+      assert(klicov("SalesInvoiceCreate") === c0 + 1 && F.docs.length === d0 + 1, "natanko 1 Create (ne 6 davcnih racunov za eno prodajo)", [klicov("SalesInvoiceCreate") - c0, F.docs.length - d0]);
+      assert(r.stanje === "napaka" && r.stevilka === null && /oznake dokumenta/.test(r.zadnja_napaka) && new RegExp(r.message_id).test(r.zadnja_napaka), "vrstica gre v `napaka` z navodilom (referenca), ne caka naprej", [r.stanje, r.zadnja_napaka]);
+      // seznam ni zivo preverjen (ERACUNI_SEZNAM_PREVERJEN ni 1): veljavno prazno iskanje NE vodi v novo izdajo, ampak v `napaka`
+      const R2 = await nov(1, 2110); const w2 = deloven({ ERACUNI_SEZNAM_PREVERJEN: "" }); const c1 = klicov("SalesInvoiceCreate");
+      nastavi("503po", 1);
+      await tek(w2);
+      await pool.query("UPDATE racuni SET poslano_at = NOW() - INTERVAL '10 days' WHERE poslano_at IS NOT NULL AND id <> $1", [R2.id]);
+      F.listOblika = "prazenSeznam";
+      await tek(w2, 4, 40, true);
+      F.listOblika = "ok";
+      const r2 = await vrstica(R2.id);
+      assert(klicov("SalesInvoiceCreate") === c1 + 1 && r2.stanje === "napaka" && /ni zivo preverjen|ERACUNI_SEZNAM_PREVERJEN/.test(r2.zadnja_napaka), "seznam ni zivo preverjen: iskanje brez najdbe -> `napaka` (rocno), nikoli nova izdaja", [r2.stanje, r2.zadnja_napaka, klicov("SalesInvoiceCreate") - c1]);
+      // 503 PRED obdelavo (zahtevek ni dosegel ponudnika) pri nepreverjenem seznamu: tudi to gre v rocno obravnavo (izid se ne da ločiti od izgube odgovora)
+      await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() + INTERVAL '1 day' WHERE id = ANY($1::bigint[])", [[R.id, R2.id]]);
     }
 
     // ================================================================

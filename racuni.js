@@ -343,6 +343,9 @@ function eracuniPonudnik(env) {
   const vrstaProdaje = celo(env, "ERACUNI_VRSTA_PRODAJE", 7, 0, 200);   // 7 = »Neobdavcen promet - ne gre v DDV evidence« (NEXT DIMENSIONS ni zavezanec za DDV), preveri v e-racuni
   const kupec = String(env.ERACUNI_KUPEC || "").trim();                  // neobvezna oznaka kupca na poenostavljenem racunu (NI ime osebe); privzeto brez
   const razmak = celo(env, "ERACUNI_RAZMAK_MS", 1000, 0, 60000);        // najmanj toliko med zacetkoma dveh zahtevkov (meja 1/s)
+  // Pomen SalesInvoiceList (po katerem datumu filtrira, velikost strani, ali elementi vsebujejo orderReference in cashRegisterCode) NI preverjen z zivim klicem. Dokler
+  // Martin po preverbi ne nastavi ERACUNI_SEZNAM_PREVERJEN=1, iskanje brez najdbe nikoli ne vodi v novo izdajo, ampak v `napaka` (rocni pregled v e-racuni).
+  const seznamPreverjen = String(env.ERACUNI_SEZNAM_PREVERJEN || "").trim() === "1";
   const SEZNAM_MEJA = celo(env, "ERACUNI_SEZNAM_MEJA", 100, 2, 100000); // seznam z toliko ali vec elementi je ob iskanju po referenci sumljiv (morda okrnjen): brez negativnega izida
   const tajno = [username, secretKey, token];
   let naslednji = 0;
@@ -388,6 +391,7 @@ function eracuniPonudnik(env) {
   return {
     ime: "eracuni", stevilcenje: "ponudnik", prostor, naprava,
     najvecVzporednih: 1,   // API: socasnih zahtevkov istega uporabnika ni
+    seznamPreverjen,
     rokMs: 30000,          // klic vkljuci FURS; privzeti rok 5 s bi poslal vsak racun v nejasen izid
     paket: 5,              // kolikor vrstic naenkrat »prevzame« delavec (paket x (rok + razmak) < zastaranje prevzema)
     zastarelo: 300000,     // prevzem vrstice zastara po 5 min (paket 5 x klici do 30 s); poleg tega najem in zeton prevzema (racuni.js, K2)
@@ -745,6 +749,13 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
     return { okno, znani };
   }
 
+  // Vrstica se TRAJNO zaklene pred novo izdajo (`napaka`, brez ponovitve): ponudnik je dokument ze ustvaril ali pa izida ne moremo zanesljivo ugotoviti.
+  async function zakleni(r, zeton, sporocilo) {
+    const s = String(sporocilo).slice(0, 300);
+    await uredi(r.id, zeton, "stanje = 'napaka', poskusi = poskusi + 1, zadnja_napaka = $3, prevzeto_at = NULL", [s], "stanje IN ('caka', 'izdan')");
+    objavi("trajna", `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${r.id})`, s);
+  }
+
   async function napakaPriPonudniku(r, e, korak, zeton) {
     const oznaka = `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${r.id})`;
     // `poslano_at` se pobrise SAMO, ce je DOKAZANO, da zahtevek ni prisel do ponudnika (429 po statusni kodi, napaka povezave pred posiljanjem, lokalna zavrnitev), je ta poskus
@@ -796,7 +807,10 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
           const ip = await podatkiZaIskanje(r, r.poslano_at);
           const najden = await klicPonudniku((signal) => ponudnik.poisci({ ...pz.podatki, ...ip }, { signal }));
           if (najden && (najden.ponudnik_id || najden.ponudnik_stevilka)) { pid = najden.ponudnik_id; pst = najden.ponudnik_stevilka; }
-          else {
+          else if (ponudnik.seznamPreverjen === false) {
+            await zakleni(r, zeton, `iskanje po referenci dokumenta ni nasla, a seznam e-racuni se NI zivo preverjen (ERACUNI_SEZNAM_PREVERJEN); v e-racuni preveri, ali obstaja dokument z referenco ${r.message_id}, PREDEN racun ponovis`);
+            return;
+          } else {
             // Veljavno negativno iskanje. Nova izdaja sele po DVEH takih iskanjih, med njima najmanj ISKANJE_RAZMAK_MS (dokument je lahko v seznamu viden z zamikom).
             const steje = r.iskanje_ne_at === null || r.iskanje_ne_at === undefined || Number(r.iskanje_pred_ms) >= ISKANJE_RAZMAK_MS;
             const n = Number(r.iskanja_ne) + (steje ? 1 : 0);
@@ -820,11 +834,17 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
             return ponudnik.ustvari(pz.podatki, { signal });
           });
           pid = o && o.ponudnik_id; pst = o && o.ponudnik_stevilka;
-          if (!pid && !pst) {   // izdano, a odgovor brez oznake dokumenta: poisci ga po referenci (nikoli nova izdaja)
+          if (!pid && !pst) {   // izdano (ponudnik je potrdil uspeh), a odgovor brez oznake dokumenta: poisci ga po referenci; ce ga ne najdemo, vrstica NIKOLI ne gre v novo izdajo
             korak = "iskanje";
-            const ip = await podatkiZaIskanje(r, new Date());
-            const najden = await klicPonudniku((signal) => ponudnik.poisci({ ...pz.podatki, ...ip, poslano_at: new Date().toISOString() }, { signal }));
-            if (!najden || !(najden.ponudnik_id || najden.ponudnik_stevilka)) throw new NapakaPonudnika("izdaja je uspela, a odgovor nima oznake dokumenta in iskanje ga ne najde", { neznan: true });
+            let najden = null;
+            try {
+              const ip = await podatkiZaIskanje(r, new Date());
+              najden = await klicPonudniku((signal) => ponudnik.poisci({ ...pz.podatki, ...ip, poslano_at: new Date().toISOString() }, { signal }));
+            } catch (e) { if (!(e instanceof NapakaPonudnika)) throw e; }
+            if (!najden || !(najden.ponudnik_id || najden.ponudnik_stevilka)) {
+              await zakleni(r, zeton, `Create je uspel, a odgovor ni vseboval oznake dokumenta in ga iskanje po referenci ne najde; v e-racuni poisci dokument z referenco ${r.message_id} in ga poveži rocno, PREDEN racun ponovis (nova izdaja = dvojnik davcnega racuna)`);
+              return;
+            }
             pid = najden.ponudnik_id; pst = najden.ponudnik_stevilka;
           }
         }
