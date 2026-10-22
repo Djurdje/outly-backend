@@ -22,6 +22,9 @@
  *  12  luknja v zaporedju ponudnika (rocni dokument na isti blagajni): pospravljalec javi POZOR; brez luknje brez opozorila
  *  13  sprozilec: stevilka ponudnika brez dokumenta, mesanje virov, dvojnik, sprememba vira, napaka s stevilko ne nazaj, INSERT s poslano_at, DELETE
  *  14  izid vracila med izdajo: dobropis, ki je ze poslan ponudniku, se NE preklice tiho (POZOR); neposlan se preklice
+ *  22  preizkus pred izdajo: napacen kljuc ob vklopu ne spravi zaostanka v `napaka` (oba nacina zastavice seznama)
+ *  23  rocni postopek za vrstico v `napaka` (povezava obstojecega dokumenta, ponovitev): isti SQL kot v STATE
+ *  24  zastavica »ustvarjeno pri ponudniku«: vrstica je `napaka` ze med iskanjem po uspehu Create brez oznake
  *  15  poverilnice nikoli v dnevniku ali zadnja_napaka
  */
 const http = require("http");
@@ -47,7 +50,7 @@ const logOd = (n) => LOG.slice(n);
 
 // ---------- lazni e-racuni ----------
 const F = {
-  docs: [], klici: [], stevec: 41, ndoc: 0, inflight: 0, maxInflight: 0, zacetki: [],
+  docs: [], klici: [], preizkusi: [], stevec: 41, ndoc: 0, inflight: 0, maxInflight: 0, zacetki: [],
   vedenje: null,        // { ustvari: 'ok'|'503pred'|'503po'|'timeoutpo'|'429'|'napaka'|'konfig'|'brezOznake', preostalo: n }
   zamudaEor: 0,         // koliko Get klicev pred pojavom EOR
   listOblika: "ok",     // 'ok' | 'neznana' | 'prazno' ({status:ok}) | 'prazenNiz' (SalesInvoices: "") | 'prazenSeznam' ([]) | 'brezRef' | 'okrnjenRef' | 'dvojnik' | 'manjkaZnan'
@@ -62,7 +65,7 @@ const streznik = http.createServer((req, res) => {
     F.inflight++; F.maxInflight = Math.max(F.maxInflight, F.inflight); F.zacetki.push(Date.now());
     const konec = (st, obj, zamik = 0) => setTimeout(() => { F.inflight--; try { res.writeHead(st, { "content-type": "application/json" }); res.end(typeof obj === "string" ? obj : JSON.stringify(obj)); } catch (_) { /* odjemalec je prekinil */ } }, zamik);
     let z; try { z = JSON.parse(tel); } catch (_) { return konec(400, "{}"); }
-    F.klici.push({ method: z.method, parameters: z.parameters, telo: tel });
+    if (req.headers["x-outly-namen"] === "preizkus") F.preizkusi.push({ method: z.method, parameters: z.parameters }); else F.klici.push({ method: z.method, parameters: z.parameters, telo: tel });
     if (!F.poverilnice || z.username !== TAJNO.user || z.secretKey !== TAJNO.key || z.token !== TAJNO.token) return konec(200, { status: "error", error: { description: "Access denied. Invalid credentials" } });
     const p = z.parameters || {};
     const ved = F.vedenje && F.vedenje.preostalo > 0 ? F.vedenje.ustvari : "ok";
@@ -291,21 +294,24 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
     }
 
     // ================================================================
-    console.log("\n# 7. Napacne poverilnice / nastavitev: vrstica ostane `caka`, pocasna ponovitev + POZOR");
-    {
-      const R = await nov(1, 1000); const w = deloven(); const l0 = LOG.length, d0 = F.docs.length;
+    console.log("\n# 7. Napacne poverilnice / nastavitev: vrstica ostane `caka`, pocasna ponovitev + POZOR; preizkus pred izdajo (pregled #318, 3. krog)");
+    for (const [ime, okolje] of [["ERACUNI_SEZNAM_PREVERJEN=1", {}], ["zastavica izklopljena (privzeto v produkciji)", { ERACUNI_SEZNAM_PREVERJEN: "" }]]) {
+      const R = await nov(1, 1000); const w = deloven(okolje); const l0 = LOG.length, d0 = F.docs.length, c0 = klicov("SalesInvoiceCreate");
       F.poverilnice = false;
       const t0 = Date.now();
       await tek(w);
       const r = await vrstica(R.id);
       const odlog = new Date(r.naslednji_poskus_at).getTime() - t0;
-      assert(r.stanje === "caka" && r.stevilka === null && r.poskusi === 1 && /Access denied/.test(r.zadnja_napaka) && odlog >= 300 && F.docs.length === d0, "caka (NE napaka), ponovitev po >= 400 ms (RACUNI_KONFIG_PREMOR_MS)", [r.stanje, odlog]);
-      assert(r.poslano_at !== null, "K1: poslano_at ostane tudi ob napaki nastavitve (besedilo napake ni dokaz, da dokument ni nastal)", r.poslano_at);
-      assert(logOd(l0).some((l) => /POZOR.*nastavitev pri ponudniku/.test(l)), "POZOR: nastavitev pri ponudniku");
+      assert(r.stanje === "caka" && r.stevilka === null && r.poskusi === 1 && /Access denied/.test(r.zadnja_napaka) && odlog >= 300 && F.docs.length === d0, `[${ime}] caka (NE napaka), ponovitev po >= 400 ms (RACUNI_KONFIG_PREMOR_MS)`, [r.stanje, odlog]);
+      assert(klicov("SalesInvoiceCreate") === c0 && r.poslano_at === null, `[${ime}] napacen kljuc: Create se NE poslje (bralni preizkus pade), poslano_at ostane prazen`, [klicov("SalesInvoiceCreate") - c0, r.poslano_at]);
+      assert(logOd(l0).some((l) => /POZOR.*nastavitev pri ponudniku/.test(l)), `[${ime}] POZOR: nastavitev pri ponudniku`);
       F.poverilnice = true;
       await pocakaj(500);
       await tek(w, 5, 130, true);
-      assert((await vrstica(R.id)).stanje === "potrjen" && F.docs.length === d0 + 1, "po popravku poverilnic racun gre naprej (najprej iskanje po referenci): ena izdaja");
+      const r1 = await vrstica(R.id);
+      assert(r1.stanje === "potrjen" && F.docs.length === d0 + 1 && klicov("SalesInvoiceCreate") === c0 + 1, `[${ime}] po popravku poverilnic racun gre naprej BREZ iskanja po referenci: ena izdaja, potrjen`, [r1.stanje, F.docs.length - d0, klicov("SalesInvoiceCreate") - c0]);
+    }
+    {
       // dokument na drugi blagajni: konfiguracija, ne napaka
       const R2 = await nov(1, 1000); const w2 = deloven();
       F.vrniBlagajno = "9";   // ponudnik vrne dokument z drugo blagajno, kot smo jo zahtevali
@@ -677,6 +683,86 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       assert(klicov("SalesInvoiceCreate") === c1 + 1 && r2.stanje === "napaka" && /ni zivo preverjen|ERACUNI_SEZNAM_PREVERJEN/.test(r2.zadnja_napaka), "seznam ni zivo preverjen: iskanje brez najdbe -> `napaka` (rocno), nikoli nova izdaja", [r2.stanje, r2.zadnja_napaka, klicov("SalesInvoiceCreate") - c1]);
       // 503 PRED obdelavo (zahtevek ni dosegel ponudnika) pri nepreverjenem seznamu: tudi to gre v rocno obravnavo (izid se ne da ločiti od izgube odgovora)
       await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() + INTERVAL '1 day' WHERE id = ANY($1::bigint[])", [[R.id, R2.id]]);
+    }
+
+    // ================================================================
+    console.log("\n# 22. Preizkus pred izdajo (pregled #318, 3. krog): napacen kljuc ob vklopu ne spravi zaostanka v `napaka`");
+    {
+      for (const [ime, okolje] of [["ERACUNI_SEZNAM_PREVERJEN=1", {}], ["zastavica izklopljena (privzeto)", { ERACUNI_SEZNAM_PREVERJEN: "" }]]) {
+        const rs = []; for (let i = 0; i < 4; i++) rs.push(await nov(1, 1500 + i));
+        const ids = rs.map((x) => x.id); const w = deloven(okolje);
+        const c0 = klicov("SalesInvoiceCreate"), l0 = klicov("SalesInvoiceList"), p0 = F.preizkusi.length, d0 = F.docs.length;
+        F.poverilnice = false;
+        await tek(w, 3, 450, true);
+        const v = (await pool.query("SELECT stanje, poslano_at, poskusi FROM racuni WHERE id = ANY($1::bigint[])", [ids])).rows;
+        assert(klicov("SalesInvoiceCreate") === c0 && v.every((x) => x.stanje === "caka" && x.poslano_at === null), `[${ime}] zaostanek 4 racunov, napacen kljuc, 3 teki: NOBEN Create, vse caka, poslano_at prazen`, [klicov("SalesInvoiceCreate") - c0, v.map((x) => x.stanje)]);
+        assert(F.preizkusi.length - p0 === 3 && klicov("SalesInvoiceList") === l0, `[${ime}] en bralni preizkus na tek (ne na vrstico): ${F.preizkusi.length - p0} preizkusov v 3 tekih`);
+        F.poverilnice = true;
+        await tek(w, 6, 130, true);
+        const v2 = (await pool.query("SELECT stanje, stevilka FROM racuni WHERE id = ANY($1::bigint[])", [ids])).rows;
+        assert(v2.every((x) => x.stanje === "potrjen" && x.stevilka !== null) && klicov("SalesInvoiceCreate") === c0 + 4 && F.docs.length === d0 + 4, `[${ime}] po popravku kljuca se vseh 4 izda, vsak natanko enkrat`, [v2.map((x) => x.stanje), klicov("SalesInvoiceCreate") - c0]);
+      }
+      // »Access denied« na sam Create po uspelem preizkusu (kljuc preklican med tekom): ostalim vrsticam v istem teku Create ne gre; poslano_at ostane le pri tisti, ki je bila poslana
+      // (ne moremo dokazati, da e-racuni ob zavrnjeni avtentikaciji dokumenta ne ustvari -> iskanje po referenci pred vsako novo izdajo)
+      const rs = []; for (let i = 0; i < 3; i++) rs.push(await nov(1, 1700 + i));
+      const ids = rs.map((x) => x.id); const w = deloven();
+      const c1 = klicov("SalesInvoiceCreate"), d1 = F.docs.length;
+      nastavi("konfig", 1);
+      await tek(w);
+      nastavi(null);
+      const v = (await pool.query("SELECT stanje, poslano_at FROM racuni WHERE id = ANY($1::bigint[])", [ids])).rows;
+      assert(klicov("SalesInvoiceCreate") === c1 + 1 && F.docs.length === d1, "Access denied na Create: ostali dve vrstici v istem teku ne dobita Create (en poskus, ne trije)", [klicov("SalesInvoiceCreate") - c1]);
+      assert(v.every((x) => x.stanje === "caka") && v.filter((x) => x.poslano_at !== null).length === 1, "poslano_at ostane samo pri poslani vrstici; vse `caka`, ne `napaka`", v);
+      await tek(w, 6, 130, true);
+      const v2 = (await pool.query("SELECT stanje FROM racuni WHERE id = ANY($1::bigint[])", [ids])).rows;
+      assert(v2.every((x) => x.stanje === "potrjen") && F.docs.length === d1 + 3, "po koncu izpada se vse tri izdajo (poslana vrstica prek iskanja po referenci, nato izdaja)", [v2.map((x) => x.stanje), F.docs.length - d1]);
+    }
+
+    // ================================================================
+    console.log("\n# 23. Rocni postopek za vrstico v `napaka` (STATE): isti SQL kot v dokumentaciji (migracija, ki spreminja produkcijske podatke = Martinov DA)");
+    {
+      const w = deloven();
+      // A: Create je uspel, odgovor brez oznake -> `napaka`; dokument pri ponudniku obstaja -> POVEZAVA
+      const RA = await nov(1, 1810); const d0 = F.docs.length;
+      nastavi("brezOznake", 1); F.listOblika = "prazenSeznam";
+      await tek(w, 3, 40, true);
+      nastavi(null); F.listOblika = "ok";
+      const a1 = await vrstica(RA.id); const dok = F.docs[F.docs.length - 1];
+      assert(a1.stanje === "napaka" && F.docs.length === d0 + 1, "A: izhodisce: `napaka`, dokument pri ponudniku obstaja (1)", [a1.stanje, F.docs.length - d0]);
+      const povezi = `UPDATE racuni SET ponudnik = 'eracuni', ponudnik_stevilka = $2, stanje = 'caka', naslednji_poskus_at = NOW()
+                       WHERE id = $1 AND stanje = 'napaka' AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL`;
+      assert((await pool.query(povezi, [RA.id, dok.number])).rowCount === 1, "A: SQL za povezavo (po STATE) se izvede na eni vrstici");
+      await tek(w, 3, 40, true);
+      const a2 = await vrstica(RA.id);
+      assert(a2.stanje === "potrjen" && Number(a2.stevilka) === dok.fiscalNumber && a2.ponudnik_stevilka === dok.number && F.docs.length === d0 + 1, "A: po povezavi potrjen s stevilko obstojecega dokumenta, NOVEGA dokumenta ni", [a2.stanje, a2.stevilka, F.docs.length - d0]);
+      // B: izdaja zavrnjena (dokumenta ni) -> PONOVITEV
+      const RB = await nov(1, 1820); const d1 = F.docs.length;
+      nastavi("napaka", 1);
+      await tek(w);
+      const b1 = await vrstica(RB.id);
+      assert(b1.stanje === "napaka" && b1.poslano_at !== null && F.docs.length === d1, "B: izhodisce: `napaka`, poslano_at zapisan, dokumenta ni", [b1.stanje, F.docs.length - d1]);
+      const ponovi = `UPDATE racuni SET stanje = 'caka', poslano_at = NULL, naslednji_poskus_at = NOW()
+                       WHERE id = $1 AND stanje = 'napaka' AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL`;
+      assert((await pool.query(ponovi, [RB.id])).rowCount === 1, "B: SQL za ponovitev (po STATE) se izvede na eni vrstici");
+      const c1 = klicov("SalesInvoiceList");
+      await tek(w, 3, 40, true);
+      const b2 = await vrstica(RB.id);
+      assert(b2.stanje === "potrjen" && F.docs.length === d1 + 1 && klicov("SalesInvoiceList") === c1, "B: po ponovitvi izda natanko en dokument, brez iskanja (poslano_at je bil prazen)", [b2.stanje, F.docs.length - d1]);
+    }
+
+    // ================================================================
+    console.log("\n# 24. Zastavica »ustvarjeno pri ponudniku«: ob uspehu Create brez oznake je vrstica zaklenjena ze MED iskanjem (restart v tem oknu ne vodi v novo izdajo)");
+    {
+      const R = await nov(1, 1830); const w = deloven(); const w2 = deloven(); const c0 = klicov("SalesInvoiceCreate"), d0 = F.docs.length;
+      nastavi("brezOznake", 1); F.listZamik = 400;
+      const tek1 = w.tek();
+      let videl = null;
+      assert(await dokler(async () => { const r = await vrstica(R.id); if (r.stanje === "napaka" && /poteka iskanje/.test(r.zadnja_napaka || "")) { videl = r; return true; } return false; }, 6000), "med iskanjem po referenci je vrstica ze `napaka` (ni vec `caka`, ki bi jo po restartu znova izdali)", videl);
+      await w2.tek();   // drug primerek (npr. po deployu): vrstice ne prevzame, Create ne gre
+      assert(klicov("SalesInvoiceCreate") === c0 + 1 && F.docs.length === d0 + 1, "drug primerek med iskanjem ne izda nic", [klicov("SalesInvoiceCreate") - c0]);
+      await tek1; F.listZamik = 0; nastavi(null);
+      const r = await vrstica(R.id);
+      assert(r.stanje === "potrjen" && r.ponudnik_stevilka && F.docs.length === d0 + 1 && r.zadnja_napaka === null, "iskanje najde dokument: vrstica nazaj v obdelavo, potrjen, ena izdaja, brez ostanka sporocila", [r.stanje, r.zadnja_napaka]);
     }
 
     // ================================================================

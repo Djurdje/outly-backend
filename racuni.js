@@ -350,13 +350,13 @@ function eracuniPonudnik(env) {
   const tajno = [username, secretKey, token];
   let naslednji = 0;
 
-  async function klic(metoda, parametri, signal) {
+  async function klic(metoda, parametri, signal, namen = null) {
     const zdaj = Date.now(); const cakaj = Math.max(0, naslednji - zdaj); naslednji = Math.max(zdaj, naslednji) + razmak;
     await pocakajSignal(cakaj, signal);
     const napaka = (sporocilo, opcije) => new NapakaPonudnika(skrij(sporocilo, tajno), opcije);
     let res, besedilo;
     try {
-      res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ username, secretKey, token, method: metoda, parameters: parametri }), signal, redirect: "error" });
+      res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", ...(namen ? { "x-outly-namen": namen } : {}) }, body: JSON.stringify({ username, secretKey, token, method: metoda, parameters: parametri }), signal, redirect: "error" });
       besedilo = await res.text();
     } catch (e) {
       const prekinjen = e && e.name === "AbortError";
@@ -417,6 +417,14 @@ function eracuniPonudnik(env) {
       }
       const j = await klic("SalesInvoiceCreate", { SalesInvoice: skupno }, signal);
       return sklicDokumenta(j);
+    },
+    // Bralni preizkus PRED izdajo (pregled #318, 3. krog): poverilnice, uporabnik in naslov delujejo, preden gre v svet prvi Create. Nic ne izda in ne spremeni; oblike odgovora
+    // NE preverja (samo da klic uspe): pomen seznama ni zivo preverjen. Napacen kljuc bi sicer pustil `poslano_at` na vsaki vrstici zaostanka (besedilo napake ni dokaz, da dokument
+    // ni nastal), po popravku kljuca pa bi vsaka morala skozi iskanje po referenci.
+    async preizkusi({ signal } = {}) {
+      const danes = datumIso(new Date());
+      await klic("SalesInvoiceList", { dateFrom: danes, dateTo: danes }, signal, "preizkus");   // glava samo za sled v testih/posrednikih, API je ne rabi
+      return true;
     },
     // Iskanje po referenci (= pred novo izdajo): seznam dokumentov v ozkem obdobju okoli `poslano_at`, filter po `orderReference` v odjemalcu. API nima filtra po referenci in
     // oblike seznama (omejitev, strani) dokumentacija ne opisuje, zato je NEGATIVEN izid (return null) dovoljen SAMO, ce je seznam dokazljivo popoln:
@@ -752,9 +760,20 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   // Vrstica se TRAJNO zaklene pred novo izdajo (`napaka`, brez ponovitve): ponudnik je dokument ze ustvaril ali pa izida ne moremo zanesljivo ugotoviti.
   async function zakleni(r, zeton, sporocilo) {
     const s = String(sporocilo).slice(0, 300);
-    await uredi(r.id, zeton, "stanje = 'napaka', poskusi = poskusi + 1, zadnja_napaka = $3, prevzeto_at = NULL", [s], "stanje IN ('caka', 'izdan')");
+    await uredi(r.id, zeton, "stanje = 'napaka', poskusi = poskusi + 1, zadnja_napaka = $3, prevzeto_at = NULL", [s], "stanje IN ('caka', 'izdan', 'napaka')");
     objavi("trajna", `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${r.id})`, s);
   }
+
+  // Bralni preizkus pred prvim Create v teku (en klic na tek, ne na vrstico). Pade -> Create se ne poslje (`neposlano`), vrstica ostane `caka`, POZOR. Ne-konfiguracijska
+  // `trajna` napaka (npr. List ne pozna parametra) NE blokira izdaje: ne govori o poverilnicah, seznam pa ni zivo preverjen.
+  let preizkusTek = null, preizkusNapaka = null;
+  async function preizkusPredIzdajo(klicPonudniku) {
+    if (!ponudnik.preizkusi) return;
+    if (!preizkusTek) preizkusTek = klicPonudniku((signal) => ponudnik.preizkusi({ signal })).then(() => null, (e) => { if (!(e instanceof NapakaPonudnika)) throw e; return e; });
+    const e = await preizkusTek;
+    if (e && !preizkusNapaka && (e.konfiguracija || !e.trajna)) preizkusNapaka = e;
+  }
+  const brezIzdajeZaradiPreizkusa = () => new NapakaPonudnika(`bralni preizkus pred izdajo ni uspel, racun ni poslan: ${String(preizkusNapaka.message || preizkusNapaka).slice(0, 200)}`, { konfiguracija: !!preizkusNapaka.konfiguracija, neznan: false, neposlano: true });
 
   async function napakaPriPonudniku(r, e, korak, zeton) {
     const oznaka = `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${r.id})`;
@@ -772,6 +791,8 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
       objavi("trajna", oznaka, sporocilo.slice(0, 300));
       return;
     }
+    // Create zavrnjen zaradi nastavitve/poverilnic: ostalim vrsticam v tem teku Create ne gre (preizkus je bil uspel, kljuc je odpovedal vmes)
+    if (e.konfiguracija && korak === "ustvari" && !preizkusNapaka) preizkusNapaka = e;
     const premorMs = Math.max(premor(Number(r.poskusi) + 1), e.neznan ? NEZNAN_PREMOR_MS : 0, e.konfiguracija ? KONFIG_PREMOR_MS : 0);
     await uredi(r.id, zeton,
       `poskusi = poskusi + 1, naknadno = TRUE, zadnja_napaka = $3, prevzeto_at = NULL, iskanja_nejasna = $5,
@@ -826,7 +847,10 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
         }
         if (!pid && !pst) {
           korak = "ustvari";
+          await preizkusPredIzdajo(klicPonudniku);
+          if (preizkusNapaka) throw brezIzdajeZaradiPreizkusa();
           const o = await klicPonudniku(async (signal) => {
+            if (preizkusNapaka) throw brezIzdajeZaradiPreizkusa();   // v istem teku je kljuc ze odpovedal (preizkus ali Create): ostalim vrsticam Create ne gre
             // Varovalo (K2): zapis »poslano« velja samo ob nasem prevzemu IN ob nespremenjenem prejsnjem poslano_at; sicer klic NI poslan.
             const ok = await uredi(id, zeton, "poslano_at = NOW(), iskanja_ne = 0, iskanje_ne_at = NULL, iskanja_nejasna = 0", [r.poslano_niz],
               "stanje = 'caka' AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL AND poslano_at IS NOT DISTINCT FROM $3::timestamptz");
@@ -836,6 +860,10 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
           pid = o && o.ponudnik_id; pst = o && o.ponudnik_stevilka;
           if (!pid && !pst) {   // izdano (ponudnik je potrdil uspeh), a odgovor brez oznake dokumenta: poisci ga po referenci; ce ga ne najdemo, vrstica NIKOLI ne gre v novo izdajo
             korak = "iskanje";
+            // Zastavica »ustvarjeno pri ponudniku«: vrstica je `napaka` ze PRED iskanjem (prevzem ostane nas). Ce se proces ustavi (deploy, padec) med Create in koncem iskanja, vrstice
+            // nihce vec ne prevzame in po restartu ne gre v novo izdajo, tudi ob ERACUNI_SEZNAM_PREVERJEN=1 (seznam je lahko viden z zamikom).
+            const zakljucena = await uredi(id, zeton, "stanje = 'napaka', zadnja_napaka = $3", ["Create je uspel, a odgovor ni vseboval oznake dokumenta; poteka iskanje po referenci"], "stanje = 'caka'");
+            if (!zakljucena) throw new NapakaPonudnika("vrstico je medtem prevzel ali spremenil drug proces", { neznan: false, neposlano: true });
             let najden = null;
             try {
               const ip = await podatkiZaIskanje(r, new Date());
@@ -849,8 +877,8 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
           }
         }
         // Oznaka in stevilka dokumenta sta LOCENI polji (S1): nikoli ena namesto druge.
-        const zapisano = await uredi(id, zeton, "ponudnik = $3, ponudnik_id = $4, ponudnik_stevilka = $5", [ponudnik.ime, pid || null, pst || null],
-          "stanje = 'caka' AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL");
+        const zapisano = await uredi(id, zeton, "ponudnik = $3, ponudnik_id = $4, ponudnik_stevilka = $5, stanje = 'caka', zadnja_napaka = NULL", [ponudnik.ime, pid || null, pst || null],
+          "stanje IN ('caka', 'napaka') AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL");
         if (!zapisano) {
           objavi("obdelava", `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${id})`, `dokument ${pid || pst} pri ponudniku je nastal, a vrstice ni bilo mogoce posodobiti (prevzel jo je drug proces); nadaljuje ta, najde ga z iskanjem po referenci`);
           return;
@@ -937,6 +965,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
         if (!imamNajem) return 0;
       }
       const zeton = crypto.randomUUID();
+      preizkusTek = null; preizkusNapaka = null;   // preizkus velja en tek
       const konec = Date.now() + PRORACUN_MS;
       for (;;) {
         const ids = await prevzemi(PAKET, zeton);
