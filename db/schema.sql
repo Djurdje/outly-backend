@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–055, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–056, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 0wcyspXjwdY7PF7xgvFHhUamC3aelcdZwZFh557LZ4OcRVsvzSxXs1fVVIb3izp
+\restrict KvQ7NBsNajTOZaxH9Op8XsAfdtzEXdpcmSdo6wJ899LcXNVd8k6dZ9DU3A2VM4U
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -53,10 +53,11 @@ CREATE FUNCTION public.racuni_varuj() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  -- Nova vrstica je vedno samo dolg (`caka`, brez stevilke, ZOI, EOR): stevilka pride IZKLJUCNO iz stevca (spodaj, prehod caka -> izdan).
+  -- Nova vrstica je vedno samo dolg (`caka`, brez stevilke, ZOI, EOR): stevilka pride IZKLJUCNO iz stevca ali od ponudnika (spodaj, prehod caka -> izdan).
   IF TG_OP = 'INSERT' THEN
     IF NEW.stanje <> 'caka' OR NEW.stevilka IS NOT NULL OR NEW.zoi IS NOT NULL OR NEW.eor IS NOT NULL OR NEW.ponudnik_id IS NOT NULL OR NEW.naknadno
-       OR NEW.vracilo_uspelo IS FALSE THEN
+       OR NEW.vracilo_uspelo IS FALSE OR NEW.stevilka_vir <> 'nas' OR NEW.ponudnik_stevilka IS NOT NULL OR NEW.poslano_at IS NOT NULL
+       OR NEW.iskanja_ne <> 0 OR NEW.iskanja_nejasna <> 0 OR NEW.iskanje_ne_at IS NOT NULL THEN
       RAISE EXCEPTION 'racuni: nov racun mora biti v stanju caka brez stevilke, ZOI in EOR' USING ERRCODE = 'restrict_violation';
     END IF;
     RETURN NEW;
@@ -70,17 +71,34 @@ BEGIN
      OR NEW.message_id IS DISTINCT FROM OLD.message_id OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
     RAISE EXCEPTION 'racuni: osnovnih podatkov racuna % ni dovoljeno spreminjati', OLD.id USING ERRCODE = 'restrict_violation';
   END IF;
+  -- Cas izdaje je zamrznjen; izjema: pri ponudniku sme NULL postati cas (enkrat), ko ga ponudnik vrne.
   IF OLD.stevilka IS NOT NULL AND (NEW.prostor IS DISTINCT FROM OLD.prostor OR NEW.naprava IS DISTINCT FROM OLD.naprava
-     OR NEW.leto IS DISTINCT FROM OLD.leto OR NEW.stevilka IS DISTINCT FROM OLD.stevilka OR NEW.izdan_at IS DISTINCT FROM OLD.izdan_at) THEN
+     OR NEW.leto IS DISTINCT FROM OLD.leto OR NEW.stevilka IS DISTINCT FROM OLD.stevilka
+     OR (NEW.izdan_at IS DISTINCT FROM OLD.izdan_at AND NOT (OLD.izdan_at IS NULL AND OLD.stevilka_vir = 'ponudnik'))) THEN
     RAISE EXCEPTION 'racuni: stevilke in casa izdaje izdanega racuna % ni dovoljeno spreminjati (ZDavP-2 38/8)', OLD.id USING ERRCODE = 'restrict_violation';
   END IF;
-  -- Dodelitev stevilke (NULL -> N): N mora biti trenutna vrednost stevca istega prostora, naprave in leta (stevec se v isti transakciji poveca za 1, racuni_zaporedje_varuj).
-  IF OLD.stevilka IS NULL AND NEW.stevilka IS NOT NULL AND NOT EXISTS (
-       SELECT 1 FROM racuni_zaporedje z WHERE z.prostor = NEW.prostor AND z.naprava = NEW.naprava AND z.leto = NEW.leto AND z.zadnja = NEW.stevilka) THEN
-    RAISE EXCEPTION 'racuni: stevilka % racuna % ni trenutna vrednost stevca (% % %)', NEW.stevilka, OLD.id, NEW.prostor, NEW.naprava, NEW.leto USING ERRCODE = 'restrict_violation';
+  -- Vir stevilke se sme spremeniti samo v UPDATE-u, ki stevilko dodeli (NULL -> N); potem je zamrznjen.
+  IF NEW.stevilka_vir IS DISTINCT FROM OLD.stevilka_vir AND NOT (OLD.stevilka IS NULL AND NEW.stevilka IS NOT NULL) THEN
+    RAISE EXCEPTION 'racuni: vira stevilke racuna % ni dovoljeno spreminjati', OLD.id USING ERRCODE = 'restrict_violation';
+  END IF;
+  -- Dodelitev stevilke (NULL -> N). Vir 'nas': N mora biti trenutna vrednost stevca istega prostora, naprave in leta (stevec se v isti transakciji poveca za 1,
+  -- racuni_zaporedje_varuj). Vir 'ponudnik': stevilko je dodelil ponudnik (mora biti znan ponudnik in dokument pri njem); stevec se ne dotakne.
+  -- V istem prostoru in napravi ne sme biti hkrati stevilk obeh virov (dve zaporedji se razhajata).
+  IF OLD.stevilka IS NULL AND NEW.stevilka IS NOT NULL THEN
+    IF NEW.stevilka_vir = 'nas' THEN
+      IF NOT EXISTS (SELECT 1 FROM racuni_zaporedje z WHERE z.prostor = NEW.prostor AND z.naprava = NEW.naprava AND z.leto = NEW.leto AND z.zadnja = NEW.stevilka) THEN
+        RAISE EXCEPTION 'racuni: stevilka % racuna % ni trenutna vrednost stevca (% % %)', NEW.stevilka, OLD.id, NEW.prostor, NEW.naprava, NEW.leto USING ERRCODE = 'restrict_violation';
+      END IF;
+    ELSIF NEW.ponudnik IS NULL OR (NEW.ponudnik_id IS NULL AND NEW.ponudnik_stevilka IS NULL) THEN
+      RAISE EXCEPTION 'racuni: stevilka racuna % je od ponudnika, zato morata biti znana ponudnik in dokument pri njem (oznaka ali stevilka)', OLD.id USING ERRCODE = 'restrict_violation';
+    END IF;
+    IF EXISTS (SELECT 1 FROM racuni x WHERE x.prostor = NEW.prostor AND x.naprava = NEW.naprava AND x.stevilka IS NOT NULL AND x.id <> OLD.id AND x.stevilka_vir <> NEW.stevilka_vir) THEN
+      RAISE EXCEPTION 'racuni: prostor % naprava % ze ima stevilke drugega vira (dve zaporedji): racun % ne dobi stevilke', NEW.prostor, NEW.naprava, OLD.id USING ERRCODE = 'restrict_violation';
+    END IF;
   END IF;
   IF (OLD.zoi IS NOT NULL AND NEW.zoi IS DISTINCT FROM OLD.zoi) OR (OLD.eor IS NOT NULL AND NEW.eor IS DISTINCT FROM OLD.eor)
      OR (OLD.ponudnik IS NOT NULL AND NEW.ponudnik IS DISTINCT FROM OLD.ponudnik) OR (OLD.ponudnik_id IS NOT NULL AND NEW.ponudnik_id IS DISTINCT FROM OLD.ponudnik_id)
+     OR (OLD.ponudnik_stevilka IS NOT NULL AND NEW.ponudnik_stevilka IS DISTINCT FROM OLD.ponudnik_stevilka)
      OR (OLD.potrjen_at IS NOT NULL AND NEW.potrjen_at IS DISTINCT FROM OLD.potrjen_at) THEN
     RAISE EXCEPTION 'racuni: ZOI, EOR in podatkov ponudnika racuna % ni dovoljeno spreminjati', OLD.id USING ERRCODE = 'restrict_violation';
   END IF;
@@ -96,7 +114,9 @@ BEGIN
      OR (OLD.stanje = 'preklican' AND NEW.stanje <> 'preklican') THEN
     RAISE EXCEPTION 'racuni: nedovoljen prehod dobropisa % (% -> %, vracilo %)', OLD.id, OLD.stanje, NEW.stanje, NEW.vracilo_uspelo USING ERRCODE = 'restrict_violation';
   END IF;
-  IF (OLD.stanje <> 'caka' AND NEW.stanje = 'caka') OR (OLD.stanje = 'potrjen' AND NEW.stanje <> 'potrjen') OR (OLD.naknadno AND NOT NEW.naknadno) THEN
+  -- Nazaj v `caka` sme samo `napaka` BREZ stevilke (ponudnik izdaje ni sprejel; rocna ponovitev). Vse ostalo ne.
+  IF (OLD.stanje <> 'caka' AND NEW.stanje = 'caka' AND NOT (OLD.stanje = 'napaka' AND OLD.stevilka IS NULL))
+     OR (OLD.stanje = 'potrjen' AND NEW.stanje <> 'potrjen') OR (OLD.naknadno AND NOT NEW.naknadno) THEN
     RAISE EXCEPTION 'racuni: nedovoljen prehod stanja racuna % (% -> %)', OLD.id, OLD.stanje, NEW.stanje USING ERRCODE = 'restrict_violation';
   END IF;
   RETURN NEW;
@@ -1297,16 +1317,28 @@ CREATE TABLE public.racuni (
     prevzeto_at timestamp with time zone,
     zadnja_napaka text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    stevilka_vir text DEFAULT 'nas'::text NOT NULL,
+    ponudnik_stevilka text,
+    poslano_at timestamp with time zone,
+    iskanja_ne smallint DEFAULT 0 NOT NULL,
+    iskanje_ne_at timestamp with time zone,
+    iskanja_nejasna smallint DEFAULT 0 NOT NULL,
+    prevzem_zeton text,
+    CONSTRAINT racuni_iskanja_ne_check CHECK (((iskanja_ne >= 0) AND (iskanja_ne <= 1000))),
+    CONSTRAINT racuni_iskanja_nejasna_check CHECK (((iskanja_nejasna >= 0) AND (iskanja_nejasna <= 1000))),
     CONSTRAINT racuni_leto_check CHECK (((leto IS NULL) OR ((leto >= 2000) AND (leto <= 2999)))),
     CONSTRAINT racuni_naprava_check CHECK (((naprava IS NULL) OR (naprava ~ '^[0-9A-Za-z]{1,20}$'::text))),
     CONSTRAINT racuni_ponudnik_check CHECK (((ponudnik IS NULL) OR ((char_length(ponudnik) >= 1) AND (char_length(ponudnik) <= 40)))),
     CONSTRAINT racuni_ponudnik_id_check CHECK (((ponudnik_id IS NULL) OR ((char_length(ponudnik_id) >= 1) AND (char_length(ponudnik_id) <= 200)))),
+    CONSTRAINT racuni_ponudnik_stevilka_check CHECK (((ponudnik_stevilka IS NULL) OR ((char_length(ponudnik_stevilka) >= 1) AND (char_length(ponudnik_stevilka) <= 100)))),
     CONSTRAINT racuni_potrjen_chk CHECK (((stanje <> 'potrjen'::text) OR ((eor IS NOT NULL) AND (potrjen_at IS NOT NULL)))),
     CONSTRAINT racuni_preklican_chk CHECK (((stanje <> 'preklican'::text) OR ((vrsta = 'dobropis'::text) AND (vracilo_uspelo = false)))),
+    CONSTRAINT racuni_prevzem_zeton_check CHECK (((prevzem_zeton IS NULL) OR ((char_length(prevzem_zeton) >= 1) AND (char_length(prevzem_zeton) <= 100)))),
     CONSTRAINT racuni_prostor_check CHECK (((prostor IS NULL) OR (prostor ~ '^[0-9A-Za-z]{1,20}$'::text))),
     CONSTRAINT racuni_stanje_check CHECK ((stanje = ANY (ARRAY['caka'::text, 'izdan'::text, 'potrjen'::text, 'napaka'::text, 'preklican'::text]))),
     CONSTRAINT racuni_stevilka_check CHECK (((stevilka IS NULL) OR (stevilka >= 1))),
-    CONSTRAINT racuni_stevilka_chk CHECK ((((stevilka IS NULL) = (izdan_at IS NULL)) AND ((stevilka IS NULL) = (prostor IS NULL)) AND ((stevilka IS NULL) = (naprava IS NULL)) AND ((stevilka IS NULL) = (leto IS NULL)) AND ((stanje = ANY (ARRAY['caka'::text, 'preklican'::text])) = (stevilka IS NULL)))),
+    CONSTRAINT racuni_stevilka_chk CHECK ((((stevilka IS NULL) = (prostor IS NULL)) AND ((stevilka IS NULL) = (naprava IS NULL)) AND ((stevilka IS NULL) = (leto IS NULL)) AND (((stevilka_vir = 'nas'::text) AND ((stevilka IS NULL) = (izdan_at IS NULL))) OR ((stevilka_vir = 'ponudnik'::text) AND ((izdan_at IS NULL) OR (stevilka IS NOT NULL)))) AND ((stanje <> ALL (ARRAY['caka'::text, 'preklican'::text])) OR (stevilka IS NULL)) AND ((stanje <> ALL (ARRAY['izdan'::text, 'potrjen'::text])) OR (stevilka IS NOT NULL)))),
+    CONSTRAINT racuni_stevilka_vir_check CHECK ((stevilka_vir = ANY (ARRAY['nas'::text, 'ponudnik'::text]))),
     CONSTRAINT racuni_vir_check CHECK (((vir IS NULL) OR ((char_length(vir) >= 1) AND (char_length(vir) <= 120)))),
     CONSTRAINT racuni_vracilo_chk CHECK (((vrsta = 'dobropis'::text) OR (vracilo_uspelo IS NULL))),
     CONSTRAINT racuni_vrsta_check CHECK ((vrsta = ANY (ARRAY['racun'::text, 'dobropis'::text]))),
@@ -1320,6 +1352,34 @@ CREATE TABLE public.racuni (
 --
 
 COMMENT ON TABLE public.racuni IS 'Davcno potrjeni racuni in dobropisi NEXT DIMENSIONS za lastne dogodke Outly (054, ZDavPR): dolg ob placilu, stevilka A001-1-N in potrditev v ozadju (racuni.js). Brez brisanja (ZDavP-2 38/8).';
+
+
+--
+-- Name: COLUMN racuni.stevilka_vir; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.racuni.stevilka_vir IS 'Kdo je dodelil stevilko (056): nas = racuni_zaporedje, ponudnik = ponudnik (e-racuni.com), stevec se ne dotakne. Zamrznjeno ob dodelitvi.';
+
+
+--
+-- Name: COLUMN racuni.ponudnik_stevilka; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.racuni.ponudnik_stevilka IS 'Stevilka dokumenta pri ponudniku (056), za sklic dobropisa na izvirni racun. Zapise se enkrat.';
+
+
+--
+-- Name: COLUMN racuni.poslano_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.racuni.poslano_at IS 'Cas, ko je bil zahtevek za izdajo poslan ponudniku (056). Brez stevilke in s poslano_at je izid lahko neznan: najprej iskanje po referenci, sele nato nova izdaja.';
+
+
+--
+-- Name: COLUMN racuni.prevzem_zeton; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.racuni.prevzem_zeton IS 'Zeton prevzema vrstice (056): zapisi delavca pri e-racuni veljajo samo ob istem zetonu.';
 
 
 --
@@ -1339,6 +1399,26 @@ CREATE SEQUENCE public.racuni_id_seq
 --
 
 ALTER SEQUENCE public.racuni_id_seq OWNED BY public.racuni.id;
+
+
+--
+-- Name: racuni_najem; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.racuni_najem (
+    ime text NOT NULL,
+    lastnik text NOT NULL,
+    potece_at timestamp with time zone NOT NULL,
+    CONSTRAINT racuni_najem_ime_check CHECK (((char_length(ime) >= 1) AND (char_length(ime) <= 50))),
+    CONSTRAINT racuni_najem_lastnik_check CHECK (((char_length(lastnik) >= 1) AND (char_length(lastnik) <= 100)))
+);
+
+
+--
+-- Name: TABLE racuni_najem; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.racuni_najem IS 'Najem delavca za ponudnika, ki ne dovoli socasnih zahtevkov (056, e-racuni): en lastnik, potece_at. Brez osebnih podatkov.';
 
 
 --
@@ -2285,6 +2365,14 @@ ALTER TABLE ONLY public.omejitve
 
 ALTER TABLE ONLY public.orders
     ADD CONSTRAINT orders_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: racuni_najem racuni_najem_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.racuni_najem
+    ADD CONSTRAINT racuni_najem_pkey PRIMARY KEY (ime);
 
 
 --
@@ -3746,5 +3834,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 0wcyspXjwdY7PF7xgvFHhUamC3aelcdZwZFh557LZ4OcRVsvzSxXs1fVVIb3izp
+\unrestrict KvQ7NBsNajTOZaxH9Op8XsAfdtzEXdpcmSdo6wJ899LcXNVd8k6dZ9DU3A2VM4U
 

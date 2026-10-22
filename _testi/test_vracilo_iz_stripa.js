@@ -121,7 +121,7 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { vrniBrezWebhooka(chId, skupaj
   const srv = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", APP_URL: "https://outly.test",
     STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: WHSEC, STRIPE_POSPRAVI_MS: "3600000", TEST_PLACILA: "",
     RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>",
-    GOST_POSTA_PONOVI_MS: "200", GOST_POSTA_TIMEOUT_MS: "400", GOST_POSTA_REZERVA_MS: "0", GOST_POSTA_PREMOR_MS: "100", VRACILA_TICK_MS: "0", JAVNI_PREDPOMNILNIK_MS: "0" },
+    GOST_POSTA_PONOVI_MS: "200", GOST_POSTA_TIMEOUT_MS: "2500", GOST_POSTA_REZERVA_MS: "0", GOST_POSTA_PREMOR_MS: "100", VRACILA_TICK_MS: "0", JAVNI_PREDPOMNILNIK_MS: "0" },
     stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", x => log += x); srv.stderr.on("data", x => log += x);
   for (let i = 0; i < 80; i++) { try { await fetch(BASE + "/"); break; } catch { await pocakaj(100); } }
@@ -287,6 +287,8 @@ const vrniVPlosci = (chId, skupajVrnjeno, id) => { vrniBrezWebhooka(chId, skupaj
 
     // ================================================================
     console.log("\n# 5. Mail ne blokira webhooka");
+    // Zadrzanje (>= 300 ms + cakanje na stub) mora biti jasno KRAJSE od roka klica Resenda (GOST_POSTA_TIMEOUT_MS, zgoraj 2500 ms): pri roku 400 ms je bilo na
+    // obremenjenem strezniku (CI) zadrzanje daljse od roka, odjemalec je odnehal, pospravljalec je poslal drugi mail in stub je ob sprostitvi izpolnil OBA zahtevka (2 maila).
     R.drzi = true;
     const O7 = await narocilo({ uporabnik: U.ana });
     w = await vrniVPlosci(O7.ch, 2000);
