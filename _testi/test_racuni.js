@@ -370,7 +370,7 @@ async function ustavi(o) { if (!o || o.srv.exitCode !== null) return; const kone
     }
     // pospravljalec: placano platformno narocilo BREZ racuna (npr. zapisano mimo zakljuci) -> racun + POZOR
     const izgubljen = await vstavi("pi_izg_1", "cs_live_izg1");
-    assert(await cakaj(async () => (await racuniNarocila(izgubljen)).length === 1, 5000) && /\[racuni\] POZOR: 1 placanih platformnih narocil ni imelo racuna/.test(A.log), "pospravljalec: manjkajoc racun vpisan + [racuni] POZOR", A.log.split("\n").filter((l) => /racuni\] POZOR/.test(l)));
+    assert(await cakaj(async () => (await racuniNarocila(izgubljen)).length === 1 && /\[racuni\] POZOR: 1 placanih platformnih narocil ni imelo racuna/.test(A.log), 5000), "pospravljalec: manjkajoc racun vpisan + [racuni] POZOR", A.log.split("\n").filter((l) => /racuni\] POZOR/.test(l)));
     await pocakaj(900);
     for (const [id, opis] of [[XN.id, "navaden klub"], [n0.body.order.id, "0 EUR"], [t1, "testni nacin test_"], [t2, "sandbox cs_test_"], [star, "placano pred 054 (ne za nazaj)"]]) {
       assert((await racuniNarocila(id)).length === 0, `${opis}: brez racuna (tudi po pospravljalcu)`);
@@ -399,6 +399,7 @@ async function ustavi(o) { if (!o || o.srv.exitCode !== null) return; const kone
     await pocakaj(800);
     const x5 = (await racuniNarocila(o5.id))[0];
     assert(klicaZa(o5.public_ref).length === 1 && x5.stevilka !== null && x5.eor === null && /HTTP 400/.test(x5.zadnja_napaka), "trajna: en sam klic (brez ponavljanja), racun ima stevilko (izdan), brez EOR", x5);
+    await cakaj(async () => new RegExp(`\\[racuni\\] POZOR: racun A001-1-${x5.stevilka} \\(narocilo ${o5.public_ref}\\) je ponudnik lazni ZAVRNIL`).test(A.log), 3000);   // dnevnik otroka prihaja prek cevi
     assert(new RegExp(`\\[racuni\\] POZOR: racun A001-1-${x5.stevilka} \\(narocilo ${o5.public_ref}\\) je ponudnik lazni ZAVRNIL`).test(A.log), "trajna: [racuni] POZOR s stevilko in narocilom (brez e-naslova)");
 
     // ================================================================
@@ -426,7 +427,7 @@ async function ustavi(o) { if (!o || o.srv.exitCode !== null) return; const kone
     assert(d6.length === 1 && d6[0].znesek_cents === -2000 && d6[0].vir === vr6.stripe_vracilo_id, "odpoved: dobropis -2000 (2 x 10 EUR), vir = nase Stripovo vracilo", [d6, vr6]);
     // pospravljalec: refunded_cents povecan mimo uveljaviVracilo (npr. star zapis) -> dobropis z nadomestnim virom + POZOR
     await pool.query("UPDATE orders SET refunded_cents = 700, status = 'partially_refunded' WHERE id = $1", [o4.id]);
-    assert(await cakaj(async () => (await racuniNarocila(o4.id)).some((x) => x.vrsta === "dobropis" && x.vir === `narocilo-${o4.id}@700` && x.znesek_cents === -700), 5000) && /\[racuni\] POZOR: 1 vracil ni imelo dobropisa/.test(A.log),
+    assert(await cakaj(async () => (await racuniNarocila(o4.id)).some((x) => x.vrsta === "dobropis" && x.vir === `narocilo-${o4.id}@700` && x.znesek_cents === -700) && /\[racuni\] POZOR: 1 vracil ni imelo dobropisa/.test(A.log), 5000),
       "pospravljalec: manjkajoc dobropis (-700, vir narocilo-<id>@700) + POZOR", await racuniNarocila(o4.id));
 
     // ================================================================
@@ -612,6 +613,7 @@ async function ustavi(o) { if (!o || o.srv.exitCode !== null) return; const kone
       d = (await racuniNarocila(Z.id)).filter((x) => x.vrsta === "dobropis");
       assert(d.length === 1 && d[0].stevilka === null && d[0].vracilo_uspelo === false && klicaZa(Z.ref).filter((k) => k.vrsta === "dobropis").length === 0,
         "failed: dobropis NI izdan, ponudnik ga ni dobil, ponovljen webhook ne doda novega", d);
+      await cakaj(async () => new RegExp(`\\[racuni\\] POZOR: Stripe vracilo ${reF.id} je failed: dobropis \\d+ \\(narocilo ${Z.id}\\) NI izdan`).test(A.log.slice(prejLog)), 3000);   // dnevnik otroka prihaja prek cevi
       assert(new RegExp(`\\[racuni\\] POZOR: Stripe vracilo ${reF.id} je failed: dobropis \\d+ \\(narocilo ${Z.id}\\) NI izdan`).test(A.log.slice(prejLog)), "failed: [racuni] POZOR");
       assert(await zavrne("UPDATE racuni SET stanje='caka' WHERE vir=$1", [reF.id]) === true && await zavrne("DELETE FROM racuni WHERE vir=$1", [reF.id]) === true, "preklican dobropis: ne nazaj v caka, ne izbris (sled)");
       // ponovni poskus vracila (novo Stripovo vracilo) -> natanko en nov dobropis, izdan
