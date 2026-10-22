@@ -764,16 +764,22 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
     objavi("trajna", `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${r.id})`, s);
   }
 
-  // Bralni preizkus pred prvim Create v teku (en klic na tek, ne na vrstico). Pade -> Create se ne poslje (`neposlano`), vrstica ostane `caka`, POZOR. Ne-konfiguracijska
-  // `trajna` napaka (npr. List ne pozna parametra) NE blokira izdaje: ne govori o poverilnicah, seznam pa ni zivo preverjen.
-  let preizkusTek = null, preizkusNapaka = null;
+  // Bralni preizkus pred prvim Create v teku (en klic na tek, ne na vrstico). FAIL-CLOSED (pregled #321): KATERAKOLI napaka preizkusa ustavi Create (`neposlano`), vrstica ostane
+  // `caka` s praznim `poslano_at`, POZOR z besedilom napake. Pravo besedilo napake avtentikacije pri e-racuni NI znano, zato razvrstitev po besedilu ni varna.
+  // Poleg tega po prvem ZAVRNJENEM Create (konfiguracija ali trajna zavrnitev ponudnika) Create stoji za CEL proces RACUNI_KONFIG_PREMOR_MS (»List dela, Create nima pravic«).
+  let preizkusTek = null, preizkusNapaka = null, createStopDo = 0, createStopRazlog = "";
   async function preizkusPredIzdajo(klicPonudniku) {
     if (!ponudnik.preizkusi) return;
     if (!preizkusTek) preizkusTek = klicPonudniku((signal) => ponudnik.preizkusi({ signal })).then(() => null, (e) => { if (!(e instanceof NapakaPonudnika)) throw e; return e; });
     const e = await preizkusTek;
-    if (e && !preizkusNapaka && (e.konfiguracija || !e.trajna)) preizkusNapaka = e;
+    if (e && !preizkusNapaka) preizkusNapaka = e;
   }
-  const brezIzdajeZaradiPreizkusa = () => new NapakaPonudnika(`bralni preizkus pred izdajo ni uspel, racun ni poslan: ${String(preizkusNapaka.message || preizkusNapaka).slice(0, 200)}`, { konfiguracija: !!preizkusNapaka.konfiguracija, neznan: false, neposlano: true });
+  const ustavljenaIzdaja = (sporocilo, pocasi) => { const e = new NapakaPonudnika(sporocilo.slice(0, 300), { konfiguracija: pocasi, neznan: false, neposlano: true }); e.izBlokade = true; return e; };
+  function blokadaIzdaje() {
+    if (preizkusNapaka) return ustavljenaIzdaja(`bralni preizkus pred izdajo ni uspel, racun ni poslan: ${String(preizkusNapaka.message || preizkusNapaka).slice(0, 200)}`, !!(preizkusNapaka.konfiguracija || preizkusNapaka.trajna));
+    if (Date.now() < createStopDo) return ustavljenaIzdaja(`izdaja je ustavljena (ponudnik je zavrnil prejsnji Create: ${createStopRazlog}); racun ni poslan`, true);
+    return null;
+  }
 
   async function napakaPriPonudniku(r, e, korak, zeton) {
     const oznaka = `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${r.id})`;
@@ -791,8 +797,6 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
       objavi("trajna", oznaka, sporocilo.slice(0, 300));
       return;
     }
-    // Create zavrnjen zaradi nastavitve/poverilnic: ostalim vrsticam v tem teku Create ne gre (preizkus je bil uspel, kljuc je odpovedal vmes)
-    if (e.konfiguracija && korak === "ustvari" && !preizkusNapaka) preizkusNapaka = e;
     const premorMs = Math.max(premor(Number(r.poskusi) + 1), e.neznan ? NEZNAN_PREMOR_MS : 0, e.konfiguracija ? KONFIG_PREMOR_MS : 0);
     await uredi(r.id, zeton,
       `poskusi = poskusi + 1, naknadno = TRUE, zadnja_napaka = $3, prevzeto_at = NULL, iskanja_nejasna = $5,
@@ -847,15 +851,21 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
         }
         if (!pid && !pst) {
           korak = "ustvari";
+          { const b0 = blokadaIzdaje(); if (b0) throw b0; }
           await preizkusPredIzdajo(klicPonudniku);
-          if (preizkusNapaka) throw brezIzdajeZaradiPreizkusa();
+          { const b1 = blokadaIzdaje(); if (b1) throw b1; }
           const o = await klicPonudniku(async (signal) => {
-            if (preizkusNapaka) throw brezIzdajeZaradiPreizkusa();   // v istem teku je kljuc ze odpovedal (preizkus ali Create): ostalim vrsticam Create ne gre
+            { const b2 = blokadaIzdaje(); if (b2) throw b2; }   // v istem teku je kljuc ze odpovedal (preizkus ali Create): ostalim vrsticam Create ne gre
             // Varovalo (K2): zapis »poslano« velja samo ob nasem prevzemu IN ob nespremenjenem prejsnjem poslano_at; sicer klic NI poslan.
             const ok = await uredi(id, zeton, "poslano_at = NOW(), iskanja_ne = 0, iskanje_ne_at = NULL, iskanja_nejasna = 0", [r.poslano_niz],
               "stanje = 'caka' AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL AND poslano_at IS NOT DISTINCT FROM $3::timestamptz");
             if (!ok) throw new NapakaPonudnika("vrstico je medtem prevzel ali spremenil drug proces (zahtevek ni poslan)", { neznan: false, neposlano: true });
-            return ponudnik.ustvari(pz.podatki, { signal });
+            try { return await ponudnik.ustvari(pz.podatki, { signal }); } catch (err) {
+              // Create ZAVRNJEN (nastavitev/poverilnice ali trajna zavrnitev ponudnika; ne lokalna zavrnitev ene vrstice): Create stoji za cel proces KONFIG_PREMOR_MS.
+              // Zapisano pred sprostitvijo semaforja, da ga ostale vrstice v istem teku vidijo.
+              if (err instanceof NapakaPonudnika && (err.konfiguracija || (err.trajna && !err.neposlano))) { createStopDo = Date.now() + KONFIG_PREMOR_MS; createStopRazlog = kratko(err).slice(0, 150); }
+              throw err;
+            }
           });
           pid = o && o.ponudnik_id; pst = o && o.ponudnik_stevilka;
           if (!pid && !pst) {   // izdano (ponudnik je potrdil uspeh), a odgovor brez oznake dokumenta: poisci ga po referenci; ce ga ne najdemo, vrstica NIKOLI ne gre v novo izdajo

@@ -25,6 +25,7 @@
  *  22  preizkus pred izdajo: napacen kljuc ob vklopu ne spravi zaostanka v `napaka` (oba nacina zastavice seznama)
  *  23  rocni postopek za vrstico v `napaka` (povezava obstojecega dokumenta, ponovitev): isti SQL kot v STATE
  *  24  zastavica »ustvarjeno pri ponudniku«: vrstica je `napaka` ze med iskanjem po uspehu Create brez oznake
+ *  25  fail-closed: katerakoli napaka bralnega preizkusa ustavi Create; po zavrnjenem Create se Create ustavi za cel proces
  *  15  poverilnice nikoli v dnevniku ali zadnja_napaka
  */
 const http = require("http");
@@ -54,6 +55,7 @@ const F = {
   vedenje: null,        // { ustvari: 'ok'|'503pred'|'503po'|'timeoutpo'|'429'|'napaka'|'konfig'|'brezOznake', preostalo: n }
   zamudaEor: 0,         // koliko Get klicev pred pojavom EOR
   listOblika: "ok",     // 'ok' | 'neznana' | 'prazno' ({status:ok}) | 'prazenNiz' (SalesInvoices: "") | 'prazenSeznam' ([]) | 'brezRef' | 'okrnjenRef' | 'dvojnik' | 'manjkaZnan'
+  opisAvt: "Access denied. Invalid credentials",   // pravo besedilo napake avtentikacije pri e-racuni NI znano
   listZamik: 0, casIzdaje: null, poverilnice: true, vrniBlagajno: null,
 };
 const dan = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Ljubljana", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
@@ -66,7 +68,7 @@ const streznik = http.createServer((req, res) => {
     const konec = (st, obj, zamik = 0) => setTimeout(() => { F.inflight--; try { res.writeHead(st, { "content-type": "application/json" }); res.end(typeof obj === "string" ? obj : JSON.stringify(obj)); } catch (_) { /* odjemalec je prekinil */ } }, zamik);
     let z; try { z = JSON.parse(tel); } catch (_) { return konec(400, "{}"); }
     if (req.headers["x-outly-namen"] === "preizkus") F.preizkusi.push({ method: z.method, parameters: z.parameters }); else F.klici.push({ method: z.method, parameters: z.parameters, telo: tel });
-    if (!F.poverilnice || z.username !== TAJNO.user || z.secretKey !== TAJNO.key || z.token !== TAJNO.token) return konec(200, { status: "error", error: { description: "Access denied. Invalid credentials" } });
+    if (!F.poverilnice || z.username !== TAJNO.user || z.secretKey !== TAJNO.key || z.token !== TAJNO.token) return konec(200, { status: "error", error: { description: F.opisAvt } });
     const p = z.parameters || {};
     const ved = F.vedenje && F.vedenje.preostalo > 0 ? F.vedenje.ustvari : "ok";
     const poraba = () => { if (F.vedenje && F.vedenje.preostalo > 0) F.vedenje.preostalo--; };
@@ -745,6 +747,7 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
                        WHERE id = $1 AND stanje = 'napaka' AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL`;
       assert((await pool.query(ponovi, [RB.id])).rowCount === 1, "B: SQL za ponovitev (po STATE) se izvede na eni vrstici");
       const c1 = klicov("SalesInvoiceList");
+      await pocakaj(450);   // zavrnjen Create (B) ustavi Create v procesu za RACUNI_KONFIG_PREMOR_MS (400 ms)
       await tek(w, 3, 40, true);
       const b2 = await vrstica(RB.id);
       assert(b2.stanje === "potrjen" && F.docs.length === d1 + 1 && klicov("SalesInvoiceList") === c1, "B: po ponovitvi izda natanko en dokument, brez iskanja (poslano_at je bil prazen)", [b2.stanje, F.docs.length - d1]);
@@ -763,6 +766,40 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       await tek1; F.listZamik = 0; nastavi(null);
       const r = await vrstica(R.id);
       assert(r.stanje === "potrjen" && r.ponudnik_stevilka && F.docs.length === d0 + 1 && r.zadnja_napaka === null, "iskanje najde dokument: vrstica nazaj v obdelavo, potrjen, ena izdaja, brez ostanka sporocila", [r.stanje, r.zadnja_napaka]);
+    }
+
+    // ================================================================
+    console.log("\n# 25. Fail-closed (pregled #321): KATERAKOLI napaka bralnega preizkusa ustavi Create; po zavrnjenem Create se Create ustavi za CEL proces");
+    {
+      const besedila = ["Authorization failed for user", "Unknown user", "Napacno uporabnisko ime ali geslo", "Something unexpected happened (code 77)"];
+      for (const besedilo of besedila) {
+        const R = await nov(1, 1900); const w = deloven(); const c0 = klicov("SalesInvoiceCreate"), l0 = LOG.length;
+        F.poverilnice = false; F.opisAvt = besedilo;
+        await tek(w, 2, 60, true);
+        const r = await vrstica(R.id);
+        assert(klicov("SalesInvoiceCreate") === c0 && r.stanje === "caka" && r.poslano_at === null, `neprepoznano besedilo napake preizkusa (»${besedilo}«): 0 Create, caka, poslano_at prazen`, [klicov("SalesInvoiceCreate") - c0, r.stanje]);
+        assert(logOd(l0).some((l) => /POZOR/.test(l) && l.includes(besedilo)) && !logOd(l0).some((l) => [TAJNO.user, TAJNO.key, TAJNO.token].some((t) => l.includes(t))), "POZOR z besedilom napake, brez poverilnic");
+        F.poverilnice = true; F.opisAvt = "Access denied. Invalid credentials";
+        await pocakaj(450); await tek(w, 3, 60, true);
+        assert((await vrstica(R.id)).stanje === "potrjen", "po popravku kljuca se izda");
+      }
+      // »List dela, Create nima pravic«: po prvem zavrnjenem Create nobenih novih Create za RACUNI_KONFIG_PREMOR_MS (400 ms), tudi ce so vrstice »takoj na vrsti«
+      for (const [ime, vedenje] of [["konfiguracija (Access denied)", "konfig"], ["trajna zavrnitev", "napaka"]]) {
+        const rs = []; for (let i = 0; i < 4; i++) rs.push(await nov(1, 1910 + i));
+        const ids = rs.map((x) => x.id); const w = deloven(); const c0 = klicov("SalesInvoiceCreate"), d0 = F.docs.length;
+        nastavi(vedenje, 50);
+        await tek(w, 1, 0, true); await tek(w, 1, 0, true); await tek(w, 1, 0, true);
+        assert(klicov("SalesInvoiceCreate") === c0 + 1, `[${ime}] po prvem zavrnjenem Create ostale vrstice v tem procesu ne gredo (3 teki, takoj na vrsti): ${klicov("SalesInvoiceCreate") - c0} Create`, klicov("SalesInvoiceCreate") - c0);
+        nastavi(null);
+        await pocakaj(450);
+        await tek(w, 1, 0, true);
+        assert(klicov("SalesInvoiceCreate") > c0 + 1, `[${ime}] po poteku RACUNI_KONFIG_PREMOR_MS Create spet gre`, klicov("SalesInvoiceCreate") - c0);
+        // pospravi: vse naj bo potrjeno ali odlozeno
+        await pool.query("UPDATE racuni SET stanje = 'caka', poslano_at = NULL, naslednji_poskus_at = NOW() WHERE id = ANY($1::bigint[]) AND stanje = 'napaka' AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL", [ids]);
+        await pocakaj(450); await tek(w, 8, 60, true);
+        const st = (await pool.query("SELECT stanje FROM racuni WHERE id = ANY($1::bigint[])", [ids])).rows.map((x) => x.stanje);
+        assert(st.every((x) => x === "potrjen") && F.docs.length === d0 + 4, `[${ime}] po koncu izpada se vseh 4 izda enkrat`, [st, F.docs.length - d0]);
+      }
     }
 
     // ================================================================
