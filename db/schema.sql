@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–057, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–058, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ciplVnDcabAaaDUN9n1zRdXFkakmVg0KIN4Ga4YFLcWifs4yhwgRwNGjNFPRUaK
+\restrict 7hiGK6ZN3YuahZ78al6DLiJHT5gdyBqFB6TZ5YBvZ08hB2CbQLj89HzpPWb7PVB
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -265,6 +265,7 @@ CREATE TABLE public.admin_dejanja (
     prej jsonb,
     potem jsonb,
     razlog text,
+    agent_zeton_id integer,
     CONSTRAINT admin_dejanja_cilj_id_check CHECK (((char_length(cilj_id) >= 1) AND (char_length(cilj_id) <= 60))),
     CONSTRAINT admin_dejanja_cilj_tip_check CHECK (((char_length(cilj_tip) >= 1) AND (char_length(cilj_tip) <= 30))),
     CONSTRAINT admin_dejanja_dejanje_check CHECK (((char_length(dejanje) >= 1) AND (char_length(dejanje) <= 60))),
@@ -277,6 +278,13 @@ CREATE TABLE public.admin_dejanja (
 --
 
 COMMENT ON TABLE public.admin_dejanja IS 'Dnevnik admin dejanj (055, admin panel faza 1): kdo, kdaj, kaj, prej/potem; vpis v isti transakciji kot sprememba. Brez osebnih podatkov kupcev.';
+
+
+--
+-- Name: COLUMN admin_dejanja.agent_zeton_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.admin_dejanja.agent_zeton_id IS 'Zeton agenta, ki je dejanje sprozil (058); NULL = dejanje je naredil admin sam. Brez tujega kljuca.';
 
 
 --
@@ -296,6 +304,53 @@ CREATE SEQUENCE public.admin_dejanja_id_seq
 --
 
 ALTER SEQUENCE public.admin_dejanja_id_seq OWNED BY public.admin_dejanja.id;
+
+
+--
+-- Name: agent_zetoni; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.agent_zetoni (
+    id integer NOT NULL,
+    ime text NOT NULL,
+    zeton_sha256 text NOT NULL,
+    obseg text[] NOT NULL,
+    velja_do timestamp with time zone NOT NULL,
+    preklican_at timestamp with time zone,
+    zadnja_raba_at timestamp with time zone,
+    ustvaril_admin_id integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT agent_zetoni_ime_check CHECK (((char_length(ime) >= 1) AND (char_length(ime) <= 60))),
+    CONSTRAINT agent_zetoni_obseg_chk CHECK (((cardinality(obseg) >= 1) AND (obseg <@ ARRAY['beri'::text]))),
+    CONSTRAINT agent_zetoni_zeton_sha256_check CHECK ((zeton_sha256 ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: TABLE agent_zetoni; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.agent_zetoni IS 'Zetoni agenta (058, #330): samo SHA-256 zetona, obseg (zdaj samo beri), rok, preklic. Zeton odpre samo /agent/api/* (I56). Cistopis zetona se nikjer ne hrani.';
+
+
+--
+-- Name: agent_zetoni_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.agent_zetoni_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: agent_zetoni_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.agent_zetoni_id_seq OWNED BY public.agent_zetoni.id;
 
 
 --
@@ -2071,6 +2126,13 @@ ALTER TABLE ONLY public.admin_dejanja ALTER COLUMN id SET DEFAULT nextval('publi
 
 
 --
+-- Name: agent_zetoni id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_zetoni ALTER COLUMN id SET DEFAULT nextval('public.agent_zetoni_id_seq'::regclass);
+
+
+--
 -- Name: bottle_packages id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -2223,6 +2285,22 @@ ALTER TABLE ONLY public.vracila ALTER COLUMN id SET DEFAULT nextval('public.vrac
 
 ALTER TABLE ONLY public.admin_dejanja
     ADD CONSTRAINT admin_dejanja_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: agent_zetoni agent_zetoni_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_zetoni
+    ADD CONSTRAINT agent_zetoni_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: agent_zetoni agent_zetoni_zeton_sha256_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_zetoni
+    ADD CONSTRAINT agent_zetoni_zeton_sha256_key UNIQUE (zeton_sha256);
 
 
 --
@@ -3929,5 +4007,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ciplVnDcabAaaDUN9n1zRdXFkakmVg0KIN4Ga4YFLcWifs4yhwgRwNGjNFPRUaK
+\unrestrict 7hiGK6ZN3YuahZ78al6DLiJHT5gdyBqFB6TZ5YBvZ08hB2CbQLj89HzpPWb7PVB
 

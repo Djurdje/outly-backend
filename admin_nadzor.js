@@ -27,7 +27,8 @@ const RESNOST_VRSTNI_RED = { rdece: 0, oranzno: 1, rumeno: 2 };
 function ociscenaNapaka(s) {
   if (s === null || s === undefined) return null;
   return String(s)
-    .replace(/[^\s@<>"',;:()[\]]+@[A-Za-z0-9.-]+/g, "[e-naslov]")
+    .slice(0, 2000)   // zgornja meja vhoda pred regexi (SQL ze reze na 2000)
+    .replace(/[^\s@<>"',;:()[\]]{1,64}@[A-Za-z0-9.-]{1,255}/g, "[e-naslov]")   // omejeni kvantifikatorji: neomejen `+` pred `@` je kvadraticen (ReDoS, #330 K1)
     .replace(/@\S*/g, "[e-naslov]")
     .slice(0, NAJVEC_ZNAKOV_NAPAKE);
 }
@@ -104,10 +105,13 @@ function ustvari(dep) {
       Promise.resolve(p).then((r) => { clearTimeout(rok); resolve(r); }, (e) => { clearTimeout(rok); reject(e); });
     });
   }
-  async function beriReadOnly(fn) {
-    await semaforVstopi();
+  // Tovarna bralca: `vstopi`/`izstopi` sta semafor (admin: skupni semafor modula; agent_api.js: brez, ker agent drzi LASTEN semafor skozi cel zahtevek, #330 S1),
+  // `imeAplikacije` se vidi v pg_stat_activity samo znotraj transakcije.
+  function ustvariBralca(vstopi, izstopi, imeAplikacije) {
+  return async function beri(fn) {
+    await vstopi();
     let c;
-    try { c = await pool.connect(); } catch (e) { semaforIzstopi(); throw e; }
+    try { c = await pool.connect(); } catch (e) { izstopi(); throw e; }
     let pokvarjena = false, koncano = false;
     const naNapako = (e) => { pokvarjena = true; console.error("[admin-nadzor] povezava s bazo prekinjena:", e && e.message); };
     try {
@@ -119,7 +123,7 @@ function ustvari(dep) {
       };
       try {
         // en sam krog do baze; application_name samo znotraj transakcije (pg_stat_activity: test semaforja)
-        await q(`BEGIN READ ONLY; SET LOCAL statement_timeout = ${ROK_STAVKA_MS}; SET LOCAL idle_in_transaction_session_timeout = ${ROK_MIRUJOCE_MS}; SET LOCAL application_name = 'admin_nadzor'`);
+        await q(`BEGIN READ ONLY; SET LOCAL statement_timeout = ${ROK_STAVKA_MS}; SET LOCAL idle_in_transaction_session_timeout = ${ROK_MIRUJOCE_MS}; SET LOCAL application_name = '${imeAplikacije}'`);
         const r = await fn({ query: q });
         await q("COMMIT");
         return r;
@@ -138,10 +142,15 @@ function ustvari(dep) {
         if (pokvarjena) c.on("error", () => {});   // pozen 'error' zavrzene povezave ne sme sesuti procesa
         c.release(pokvarjena);
       } finally {
-        semaforIzstopi();
+        izstopi();
       }
     }
+  };
   }
+  const beriReadOnly = ustvariBralca(semaforVstopi, semaforIzstopi, "admin_nadzor");
+  const brezSemaforja = () => Promise.resolve();
+  // Bralec za agenta (#330): BREZ admin semaforja (agent nikoli ne caka na Martinovo plosco in ona ne na agenta); agent_api.js zagotovi najvec ENO povezavo z lastnim semaforjem.
+  const beriAgent = ustvariBralca(brezSemaforja, () => {}, "agent_api");
 
   function odgovoriNapaka(res, e, kje) {
     if (e && (e.code === "57014" || e.code === "ADMIN_QUERY_TIMEOUT" || e.code === "ADMIN_BUSY")) {
@@ -158,8 +167,8 @@ function ustvari(dep) {
   // =====================================================================================================================
   // `dogodekId` (neobvezno, samo GET /opozorila?dogodek=ID, #328): preverjanje enega dogodka PRED objavo. Isti pogoji, a tudi za osnutek (sicer se osnutek
   // preskoci: plakat je edino opozorilo osnutka), brez filtra skritosti/konca; vrne SAMO opozorila tega dogodka. Ne gre v predpomnilnik in ne v `zadnjiRdeci`.
-  async function izracunajOpozorila(dogodekId = null) {
-    return beriReadOnly(async (c) => {
+  async function izracunajOpozorila(dogodekId = null, bere = beriReadOnly) {
+    return bere(async (c) => {
       const items = [];
       const dodaj = (vrsta, resnost, cilj_tip, cilj_id, besedilo, cas) =>
         items.push({ vrsta, resnost, cilj_tip, cilj_id, besedilo, ...(cas ? { cas: new Date(cas).toISOString() } : {}) });
@@ -262,7 +271,7 @@ function ustvari(dep) {
   // Zadnje izracunano stevilo rdecih (summary ga vzame brez lastnega izracuna in brez cakanja: sicer null).
   let zadnjiRdeci = null;
   const izracunajOpozorilaZapomni = async () => {
-    const r = await izracunajOpozorila();
+    const r = await izracunajOpozorila(null, beriReadOnly);
     zadnjiRdeci = { n: r.stevci.rdece, ob: Date.now() };
     return r;
   };
@@ -284,25 +293,34 @@ function ustvari(dep) {
   // =====================================================================================================================
   // RACUNI (davcno potrjeni racuni lastnih dogodkov, I52): seznam po stanju, brez kupca
   // =====================================================================================================================
+  // Skupna logika za admin pot in /agent/api/racuni (agent_api.js): isti izracun, ista omejitev (ena povezava, READ ONLY, rok 2 s), brez kupca.
+  // Vrne { stevci, limit, items }; neveljavno stanje je napaka s kodo NEVELJAVNO_STANJE (klicatelj odgovori 400).
+  async function racuniSeznam(stanjeVhod, limitVhod, bere = beriReadOnly) {
+    const stanje = stanjeVhod === undefined || stanjeVhod === null ? null : String(stanjeVhod);
+    if (stanje !== null && !STANJA_RACUNOV.includes(stanje)) throw Object.assign(new Error("stanje must be one of: " + STANJA_RACUNOV.join(", ") + "."), { code: "NEVELJAVNO_STANJE" });
+    const limit = Math.min(Math.max(Number.parseInt(limitVhod, 10) || 50, 1), 200);
+    const r = await bere(async (c) => {
+      const stevila = await c.query("SELECT stanje, COUNT(*)::int AS n FROM racuni GROUP BY stanje");
+      const vrstice = await c.query(
+        `SELECT id, order_id, vrsta, stanje, znesek_cents, valuta, stevilka, ponudnik_stevilka, izdan_at, potrjen_at, poskusi,
+                left(zadnja_napaka, 2000) AS zadnja_napaka, created_at
+           FROM racuni WHERE ($1::text IS NULL OR stanje = $1) ORDER BY id DESC LIMIT $2`, [stanje, limit]);
+      return { stevila, vrstice };
+    });
+    const stevci = Object.fromEntries(STANJA_RACUNOV.map((x) => [x, 0]));
+    for (const x of r.stevila.rows) stevci[x.stanje] = x.n;
+    const items = r.vrstice.rows.map((x) => ({ ...x, valuta: String(x.valuta).trim(), zadnja_napaka: ociscenaNapaka(x.zadnja_napaka) }));
+    return { stevci, limit, items };
+  }
+
   router.get("/racuni", async (req, res) => {
     try {
       res.set("Cache-Control", "no-store");
-      const stanje = req.query.stanje === undefined ? null : String(req.query.stanje);
-      if (stanje !== null && !STANJA_RACUNOV.includes(stanje)) return res.status(400).send("stanje must be one of: " + STANJA_RACUNOV.join(", ") + ".");
-      const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
-      const r = await beriReadOnly(async (c) => {
-        const stevila = await c.query("SELECT stanje, COUNT(*)::int AS n FROM racuni GROUP BY stanje");
-        const vrstice = await c.query(
-          `SELECT id, order_id, vrsta, stanje, znesek_cents, valuta, stevilka, ponudnik_stevilka, izdan_at, potrjen_at, poskusi,
-                  left(zadnja_napaka, 2000) AS zadnja_napaka, created_at
-             FROM racuni WHERE ($1::text IS NULL OR stanje = $1) ORDER BY id DESC LIMIT $2`, [stanje, limit]);
-        return { stevila, vrstice };
-      });
-      const stevci = Object.fromEntries(STANJA_RACUNOV.map((x) => [x, 0]));
-      for (const x of r.stevila.rows) stevci[x.stanje] = x.n;
-      const items = r.vrstice.rows.map((x) => ({ ...x, valuta: String(x.valuta).trim(), zadnja_napaka: ociscenaNapaka(x.zadnja_napaka) }));
-      return res.json({ stevci, limit, items });
-    } catch (e) { return odgovoriNapaka(res, e, "GET /admin/api/racuni"); }
+      return res.json(await racuniSeznam(req.query.stanje, req.query.limit));
+    } catch (e) {
+      if (e && e.code === "NEVELJAVNO_STANJE") return res.status(400).send(e.message);
+      return odgovoriNapaka(res, e, "GET /admin/api/racuni");
+    }
   });
 
   // =====================================================================================================================
@@ -313,14 +331,14 @@ function ustvari(dep) {
   // delno vrnjeno je v celoti (bruto = total_cents, brez odbitka vracil). /finance tece drugace (steje tudi refunded); to je namenoma preprostejsa nadzorna slika.
   // Guest lista (o.guest_list_id) ni prodaja (I24). Čas naročila = orders.created_at (kot /finance po dnevih).
   // `zdajVhod`: neobvezen fiksen trenutek (samo testi, _testi/test_admin_danes.js); sicer ura baze (NOW()). Vse poizvedbe so vezane na ISTI trenutek.
-  async function izracunajDanes(zdajVhod = null) {
+  async function izracunajDanes(zdajVhod = null, bere = beriReadOnly, opozorilaFn = opozorila) {
     let rdeca = null;
-    try { rdeca = (await opozorila()).stevci.rdece; }   // PRED povezavo za »danes«: nista hkrati dve povezavi iste poti
+    try { rdeca = (await opozorilaFn()).stevci.rdece; }   // PRED povezavo za »danes«: nista hkrati dve povezavi iste poti
     catch (e) {
       if (e && e.code === "ADMIN_QUERY_TIMEOUT") throw e;   // povezava obvisi: drugi poskus za »danes« bi cakal se en odjemalski rok brez upanja
       console.error("[admin-nadzor] danes: opozorila niso na voljo:", e && e.message);
     }
-    return beriReadOnly(async (c) => {
+    return bere(async (c) => {
       const T = SQL_TESTNO_NAROCILO;
       const t = (await c.query(
         `WITH z AS (SELECT COALESCE($1::timestamptz, NOW()) AS cas)
@@ -387,7 +405,24 @@ function ustvari(dep) {
     } catch (e) { return odgovoriNapaka(res, e, "GET /admin/api/danes"); }
   });
 
-  return { opozorila, danes, danesNaCas: izracunajDanes, rdeceStevilo };
+  // Za agenta (agent_api.js, #330): ISTI izracun, a prek LASTNEGA bralca (brez admin semaforja) in z LASTNIM predpomnilnikom (kljuc »agent:…«): agent nikoli ne zasede
+  // povezave plosce in je ne caka. Stranskega ucinka »zadnji rdeci« (summary) agent ne sprozi.
+  // `kavlji.zacni/konec`: agent_api.js steje tekoca branja (semafor agenta se sprosti sele, ko se vsa branja zakljucijo).
+  function zaAgenta(kavlji = {}) {
+    const bere = (fn) => {
+      if (kavlji.zacni) kavlji.zacni();
+      return Promise.resolve(beriAgent(fn)).finally(() => { if (kavlji.konec) kavlji.konec(); });
+    };
+    const opozorilaAgent = () => predpomni("agent:opozorila", () => izracunajOpozorila(null, bere));
+    return {
+      beri: bere,
+      opozorila: opozorilaAgent,
+      danes: () => predpomni("agent:danes", () => izracunajDanes(null, bere, opozorilaAgent)),
+      racuni: (stanje, limit) => racuniSeznam(stanje, limit, bere),
+      odgovoriNapaka,
+    };
+  }
+  return { opozorila, danes, danesNaCas: izracunajDanes, rdeceStevilo, racuni: racuniSeznam, zaAgenta };
 }
 
 module.exports = { ustvari, ociscenaNapaka, prodajnoStanje, STANJA_RACUNOV };

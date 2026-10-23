@@ -170,7 +170,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
   assert(trsS.map(t => gumbov(t.children[t.children.length - 1])).join() === "1,1,0,0,0", "spori: gumb samo pri povrnitvi ni_uspelo/rocno", trsS.map(t => gumbov(t)));
 
   // --- 5. moduli panela (faza 1, 21. 10. 2026: admin/dialog.js, admin/dogodki.js) in brez window.confirm ---
-  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js"]) {
+  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js", "agent.js"]) {
     const kod = fs.readFileSync(path.join(__dirname, "..", "admin", ime), "utf8");
     const k5 = [];
     for (const m of kod.matchAll(NEVARNO)) {
@@ -183,7 +183,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     assert(!/\bon[a-z]+\s*=\s*["'`]/i.test(kod.replace(/\bon[a-z]+\s*=\s*\(/g, "")), `admin/${ime}: brez onclick="..." / onchange="..." nizov`);
   }
   assert(!/\bconfirm\s*\(/.test(skripta), "admin/index.html: brez window.confirm (vse potrditve prek potrdi() iz dialog.js)");
-  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
+  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script src="agent\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
   assert(/<link rel="stylesheet" href="danes\.css">/.test(html), "danes.css je vezan v index.html");
   assert(!/<link[^>]+(?:https?:)?\/\//.test(html) && !/<script[^>]+src="(?:https?:)?\/\//.test(html), "panel ne nalaga tujih skript ali stilov");
   // dialog.js: vsebina iz podatkov gre v DOM kot besedilo (izvajalno, lažni DOM)
@@ -470,6 +470,92 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     const izbire = [];
     sprehod($7("op_racuni"), (e) => { if (e.nodeType === 1 && e.tagName === "select") izbire.push(e); });
     assert(izbire.length === 1 && typeof izbire[0].onchange === "function", "opozorila.js: filter stanja računov");
+
+    // --- agent.js (#330): zavihek »Agent« ---
+    {
+      const kodaAgent = koda("agent.js");
+      assert(!/localStorage|sessionStorage|indexedDB|history\.|location\.|document\.cookie/.test(kodaAgent.split("\n").filter((v) => !/^\s*\/\//.test(v)).join("\n")), "agent.js: zeton se nikamor ne shrani (ne localStorage, ne URL, ne piskotek)");
+      const klici8 = [], potrdiKlici8 = [];
+      let potrdiOdgovor8 = null;
+      let seznam8 = {};
+      const klic8 = async (metoda, pot, telo) => {
+        klici8.push({ metoda, pot, telo });
+        if (metoda === "GET") return JSON.parse(JSON.stringify(seznam8));
+        if (metoda === "POST" && pot === "/admin/api/agent-zetoni") return { id: 9, ime: telo.ime, obseg: ["beri"], velja_do: "2026-11-22T10:00:00Z", zeton: "outly_agent_" + "A".repeat(43) };
+        return {};
+      };
+      const potrdi8 = async (o) => { potrdiKlici8.push(o); return potrdiOdgovor8; };
+      const okno8 = {};
+      const el8 = {};
+      const $8 = (id) => (el8[id] = el8[id] || new El2("div"));
+      El.prototype.select = function () {}; El.prototype.focus = El.prototype.focus || function () {};
+      const obvestila8 = [];
+      new Function("window", "document", "$", "h", "klic", "datum", "varno", "obvesti", "potrdi", "navigator", koda("agent.js"))(
+        okno8, doc7, $8, new Function("document", `${mh[0]}\nreturn h;`)(doc7), klic8, new Function(`${md[0]}\nreturn datum;`)(), varno, (b) => obvestila8.push(b), potrdi8, {});
+      mora(typeof okno8.naloziAgenta === "function", "agent.js ne izvozi window.naloziAgenta");
+      const ZETON8 = "outly_agent_" + "A".repeat(43);
+      const DOV8 = new Set(["div", "span", "b", "p", "h2", "button", "select", "option", "small", "input", "label"]);
+      const vseTipke = (korenski) => { const r = []; sprehod(korenski, (e) => { if (e.nodeType === 1 && e.tagName === "button") r.push(e); }); return r; };
+      const tipkaBesedilo = (b) => b.children.map((c) => c.data || "").join("");
+      seznam8 = { agent_api: true, items: [
+        { id: 1, ime: ZLO7[0], obseg: [ZLO7[1]], velja_do: "2026-11-22T10:00:00Z", preklican_at: null, zadnja_raba_at: null, ustvaril_admin_id: 1, created_at: "2026-10-23T10:00:00Z", stanje: "aktiven" },
+        { id: "3<script>", ime: ZLO7[2], obseg: ["beri"], velja_do: "2026-11-22T10:00:00Z", preklican_at: "2026-10-24T10:00:00Z", zadnja_raba_at: "2026-10-24T09:00:00Z", ustvaril_admin_id: 1, created_at: "2026-10-23T10:00:00Z", stanje: "preklican" },
+        { id: 4, ime: ZLO7[3], obseg: "beri", velja_do: "2026-10-01T10:00:00Z", preklican_at: null, zadnja_raba_at: null, ustvaril_admin_id: 1, created_at: "2026-09-01T10:00:00Z", stanje: ZLO7[0] },
+      ] };
+      await okno8.naloziAgenta();
+      let p8 = oznake($8("ag_koren"));
+      assert(p8.elementi.length > 10 && p8.elementi.every((t) => DOV8.has(t)), "agent.js: nobenega elementa iz podatkov (img/script/svg/iframe)", [...new Set(p8.elementi)]);
+      assert(brezOn(p8), "agent.js: brez on* atributov");
+      const bes8 = p8.besedila.join("\n");
+      for (const z of ZLO7) assert(bes8.includes(z), "agent.js: niz iz podatkov konča kot besedilo: " + z.slice(0, 30));
+      const preklici8 = vseTipke($8("ag_koren")).filter((b) => tipkaBesedilo(b) === "Prekliči");
+      assert(preklici8.length === 1, "agent.js: gumb »Prekliči« samo pri aktivnem žetonu (preklican, potekel/neznano stanje ne)", preklici8.length);
+      assert(!bes8.includes("Agent API je izklopljen"), "agent.js: brez opozorila, ko je API vklopljen");
+
+      // ustvari: preklic v oknu = brez klica; potrditev = POST z obsegom [beri] in razlogom; zeton prikazan enkrat
+      const ustvari8 = vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b) === "Ustvari žeton");
+      const imePolje = []; sprehod($8("ag_koren"), (e) => { if (e.nodeType === 1 && e.tagName === "input") imePolje.push(e); });
+      imePolje[0].oninput({ currentTarget: { value: ZLO7[0] } });
+      potrdiOdgovor8 = null; klici8.length = 0;
+      await ustvari8.onclick();
+      assert(potrdiKlici8.length === 1 && potrdiKlici8[0].razlog === "obvezen" && !klici8.some((k) => k.metoda === "POST"), "agent.js: Prekliči v potrditvenem oknu = nobenega POST-a; razlog je obvezen");
+      assert(oznake($8("ag_koren")).besedila.join("\n").includes(ZETON8) === false, "agent.js: brez potrditve zetona ni");
+      potrdiOdgovor8 = { razlog: "preizkus razloga" }; klici8.length = 0;
+      const ustvari8b = vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b) === "Ustvari žeton");
+      await ustvari8b.onclick();
+      const post8 = klici8.find((k) => k.metoda === "POST");
+      assert(post8 && post8.pot === "/admin/api/agent-zetoni" && post8.telo.ime === ZLO7[0] && post8.telo.dni === 30 && JSON.stringify(post8.telo.obseg) === '["beri"]' && post8.telo.reason === "preizkus razloga", "agent.js: POST z imenom, 30 dni, obsegom [beri] in razlogom", post8);
+      const polja8 = []; sprehod($8("ag_koren"), (e) => { if (e.nodeType === 1 && e.tagName === "input" && e.className === "ag-zeton") polja8.push(e); });
+      p8 = oznake($8("ag_koren"));
+      assert(polja8.length === 1 && polja8[0].attrs.value === ZETON8 && polja8[0].attrs.readonly === "" && !p8.besedila.join("\n").includes(ZETON8), "agent.js: zeton v polju samo za branje (ne kot besedilo strani), enkrat");
+      assert(p8.besedila.join("\n").includes("Network secrets") && p8.besedila.join("\n").includes("outly-backend-roy3.onrender.com") && p8.besedila.join("\n").includes("ne v chat"), "agent.js: navodilo: Network secrets, gostitelj backenda, ne v chat");
+      assert(p8.elementi.every((t) => DOV8.has(t)) && brezOn(p8), "agent.js: po ustvarjanju spet nobenega elementa iz podatkov");
+      // kopiraj brez odlozisca: oznaci polje (ne vrze)
+      const kopiraj8 = vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b) === "Kopiraj");
+      await kopiraj8.onclick();
+      assert(obvestila8.some((b) => /Ctrl\+C/.test(b)), "agent.js: kopiranje brez odlozisca polje oznaci in to pove");
+      // zapri okvir: zetona ni vec
+      vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b).startsWith("Zapri")).onclick();
+      assert(!JSON.stringify(oznake($8("ag_koren"))).includes(ZETON8) && !JSON.stringify([...Object.values(el8)].map((e) => e.children.length)).includes("undefined"), "agent.js: po »Zapri« zetona ni vec v strani");
+      // osvezitev zavihka zapre okvir
+      await ustvari8b.onclick().catch(() => {});
+      await okno8.naloziAgenta();
+      const poOsvezitvi = []; sprehod($8("ag_koren"), (e) => { if (e.nodeType === 1 && e.className === "ag-zeton") poOsvezitvi.push(e); });
+      assert(poOsvezitvi.length === 0, "agent.js: osvezitev zavihka (zamenjava zavihka) zapre okvir z zetonom");
+      // preklic
+      potrdiKlici8.length = 0; potrdiOdgovor8 = { razlog: "ni vec potreben" }; klici8.length = 0;
+      const pr = vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b) === "Prekliči");
+      await pr.onclick();
+      const prPost = klici8.find((k) => k.metoda === "POST");
+      assert(potrdiKlici8[0].nevarno === true && potrdiKlici8[0].razlog === "obvezen" && prPost && prPost.pot === "/admin/api/agent-zetoni/1/preklici" && prPost.telo.reason === "ni vec potreben", "agent.js: preklic: potrdi(nevarno, razlog obvezen), POST na /:id/preklici z razlogom", [potrdiKlici8[0], prPost]);
+      potrdiOdgovor8 = null; klici8.length = 0;
+      await vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b) === "Prekliči").onclick();
+      assert(!klici8.some((k) => k.metoda === "POST"), "agent.js: Prekliči v oknu = brez POST-a");
+      // izklopljen API
+      seznam8 = { agent_api: false, items: [] };
+      await okno8.naloziAgenta();
+      assert(oznake($8("ag_koren")).besedila.join("\n").includes("Agent API je izklopljen"), "agent.js: AGENT_API=0 -> opozorilo v zavihku");
+    }
   }
 
 

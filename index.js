@@ -468,15 +468,17 @@ const OMEJEVALNIK_SQL = `
 
 // poUporabniku: stej na prijavljenega uporabnika (za requireAuth), ne na IP - npr. podpis za Cloudinary (S2, 17. 10. 2026), kjer en racun
 // z mnogo IP-ji (mobilno omrezje) ne sme obiti meje in vec ljudi za istim NAT-om (klub, wifi) ne sme deliti ene meje.
-function omeji({ kljuc, najvec, oknoSekund, priNapaki = "zapri", poUporabniku = false }) {
+// kljucIz(req) (DODANO, #330): poljuben niz namesto IP-ja (npr. "agent:<id zetona>"); telo429: objekt, ki ga pot vrne kot JSON namesto navadnega besedila (poti za stroje).
+function omeji({ kljuc, najvec, oknoSekund, priNapaki = "zapri", poUporabniku = false, kljucIz = null, telo429 = null }) {
+  const zavrni429 = (res) => (telo429 ? res.status(429).json(telo429) : res.status(429).send("Too many requests. Please try again later."));
   return async (req, res, next) => {
-    const kdo = poUporabniku && req.user && req.user.userId ? `uporabnik:${req.user.userId}` : req.ip;   // "uporabnik:N" ni IP: predponaIp ga pusti
+    const kdo = kljucIz ? String(kljucIz(req)) : poUporabniku && req.user && req.user.userId ? `uporabnik:${req.user.userId}` : req.ip;   // "uporabnik:N" ni IP: predponaIp ga pusti
     const id = kljucOmejitve(kljuc, najvec, oknoSekund, kdo);
     const zdaj = Date.now();
     const blokiranDo = blokiraniKljuci.get(id);
     if (blokiranDo && blokiranDo > zdaj) {
       res.set("Retry-After", String(Math.max(1, Math.ceil((blokiranDo - zdaj) / 1000))));
-      return res.status(429).send("Too many requests. Please try again later.");
+      return zavrni429(res);
     }
 
     let vrstica;
@@ -489,7 +491,7 @@ function omeji({ kljuc, najvec, oknoSekund, priNapaki = "zapri", poUporabniku = 
         const preostaloLokalno = lokalnoPreseglo(id, najvec, oknoSekund);
         if (!preostaloLokalno) return next();
         res.set("Retry-After", String(preostaloLokalno));
-        return res.status(429).send("Too many requests. Please try again later.");
+        return zavrni429(res);
       }
       res.set("Retry-After", "5");
       return res.status(503).send("Service temporarily unavailable. Please try again shortly.");
@@ -500,7 +502,7 @@ function omeji({ kljuc, najvec, oknoSekund, priNapaki = "zapri", poUporabniku = 
         blokiraniKljuci.set(id, Date.now() + (vrstica.preostalo - 1) * 1000);
       }
       res.set("Retry-After", String(vrstica.preostalo));
-      return res.status(429).send("Too many requests. Please try again later.");
+      return zavrni429(res);
     }
     next();
   };
@@ -858,10 +860,16 @@ async function razberiUporabnika(token, db = pool) {
 // Vloga `backup` (issue #116, migracija 029) je racun za dnevno varnostno kopijo in sme SAMO GET /admin/api/export.
 // Zato je privzeto ZAVRNJENA na vsaki poti, ki gre skozi requireAuth/requireAuthSken (403); edina izjema je izvoz
 // (requireAuthIzvoz). Nova pot je tako varna brez dodatnega dela: pozabljen requireRole ne odpre poti racunu backup.
+//
+// Zeton agenta (`outly_agent_…`, migracija 058, issue #330, I56) je na VSAKI poti, ki gre skozi requireAuthNa, takoj 403: BREZ preverjanja podpisa, BREZ poizvedbe v
+// bazo in brez vloge v req.user (sken, nakup in vse ostalo nimajo zaradi agenta nobenega dodatnega dela). Odpre ga samo prijava agenta na /agent/api/* (agent_api.js, lasten router brez requireAuth).
+// Pozabljen requireRole zato ne more odpreti nicesar: agent nikoli ni v req.user.
+const ZETON_AGENTA_PREDPONA = "outly_agent_";
 async function requireAuthNa(db, req, res, next, dovoliBackup = false) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!token) return res.status(401).send("Missing token.");
+  if (token.startsWith(ZETON_AGENTA_PREDPONA)) return res.status(403).send("Forbidden.");
   try {
     req.user = await razberiUporabnika(token, db);
     if (req.user.role === "backup" && !dovoliBackup) return res.status(403).send("Forbidden.");
@@ -3483,6 +3491,7 @@ async function neobveznaPrijava(req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!token) return next();
+  if (token.startsWith(ZETON_AGENTA_PREDPONA)) return next();   // zeton agenta (I56) je na javnih poteh neprijavljen: ne razbiramo ga, javni odgovor brez osebnih polj
   try { req.user = await razberiUporabnika(token); } catch (_) { /* neprijavljen */ }
   if (req.user && req.user.role === "backup") req.user = undefined; // racun za kopije je povsod razen na izvozu kot neprijavljen
   next();
@@ -4633,6 +4642,14 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
 const adminNadzor = require("./admin_nadzor").ustvari({
   pool, router: admin, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
 });
+// Dostop za agenta (Claude) z zetonom samo za branje (#330, 1. del; migracija 058; ARCHITECTURE »Dostop za agenta«, I56). Upravljanje zetonov: GET/POST /admin/api/agent-zetoni
+// (vloga admin, na routerju `admin`); poti za agenta: /agent/api/* (samo GET). Zeton agenta je na VSEH drugih poteh 403 že v requireAuthNa (brez baze).
+const agentApi = require("./agent_api").ustvari({
+  pool, adminRouter: admin, nadzor: adminNadzor, omeji, zapisiAdminDejanje, celoId4, odgovoriNaNapako, SQL_TESTNO_NAROCILO, ZANRI,
+  SQL_NAROCILO_PLATFORMNO: (a) => placilaStripe.SQL_NAROCILO_PLATFORMNO(a),
+  paymentsMode: () => (placilaStripe.testniNacin() ? "fake" : (placilaStripe.jeSandbox() ? "sandbox" : "live")),
+});
+app.use("/agent/api", agentApi.router);
 app.use("/admin/api", admin);
 
 // ---------------------------
