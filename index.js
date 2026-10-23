@@ -4478,6 +4478,11 @@ admin.get("/finance", async (req, res) => {
 // db/obnovi_izvoz.js jo berejo: {exported_at, postgres, tables:{ime:{count,columns,rows}}, sequences}.
 // Test: _testi/test_export_tok.js (primerja z referenčno stari izvedbo, meri RSS, prekinitev odjemalca).
 const IZVOZ_VRSTIC = 500;
+// Tabele z bytea (racuni_pdf, migracija 057: PDF racunov, do 2 MB na vrstico) se berejo v majhnih paketih, vrednost pa gre v izvoz kot {"$bytea_b64":"<base64>"}
+// (JSON.stringify(Buffer) bi dal {"type":"Buffer","data":[...]}: ~3,6x vec; 500 PDF-jev po 60 KB = RSS 321 MB v procesu, ki skenira, I16). db/obnovi_izvoz.js oznako prebere.
+const IZVOZ_VRSTIC_BYTEA = 10;
+// ... in omejeno po skupni velikosti: paket = IZVOZ_BYTEA_PRORACUN_B / najvecja vrednost bytea v tabeli (v istem posnetku), 1..10 vrstic (10 PDF po 15 MB je dalo RSS 765 MB).
+const IZVOZ_BYTEA_PRORACUN_B = 4 * 1024 * 1024;
 // Varovalki pred bralcem, ki neha brati ali pred bazo, ki prekine povezavo (izvoz drži transakcijo z
 // AccessShareLock na vseh prebranih tabelah: migracija ob deployu bi čakala nanjo, za njo pa vsa navadna branja):
 //  - IZVOZ_DRAIN_TIMEOUT_MS: koliko čakamo, da odjemalec sprazni medpomnilnik ('drain'); nato res.destroy() + ROLLBACK;
@@ -4555,7 +4560,13 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
     // (Europe/Ljubljana) premakne za dan nazaj — date_of_birth bi po obnovi
     // pomenil drug rojstni dan (ujeto v _testi/test_obnova.js). Samo za ta klic,
     // odgovori API-ja se ne spremenijo.
-    const tipiIzvoza = { getTypeParser: (oid, fmt) => (oid === 1082 ? (v) => v : pgTipi.getTypeParser(oid, fmt)) };
+    const byteaPrivzeto = pgTipi.getTypeParser(17, "text");
+    const tipiIzvoza = { getTypeParser: (oid, fmt) => (oid === 1082 ? (v) => v : oid === 17 ? (v) => ({ $bytea_b64: byteaPrivzeto(v).toString("base64") }) : pgTipi.getTypeParser(oid, fmt)) };
+    const stolpciBytea = new Map();   // tabela -> stolpci tipa bytea
+    for (const x of (await c.query("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema='public' AND data_type='bytea'")).rows) {
+      if (!stolpciBytea.has(x.table_name)) stolpciBytea.set(x.table_name, []);
+      stolpciBytea.get(x.table_name).push(x.column_name);
+    }
     // Od tu naprej so glave poslane: napaka ne more več postati 500 (glej catch).
     res.status(200);
     res.set("Content-Type", "application/json; charset=utf-8");
@@ -4569,8 +4580,13 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
       const n = (await c.query(`SELECT COUNT(*)::int AS n FROM ${ime}`)).rows[0].n;
       await c.query(`DECLARE izvoz_kurzor NO SCROLL CURSOR FOR SELECT * FROM ${ime}`);
       let prva = true, bilaVrstica = false;
+      let paket = IZVOZ_VRSTIC;
+      if (stolpciBytea.has(table_name)) {
+        const najvecja = (await c.query(`SELECT COALESCE(MAX(GREATEST(${stolpciBytea.get(table_name).map((k) => `octet_length("${k.replace(/"/g, '""')}")`).join(", ")})), 0)::bigint AS n FROM ${ime}`)).rows[0].n;
+        paket = Math.max(1, Math.min(IZVOZ_VRSTIC_BYTEA, Math.floor(IZVOZ_BYTEA_PRORACUN_B / Math.max(1, Number(najvecja)))));
+      }
       for (;;) {
-        const r = await c.query({ text: `FETCH ${IZVOZ_VRSTIC} FROM izvoz_kurzor`, types: tipiIzvoza });
+        const r = await c.query({ text: `FETCH ${paket} FROM izvoz_kurzor`, types: tipiIzvoza });
         let kos = "";
         if (prva) {
           // columns so v odgovoru FETCH tudi pri prazni tabeli
@@ -4581,7 +4597,7 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
           kos += (bilaVrstica ? "," : "") + r.rows.map((vrstica) => JSON.stringify(vrstica)).join(",");
           bilaVrstica = true;
         }
-        if (r.rows.length < IZVOZ_VRSTIC) { await pisi(kos + "]}"); break; } // zadnji (nepolni ali prazni) kos
+        if (r.rows.length < paket) { await pisi(kos + "]}"); break; } // zadnji (nepolni ali prazni) kos
         await pisi(kos);
       }
       await c.query("CLOSE izvoz_kurzor");
@@ -6408,6 +6424,7 @@ async function gostPosljiNeposlane() {
     await prenosPosljiNeposlane();   // vstopnice, poslane prijateljem brez racuna (034)
     await potrdiloPosljiNeposlane();   // potrdila kupcem z racunom (042, #95)
     await vraciloIzStripaPosljiNeposlane();   // vracila iz Stripove nadzorne plosce (053, #309)
+    await racunKupcuPosljiNeposlane();   // racuni in dobropisi kupcem (057, Issue #319, I55)
   } catch (e) { console.error("[gost] pospravljanje mailov:", e && e.message); }
   finally { gostPostaTece = false; }
 }
@@ -6631,6 +6648,126 @@ async function potrdiloPosljiNeposlane() {
         AND (receipt_mail_claimed_at IS NULL OR receipt_mail_claimed_at < NOW() - ($2::bigint[])[receipt_mail_attempts + 1] * INTERVAL '1 millisecond')
       ORDER BY id LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
   for (const o of r.rows) await posljiPotrdiloKupcu(o.id);
+}
+// ---------------------------
+// RACUN KUPCU (Issue #319, I55, migracija 057): davcno potrjen racun ali dobropis gre kupcu v LOCENEM mailu »Vaš račun / Your invoice« (dobropis: »Vaš dobropis / Your credit
+// note«), ko je `potrjen` (z EOR) in je PDF iz e-racuni SHRANJEN pri nas (racuni_pdf; PDF pridobi delavec racuni.js, strogo preverjen). Potrdilo o nakupu (I32) ostane takoj ob placilu.
+// Mail brez PDF NE gre. Priloga = PDF iz naše baze, bit za bit. Racun gre kupcu NATANKO ENKRAT (ponovno posiljanje je kopija z oznako KOPIJA, interni akt 10. clen - ni izvedeno):
+//   * rezervacija poskusa v bazi (racuni.mail_poskusi, mail_prevzeto_at) kot pri potrdilu kupcu in vracilih (I51), mail_poslano_at SELE po uspehu Resenda;
+//   * IZID NEZNAN (rok Resenda potekel, napaka brez odgovora API-ja, ali proces se je ustavil med klicem): mail se NE ponovi (bi lahko bil dvojnik = kopija brez oznake). Zato se
+//     mail_izid_neznan = TRUE zapise ze ob REZERVACIJI (pred klicem Resenda) in se pobrise SELE ob znanem izidu (poslano ali zavrnitev API-ja); POZOR, rocni pregled v Resendu;
+//   * ZNANA napaka Resenda (odgovor API-ja z `name`, mail zagotovo ni sel): ponovitev z narascajocim premorom (GOST_POSTA_PREMORI, 8 poskusov), nato POZOR;
+//   * posilja ga SAMO pospravljalec (gostPosljiNeposlane), z lastnim semaforjem (1 socasen) in razmikom (RACUN_MAIL_RAZMAK_MS): pot nakupa, webhooka in skena ga ne klice (I16);
+//   * prejemnik je orders.buyer_email; naslov *@outly.invalid (izbrisan racun) ne dobi maila, poskusi se izcrpajo; v dnevniku NI e-naslova ne vsebine PDF.
+const RACUN_MAIL_RAZMAK_MS = okoljeCelo("RACUN_MAIL_RAZMAK_MS", 550, 0, 60000);
+const RACUN_MAIL_PAKET = 20;
+const RACUN_MAIL_NEZNAN_ALARM_MS = okoljeCelo("RACUN_MAIL_NEZNAN_ALARM_MS", 600000, 0, 7 * 24 * 3600000);
+const racunMailVTeku = new Set();
+const racunMailPosta = { aktivnih: 0, cakajoci: [] };   // lasten semafor (1 socasen): ne tekmuje s potrdili, gostom in vracili
+async function racunMailVstopi() {
+  if (racunMailPosta.aktivnih < 1) { racunMailPosta.aktivnih++; return true; }
+  if (racunMailPosta.cakajoci.length >= 50) return false;
+  await new Promise((r) => racunMailPosta.cakajoci.push(r));
+  return true;
+}
+function racunMailIzstopi() { const n = racunMailPosta.cakajoci.shift(); if (n) n(); else racunMailPosta.aktivnih--; }
+
+function racunKupcuMail(r, o) {
+  const jeDobropis = r.vrsta === "dobropis";
+  const stevilka = `${r.prostor}-${r.naprava}-${r.stevilka}`;
+  const centi = Math.abs(Number(r.znesek_cents));
+  const bloki = JEZIKI_MAILA.map((jez) => {
+    const T = (sl, en) => (jez === "sl" ? sl : en);
+    return {
+      jez,
+      naslov: jeDobropis ? T(`Vaš dobropis ${stevilka}`, `Your credit note ${stevilka}`) : T(`Vaš račun ${stevilka}`, `Your invoice ${stevilka}`),
+      vrstice: [
+        jeDobropis ? T(`Dobropis za vrnjeni znesek po naročilu ${o.public_ref} je v prilogi (PDF).`, `The credit note for the refunded amount of order ${o.public_ref} is attached (PDF).`)
+          : T(`Račun za naročilo ${o.public_ref} je v prilogi (PDF).`, `The invoice for order ${o.public_ref} is attached (PDF).`),
+        `${jeDobropis ? T("Znesek dobropisa", "Credit note amount") : T("Znesek računa", "Invoice amount")}: ${znesek(centi, r.valuta, jez)}`,
+        T(`Račun vam pošljemo enkrat. Če potrebujete kopijo, nam pišite na luka@outly.si; kopija je označena z »KOPIJA«.`, `We send you the invoice once. If you need a copy, write to luka@outly.si; a copy is marked »KOPIJA«.`),
+      ],
+    };
+  });
+  const N = GOST_POSTA_NIZ;
+  const besedilo = bloki.map((b) => [b.naslov, "", ...b.vrstice].join("\n")).join(`\n\n${LOCILO_MAILA}\n\n`) + "\n";
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111;max-width:600px">` + bloki.map((b, i) =>
+    (i ? `<hr style="margin:28px 0;border:0;border-top:1px solid #ccc">` : "") + `<div lang="${b.jez}"><h2 style="margin:0 0 8px;font-size:20px">${N(b.naslov)}</h2>`
+    + b.vrstice.map((v) => `<p style="margin:0 0 8px">${N(v)}</p>`).join("") + `</div>`).join("") + `</div>`;
+  return { besedilo, html, stevilka, zadeva: `${jeDobropis ? "Vaš dobropis / Your credit note" : "Vaš račun / Your invoice"}: ${stevilka} (${o.public_ref})` };
+}
+
+async function posljiRacunKupcu(id) {
+  if (!resend) return false;
+  const kljuc = String(id);
+  if (racunMailVTeku.has(kljuc)) return false;
+  racunMailVTeku.add(kljuc);
+  try {
+    if (!(await racunMailVstopi())) return false;
+    try { return await racunKupcuPosljiEno(id); }
+    catch (err) { console.error(`[racun-kupcu] napaka (vrstica ${id}):`, err && (err.message || String(err))); return false; }
+    finally { racunMailIzstopi(); }
+  } finally { racunMailVTeku.delete(kljuc); }
+}
+// Skupni pogoj »mail dolgovan in prevzemljiv« (isti za izbiro, rezervacijo in pospravljalca); parametra = mesti $ za najvec poskusov in tabelo premorov.
+const racunMailPogoj = (mesto) => `r.stanje = 'potrjen' AND r.pdf_prejet AND r.mail_poslano_at IS NULL AND NOT r.mail_izid_neznan AND r.mail_poskusi < ${mesto[0]}
+        AND (r.mail_prevzeto_at IS NULL OR r.mail_prevzeto_at < NOW() - (${mesto[1]}::bigint[])[r.mail_poskusi + 1] * INTERVAL '1 millisecond')`;
+// Resend SDK 3.x VSAKO izjemo fetcha (prekinjena povezava po poslanem zahtevku, okrnjen 200) in vsak ne-JSON odgovor (502 posrednika) vrne kot
+// { error: { name: "application_error" } } BREZ statusCode: mail je lahko ze sprejet. Zavrnitev je dokazana SAMO, ce je odgovor API-ja (JSON) prinesel
+// statusCode 4xx (validation_error, missing_required_field, invalid_*, rate_limit_exceeded 429, not_found ...): Resend takega zahtevka ne obdela. 5xx
+// (tudi internal_server_error), application_error in karkoli brez statusCode = izid neznan, brez ponovitve. 408/499 sta casovna izpad, ne zavrnitev.
+function resendDokazanaZavrnitev(err) {
+  if (!err || typeof err.name !== "string" || !err.name || err.name === "application_error") return false;
+  const sc = err.statusCode;
+  return Number.isInteger(sc) && sc >= 400 && sc <= 499 && sc !== 408 && sc !== 499;
+}
+async function racunKupcuPosljiEno(id) {
+  const pre = (await pool.query(
+    `SELECT r.id, r.vrsta, r.prostor, r.naprava, r.stevilka, r.znesek_cents, r.valuta, o.public_ref, o.buyer_email, p.pdf
+       FROM racuni r JOIN orders o ON o.id = r.order_id JOIN racuni_pdf p ON p.racun_id = r.id
+      WHERE r.id = $1 AND ${racunMailPogoj(["$2", "$3"])}`, [id, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI])).rows[0];
+  if (!pre) return false;
+  if (!/^[^@\s]+@[^@\s]+$/.test(pre.buyer_email || "") || /@outly\.invalid$/i.test(pre.buyer_email)) {
+    await pool.query("UPDATE racuni SET mail_poskusi = $2 WHERE id = $1 AND mail_poslano_at IS NULL", [id, GOST_POSTA_POSKUSOV]);   // naslova ni vec (izbrisan racun)
+    gostPostaDnevnik("racun-kupcu-brez-naslova", `[racun-kupcu] POZOR: racun ${pre.prostor}-${pre.naprava}-${pre.stevilka} (narocilo ${pre.public_ref}) kupcu NI mogoce poslati: naslova ni vec (izbrisan racun); racun ostane v racuni_pdf`);
+    return false;
+  }
+  const k = await pool.query(
+    `UPDATE racuni r SET mail_poskusi = r.mail_poskusi + 1, mail_prevzeto_at = NOW(), mail_izid_neznan = TRUE WHERE r.id = $1 AND ${racunMailPogoj(["$2", "$3"])} RETURNING r.mail_poskusi`,
+    [id, GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+  if (!k.rows.length) return false;   // drug proces je rezerviral poskus
+  const poskus = k.rows[0].mail_poskusi;
+  const { besedilo, html, stevilka, zadeva } = racunKupcuMail(pre, pre);
+  const ime = `${pre.vrsta === "dobropis" ? "dobropis" : "racun"}-${stevilka}.pdf`;
+  const r = await gostResendPosli({ to: pre.buyer_email, subject: zadeva, html, text: besedilo,
+    attachments: [{ filename: ime, content: Buffer.from(pre.pdf).toString("base64"), content_type: "application/pdf" }] });
+  if (r && r.error) {
+    // Dokazana zavrnitev (JSON odgovor API-ja s 4xx statusCode, glej resendDokazanaZavrnitev) = mail zagotovo ni sel: ponovitev. Sicer (rok potekel, prekinjena povezava,
+    // application_error, 5xx) izid ni znan: NE ponavljamo.
+    if (resendDokazanaZavrnitev(r.error)) {
+      await pool.query("UPDATE racuni SET mail_izid_neznan = FALSE WHERE id = $1 AND mail_poslano_at IS NULL", [id]);   // znan izid: mail ni sel, ponovitev je varna
+      console.error(`Resend napaka (racun kupcu, ${pre.public_ref}, poskus ${poskus}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
+      if (poskus >= GOST_POSTA_POSKUSOV) console.error(`[racun-kupcu] POZOR: racun ${stevilka} (narocilo ${pre.public_ref}) NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov); PDF je v racuni_pdf, posljite ga rocno`);
+      return false;
+    }
+    console.error(`[racun-kupcu] POZOR: izid maila z racunom ${stevilka} (narocilo ${pre.public_ref}) je neznan (${String(r.error.message || "").slice(0, 80)}); mail se NE ponovi (bi bil dvojnik brez oznake KOPIJA). V Resendu preveri, ali je poslan; ce ni, poslji PDF iz racuni_pdf rocno`);
+    return false;
+  }
+  for (let i = 0; ; i++) {
+    try { await pool.query("UPDATE racuni SET mail_poslano_at = NOW(), mail_izid_neznan = FALSE WHERE id = $1", [id]); break; }
+    catch (e) { if (i >= 2) { console.error(`[racun-kupcu] POZOR: mail z racunom ${stevilka} je poslan, a zapisa v bazo ni bilo mogoce narediti (${e && e.message}); mail_izid_neznan ostane, ponovitve NI; preveri v Resendu`); return true; } await new Promise((res) => setTimeout(res, 200)); }
+  }
+  console.log(`[racun-kupcu] mail poslan: ${pre.vrsta === "dobropis" ? "dobropis" : "racun"} ${stevilka} (narocilo ${pre.public_ref})`);
+  return true;
+}
+// Pospravljalec: potrjeni racuni in dobropisi s shranjenim PDF brez poslanega maila. Po vrsti z razmikom (Resend 2 zahtevka/s).
+async function racunKupcuPosljiNeposlane() {
+  if (!resend) return;
+  const r = await pool.query(`SELECT r.id FROM racuni r WHERE ${racunMailPogoj(["$1", "$2"])} ORDER BY r.id LIMIT ${RACUN_MAIL_PAKET}`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);
+  for (const x of r.rows) { if (await posljiRacunKupcu(x.id) && RACUN_MAIL_RAZMAK_MS) await new Promise((res) => setTimeout(res, RACUN_MAIL_RAZMAK_MS)); }
+  // Alarm: izid neznan dlje kot RACUN_MAIL_NEZNAN_ALARM_MS (proces se je ustavil med klicem Resenda ali izid ni bil znan): racun se ne ponovi, kupec ga morda ni dobil. Najvec 1 izpis na uro.
+  const n = (await pool.query(`SELECT COUNT(*)::int AS n FROM racuni WHERE mail_izid_neznan AND mail_poslano_at IS NULL AND mail_prevzeto_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')`, [RACUN_MAIL_NEZNAN_ALARM_MS])).rows[0].n;
+  if (n > 0) gostPostaDnevnik("racun-kupcu-neznan", `[racun-kupcu] POZOR: ${n} racunov/dobropisov z neznanim izidom maila (rezervirano, odgovora Resenda ni): NE ponovim (bi bila kopija brez oznake KOPIJA). V Resendu preveri, ali je mail poslan; ce ni, poslji PDF iz racuni_pdf rocno`);
 }
 // ---------------------------
 // VRACILA IN SPORI — OBVESTILA (issue #190, migracija 047, vracila_stripe.js)
