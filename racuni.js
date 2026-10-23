@@ -379,6 +379,13 @@ function eracuniPonudnik(env) {
   const SEZNAM_MEJA = celo(env, "ERACUNI_SEZNAM_MEJA", 100, 2, 100000); // seznam z toliko ali vec elementi je ob iskanju po referenci sumljiv (morda okrnjen): brez negativnega izida
   const tajno = [username, secretKey, token];
   let naslednji = 0;
+  // Struktura PRVEGA zahtevka vsake vrste Create po zagonu (brez poverilnic, ki so v ovojnici, ne v `parameters`; kupca ni): imena in vrednosti polj za primerjavo z dokumentacijo.
+  const prikazane = new Set();
+  function prikaziStrukturo(metoda, parametri) {
+    if (prikazane.has(metoda)) return;
+    prikazane.add(metoda);
+    console.log(`[racuni] struktura zahtevka ${metoda} (prvi po zagonu, brez poverilnic): ${skrij(JSON.stringify(parametri), tajno).slice(0, 2000)}`);
+  }
 
   async function klic(metoda, parametri, signal, namen = null) {
     const zdaj = Date.now(); const cakaj = Math.max(0, naslednji - zdaj); naslednji = Math.max(zdaj, naslednji) + razmak;
@@ -393,7 +400,17 @@ function eracuniPonudnik(env) {
       const dokazano = !prekinjen && neposlanoPriPovezavi(e);
       throw napaka(`${metoda}: omrezje: ${prekinjen ? "rok potekel" : (e && e.message) || e}${dokazano ? " (zahtevek ni bil poslan)" : ""}`, dokazano ? { neznan: false, neposlano: true } : { neznan: true });
     }
-    if (res.status === 429) throw napaka(`${metoda}: HTTP 429 (omejitev klicev)`, { neznan: false, neposlano: true });   // po STATUSNI KODI, ne po besedilu
+    // E-racuni vrne HTTP 500 za VSE aplikacijske napake; vzrok je v telesu {"response": {"status": "error", "apiMethod": ..., "description": "Error nr: N #koda - besedilo"}}.
+    // Ob vsakem ne-2xx se apiMethod in description izpisejo v sporocilo napake (dnevnik, POZOR, zadnja_napaka), SKRAJSANO in brez poverilnic (napaka() jih skrije); VEDENJE (neznan,
+    // neposlano, konfiguracija) odloca samo statusna koda, kot doslej.
+    const podrobnost = () => {
+      let tel = null; try { tel = JSON.parse(besedilo); } catch (_) { tel = null; }
+      if (!jeObjekt(tel)) return "";
+      const m = iskaniKljuc(tel, ["apiMethod"]), o = iskaniKljuc(tel, ["description", "errorDescription", "message"]);
+      const deli = [m !== undefined ? `apiMethod=${String(m).slice(0, 60)}` : null, o !== undefined ? String(o) : null].filter(Boolean).join("; ");
+      return deli ? ` (${deli.replace(/\s+/g, " ").slice(0, 220)})` : "";
+    };
+    if (res.status === 429) throw napaka(`${metoda}: HTTP 429 (omejitev klicev)${podrobnost()}`, { neznan: false, neposlano: true });   // po STATUSNI KODI, ne po besedilu
     // Seznam brez dokumentov v obdobju: e-racuni NE vrne praznega seznama, ampak HTTP 500 (status »error«) z description »Error nr: 1 #noDocumentsFound - No documents were found
     // matching search criteria!« (zivo preverjeno 22. 10. 2026). To je veljaven PRAZEN SEZNAM; prepoznano STROGO po kodi #noDocumentsFound v `description` (ne po golem 500, ne po
     // drugem besedilu), samo za List. Ali je prazen seznam zadosten dokaz »dokumenta ni«, odloca poisci() po obstojecih pravilih (znani dokumenti, ERACUNI_SEZNAM_PREVERJEN, dve iskanji).
@@ -402,8 +419,8 @@ function eracuniPonudnik(env) {
       const opisSeznama = jeObjekt(tel) ? iskaniKljuc(tel, ["description", "errorDescription"]) : undefined;
       if (typeof opisSeznama === "string" && /#noDocumentsFound\b/.test(opisSeznama)) return metoda === "CreditNoteList" ? { CreditNotes: [] } : { SalesInvoices: [] };
     }
-    if (res.status === 408 || res.status >= 500) throw napaka(`${metoda}: HTTP ${res.status}`, { neznan: true });
-    if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 405) throw napaka(`${metoda}: HTTP ${res.status} (poverilnice, pravice ali naslov)`, { konfiguracija: true, neznan: false });
+    if (res.status === 408 || res.status >= 500) throw napaka(`${metoda}: HTTP ${res.status}${podrobnost()}`, { neznan: true });
+    if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 405) throw napaka(`${metoda}: HTTP ${res.status} (poverilnice, pravice ali naslov)${podrobnost()}`, { konfiguracija: true, neznan: false });
     let j = null;
     try { j = JSON.parse(besedilo); } catch (_) { j = null; }
     if (!jeObjekt(j)) {
@@ -450,9 +467,11 @@ function eracuniPonudnik(env) {
         // Sklic je STEVILKA izvirnega dokumenta pri ponudniku (salesInvoiceRef: »2022-00005«); oznaka dokumenta (documentID) ni sklic.
         const ref = p.sklic && p.sklic.ponudnik_stevilka;
         if (!ref) throw new NapakaPonudnika("dobropis brez stevilke izvirnega dokumenta pri ponudniku", { trajna: true, neznan: false, neposlano: true });
+        prikaziStrukturo("CreditNoteCreate", { CreditNote: { ...skupno, salesInvoiceRef: ref } });
         const j = await klic("CreditNoteCreate", { CreditNote: { ...skupno, salesInvoiceRef: ref } }, signal);
         return sklicDokumenta(j);
       }
+      prikaziStrukturo("SalesInvoiceCreate", { SalesInvoice: skupno });
       const j = await klic("SalesInvoiceCreate", { SalesInvoice: skupno }, signal);
       return sklicDokumenta(j);
     },
@@ -638,7 +657,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   const klici = semafor(VZPOREDNO);
   const baza = semafor(DB_VZPOREDNO);
   const premor = (poskusi) => (PREMOR_MS > 0 ? PREMOR_MS : PREMORI[Math.min(Math.max(poskusi, 1), PREMORI.length) - 1]);
-  const kratko = (e) => `${e && e.name ? e.name : "Error"}: ${e && e.message ? e.message : String(e)}`.replace(/\s+/g, " ").slice(0, 300);
+  const kratko = (e) => `${e && e.name ? e.name : "Error"}: ${e && e.message ? e.message : String(e)}`.replace(/\s+/g, " ").slice(0, 420);
 
   async function vTransakciji(fn) {
     return baza(async () => {
