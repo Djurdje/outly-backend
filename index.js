@@ -3118,7 +3118,9 @@ async function zapisiAdminDejanje(c, req, dejanje, ciljTip, ciljId, prej, potem,
 // Navaden uporabnik postane business (odobritev prosnje, nov klub, prenos lastnistva): ISTA transakcija kot UPDATE, vrstica `user.role` brez e-naslova (U3, #328).
 async function postaniBusiness(c, req, uporabnik, razlog) {
   if (!uporabnik || uporabnik.role !== "user") return;
-  await c.query("UPDATE users SET role='business' WHERE id=$1", [uporabnik.id]);
+  // WHERE role='user': soCasen PATCH vloge (npr. na admin) ne sme biti tiho znizan; vrstica v dnevniku samo, ce je vloga res bila user.
+  const r = await c.query("UPDATE users SET role='business' WHERE id=$1 AND role='user' RETURNING id", [uporabnik.id]);
+  if (r.rowCount !== 1) return;
   await zapisiAdminDejanje(c, req, "user.role", "user", uporabnik.id, { role: "user" }, { role: "business" }, razlog);
 }
 // Primerljiva vrednost za dnevnik (Date -> ISO, NUMERIC/BIGINT niz ostane niz).

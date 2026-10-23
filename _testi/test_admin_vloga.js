@@ -210,6 +210,34 @@ async function api(method, path, token, body) {
     r = await api("POST", "/admin/api/clubs", T.lastnik, { name: "Klub Pet", ownerEmail: "nov5@outly.si" });
     assert(r.status === 403 && await vloga(n5) === "user" && (await dnevnikUser(n5)).length === 0, "ne-admin: POST kluba 403, brez vrstice");
 
+    console.log("\n# Dirka: soCasen PATCH vloge na admin ne sme biti tiho znizan (postaniBusiness: WHERE role='user')");
+    const dirka = async (ime, klic) => {
+      const T3 = zeton(`${ime}@outly.si`, uuid(30 + dirkaSt)); dirkaSt++;
+      assert((await api("GET", "/me", T3)).status === 200, `GET /me ${ime}`);
+      const uid = await id(`${ime}@outly.si`);
+      const drzi = await pool.connect();
+      try {
+        await drzi.query("BEGIN");
+        await drzi.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [uid]);   // zaklep: SELECT brez zaklepa (lastnikPoEmailu) se ne ustavi, UPDATE v postaniBusiness da
+        const zahteva = klic(uid);
+        let caka = false;
+        for (let i = 0; i < 400 && !caka; i++) {
+          caka = (await pool.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'UPDATE users SET role=%business%'")).rowCount > 0;
+          if (!caka) await new Promise(r => setImmediate(r));
+        }
+        assert(caka, `${ime}: UPDATE v postaniBusiness caka na zaklep (dirka postavljena)`);
+        await drzi.query("UPDATE users SET role='admin' WHERE id=$1", [uid]);
+        await drzi.query("COMMIT");
+        const odg = await zahteva;
+        assert(odg.status === 200 || odg.status === 201, `${ime}: zahteva uspe`, [odg.status, odg.body]);
+      } finally { drzi.release(); }
+      assert(await vloga(uid) === "admin", `${ime}: vloga ostane admin (ni tiho znizana na business)`);
+      assert((await dnevnikUser(uid)).length === 0, `${ime}: v dnevniku ni napacne vrstice user -> business`);
+    };
+    let dirkaSt = 0;
+    await dirka("dirka1", () => api("POST", "/admin/api/clubs", T.admin, { name: "Klub Dirka Ena", ownerEmail: "dirka1@outly.si" }));
+    await dirka("dirka2", () => api("PATCH", `/admin/api/clubs/${klubId}`, T.admin, { ownerEmail: "dirka2@outly.si" }));
+
     console.log("\n# Branje ostane enako");
     r = await api("GET", "/admin/api/users?q=cilj", T.admin);
     assert(r.status === 200 && Array.isArray(r.body) && r.body.length === 1 && r.body[0].role === "business" && "club_count" in r.body[0], "GET /admin/api/users: seznam z club_count", r.body);

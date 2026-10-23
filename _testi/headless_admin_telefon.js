@@ -140,6 +140,17 @@ const LJUDJE = ["prosnje", "klubi", "uporabniki"], VEC = ["predlogi", "agent", "
       st.odgovori["/admin/api/clubs"] = klubi; st.odgovori["/admin/api/users"] = uporabniki; st.odgovori["/admin/api/events"] = dogodki;
       st.odgovori["/admin/api/summary"] = { clubs: 6, hidden_clubs: 1, users: 7, business_users: 1, admins: 1, events: 5, upcoming_events: 4, new_applications: 2, refunds_attention: 1, open_disputes: 0, dispute_recovery_attention: 0, predlogi_caka: 2, nujno_nepregledanih: 1 };
       st.odgovori["/admin/api/predlogi/nujno"] = nujno;
+      // oblike, ki jih zavihki pricakujejo (brez tega bi stub [] sprozil obvestila o napaki, ki jih test ujame)
+      st.odgovori["/admin/api/guest-lists"] = { guest_lists: [] };
+      st.odgovori["/admin/api/reports"] = { reports: [] };
+      st.odgovori["/admin/api/help-feedback"] = { articles: [] };
+      st.odgovori["/admin/api/refunds"] = { counts: {}, items: [] };
+      st.odgovori["/admin/api/disputes"] = { items: [] };
+      st.odgovori["/admin/api/finance"] = { from: "2026-10-01", to: "2026-10-23", fee_percent: 5, payments_mode: "live", summary: { gross_cents: 10000, fee_cents: 500, clubs_net_cents: 9500, refunded_cents: 0, tickets_sold: 7, orders: 4, buyers: 3, clubs_with_sales: 1 },
+        all_time: { gross_cents: 10000, fee_cents: 500, tickets_sold: 7 }, test_summary: { orders: 0, gross_cents: 0, fee_cents: 0, refunded_cents: 0, tickets_sold: 0 }, all_time_test: { orders: 0, gross_cents: 0 },
+        by_day: [{ day: "2026-10-22", gross_cents: 10000, tickets: 7 }], by_club: [{ name: "Klub 1", city: "Ljubljana", gross_cents: 10000, fee_cents: 500, refunded_cents: 0, net_cents: 9500, tickets_sold: 7, orders: 4 }],
+        by_event: [{ title: "Dogodek 1", status: "published", club_name: "Klub 1", start_at: "2026-11-01T21:00:00Z", ticket_price_cents: 1500, tickets_sold: 7, capacity: 300, checked_in: 0, gross_cents: 10000, fee_cents: 500 }],
+        recent_orders: [{ public_ref: "OUT-1", created_at: "2026-10-22T10:00:00Z", event_title: "Dogodek 1", club_name: "Klub 1", buyer_username: "kupec", buyer_email: "kupec@primer.si", quantity: 2, total_cents: 3000, application_fee_cents: 150, refunded_cents: 0, status: "paid", is_test: false }] };
       st.odgovori["/admin/api/creator-applications"] = [{ id: 4, business_name: "Bar Test", business_type: "bar", licence_id: "", message: "Pozdrav", contact_name: "Ana", contact_role: "lastnica", email: DOLGO, phone: "", user_id: null, club_id: null, city: "Maribor", business_address: "", created_at: "2026-10-01T10:00:00Z", status: "new", decided_at: null, decision_note: "" }];
       const ctx = await brskalnik.newContext({ viewport: { width: sirina, height: visina }, deviceScaleFactor: 1, hasTouch: telefon, isMobile: telefon });
       await namestiStub(ctx, st, origin);
@@ -152,7 +163,9 @@ const LJUDJE = ["prosnje", "klubi", "uporabniki"], VEC = ["predlogi", "agent", "
       const brezDrsenja = async (opis) => { const o = await prelivanje(); preveri(o.doc <= o.okno && o.telo <= o.okno, `${opis}: brez vodoravnega drsenja strani`, o); };
       const vidno = (sel) => page.evaluate((s) => { const e = document.querySelector(s); if (!e) return false; const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return cs.display !== "none" && cs.visibility !== "hidden" && r.width > 0 && r.height > 0; }, sel);
       const aktivna = () => page.evaluate(() => { const s = [...document.querySelectorAll("section[id^=z-]")].filter(e => !e.classList.contains("skrito")).map(e => e.id.slice(2)); return s; });
-      const poNavigaciji = async (z) => { await page.waitForFunction((x) => { const e = document.getElementById("z-" + x); return e && !e.classList.contains("skrito"); }, z, { timeout: 5000 }); await page.waitForTimeout(150); };
+      const poNavigaciji = async (z) => { await page.waitForFunction((x) => { const e = document.getElementById("z-" + x); return e && !e.classList.contains("skrito"); }, z, { timeout: 5000 });
+        await page.waitForLoadState("networkidle"); await page.waitForFunction(() => !document.querySelector("#panel .prazno")?.textContent.startsWith("Nalagam"), null, { timeout: 5000 });
+        const nap = await page.$$eval("#obvestila .obv.slabo", (e) => e.map((x) => { const t = x.textContent; x.remove(); return t; })); preveri(nap.length === 0, ime(`${z}: brez obvestila o napaki panela`), nap); };
 
       preveri(await vidno("#spodnja_vrstica") === telefon, ime("spodnja vrstica je vidna samo na telefonu"));
       preveri(await vidno("nav") === !telefon, ime("vrsta gumbov <nav> je vidna samo na racunalniku"));
@@ -185,6 +198,8 @@ const LJUDJE = ["prosnje", "klubi", "uporabniki"], VEC = ["predlogi", "agent", "
             await page.click(`#lista button[data-z="${z}"]`); await poNavigaciji(z);
             preveri((await aktivna()).join() === z, ime(`${z} dosegljiv prek »${tipka}«`), await aktivna());
             preveri(await vidno("#lista") === false, ime(`lista se po izbiri zapre (${z})`));
+            const fokus = await page.evaluate(() => { const a = document.activeElement; const sek = [...document.querySelectorAll("section[id^=z-]")].find((e) => !e.classList.contains("skrito")); return { vSekciji: !!(sek && sek.contains(a)), vVrstici: !!a.closest("#spodnja_vrstica"), telo: a === document.body }; });
+            preveri(!fokus.telo && (fokus.vSekciji || fokus.vVrstici), ime(`fokus po izbiri (${z}) ni izgubljen (zavihek ali vrstica)`), fokus);
             preveri((await page.getAttribute(`#spodnja_vrstica button[data-t="${tipka}"]`, "aria-current")) === "page", ime(`tipka »${tipka}« je aktivna na ${z}`));
             await brezDrsenja(ime(z));
             if (["klubi", "uporabniki", "predlogi", "agent", "prosnje"].includes(z)) await snemi("5-" + z);
@@ -210,14 +225,14 @@ const LJUDJE = ["prosnje", "klubi", "uporabniki"], VEC = ["predlogi", "agent", "
         // rdeci pas ostane viden na vsakem zavihku
         preveri(await vidno("#nujno_pas .nj-pas"), ime("rdeci pas je viden tudi na Uporabnikih"));
         preveri(await vidno("#nujno_trak") === false, ime("trak ni viden, dokler je pas v zaslonu"));
-        await page.evaluate(() => window.scrollTo(0, 900)); await page.waitForTimeout(250);
+        await page.evaluate(() => window.scrollTo(0, 900)); await page.waitForSelector("#nujno_trak.vidno", { timeout: 5000 });
         const trak = await page.evaluate(() => { const e = document.getElementById("nujno_trak"); const r = e.getBoundingClientRect(); return { vidno: getComputedStyle(e).display !== "none", vrh: Math.round(r.top), besedilo: e.textContent, desno: Math.round(r.right), okno: innerWidth }; });
         preveri(trak.vidno && trak.vrh >= 0 && trak.vrh < 20 && /nujnem/.test(trak.besedilo) && trak.desno <= trak.okno, ime("po drsenju iz pasu ostane viden rdeci trak nujnega dejanja"), trak);
         await snemi("6-trak");
-        await page.click("#nujno_trak"); await page.waitForTimeout(700);
+        await page.click("#nujno_trak"); await page.waitForFunction(() => { const t = document.getElementById("nujno_pas").getBoundingClientRect().top; return t >= -2 && t < 60; }, null, { timeout: 5000 }).catch(() => {});
         const nazaj = await page.evaluate(() => Math.round(document.getElementById("nujno_pas").getBoundingClientRect().top));
         preveri(nazaj >= -2 && nazaj < 60, ime("dotik na trak vrne na rdeci pas"), nazaj);
-        await page.evaluate(() => window.scrollTo(0, 0));
+        await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForFunction(() => scrollY === 0);
       } else {
         for (const z of ZAVIHKI) {
           await page.click(`nav button[data-z="${z}"]`); await poNavigaciji(z);

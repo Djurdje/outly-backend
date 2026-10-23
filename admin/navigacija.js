@@ -37,7 +37,14 @@
     tipke[ime] = { gumb: g, znacka: zn, skupina, ids };
     vrstica.append(g);
   }
-  function pojdi(z) { zapri(); const g = gumbNav(z); if (g) g.click(); }
+  function pojdi(z) {
+    zapri();
+    const g = gumbNav(z); if (g) g.click();
+    // lista z izbrano tipko izgine: fokus ne sme ostati na izginulem elementu. Zavihek se ob nalaganju prerise (replaceChildren), zato fokus na njegovih
+    // elementih ni stabilen; fokus dobi tipka vrstice, ki zavihku pripada (stabilen element).
+    const t = Object.values(tipke).find((x) => x.skupina.includes(z));
+    if (t) t.gumb.focus({ preventScroll: true });
+  }
   function odpri(ime) {
     if (odprta === ime) { zapri(); return; }
     odprta = ime;
