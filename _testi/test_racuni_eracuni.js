@@ -58,6 +58,7 @@ const F = {
   zamudaEor: 0,         // koliko Get klicev pred pojavom EOR
   listOblika: "ok",     // 'ok' | 'neznana' | 'prazno' ({status:ok}) | 'prazenNiz' (SalesInvoices: "") | 'prazenSeznam' ([]) | 'brezRef' | 'okrnjenRef' | 'dvojnik' | 'manjkaZnan'
   opisAvt: "Access denied. Invalid credentials",   // pravo besedilo napake avtentikacije pri e-racuni NI znano
+  zahtevajArtikel: true, obveznoPolje: 0,   // postavka mora imeti productCode (sicer 500 »#Item1_productCode - This field is required«)
   listStatus: null,   // npr. 503: seznam (tudi bralni preizkus) ne dela
   listZamik: 0, casIzdaje: null, poverilnice: true, vrniBlagajno: null,
 };
@@ -90,6 +91,11 @@ const streznik = http.createServer((req, res) => {
       if (ved === "500opis") { const besedilo = F.vedenje.besedilo; poraba(); return konec(500, { response: { status: "error", apiMethod: z.method, description: besedilo } }); }
       if (ved === "napaka") { poraba(); return konec(200, { status: "error", error: { description: "Invalid value for field price" } }); }
       if (ved === "konfig") { poraba(); return konec(200, { status: "error", error: { description: "Access denied. User account does not have sufficient privileges for the given request" } }); }
+      // Zivo preverjeno 23. 10. 2026: postavka brez productCode -> HTTP 500 »Error nr: 1 #Item1_productCode - This field is required« (dokument ne nastane)
+      const postavke = (p[kljuc] && p[kljuc].Items) || [];
+      const manjka = postavke.findIndex((x) => !x || typeof x.productCode !== "string" || !x.productCode.trim());
+      if (F.zahtevajArtikel && manjka >= 0) { F.obveznoPolje++; return konec(500, { response: { status: "error", apiMethod: z.method, description: `Error nr: 1 #Item${manjka + 1}_productCode - This field is required` } }); }
+      if (ved === "obvezno") { poraba(); F.obveznoPolje++; return konec(500, { response: { status: "error", apiMethod: z.method, description: "Error nr: 1 #Item1_productCode - This field is required" } }); }
       const d = ustvari(kljuc, vrsta);
       if (ved === "503po") { poraba(); return konec(503, "{}"); }
       if (ved === "dokInNapaka") { const besedilo = F.vedenje.besedilo; poraba(); return konec(200, { status: "error", error: { description: besedilo } }); }   // dokument NASTAL, odgovor je napaka (pregled #318, K1)
@@ -1091,6 +1097,113 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       const staroPisanje = await pool.query("UPDATE racuni SET poslano_at = NOW() WHERE id = $1 AND prevzem_zeton = 'zeton-stare-instance' AND prevzeto_at IS NOT NULL", [Ro.id]);
       assert(staroPisanje.rowCount === 0 && (await vrstica(Ro.id)).poslano_at === null, "stara instanca po migraciji ne more vec zapisati (prevzem_zeton), poslano_at ostane prazen");
       const co = klicov("SalesInvoiceCreate"), w1 = deloven(), w2 = deloven();
+      await Promise.all([tek(w1, 3, 30), tek(w2, 3, 30)]);   // dve instanci hkrati (najem + zeton)
+      assert(klicov("SalesInvoiceCreate") - co === 1 && (await vrstica(Ro.id)).stanje === "potrjen" && F.docs.length === 1, "dve instanci hkrati: natanko 1 Create", [klicov("SalesInvoiceCreate") - co, F.docs.length]);
+    }
+
+    // ================================================================
+    console.log("\n# 31. Postavka racuna in dobropisa ima productCode (ERACUNI_ARTIKEL, privzeto VSTOPNICA); obvezno polje manjka = zavrnjen zahtevek: POZOR + konfiguracijski premor, a BREZ ugibanja, da dokumenta ni");
+    {
+      F.listOblika = "ok";
+      // (a) privzeta sifra artikla v racunu in dobropisu
+      const R = await nov(1, 2700); const w = deloven(); const n0 = F.klici.length;
+      await tek(w, 3, 40, true);
+      const r = await vrstica(R.id);
+      const cr = F.klici.slice(n0).find((k) => k.method === "SalesInvoiceCreate");
+      assert(r.stanje === "potrjen" && cr && cr.parameters.SalesInvoice.Items.every((x) => x.productCode === "VSTOPNICA"), "racun: vsaka postavka ima productCode VSTOPNICA (privzeto)", cr && cr.parameters.SalesInvoice.Items);
+      const dop = await pool.query(`INSERT INTO racuni (order_id, vrsta, ref_racun_id, vir, znesek_cents, valuta) VALUES ($1, 'dobropis', $2, 'test-artikel-1', -500, 'EUR') RETURNING id`, [R.oid, R.id]);
+      await pool.query("UPDATE racuni SET vracilo_uspelo = TRUE WHERE id = $1", [dop.rows[0].id]);
+      await tek(w, 6, 40, true);
+      const cn = F.klici.slice(n0).find((k) => k.method === "CreditNoteCreate");
+      assert((await vrstica(dop.rows[0].id)).stanje === "potrjen" && cn && cn.parameters.CreditNote.Items.every((x) => x.productCode === "VSTOPNICA"), "dobropis: vsaka postavka ima productCode VSTOPNICA", cn && cn.parameters.CreditNote.Items);
+      // (b) nastavljiva sifra
+      const R2 = await nov(1, 2710); const w2 = deloven({ ERACUNI_ARTIKEL: "  KARTA-1 " }); const n1 = F.klici.length;
+      await tek(w2, 3, 40, true);
+      const c2 = F.klici.slice(n1).find((k) => k.method === "SalesInvoiceCreate");
+      assert((await vrstica(R2.id)).stanje === "potrjen" && c2 && c2.parameters.SalesInvoice.Items[0].productCode === "KARTA-1", "ERACUNI_ARTIKEL (obrezan) se uporabi kot productCode", c2 && c2.parameters.SalesInvoice.Items);
+      // (c) manjkajoce obvezno polje: POZOR, konfiguracijski premor, poslano_at OSTANE (izid ni dokazan), vrstica gre naprej samo prek iskanja po referenci
+      const R3 = await nov(1, 2720); const w3 = deloven(); const l3 = LOG.length, o0 = F.obveznoPolje;
+      nastavi("obvezno", 1);
+      await tek(w3, 1, 40, true);
+      const r3 = await vrstica(R3.id);
+      const dn = logOd(l3).join("\n");
+      assert(F.obveznoPolje - o0 === 1 && /#Item1_productCode - This field is required/.test(dn) && /POZOR/.test(dn), "obvezno polje manjka: napaka z opisom v dnevniku in POZOR", dn.slice(0, 300));
+      assert(r3.stanje === "caka" && r3.poslano_at !== null && r3.poskusi === 1 && new Date(r3.naslednji_poskus_at).getTime() >= Date.now() + 200, "vrstica caka, poslano_at ostane (izid ni dokazan), pocasen konfiguracijski premor", [r3.stanje, r3.poslano_at, r3.naslednji_poskus_at]);
+      const c3 = klicov("SalesInvoiceCreate");
+      await tek(w3, 2, 40);   // premor + zaustavitev izdaje za cel proces: nobenega novega Create
+      assert(klicov("SalesInvoiceCreate") === c3, "po napaki obveznega polja nobenega novega Create takoj (zaustavitev izdaje)");
+      // (d) vsaka druga 500 napaka ostane kot prej (izid neznan, brez POZOR za konfiguracijo)
+      const R4 = await nov(1, 2730); const w4 = deloven(); const l4 = LOG.length;
+      nastavi("500opis", 1); F.vedenje.besedilo = "Error nr: 7 #internalError - Something went wrong";
+      await tek(w4, 1, 40, true);
+      assert(!logOd(l4).some((l) => /nastavitev pri ponudniku/.test(l)) && (await vrstica(R4.id)).poslano_at !== null, "druga 500 napaka: brez konfiguracijskega POZOR, izid neznan kot doslej");
+    }
+
+    // ================================================================
+    console.log("\n# 32. Migracija 063: racun za OUT-TTWH2V4Q (Create je dal 500 »#Item1_productCode - This field is required«) ponovno v izdajo; varno za caka (izid neznan) IN napaka; natanko 1 Create");
+    {
+      const fs = require("fs"), path = require("path");
+      const sql = fs.readFileSync(path.join(__dirname, "..", "db", "migracije", "063_racun_ttwh2v4q_artikel.sql"), "utf8");
+      const zaganjaj = async () => { const c = await pool.connect(); const note = []; c.on("notice", (n) => note.push(n.message)); try { await c.query(sql); } finally { c.release(); } return note; };
+      const REF = "OUT-TTWH2V4Q";
+      const priprava = async (stanje, { poslanoPrej = "3 hours", napaka = "SalesInvoiceCreate: HTTP 500 (apiMethod=SalesInvoiceCreate; Error nr: 1 #Item1_productCode - This field is required)" } = {}) => {
+        await pool.query("TRUNCATE racuni CASCADE"); await pool.query("UPDATE orders SET public_ref = 'OUT-STARO-' || id WHERE public_ref = $1", [REF]);
+        F.docs.length = 0; F.listOblika = "ok";
+        const R = await nov(1, 2800);
+        await pool.query("UPDATE orders SET public_ref = $2 WHERE id = $1", [R.oid, REF]);
+        // kot v produkciji: Create je padel (500), poslano_at je star, iskanje je padlo zaradi izpada, vrstica caka z napako ali je ze `napaka`
+        await pool.query(`UPDATE racuni SET poslano_at = NOW() - $2::interval, poskusi = 3, naknadno = TRUE, iskanja_ne = 1, iskanje_ne_at = NOW() - INTERVAL '2 hours', iskanja_nejasna = 2, zadnja_napaka = $3,
+                            naslednji_poskus_at = NOW() + INTERVAL '30 minutes' WHERE id = $1`, [R.id, poslanoPrej, napaka]);
+        if (stanje === "napaka") await pool.query("UPDATE racuni SET stanje = 'napaka' WHERE id = $1", [R.id]);
+        return R;
+      };
+      for (const stanje of ["caka", "napaka"]) {
+        const R = await priprava(stanje);
+        // tujo vrstico (drugo narocilo) migracija ne sme spremeniti
+        const T = await nov(1, 2810); await pool.query("UPDATE racuni SET poslano_at = NOW() - INTERVAL '5 hours', poskusi = 2, zadnja_napaka = 'tuja' WHERE id = $1", [T.id]);
+        const note = await zaganjaj();
+        const r = await vrstica(R.id), t = await vrstica(T.id);
+        assert(r.stanje === "caka" && r.poslano_at === null && r.poskusi === 0 && r.iskanja_ne === 0 && r.iskanje_ne_at === null && r.iskanja_nejasna === 0 && r.zadnja_napaka === null && r.prevzeto_at === null && r.prevzem_zeton === null
+          && Math.abs(new Date(r.naslednji_poskus_at).getTime() - (Date.now() + 5 * 60 * 1000)) < 30000, `[${stanje}] vrstica je po migraciji v izdaji (caka, poslano_at/stevci/napaka pocisceni, na vrsti sele cez 5 minut)`, r);
+        assert(t.poskusi === 2 && t.zadnja_napaka === "tuja" && t.poslano_at !== null, `[${stanje}] tuja vrstica nespremenjena`);
+        assert(note.some((x) => /063/.test(x)), `[${stanje}] migracija izpise obvestilo`, note);
+        const w = deloven(); const c0 = klicov("SalesInvoiceCreate"), l0 = klicov("SalesInvoiceList");
+        await pool.query("UPDATE racuni SET poslano_at = poslano_at WHERE id = $1", [T.id]);
+        await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() + INTERVAL '3 hours' WHERE id = $1", [T.id]);   // tuje vrstice ta test ne izdaja
+        // stara instanca ob deployu (koda brez productCode) vrstice NE sme prevzeti pred casom: nobenega Create, nobenega Lista, vrstica nespremenjena
+        await tek(w, 4, 40);
+        const pred5 = await vrstica(R.id);
+        assert(klicov("SalesInvoiceCreate") === c0 && klicov("SalesInvoiceList") === l0 && pred5.stanje === "caka" && pred5.poslano_at === null && pred5.prevzem_zeton === null && F.docs.length === 0, `[${stanje}] pred potekom 5 minut vrstice noben delavec ne prevzame (0 Create, 0 List)`, [klicov("SalesInvoiceCreate") - c0, pred5.stanje, pred5.poslano_at]);
+        await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() WHERE id = $1", [R.id]);   // 5 minut je minilo
+        await tek(w, 4, 40);
+        const r2 = await vrstica(R.id);
+        assert(klicov("SalesInvoiceCreate") - c0 === 1 && klicov("SalesInvoiceList") === l0 && r2.stanje === "potrjen" && F.docs.length === 1, `[${stanje}] po migraciji natanko 1 Create (brez iskanja), racun potrjen, en dokument`, [klicov("SalesInvoiceCreate") - c0, r2.stanje, F.docs.length]);
+        // ponovni zagon migracije (ne bi se smel zgoditi): vrstica je potrjena -> nic, obvestilo
+        const note2 = await zaganjaj();
+        assert((await vrstica(R.id)).stanje === "potrjen" && note2.some((x) => /063/.test(x)), `[${stanje}] ponovni zagon: potrjena vrstica ostane, obvestilo`, note2);
+        await tek(w, 2, 40);
+        assert(klicov("SalesInvoiceCreate") - c0 === 1, `[${stanje}] ponovni zagon ne sprozi nove izdaje`);
+      }
+      // ne ustreza pogoju -> nic + obvestilo
+      for (const [ime, popravi] of [
+        ["poslano_at mlajsi od 10 min (zahtevek je lahko se v teku)", async (id) => { await pool.query("UPDATE racuni SET poslano_at = NOW() - INTERVAL '2 minutes' WHERE id = $1", [id]); }],
+        ["vrstica ima ponudnik_stevilka (dokument obstaja)", async (id) => { await pool.query("UPDATE racuni SET ponudnik = 'eracuni', ponudnik_stevilka = '2026-00001' WHERE id = $1", [id]); }],
+      ]) {
+        const R = await priprava("caka"); await popravi(R.id);
+        const pred = await vrstica(R.id); const note = await zaganjaj(); const po = await vrstica(R.id);
+        assert(JSON.stringify(po) === JSON.stringify(pred) && note.some((x) => /063/.test(x)), `ne ustreza pogoju (${ime}): nic ne spremeni, izpise obvestilo`, [note, po.stanje]);
+      }
+      await pool.query("TRUNCATE racuni CASCADE"); await pool.query("UPDATE orders SET public_ref = 'OUT-STARO-' || id WHERE public_ref = $1", [REF]);
+      const noteBrez = await zaganjaj();
+      assert(noteBrez.some((x) => /063/.test(x)), "narocila ni (prazna baza, druga okolja): migracija ne naredi nic in ne pade", noteBrez);
+      // prekrivanje instanc ob deployu: stara instanca drzi prevzem; migracija ga prekine, njen zapis (zeton) ne spremeni nic, nov delavec izda natanko enkrat
+      const Ro = await priprava("caka");
+      await pool.query("UPDATE racuni SET prevzeto_at = NOW(), prevzem_zeton = 'zeton-stare-instance' WHERE id = $1", [Ro.id]);
+      await zaganjaj();
+      const staroPisanje = await pool.query("UPDATE racuni SET poslano_at = NOW() WHERE id = $1 AND prevzem_zeton = 'zeton-stare-instance' AND prevzeto_at IS NOT NULL", [Ro.id]);
+      assert(staroPisanje.rowCount === 0 && (await vrstica(Ro.id)).poslano_at === null, "stara instanca po migraciji ne more vec zapisati (prevzem_zeton), poslano_at ostane prazen");
+      const co = klicov("SalesInvoiceCreate"), w1 = deloven(), w2 = deloven();
+      await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() WHERE id = $1", [Ro.id]);   // 5 minut je minilo
       await Promise.all([tek(w1, 3, 30), tek(w2, 3, 30)]);   // dve instanci hkrati (najem + zeton)
       assert(klicov("SalesInvoiceCreate") - co === 1 && (await vrstica(Ro.id)).stanje === "potrjen" && F.docs.length === 1, "dve instanci hkrati: natanko 1 Create", [klicov("SalesInvoiceCreate") - co, F.docs.length]);
     }
