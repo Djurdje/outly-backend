@@ -86,6 +86,8 @@ const streznik = http.createServer((req, res) => {
       const kljuc = vrsta === "racun" ? "SalesInvoice" : "CreditNote";
       if (ved === "503pred") { poraba(); return konec(503, "{}"); }
       if (ved === "429") { poraba(); return konec(429, "{}"); }
+      // e-racuni vrne 500 za VSE aplikacijske napake (zivo 23. 10. 2026), telo {"response": {"status": "error", "apiMethod": ..., "description": "Error nr: N #koda - besedilo"}}
+      if (ved === "500opis") { const besedilo = F.vedenje.besedilo; poraba(); return konec(500, { response: { status: "error", apiMethod: z.method, description: besedilo } }); }
       if (ved === "napaka") { poraba(); return konec(200, { status: "error", error: { description: "Invalid value for field price" } }); }
       if (ved === "konfig") { poraba(); return konec(200, { status: "error", error: { description: "Access denied. User account does not have sufficient privileges for the given request" } }); }
       const d = ustvari(kljuc, vrsta);
@@ -1001,6 +1003,35 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       assert(klicov("SalesInvoiceCreate") - ce === 1 && F.docs.length === de && re.stanje !== "potrjen", "500 #noDocumentsFound ob znanem dokumentu: seznam ni popoln, brez druge izdaje", [klicov("SalesInvoiceCreate") - ce, F.docs.length - de, re.stanje]);
       F.listOblika = "ok";
     }
+    // ================================================================
+    console.log("\n# 29. Dnevnik napak e-racuni: apiMethod + description iz telesa ob vsakem ne-2xx; struktura prvega zahtevka Create (brez poverilnic); vedenje nespremenjeno");
+    {
+      F.listOblika = "ok";
+      const R1 = await nov(1, 2500), R2 = await nov(1, 2510); const w = deloven(); const l0 = LOG.length;
+      nastavi("500opis", 1); F.vedenje.besedilo = `Error nr: 12 #invalidPaymentMethod - Payment method Stripe is not supported (token ${TAJNO.token})`;
+      await tek(w, 1, 40, true);
+      const r1 = await vrstica(R1.id);
+      const dn = logOd(l0).join("\n");
+      assert(/apiMethod=SalesInvoiceCreate/.test(dn) && /#invalidPaymentMethod/.test(dn) && /Payment method Stripe is not supported/.test(dn), "dnevnik vsebuje apiMethod in description iz telesa 500", dn.slice(0, 400));
+      assert(![TAJNO.user, TAJNO.key, TAJNO.token].some((t) => dn.includes(t) || (r1.zadnja_napaka || "").includes(t)), "poverilnice (tudi ce jih ponudnik odmeva v description) niso v dnevniku ne v zadnja_napaka");
+      assert(/#invalidPaymentMethod/.test(r1.zadnja_napaka || "") && (r1.zadnja_napaka || "").length <= 400, "zadnja_napaka vsebuje description (skrajsan)", r1.zadnja_napaka);
+      // vedenje NESPREMENJENO: 500 na Create = izid neznan (zahtevek poslan), vrstica ostane v postopku, naprej samo prek iskanja po referenci
+      assert(r1.poslano_at !== null && r1.stanje === "caka" && r1.poskusi === 1 && r1.naknadno === true && /izid neznan/.test(dn), "vedenje nespremenjeno: 500 = izid neznan, poslano_at ostane, ponovitev prek iskanja", [r1.stanje, r1.poskusi, r1.poslano_at]);
+      // struktura prvega zahtevka Create: ENKRAT na zagon (ne na vrstico), brez poverilnic
+      const struktura = logOd(l0).filter((l) => /struktura zahtevka SalesInvoiceCreate/.test(l));
+      assert(struktura.length === 1, "struktura zahtevka Create izpisana natanko enkrat (dva racuna, en zagon)", struktura.length);
+      const st = struktura[0] || "";
+      assert(/"methodOfPayment":"Stripe"/.test(st) && /"cashRegisterCode":"1"/.test(st) && /"businessUnit":"A001"/.test(st) && /"type":"Retail"/.test(st) && /"vatTransactionType":7/.test(st) && /"Items"/.test(st), "struktura vsebuje polja (nacin placila, blagajna, enota, vrsta, vatTransactionType, postavke)", st.slice(0, 400));
+      assert(![TAJNO.user, TAJNO.key, TAJNO.token].some((t) => st.includes(t)) && !/secretKey|username|"token"/.test(st) && !/buyer/i.test(st), "struktura brez poverilnic in brez podatkov kupca", st.slice(0, 200));
+      // 500 z drugo kodo na Get/List (ne-2xx nasploh): tudi tam opis
+      const l1 = LOG.length;
+      F.listOblika = "napaka500";
+      await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() WHERE id = $1", [R1.id]);
+      await tek(w, 2, 40, true);
+      assert(logOd(l1).some((l) => /SalesInvoiceList: HTTP 500 \(.*#internalError/.test(l)), "tudi bralni preizkus/List ob 500 izpise description (#internalError)", logOd(l1).slice(0, 3));
+      F.listOblika = "ok";
+    }
+
   } catch (e) {
     fail++; console.log("  ✗ IZJEMA:", e && e.stack || e);
   } finally {
