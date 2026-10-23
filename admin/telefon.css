@@ -1,0 +1,82 @@
+/* Admin panel na telefonu (#328, PR 10, 23. 10. 2026): spodnja vrstica 5 zavihkov (admin/navigacija.js) namesto vrste gumbov in kartice
+   namesto tabel v Klubih in Uporabnikih, pod 640 px. Nalozi se ZADNJI (po dogodki.css, danes.css). Brez ogrodja in brez gradnje (DECISIONS 21. 10. 2026).
+   Nad 640 px se spodnja vrstica ne izrise; navigacija v vrsti gumbov ostane nespremenjena. */
+#spodnja_vrstica, #lista_ozadje, #lista, #nujno_trak { display:none }
+
+@media (max-width: 640px) {
+  nav { display:none }
+  .wrap { padding:12px 12px calc(88px + env(safe-area-inset-bottom)) }
+  header { gap:8px }
+  .jaz { flex-wrap:wrap; max-width:100% }
+  .jaz > span { overflow-wrap:anywhere; min-width:0 }
+  #obvestila { left:12px; right:12px; max-width:none; bottom:calc(72px + env(safe-area-inset-bottom)) }
+  /* rdeci pas nujnih dejanj (nujno.js) je na vrhu vsakega zavihka; ko ga drsenje odnese iz zaslona, ostane viden ozek rdec trak (navigacija.js) */
+  #nujno_trak { display:none; position:fixed; top:6px; left:12px; right:12px; z-index:12; width:auto; border-radius:8px; box-shadow:0 4px 18px rgba(0,0,0,.4); background:var(--napaka); color:#fff; text-align:left;
+    white-space:normal; font-size:13px; padding:9px 12px; min-height:40px; border:0 }
+  #nujno_trak.vidno { display:block }
+  #nujno_trak:hover { filter:none }
+
+  #spodnja_vrstica { display:grid; grid-template-columns:repeat(5, minmax(0, 1fr)); position:fixed; left:0; right:0; bottom:0; z-index:14;
+    background:var(--panel); border-top:1px solid var(--line); padding-bottom:env(safe-area-inset-bottom) }
+  #spodnja_vrstica button { background:none; border:0; border-radius:0; color:var(--muted); min-height:58px; padding:6px 2px; font-size:11.5px; font-weight:600;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; position:relative; white-space:normal; overflow-wrap:anywhere }
+  #spodnja_vrstica button:hover { filter:none; color:var(--ink) }
+  #spodnja_vrstica button:focus-visible { outline:2px solid var(--modra); outline-offset:-3px }
+  #spodnja_vrstica button .ikona { font-size:17px; line-height:1; font-weight:700 }
+  #spodnja_vrstica button.aktiven { color:var(--modra); background:var(--modra-soft) }
+  #spodnja_vrstica button.aktiven::before { content:""; position:absolute; top:0; left:20%; right:20%; height:3px; border-radius:0 0 3px 3px; background:var(--modra) }
+  #spodnja_vrstica .n, #lista .n { background:var(--napaka); color:#fff; border-radius:9px; padding:0 6px; font-size:11px; line-height:16px; font-weight:700 }
+  #spodnja_vrstica .n { position:absolute; top:4px; left:calc(50% + 6px) }
+  #spodnja_vrstica .n.skrito, #lista .n.skrito { display:none }
+
+  #lista_ozadje { display:block; position:fixed; inset:0; z-index:12; background:rgba(5,6,8,.55) }
+  #lista { display:block; position:fixed; left:0; right:0; bottom:calc(58px + env(safe-area-inset-bottom)); z-index:13; max-height:min(60vh, 420px); overflow-y:auto;
+    background:var(--panel); border-top:1px solid var(--line); border-radius:14px 14px 0 0; padding:14px 12px 12px; box-shadow:0 -8px 30px rgba(0,0,0,.45) }
+  #lista_ozadje.skrito, #lista.skrito { display:none !important }
+  #lista h2 { margin:0 0 10px; font-size:12px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:var(--muted) }
+  #lista .izbire { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px }
+  #lista .izbire button { background:var(--panel2); color:var(--ink); border:1px solid var(--line); min-height:48px; text-align:left; white-space:normal;
+    overflow-wrap:anywhere; display:flex; align-items:center; justify-content:space-between; gap:8px }
+  #lista .izbire button.aktiven { background:var(--modra-soft); color:var(--modra); border-color:#2B3D7A }
+
+  /* --- Klubi: kartica namesto tabele --- */
+  #kTabela table, #kTabela tbody, #uTabela table, #uTabela tbody { display:block }
+  #kTabela thead, #uTabela thead { display:none }
+  #kTabela tr, #uTabela tr { display:grid; gap:4px 12px; padding:13px 14px; border-bottom:1px solid var(--line) }
+  #kTabela tr:last-child, #uTabela tr:last-child { border-bottom:0 }
+  #kTabela td, #uTabela td { display:block; padding:0; border:0; min-width:0; overflow-wrap:anywhere }
+
+  #kTabela tr { grid-template-columns:40px minmax(0, 1fr); align-items:start }
+  #kTabela td:nth-child(1) { display:none }
+  #kTabela td:nth-child(2) { grid-column:1; grid-row:1 / span 2 }
+  #kTabela td:nth-child(3) { grid-column:2; font-size:15px }
+  #kTabela td:nth-child(n+4):not(:last-child) { grid-column:2; color:var(--muted); font-size:13px }
+  #kTabela td:nth-child(4)::before { content:"Lastnik: "; color:var(--faint) }
+  #kTabela td:nth-child(5)::before { content:"Kraj: "; color:var(--faint) }
+  #kTabela td:nth-child(6)::before { content:"Koord.: "; color:var(--faint) }
+  #kTabela td:nth-child(7)::before { content:"Dogodkov: "; color:var(--faint) }
+  #kTabela td:nth-child(n+4):nth-child(-n+7) .drobno { display:inline; margin-left:6px }
+  #kTabela td:last-child { grid-column:1 / -1; margin-top:6px }
+  #kTabela td:last-child .vrsta { gap:8px }
+  #kTabela td:last-child button { flex:1 1 90px }
+
+  /* --- Uporabniki: kartica namesto tabele (#, e-naslov, ime, vloga, e-posta, zaklep, klubi, registriran) --- */
+  #uTabela tr { grid-template-columns:repeat(2, minmax(0, 1fr)) }
+  #uTabela td:nth-child(1) { display:none }
+  #uTabela td:nth-child(2) { grid-column:1 / -1; font-size:15px; font-weight:600 }
+  #uTabela td:nth-child(3), #uTabela td:nth-child(7), #uTabela td:nth-child(8) { color:var(--muted); font-size:13px }
+  #uTabela td:nth-child(4) { grid-column:1 / -1; margin:4px 0 2px }
+  #uTabela td:nth-child(4) .vrsta { flex-wrap:nowrap }
+  #uTabela td:nth-child(4) select { flex:1 1 auto; min-width:0 }
+  #uTabela td:nth-child(5), #uTabela td:nth-child(6) { grid-column:1 / -1 }
+  #uTabela td:nth-child(3)::before { content:"Ime"; display:block; font-size:10.5px; color:var(--faint); text-transform:uppercase; letter-spacing:.06em }
+  #uTabela td:nth-child(7)::before { content:"Klubi"; display:block; font-size:10.5px; color:var(--faint); text-transform:uppercase; letter-spacing:.06em }
+  #uTabela td:nth-child(8)::before { content:"Registriran"; display:block; font-size:10.5px; color:var(--faint); text-transform:uppercase; letter-spacing:.06em }
+  #uTabela td:nth-child(5) .znacka, #uTabela td:nth-child(6) .znacka { margin-right: 6px }
+
+  /* ostali zavihki: tabele drsijo v svoji vrstici (.tabela), ne cela stran */
+  .skupina > h2 .desno { margin-left:0; width:100% }
+  .skupina > h2 .desno input { flex:1 1 140px; width:auto !important }
+  .stevilke { grid-template-columns:repeat(2, minmax(0, 1fr)) }
+  .polja { grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)) }
+}
