@@ -31,7 +31,20 @@ const STANJA = ["caka", "potrjen", "zavrnjen", "potekel", "neuspel"];
 const SPREMEMBE_NAJVEC = 20000;      // znakov JSON (naslov z 95 000 znaki ne pride niti do validacije poti)
 const PREJ_NAJVEC = 200000;          // znakov JSON posnetka (opis v bazi nima omejitve)
 const RAZLOG_NAJVEC = 1000;
-const ZAKLEP_RAZRED = 73120;         // advisory (razred, id zetona): stetje cakajocih in vstavljanje zaporedno tudi cez instance; 73110/73112 sta nakup/pavza
+const ZAKLEP_RAZRED = 73120;
+// Besedila, ki morajo biti niz (obstojeca PATCH pot sprejme npr. opis null/stevilo; predlog je strozji, pot ostane nespremenjena za iOS/splet).
+const BESEDILNA = new Set(["title", "description", "venueName", "venueAddress", "venueCity", "posterUrl"]);
+// Bidi kontrolni znaki in znaki nicelne sirine: z njimi bi agent besedilo v panelu prikazal drugace, kot je shranjeno (prevara pri »prej -> potem«).
+const NEVIDNI = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/;
+const imaNevidne = (v, g = 0) => (typeof v === "string" ? NEVIDNI.test(v) : v && typeof v === "object" && g < 5 ? Object.entries(v).some(([k, x]) => NEVIDNI.test(k) || imaNevidne(x, g + 1)) : false);
+// Plakat v predlogu samo iz NASEGA Cloudinaryja (kot avatar, PUT /me/avatar): agent ne more podtakniti slike s tujega gostitelja (sledenje, vsebina).
+// Obstojeca pot (PATCH /events/:id, iOS/splet) sprejme vsak http(s) in ostane, kot je.
+function plakatDovoljen(url) {
+  if (url === undefined || url === null || url === "") return true;
+  const oblak = process.env.CLOUDINARY_CLOUD_NAME;
+  if (!oblak || typeof url !== "string" || !url.startsWith(`https://res.cloudinary.com/${oblak}/`)) return false;
+  try { const u = new URL(url); return u.protocol === "https:" && u.hostname === "res.cloudinary.com" && !u.username && !u.password; } catch (_) { return false; }
+}         // advisory (razred, id zetona): stetje cakajocih in vstavljanje zaporedno tudi cez instance; 73110/73112 sta nakup/pavza
 
 const veljaven = (v) => (v instanceof Date ? v.toISOString() : v === undefined ? null : v);
 const enako = (a, b) => JSON.stringify(veljaven(a)) === JSON.stringify(veljaven(b));
@@ -76,6 +89,8 @@ function ustvari(dep) {
     if (opis.pot === "uredi") {
       await dejanja.uredi(zahtevaZa(ciljId, telo, { role: "admin" }), lazen, { samoPreveri: (dovoljeno, d) => { izid = { dovoljeno, d }; } });
     } else if (opis.pot === "ustvari") {
+      const klub = (await pool.query("SELECT id FROM clubs WHERE id = $1", [ciljId])).rows[0];
+      if (!klub) throw odgovor(404, "cilj_ni_najden", "Target not found.");
       await dejanja.ustvari(zahtevaZa(ciljId, { ...telo, clubId: ciljId }, { role: "admin" }), lazen, { admin: true, samoPreveri: () => { izid = {}; } });
     } else {
       const obstaja = (await pool.query("SELECT id FROM events WHERE id = $1", [ciljId])).rows[0];
@@ -83,6 +98,7 @@ function ustvari(dep) {
       await dejanja.podvoji(zahtevaZa(ciljId, telo, { role: "admin" }), lazen, { samoPreveri: () => { izid = {}; } });
     }
     if (!izid) {
+      if (lazen.statusCode === 404 && opis.pot === "ustvari") throw odgovor(400, "invalid_changes", "Venue club not found.", { koda: "venue_club_not_found" });   // cilj (klub) obstaja, manjka gostitelj
       if (lazen.statusCode === 404) throw odgovor(404, "cilj_ni_najden", "Target not found.");
       if (lazen.statusCode >= 500) throw new Error("validacija predloga: pot je vrnila " + lazen.statusCode);
       const n = opisNapake(lazen.telo);
@@ -140,7 +156,7 @@ function ustvari(dep) {
       const ciljId = typeof cilj.id === "number" || typeof cilj.id === "string" ? celoId4(cilj.id) : null;
       if (cilj.tip !== opis.cilj || !ciljId) return napaka(400, "invalid_cilj", `cilj must be { tip: "${opis.cilj}", id: <id> }.`);
       const razlog = b.razlog;
-      if (typeof razlog !== "string" || razlog.trim().length < 3 || razlog.length > RAZLOG_NAJVEC || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(razlog)) {
+      if (typeof razlog !== "string" || razlog.trim().length < 3 || razlog.length > RAZLOG_NAJVEC || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(razlog) || NEVIDNI.test(razlog)) {
         return napaka(400, "invalid_reason", `razlog must be a text of 3-${RAZLOG_NAJVEC} characters without control characters.`);
       }
       const spr = b.spremembe === undefined ? {} : b.spremembe;
@@ -148,9 +164,15 @@ function ustvari(dep) {
       if (JSON.stringify(spr).length > SPREMEMBE_NAJVEC) return napaka(400, "spremembe_prevelike", `spremembe must be at most ${SPREMEMBE_NAJVEC} characters of JSON.`);
       const tuje = Object.keys(spr).filter((k) => !opis.polja.includes(k));
       if (tuje.length) return napaka(400, "sprememba_ni_dovoljena", "These fields can't be changed by an agent proposal.", { polja: tuje.slice(0, 10).map((k) => k.slice(0, 40)) });
+      const napacenTip = Object.keys(spr).filter((k) => BESEDILNA.has(k) && typeof spr[k] !== "string" && !(k === "posterUrl" && spr[k] === null));
+      if (napacenTip.length) return napaka(400, "neveljaven_tip", "These fields must be text.", { polja: napacenTip });
+      if (imaNevidne(spr)) return napaka(400, "nevidni_znaki", "Invisible or bidirectional control characters are not allowed in a proposal.");
       if (opis.pot === "uredi" && !opis.fiksno && !Object.keys(spr).length) return napaka(400, "brez_spremembe", "Nothing to change.");
       try {
         const pr = await delo(req, () => pripravi(b.dejanje, opis, ciljId, spr));
+        if (!plakatDovoljen(opis.pot === "uredi" ? pr.spremembe.poster_url : spr.posterUrl)) {
+          return napaka(400, "plakat_ni_dovoljen", "A proposed poster must be an https image uploaded to Outly's Cloudinary (res.cloudinary.com).");
+        }
         const vrstica = await delo(req, async () => {
           const c = await pool.connect();
           try {

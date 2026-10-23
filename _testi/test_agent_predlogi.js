@@ -77,7 +77,7 @@ function nicOsebnega(ime, tekst) {
   const pool = new Pool({ connectionString: DB });
   await pool.query("TRUNCATE agent_zetoni, admin_dejanja, omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
   await new Promise((r) => jwksServer.listen(JWKS_PORT, r));
-  const A = zazeni(PORT, { AGENT_API_NA_URO: "100000", AGENT_API_IP_NA_MIN: "100000", AGENT_PREDLOGI_NA_URO: "100000", PAVZA_KMALU_MS: "0", PAVZA_PONOVNO_MS: "0" });
+  const A = zazeni(PORT, { AGENT_API_NA_URO: "100000", AGENT_API_IP_NA_MIN: "100000", AGENT_PREDLOGI_NA_URO: "100000", PAVZA_KMALU_MS: "0", PAVZA_PONOVNO_MS: "0", CLOUDINARY_CLOUD_NAME: "outlytest" });
   let B = zazeni(PORT_MEJA, { AGENT_API_NA_URO: "100000", AGENT_API_IP_NA_MIN: "100000" });
   const C = zazeni(PORT_CAKA, { AGENT_API_NA_URO: "100000", AGENT_API_IP_NA_MIN: "100000", AGENT_PREDLOGI_NA_URO: "100000", AGENT_PREDLOGI_CAKA_NAJVEC: "3" });
   const vsi = () => [A, B, C];
@@ -102,6 +102,7 @@ function nicOsebnega(ime, tekst) {
     const E = {
       a: await dogodek("Petkov vecer"), b: await dogodek("Sobota"), c: await dogodek("Nedelja"), d: await dogodek("Ponedeljek"),
       osnutek: await dogodek("Osnutek", { status: "draft" }), pavza: await dogodek("Pavza"), okno: await dogodek("Okno"),
+      osnutek2: await dogodek("Osnutek 2", { status: "draft" }), e: await dogodek("Torek"), f: await dogodek("Sreda"),
     };
     const vrstica = async (id) => (await pool.query("SELECT * FROM events WHERE id = $1", [id])).rows[0];
     const predlogVBazi = async (id) => (await pool.query("SELECT * FROM predlogi_dejanj WHERE id = $1", [id])).rows[0];
@@ -212,17 +213,54 @@ function nicOsebnega(ime, tekst) {
     for (const [naslov, opis] of [["N".repeat(201), "201 znakov"], [12345, "ni niz"], [null, "null"], ["   ", "prazen"]]) {
       const x = await predlagaj(UREDI(E.a, { title: naslov }));
       const xp = await api(PORT, "PATCH", `/events/${E.a}`, T.admin, { title: naslov });
-      assert(x.status === 400 && x.body.error === "invalid_changes" && xp.status === 400, `naslov ${opis}: predlog 400 invalid_changes (= PATCH 400), ze ob POST`, [x.status, x.body, xp.status]);
+      assert(x.status === 400 && ["invalid_changes", "neveljaven_tip"].includes(x.body.error) && xp.status === 400, `naslov ${opis}: predlog 400 (= PATCH 400), ze ob POST`, [x.status, x.body, xp.status]);
     }
     r = await predlagaj(UREDI(E.a, { title: "N".repeat(200) }));
     assert(r.status === 201, "naslov s tocno 200 znaki: predlog sprejet", [r.status, r.body]);
     await api(PORT, "POST", `/admin/api/predlogi/${r.body.predlog.id}/zavrni`, T.admin, {});
     for (const naslov of ["N".repeat(201), 12345]) {
       const x = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: naslov, startAt: "2027-01-01T22:00:00Z" }, razlog: "nov" });
-      assert(x.status === 400 && x.body.error === "invalid_changes", `nov osnutek: naslov ${typeof naslov === "string" ? "201 znakov" : "ni niz"} -> 400 ze ob POST`, [x.status, x.body]);
+      assert(x.status === 400 && (typeof naslov === "string" ? x.body.error === "invalid_changes" : x.body.error === "neveljaven_tip"), `nov osnutek: naslov ${typeof naslov === "string" ? "201 znakov" : "ni niz"} -> 400 ze ob POST`, [x.status, x.body]);
     }
     r = await predlagaj({ dejanje: "event.okno_prodaje", cilj: { tip: "event", id: E.okno }, spremembe: { salesOpenAt: "2026-02-31T10:00:00Z" }, razlog: "okno" });
     assert(r.status === 400 && r.body.error === "invalid_changes" && /salesOpenAt/.test(r.body.message), "okno prodaje: neveljaven datum (31. 2.) -> 400 po obstojeci poti", [r.status, r.body]);
+    // N1: besedila, ki niso niz -> 400 (obstojeca PATCH pot tega ne zahteva za opis; tam ostane, kot je)
+    for (const [spr, opis] of [[{ description: 12345 }, "opis stevilo"], [{ description: { a: 1 } }, "opis objekt"], [{ description: null }, "opis null"]]) {
+      const x = await predlagaj(UREDI(E.a, spr));
+      assert(x.status === 400 && x.body.error === "neveljaven_tip", `${opis} -> 400 neveljaven_tip`, [x.status, x.body]);
+    }
+    r = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: "Nov", startAt: "2027-01-01T22:00:00Z", venueName: 5 }, razlog: "nov dogodek" });
+    assert(r.status === 400 && r.body.error === "neveljaven_tip", "nov osnutek: venueName stevilo -> 400 neveljaven_tip", [r.status, r.body]);
+    // N2: bidi in znaki nicelne sirine v besedilih predloga in razlogu -> 400
+    for (const z of ["\u200B", "\u200F", "\u202E", "\u2066", "\u2069", "\uFEFF"]) {
+      const x = await predlagaj(UREDI(E.a, { title: "Petek" + z + "vecer" }));
+      assert(x.status === 400 && x.body.error === "nevidni_znaki", `naslov z U+${z.charCodeAt(0).toString(16).toUpperCase()} -> 400 nevidni_znaki`, [x.status, x.body]);
+    }
+    r = await predlagaj(UREDI(E.a, { genres: ["techno\u200B"] }));
+    assert(r.status === 400 && r.body.error === "nevidni_znaki", "zanr z nicelno sirino -> 400", [r.status, r.body]);
+    r = await predlagaj(UREDI(E.a, { title: "Petkov vecer (x)" }, "Razlog \u202Eskrito\u202C besedilo"));
+    assert(r.status === 400 && r.body.error === "invalid_reason", "razlog z bidi znaki -> 400 invalid_reason", [r.status, r.body]);
+    // N3: neobstojec gostiteljski klub -> 400 z jasno kodo (ne 404 cilj_ni_najden)
+    r = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: "Nov", startAt: "2027-01-01T22:00:00Z", venueClubId: 999999 }, razlog: "nov dogodek" });
+    assert(r.status === 400 && r.body.error === "invalid_changes" && r.body.koda === "venue_club_not_found", "nov osnutek: neobstojec venueClubId -> 400 venue_club_not_found", [r.status, r.body]);
+    r = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: 999999 }, spremembe: { title: "Nov", startAt: "2027-01-01T22:00:00Z" }, razlog: "nov dogodek" });
+    assert(r.status === 404 && r.body.error === "cilj_ni_najden", "nov osnutek: neobstojec klub (cilj) -> 404 cilj_ni_najden", [r.status, r.body]);
+    // S1: plakat samo iz nasega Cloudinaryja (kot avatar); obstojeca pot za iOS/splet ostane (vsak http(s))
+    for (const url of ["https://evil.test/plakat.jpg", "https://res.cloudinary.com/drugi/image/upload/x.jpg", "http://res.cloudinary.com/outlytest/image/upload/x.jpg", "https://res.cloudinary.com.evil.test/outlytest/x.jpg"]) {
+      const x = await predlagaj(UREDI(E.a, { posterUrl: url }));
+      assert(x.status === 400 && x.body.error === "plakat_ni_dovoljen", `plakat ${url.slice(0, 50)} -> 400 plakat_ni_dovoljen`, [x.status, x.body]);
+    }
+    r = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: "Nov", startAt: "2027-01-01T22:00:00Z", posterUrl: "https://evil.test/p.jpg" }, razlog: "nov dogodek" });
+    assert(r.status === 400 && r.body.error === "plakat_ni_dovoljen", "nov osnutek s tujim plakatom -> 400", [r.status, r.body]);
+    r = await api(PORT, "PATCH", `/events/${E.e}`, T.admin, { posterUrl: "https://evil.test/plakat.jpg" });
+    assert(r.status === 200, "obstojeca pot (PATCH) tuj http(s) plakat se vedno sprejme (iOS/splet nespremenjeno)", r.status);
+    r = await predlagaj(UREDI(E.e, { posterUrl: "https://res.cloudinary.com/outlytest/image/upload/v1/plakat.jpg" }));
+    assert(r.status === 201 && r.body.predlog.prej.poster_url === "https://evil.test/plakat.jpg", "plakat iz nasega Cloudinaryja -> 201", [r.status, r.body]);
+    await api(PORT, "POST", `/admin/api/predlogi/${r.body.predlog.id}/zavrni`, T.admin, {});
+    r = await predlagaj(UREDI(E.e, { posterUrl: "" }));
+    assert(r.status === 201, "odstranitev plakata (prazen niz) -> 201", [r.status, r.body]);
+    await api(PORT, "POST", `/admin/api/predlogi/${r.body.predlog.id}/zavrni`, T.admin, {});
+
     r = await predlagaj({ dejanje: "event.podvoji", cilj: { tip: "event", id: E.a }, spremembe: { startAt: "2020-01-01T22:00:00Z" }, razlog: "podvoji" });
     assert(r.status === 400 && r.body.error === "invalid_changes" && r.body.koda === "start_in_past", "podvoji: zacetek v preteklosti -> 400 (validacija poti podvajanja)", [r.status, r.body]);
     r = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: "   ", startAt: "2027-01-01T22:00:00Z" }, razlog: "nov" });
@@ -384,33 +422,74 @@ function nicOsebnega(ime, tekst) {
     r = await api(PORT, "POST", `/admin/api/predlogi/${P_OKNO_SLABO.id}/potrdi`, T.admin, {});
     assert(r.status === 400 && (await predlogVBazi(P_OKNO_SLABO.id)).stanje === "neuspel", "okno, ki ga baza zavrne (zapre pred odpre), ob potrditvi 400 -> predlog neuspel", [r.status, r.body]);
 
-    // objava iz osnutka (obvesti sledilce: ista pot)
+    // objava iz osnutka (obvesti sledilce: ista pot) -- obvestila sele ob potrditvi
+    await pool.query("INSERT INTO club_follows (club_id, user_id) VALUES ($1, $2)", [K1, lastnikId]);
+    const obvestil = async (id) => (await pool.query("SELECT COUNT(*)::int AS n FROM club_event_notifications WHERE event_id = $1", [id])).rows[0].n;
     r = await predlagaj({ dejanje: "event.objavi", cilj: { tip: "event", id: E.osnutek }, spremembe: {}, razlog: "Vse je pripravljeno." });
     assert(r.status === 201 && r.body.predlog.spremembe.status === "published" && r.body.predlog.prej.status === "draft", "predlog objave", [r.status, r.body]);
+    assert((await vrstica(E.osnutek)).status === "draft" && (await obvestil(E.osnutek)) === 0, "predlog objave: dogodek ostane osnutek, sledilci NISO obvesceni");
     r = await api(PORT, "POST", `/admin/api/predlogi/${r.body.predlog.id}/potrdi`, T.admin, {});
     assert(r.status === 200 && (await vrstica(E.osnutek)).status === "published", "objavljeno", [r.status, r.body]);
+    assert((await obvestil(E.osnutek)) === 1, "po potrditvi sledilec obvescen (ista pot kot rocna objava)");
+    // zastarela objava: osnutek je vmes objavil admin sam
+    r = await predlagaj({ dejanje: "event.objavi", cilj: { tip: "event", id: E.osnutek2 }, spremembe: {}, razlog: "objavi" });
+    const P_OBJ_STAR = r.body.predlog;
+    await api(PORT, "PATCH", `/events/${E.osnutek2}`, T.admin, { status: "published" });
+    await api(PORT, "PATCH", `/events/${E.osnutek2}`, T.admin, { status: "cancelled" });
+    r = await api(PORT, "POST", `/admin/api/predlogi/${P_OBJ_STAR.id}/potrdi`, T.admin, {});
+    assert(r.status === 409 && r.body.error === "predlog_zastarel" && (await vrstica(E.osnutek2)).status === "cancelled", "zastarela objava (osnutek vmes objavljen in odpovedan) -> 409, odpovedan ostane odpovedan", [r.status, r.body]);
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM admin_dejanja WHERE dejanje = 'event.publish' AND cilj_id = $1 AND predlog_id IS NOT NULL", [String(E.osnutek)])).rows[0].n === 1, "admin_dejanja event.publish z oznako predloga");
 
     // nov osnutek
+    const steviloDogodkov = async () => (await pool.query("SELECT COUNT(*)::int AS n FROM events")).rows[0].n;
+    let predDejanjem = await steviloDogodkov();
     r = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: "Halloween", startAt: "2027-10-31T21:00:00+01:00", genres: ["techno"], description: "Opis" }, razlog: "Klub je poslal plakat." });
     assert(r.status === 201 && r.body.predlog.prej === null, "predlog novega osnutka", [r.status, r.body]);
+    assert((await steviloDogodkov()) === predDejanjem, "predlog novega osnutka: stevilo dogodkov enako kot pred predlogom", [predDejanjem, await steviloDogodkov()]);
     const P_NOV = r.body.predlog;
-    const prejDogodkov = (await pool.query("SELECT COUNT(*)::int AS n FROM events")).rows[0].n;
-    assert(prejDogodkov === 7, "predlog novega osnutka ne ustvari dogodka", prejDogodkov);
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM events WHERE title = 'Halloween'")).rows[0].n === 0, "predlog novega osnutka ne ustvari dogodka");
     r = await api(PORT, "POST", `/admin/api/predlogi/${P_NOV.id}/potrdi`, T.admin, {});
     const nov = (await pool.query("SELECT * FROM events WHERE title = 'Halloween'")).rows;
     assert(r.status === 201 && nov.length === 1 && nov[0].status === "draft" && nov[0].club_id === K1 && nov[0].ticket_price_cents === null, "nov dogodek kot OSNUTEK (brez cene)", [r.status, nov]);
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM admin_dejanja WHERE dejanje = 'event.create' AND predlog_id = $1 AND admin_user_id = $2 AND agent_zeton_id = $3", [P_NOV.id, adminId, PRED_ID])).rows[0].n === 1, "admin_dejanja event.create z oznako predloga");
 
-    // podvajanje
+    // podvajanje (predlog ne ustvari kopij)
+    predDejanjem = await steviloDogodkov();
     r = await predlagaj({ dejanje: "event.podvoji", cilj: { tip: "event", id: E.a }, spremembe: { startAt: "2027-03-05T22:00:00+01:00", ponovi: "weekly", n: 2 }, razlog: "Vsak petek." });
-    assert(r.status === 201, "predlog podvajanja", [r.status, r.body]);
+    assert(r.status === 201 && (await steviloDogodkov()) === predDejanjem, "predlog podvajanja: nobene kopije pred potrditvijo", [r.status, r.body, predDejanjem]);
     const P_PODV = r.body.predlog;
+    predDejanjem = (await pool.query("SELECT COUNT(*)::int AS n FROM events")).rows[0].n;
     r = await api(PORT, "POST", `/admin/api/predlogi/${P_PODV.id}/potrdi`, T.admin, {});
-    assert(r.status === 201 && r.body.events && r.body.events.length === 2 && r.body.events.every((x) => x.status === "draft"), "podvojeno v 2 osnutka", [r.status, r.body]);
+    assert(r.status === 201 && r.body.events && r.body.events.length === 2 && r.body.events.every((x) => x.status === "draft") && (await steviloDogodkov()) === predDejanjem + 2, "podvojeno v 2 osnutka", [r.status, r.body]);
     assert((await pool.query("SELECT COUNT(*)::int AS n FROM admin_dejanja WHERE dejanje = 'event.duplicate' AND predlog_id = $1", [P_PODV.id])).rows[0].n === 2, "admin_dejanja event.duplicate x2 z oznako predloga");
 
     // ---------------- 9. odgovori agenta ----------------
+    console.log("\n# 7b. tekme: potrdi + zavrni hkrati, preklic zetona med potrditvijo");
+    for (let i = 0; i < 3; i++) {
+      r = await predlagaj(UREDI(E.f, { title: "Sreda " + i }));
+      const pid = r.body.predlog.id;
+      const prejF = (await vrstica(E.f)).title;
+      const [a1, a2] = await Promise.all([api(PORT, "POST", `/admin/api/predlogi/${pid}/potrdi`, T.admin, {}), api(PORT, "POST", `/admin/api/predlogi/${pid}/zavrni`, T.admin, {})]);
+      const st = (await predlogVBazi(pid)).stanje, naslov = (await vrstica(E.f)).title;
+      const uspehov = [a1.status, a2.status].filter((x) => x === 200).length;
+      assert(uspehov === 1 && ((st === "potrjen" && a1.status === 200 && naslov === "Sreda " + i) || (st === "zavrnjen" && a2.status === 200 && naslov === prejF)),
+        `hkrati potrdi + zavrni (${i + 1}/3): natanko eno uspe, stanje in dogodek se ujemata`, [a1.status, a2.status, st, naslov]);
+    }
+    r = await api(PORT, "POST", "/admin/api/agent-zetoni", T.admin, { ime: "Preklic med potrditvijo", obseg: ["beri", "predlagaj"] });
+    const PM = r.body;
+    r = await predlagaj(UREDI(E.f, { title: "Sreda (preklic)" }), PM.zeton);
+    const P_PM = r.body.predlog;
+    const zak = new pg.Client({ connectionString: DB }); await zak.connect();
+    await zak.query("BEGIN"); await zak.query("SELECT id FROM agent_zetoni WHERE id = $1 FOR UPDATE", [PM.id]);
+    const potrditev = api(PORT, "POST", `/admin/api/predlogi/${P_PM.id}/potrdi`, T.admin, {});
+    let caka = false;
+    for (let i = 0; i < 200 && !caka; i++) { caka = (await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%FOR SHARE OF z%'")).rows[0].n > 0; if (!caka) await pocakaj(20); }
+    assert(caka, "potrditev caka na zaklep zetona (preverba je pod zaklepom)");
+    await zak.query("UPDATE agent_zetoni SET preklican_at = NOW() WHERE id = $1", [PM.id]); await zak.query("COMMIT"); await zak.end();
+    r = await potrditev;
+    assert(r.status === 409 && r.body.error === "zeton_neveljaven" && (await vrstica(E.f)).title !== "Sreda (preklic)", "zeton preklican med potrditvijo -> 409, nic se ne izvede", [r.status, r.body]);
+    assert((await predlogVBazi(P_PM.id)).stanje === "neuspel", "predlog neuspel");
+
     console.log("\n# 9. GET /agent/api/predlogi: samo lastni, brez osebnih podatkov");
     r = await predlagaj(UREDI(E.b, { description: "Nov opis brez kontakta" }, "Opis vsebuje e-naslov info@klub-eden.si, odstrani ga."));
     assert(r.status === 201 && r.body.predlog.prej.description.includes("[e-naslov]"), "posnetek prej (opis z e-naslovom) je v odgovoru agenta ociscen", r.body);

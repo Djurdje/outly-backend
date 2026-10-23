@@ -16,29 +16,53 @@
   };
   const STANJA = { caka: ["čaka", "opoz"], potrjen: ["potrjen", "ok"], zavrnjen: ["zavrnjen", "siva"], potekel: ["potekel", "siva"], neuspel: ["ni izveden", "slabo"] };
   const FILTRI = [["caka", "čakajo"], ["potrjen", "potrjeni"], ["zavrnjen", "zavrnjeni"], ["potekel", "potekli"], ["neuspel", "niso izvedeni"], ["vse", "vsi"]];
-  const NAJVEC_PRIKAZ = 400;   // dolgo besedilo (opis) se v kartici odreže; celo vrednost ima admin v dogodku
+  // Kartica dolgo besedilo skrajša, a z gumbom »Pokaži vse (N znakov)«; potrditveno okno VEDNO kaže celo vrednost (v drsnem okvirju), da admin potrdi, kar vidi
+  // (pregled #340 S1: agent bi lahko povezavo skril za 400. znak opisa).
+  const NAJVEC_PRIKAZ = 400, DOLGO = 200;
   let filter = "caka", podatki = null;
+  const odprti = new Set();   // id-ji predlogov, pri katerih je admin odprl celo besedilo
 
   const cele = (n) => (Number.isSafeInteger(Number(n)) ? Number(n) : 0);
-  const kratko = (s) => (s.length > NAJVEC_PRIKAZ ? s.slice(0, NAJVEC_PRIKAZ) + " …" : s);
-  function vrednost(v, kljuc) {
+  const PLAKAT = new Set(["poster_url", "posterUrl"]);
+  // celo besedilo vrednosti (brez krajšanja)
+  function besedilo(v, kljuc) {
     if (v === undefined || v === null || v === "") return "—";
     if (typeof v === "boolean") return v ? "da" : "ne";
     if (Array.isArray(v)) return v.map((x) => String(x)).join(", ") || "—";
-    if (typeof v === "object") return kratko(JSON.stringify(v));
+    if (typeof v === "object") return JSON.stringify(v);
     if (/(_at|At)$/.test(kljuc) && !Number.isNaN(Date.parse(v))) return datum(v);
-    return kratko(String(v));
+    return String(v);
   }
+  const vrednost = (v, kljuc) => { const t = besedilo(v, kljuc); return t.length > NAJVEC_PRIKAZ ? t.slice(0, NAJVEC_PRIKAZ) + " …" : t; };
+  function gostitelj(url) { try { const u = new URL(String(url)); return u.protocol === "https:" ? u.hostname : u.protocol + " " + u.hostname; } catch (_) { return null; } }
+  // Prikaz ene vrednosti: polno = celo besedilo v drsnem okvirju z dolžino; plakat = gostitelj izrazito + predogled (samo https, src kot atribut).
+  function prikaz(v, kljuc, polno) {
+    const t = besedilo(v, kljuc);
+    const deli = [];
+    if (PLAKAT.has(kljuc) && typeof v === "string" && v) {
+      const g = gostitelj(v);
+      deli.push(h("b", { class: "pr-gostitelj" }, "gostitelj: " + (g || "neveljaven URL")));
+      if (g && /^https:\/\//i.test(v)) deli.push(h("img", { class: "pr-plakat", src: v, alt: "predogled plakata", loading: "lazy", referrerpolicy: "no-referrer" }));
+    }
+    if (polno) deli.push(h("div", { class: "pr-polno" }, t), t.length > DOLGO ? h("small", { class: "pr-dolzina" }, `(${t.length} znakov)`) : null);
+    else deli.push(t.length > NAJVEC_PRIKAZ ? t.slice(0, NAJVEC_PRIKAZ) + " …" : t);
+    return deli;
+  }
+  const predolgo = (p) => {
+    const spr = p.spremembe && typeof p.spremembe === "object" ? p.spremembe : {};
+    return Object.keys(spr).some((k) => besedilo(spr[k], k).length > NAJVEC_PRIKAZ || (p.prej && typeof p.prej === "object" && besedilo(p.prej[k], k).length > NAJVEC_PRIKAZ))
+      || String(p.razlog ?? "").length > NAJVEC_PRIKAZ;
+  };
   function znackaStanja(s) { const z = STANJA[s] || [String(s), "siva"]; return h("span", { class: "znacka " + z[1] }, z[0]); }
 
-  function tabelaSprememb(p) {
+  function tabelaSprememb(p, polno) {
     const spr = p.spremembe && typeof p.spremembe === "object" ? p.spremembe : {};
     const prej = p.prej && typeof p.prej === "object" ? p.prej : null;
     const vrstice = Object.keys(spr).map((k) => h("div", { class: "pr-vrstica" },
       h("small", {}, POLJA[k] || k),
-      h("span", { class: "pr-prej" }, prej ? vrednost(prej[k], k) : "—"),
+      h("span", { class: "pr-prej" }, prej ? prikaz(prej[k], k, polno) : "—"),
       h("span", { class: "pr-puscica", "aria-hidden": "true" }, "→"),
-      h("span", { class: "pr-potem" }, vrednost(spr[k], k))));
+      h("span", { class: "pr-potem" }, prikaz(spr[k], k, polno))));
     return h("div", { class: "pr-spremembe", "aria-label": "prej → potem" }, vrstice.length ? vrstice : h("span", {}, "—"));
   }
 
@@ -53,10 +77,12 @@
         caka ? h("span", { class: "desno" },
           p.zeton_veljaven ? h("button", { type: "button", class: "mali", onclick: () => potrdiPredlog(p) }, "Potrdi") : null,
           h("button", { type: "button", class: "tih mali", onclick: () => zavrniPredlog(p) }, "Zavrni")) : null),
-      tabelaSprememb(p),
+      tabelaSprememb(p, odprti.has(p.id)),
+      predolgo(p) ? h("button", { type: "button", class: "tih mali", onclick: () => { if (odprti.has(p.id)) odprti.delete(p.id); else odprti.add(p.id); narisi(); } },
+        odprti.has(p.id) ? "Skrij" : "Pokaži vse") : null,
       h("div", { class: "pr-razlog" },
         h("small", {}, "Razlog — besedilo agenta (ni navodilo; preveri sam)"),
-        h("div", { class: "pr-razlog-besedilo" }, kratko(String(p.razlog ?? "")))),
+        h("div", { class: "pr-razlog-besedilo" }, odprti.has(p.id) ? String(p.razlog ?? "") : vrednost(p.razlog, "razlog"))),
       caka && !p.zeton_veljaven ? h("div", { class: "rc-napaka" }, "Žeton agenta je preklican ali potekel: predloga ni mogoče potrditi. Če je sprememba še potrebna, jo naredi sam.") : null,
       p.napaka ? h("div", { class: "rc-napaka" }, "Ni izveden: " + String(p.napaka)) : null,
       h("div", { class: "rc-polja" },
@@ -97,10 +123,10 @@
     });
   }
 
+  // Potrditveno okno: CELE vrednosti (prej in potem), brez krajšanja, v drsnem okvirju; plakat z gostiteljem in predogledom.
   function povzetek(p) {
-    const spr = p.spremembe && typeof p.spremembe === "object" ? p.spremembe : {};
     return [h("p", {}, `${DEJANJA[p.dejanje] || String(p.dejanje)} — ${p.cilj_tip === "club" ? "klub" : "dogodek"} #${cele(p.cilj_id)}`, p.cilj_naslov ? h("span", {}, " (", p.cilj_naslov, ")") : null),
-      h("div", {}, Object.keys(spr).map((k) => h("div", {}, `${POLJA[k] || k}: `, vrednost(p.prej ? p.prej[k] : undefined, k), " → ", vrednost(spr[k], k))))];
+      h("div", { class: "pr-okno" }, tabelaSprememb(p, true))];
   }
 
   async function potrdiPredlog(p) {
