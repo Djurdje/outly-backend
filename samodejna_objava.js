@@ -76,7 +76,7 @@ function ustvari(dep) {
   // KANDIDATOV_NA_KROG naredi krog() po tem, kdaj je bil dogodek nazadnje poskusen (rotacija), ne po publish_at.
   async function kandidati() {
     return vTransakciji(async (q) => (await q(
-      `SELECT id FROM events WHERE status = 'draft' AND publish_at IS NOT NULL AND publish_at <= NOW() AND start_at > NOW() ORDER BY publish_at, id LIMIT ${KANDIDATOV_BRANJE}`)).rows.map((r) => r.id));
+      `SELECT id FROM events WHERE status = 'draft' AND publish_at IS NOT NULL AND publish_at <= NOW() AND start_at > NOW() ORDER BY publish_at DESC, id DESC LIMIT ${KANDIDATOV_BRANJE}`)).rows.map((r) => r.id));
   }
 
   // Pregled »Pred objavo«: true = je rdeca ovira ali pregled ni uspel (dogodek ostane osnutek).
@@ -122,9 +122,9 @@ function ustvari(dep) {
       try { ids = await kandidati(); }
       catch (e) { log.error("[samodejna-objava] kandidatov ni mogoce prebrati:", (e && (e.code || e.message)) || e); return { objavljenih, preskocenih, napaka: true }; }
       // Rotacija (pregled #347 S2): najprej dogodki, ki jih se nismo poskusili, nato tisti z najstarejsim poskusom; zataknjeni (rdeca ovira) se vrte, novi pridejo takoj na vrsto.
-      // Med se nepoizkusenimi gredo najprej NAJNOVEJSI (najpozneje zapadli) publish_at: zataknjeni so praviloma starejsi. Pomnilnik je omejen na trenutne kandidate.
+      // Poizvedba vrne NAJNOVEJSE najprej (ORDER BY publish_at DESC: ob vec kot 500 zataknjenih se svez dogodek vseeno prebere), zato med se nepoizkusenimi gredo najprej najnovejsi publish_at: zataknjeni so praviloma starejsi. Pomnilnik je omejen na trenutne kandidate.
       for (const k of [...poskusen.keys()]) if (!ids.includes(k)) poskusen.delete(k);
-      ids = ids.map((id, i) => [id, i]).sort((a, b) => (poskusen.get(a[0]) || 0) - (poskusen.get(b[0]) || 0) || b[1] - a[1]).slice(0, KANDIDATOV_NA_KROG).map((x) => x[0]);
+      ids = ids.map((id, i) => [id, i]).sort((a, b) => (poskusen.get(a[0]) || 0) - (poskusen.get(b[0]) || 0) || a[1] - b[1]).slice(0, KANDIDATOV_NA_KROG).map((x) => x[0]);
       for (const id of ids) {
         try {
           poskusen.set(id, Date.now());

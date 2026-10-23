@@ -272,6 +272,19 @@ const stVLogu = (re) => procesi.reduce((n, p) => n + (p.log.match(re) || []).len
       const dnevnikOpomb = []; 
       await pool.query("DELETE FROM events WHERE id = ANY($1::int[]) OR id = ANY($2::int[]) OR id = $3", [zataknjeni, rdeci, rdeciNov]);
     }
+    // --- M4b: vec kot 500 zataknjenih: svez dogodek se vseeno prebere in objavi v prvem krogu (ORDER BY publish_at DESC) ---
+    {
+      klicani.length = 0;
+      await pool.query(
+        `INSERT INTO events (club_id, title, status, start_at, end_at, ticket_price_cents, capacity, publish_at)
+         SELECT $1, 'Zataknjen ' || g, 'draft', NOW() + INTERVAL '10 days', NOW() + INTERVAL '10 days 6 hours', 0, 100, NOW() - INTERVAL '3 hours' - g * INTERVAL '1 second' FROM generate_series(1, 510) g`, [klubM]);
+      const sveze = await osnutek("Svez med 510 zataknjenimi", { publish: "-1 minute" });
+      const m = modul(async (id) => ({ items: id === sveze ? [] : [{ vrsta: "prodajalec_nepopoln", resnost: "rdece" }] }));
+      const t0 = Date.now();
+      const r = await m.krog();
+      assert(r.objavljenih === 1 && (await stanje(sveze)).status === "published", `M4b: 510 zataknjenih + 1 svez: svez objavljen v prvem krogu (${Date.now() - t0} ms)`, r);
+      await pool.query("DELETE FROM events WHERE title LIKE 'Zataknjen %'");
+    }
     // --- M5: DELETE /events/:id z narocili je odpoved: publish_at se pobrise (preverjeno v P-delu) ---
     await pool.query("TRUNCATE admin_dejanja, events RESTART IDENTITY CASCADE");
 
