@@ -2500,6 +2500,10 @@ const STOLPCI_DOGODKA = `
         (status = 'published' AND NOT sales_paused AND start_at > NOW()
           AND NOT COALESCE((SELECT ch.hidden FROM clubs ch WHERE ch.id = events.club_id), FALSE)
           AND (sales_open_at IS NULL OR sales_open_at <= NOW()) AND (sales_close_at IS NULL OR sales_close_at >= NOW())) AS on_sale,
+        -- Okno prodaje (#327 A, 23. 10.): kdaj se prodaja odpre/zapre (ISO ali null = brez omejitve). DODANI polji, da odjemalec pokaze datum odprtja
+        -- namesto splosnega »prodaja ni odprta«. Ne zavisita od uporabnika: smeta v javni predpomnilnik (I17). publish_at in druga notranja polja ostanejo skrita.
+        sales_open_at,
+        sales_close_at,
         ${STOLPCI_PRIZORISCA}`;
 
 // Lahka razlicica seznama (GET /events?lite=true, #114): brez `description` (pri 200 dogodkih je to vecina teze odgovora).
