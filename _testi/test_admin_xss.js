@@ -321,8 +321,13 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     const setTimeout7 = (f, ms) => { casovniki.push({ f, ms }); return casovniki.length; };
     const history7 = { pushState: (...a) => zgodovina.push(a) };
     let odgovor7 = {}, napaka7 = null;
-    const klic7 = async (metoda, pot) => {
+    let visi7 = false;   // klic obvisi, dokler ga ne prekine AbortSignal (polodprta povezava)
+    const klic7 = async (metoda, pot, telo, ponovno, signal) => {
       klici7.push(pot);
+      if (visi7) {
+        mora(signal, "danes.js: klic brez AbortSignala (rok klica manjka)");
+        return new Promise((_, zavrni) => signal.addEventListener("abort", () => zavrni(Object.assign(new Error("The operation was aborted."), { name: "TimeoutError" }))));
+      }
       if (napaka7) throw napaka7;
       const k = Object.keys(odgovor7).find(x => pot.startsWith(x));
       mora(k, "nepričakovan klic API-ja iz novega modula: " + pot);
@@ -398,6 +403,30 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     await danesOkno.danesOsvezi(true);
     assert(casovniki[casovniki.length - 1].ms === 20000 && pregled($7("dn_koren")).besedila.join("\n").includes("podatki zastareli"), "danes.js: druga napaka: zastarelo, a brez 60 s premora");
     napaka7 = null;
+    // obvisel zahtevek: rok klica 15 s (AbortSignal) -> vTeku se ponastavi, »podatki zastareli« + sporocilo, osvezevanje tece naprej
+    {
+      const ctrl7 = new AbortController(), izvirnik = AbortSignal.timeout, roki = [];
+      AbortSignal.timeout = (ms) => { roki.push(ms); return ctrl7.signal; };
+      try {
+        visi7 = true;
+        const tikVisi = casovniki.length, klVisi = klici7.length;
+        const visece = danesOkno.danesOsvezi(true);
+        await new Promise(r => setImmediate(r));
+        const drugi = danesOkno.danesOsvezi(true);   // vTeku: drugi klic ne sproži vzporednega
+        await new Promise(r => setImmediate(r));
+        assert(klici7.length === klVisi + 1 && roki.length === 1 && roki[0] === 15000, "danes.js: klic ima AbortSignal z rokom 15 s, vzporednega klica ni", { klici: klici7.length - klVisi, roki });
+        ctrl7.abort();
+        await visece; await drugi;
+        const besVisi = pregled($7("dn_koren")).besedila.join("\n");
+        assert(besVisi.includes("podatki zastareli") && besVisi.includes("ni odgovoril v 15 s"), "danes.js: po izteku roka napis »podatki zastareli« in sporocilo (osvezevanje se ne ustavi tiho)");
+        assert(casovniki.length > tikVisi && casovniki[casovniki.length - 1].ms === 20000, "danes.js: po izteku roka casovnik tece naprej (20 s)");
+        visi7 = false;
+        const ctrl8 = new AbortController(); AbortSignal.timeout = () => ctrl8.signal;
+        const klPo = klici7.length;
+        await danesOkno.danesOsvezi(true);
+        assert(klici7.length === klPo + 1 && !pregled($7("dn_koren")).besedila.join("\n").includes("podatki zastareli"), "danes.js: po izteku roka vTeku ni obstal: naslednji klic uspe in obnovi stanje");
+      } finally { AbortSignal.timeout = izvirnik; visi7 = false; }
+    }
 
     // --- opozorila.js ---
     const opOkno = naloziModul("opozorila.js");

@@ -5,6 +5,7 @@
 // Meje (ARCHITECTURE »Opozorila in nadzorna plosca (admin)«):
 //  - vsaka pot: ENA povezava glavnega poola, BEGIN READ ONLY + SET LOCAL statement_timeout = 2000, `c.on("error")`, release v finally;
 //    NIKOLI skenPool (sken na vratih ne sme cakati za nadzorno plosco, I16). Ob 57014 (rok) -> 503 + Retry-After; panel podaljsa premor.
+//    Vsaka poizvedba ima se ODJEMALSKI rok (obvisela povezava: glavni pool nima query_timeout): ob izteku povezava zavrzena, semafor prost, 503 admin_busy.
 //  - opozorila in »danes« so v pomnilniku procesa ADMIN_NADZOR_PREDPOMNILNIK_MS (privzeto 10 s): vec zavihkov/adminov = ena poizvedba;
 //    sočasni klici si delijo isto obljubo. 0 = brez predpomnilnika (testi).
 //  - brez e-naslovov, imen kupcev, telefonov in Stripovih ID-jev v nobenem odgovoru.
@@ -89,38 +90,65 @@ function ustvari(dep) {
     if (n) n.resolve(); else semaforZaseden = false;
   }
 
-  // --- ena povezava, READ ONLY, rok stavka, rok mirujoce transakcije ---
+  // --- ena povezava, READ ONLY, rok stavka, rok mirujoce transakcije, ODJEMALSKI rok vsake poizvedbe ---
+  // Glavni pool nima `query_timeout`, `statement_timeout` pa tece na strezniku: na polodprti TCP povezavi (baza ali omrezje ne odgovori in
+  // povezave ne zapre) bi `c.query` visel za vedno, semafor bi ostal zaseden in vse poti tega modula bi obvisele. Zato ima VSAKA poizvedba
+  // svoj odjemalski rok (strezniski rok + 1 s: ob zakoniti 57014 odgovori najprej baza). Ob roku: poizvedba se zavrne (ADMIN_QUERY_TIMEOUT),
+  // povezava se ZAVRZE (release(true), brez ROLLBACK: ta bi na obviseli povezavi visel se enkrat) in semafor se sprosti -> 503 admin_busy.
+  const ROK_ODJEMALCA_MS = ROK_STAVKA_MS + 1000;
+  function poizvedbaZRokom(c, sql, params) {
+    return new Promise((resolve, reject) => {
+      const rok = setTimeout(() => reject(Object.assign(new Error("admin_nadzor: poizvedba timed out (odjemalski rok)"), { code: "ADMIN_QUERY_TIMEOUT" })), ROK_ODJEMALCA_MS);
+      let p;
+      try { p = params === undefined ? c.query(sql) : c.query(sql, params); } catch (e) { clearTimeout(rok); reject(e); return; }
+      Promise.resolve(p).then((r) => { clearTimeout(rok); resolve(r); }, (e) => { clearTimeout(rok); reject(e); });
+    });
+  }
   async function beriReadOnly(fn) {
     await semaforVstopi();
     let c;
     try { c = await pool.connect(); } catch (e) { semaforIzstopi(); throw e; }
-    let pokvarjena = false;
+    let pokvarjena = false, koncano = false;
     const naNapako = (e) => { pokvarjena = true; console.error("[admin-nadzor] povezava s bazo prekinjena:", e && e.message); };
-    c.on("error", naNapako);
     try {
-      // en sam krog do baze; application_name samo znotraj transakcije (pg_stat_activity: test semaforja)
-      await c.query(`BEGIN READ ONLY; SET LOCAL statement_timeout = ${ROK_STAVKA_MS}; SET LOCAL idle_in_transaction_session_timeout = ${ROK_MIRUJOCE_MS}; SET LOCAL application_name = 'admin_nadzor'`);
-      const r = await fn(c);
-      await c.query("COMMIT");
-      return r;
-    } catch (e) {
-      // napaka brez SQLSTATE (prekinjena povezava, odjemalski rok): povezave ni varno vrniti v pool (kot skenBranje: SQLSTATE ima vedno stevko)
-      const koda = String((e && e.code) || "");
-      if (!(/^[0-9A-Z]{5}$/.test(koda) && /[0-9]/.test(koda))) pokvarjena = true;
-      await c.query("ROLLBACK").catch(() => { pokvarjena = true; });
-      throw e;
+      c.on("error", naNapako);
+      // fn dobi ovoj, ne povezave: po izteku roka (povezava je ze zavrzena) poznejsa poizvedba ne sme na mrtvo povezavo
+      const q = (sql, params) => {
+        if (koncano) return Promise.reject(Object.assign(new Error("admin_nadzor: povezava je zavrzena"), { code: "ADMIN_QUERY_TIMEOUT" }));
+        return poizvedbaZRokom(c, sql, params).catch((e) => { if (e && e.code === "ADMIN_QUERY_TIMEOUT") koncano = true; throw e; });
+      };
+      try {
+        // en sam krog do baze; application_name samo znotraj transakcije (pg_stat_activity: test semaforja)
+        await q(`BEGIN READ ONLY; SET LOCAL statement_timeout = ${ROK_STAVKA_MS}; SET LOCAL idle_in_transaction_session_timeout = ${ROK_MIRUJOCE_MS}; SET LOCAL application_name = 'admin_nadzor'`);
+        const r = await fn({ query: q });
+        await q("COMMIT");
+        return r;
+      } catch (e) {
+        // Kot skenBranje (index.js): baza je odgovorila z napako (SQLSTATE: pet znakov, vsaj ena stevka, npr. 57014) -> povezava je ziva,
+        // ROLLBACK jo pocisti. Brez SQLSTATE (odjemalski rok, prekinjena povezava): povezava je mrtva ali visi, ROLLBACK ne poskusimo, zavrzemo jo.
+        const koda = String((e && e.code) || "");
+        if (/^[0-9A-Z]{5}$/.test(koda) && /[0-9]/.test(koda)) await poizvedbaZRokom(c, "ROLLBACK").catch(() => { pokvarjena = true; });
+        else pokvarjena = true;
+        throw e;
+      }
     } finally {
-      c.off("error", naNapako);
-      if (pokvarjena) c.on("error", () => {});   // pozen 'error' zavrzene povezave ne sme sesuti procesa
-      c.release(pokvarjena);
-      semaforIzstopi();
+      // semafor se sprosti TUDI, ce off/on/release vrzejo
+      try {
+        c.off("error", naNapako);
+        if (pokvarjena) c.on("error", () => {});   // pozen 'error' zavrzene povezave ne sme sesuti procesa
+        c.release(pokvarjena);
+      } finally {
+        semaforIzstopi();
+      }
     }
   }
 
   function odgovoriNapaka(res, e, kje) {
-    if (e && (e.code === "57014" || e.code === "ADMIN_BUSY")) {
-      console.error(`[admin-nadzor] ${kje}: ${e.code === "ADMIN_BUSY" ? "povezava zasedena (semafor)" : `preseglo statement_timeout ${ROK_STAVKA_MS} ms`}`);
-      return res.status(503).set("Retry-After", "5").json({ error: "admin_busy", message: "The dashboard query timed out. Try again in a few seconds." });
+    if (e && (e.code === "57014" || e.code === "ADMIN_QUERY_TIMEOUT" || e.code === "ADMIN_BUSY")) {
+      const zaseden = e.code === "ADMIN_BUSY";
+      console.error(`[admin-nadzor] ${kje}: ${zaseden ? "povezava zasedena (semafor)" : e.code === "57014" ? `preseglo statement_timeout ${ROK_STAVKA_MS} ms` : `preseglo odjemalski rok ${ROK_ODJEMALCA_MS} ms (povezava zavrzena)`}`);
+      return res.status(503).set("Retry-After", "5").json({ error: "admin_busy",
+        message: zaseden ? "The dashboard is busy, try again shortly." : "The dashboard query timed out. Try again in a few seconds." });
     }
     return odgovoriNaNapako(res, e, kje);
   }
@@ -270,7 +298,10 @@ function ustvari(dep) {
   async function izracunajDanes(zdajVhod = null) {
     let rdeca = null;
     try { rdeca = (await opozorila()).stevci.rdece; }   // PRED povezavo za »danes«: nista hkrati dve povezavi iste poti
-    catch (e) { console.error("[admin-nadzor] danes: opozorila niso na voljo:", e && e.message); }
+    catch (e) {
+      if (e && e.code === "ADMIN_QUERY_TIMEOUT") throw e;   // povezava obvisi: drugi poskus za »danes« bi cakal se en odjemalski rok brez upanja
+      console.error("[admin-nadzor] danes: opozorila niso na voljo:", e && e.message);
+    }
     return beriReadOnly(async (c) => {
       const T = SQL_TESTNO_NAROCILO;
       const t = (await c.query(

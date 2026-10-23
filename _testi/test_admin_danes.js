@@ -86,9 +86,11 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
   const B = zazeni(PORT_PRED, { ADMIN_NADZOR_PREDPOMNILNIK_MS: "3000" });
   const C = zazeni(PORT_PRIVZETO, {});
   const vsi = [A, B, C];
-  for (const [p] of [[PORT], [PORT_PRED], [PORT_PRIVZETO]]) await cakajStreznik(p);
+  let kl = null;   // zaklep tabele racuni (odjemalec); sprosti ga finally, ce test pade vmes
+  const sprostiKl = async () => { const k = kl; kl = null; if (k) { await k.query("ROLLBACK").catch(() => {}); await k.end().catch(() => {}); } };
 
   try {
+    for (const [p] of [[PORT], [PORT_PRED], [PORT_PRIVZETO]]) await cakajStreznik(p);
     assert(indexKoda.includes("const SQL_TESTNO_NAROCILO = `" + SQL_TESTNO_ZAPIS + "`;"), "test uporablja isti pogoj testnega naročila kot index.js (SQL_TESTNO_NAROCILO)");
     const T = {
       admin: zeton("admin@outly.si", uuid(1)), navaden: zeton("navaden@outly.si", uuid(2)), lastnik: zeton("lastnik@outly.si", uuid(3)), kopija: zeton("kopija@outly.si", uuid(4)),
@@ -362,9 +364,9 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
 
     console.log("\n# Zanesljivost: 57014 -> 503, vracanje povezave, semafor (najvec ena povezava)");
     const aktivne = async () => (await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE application_name = 'admin_nadzor'")).rows[0].n;
-    const zakleni = async () => { const k = new Client({ connectionString: DB }); await k.connect(); await k.query("BEGIN"); await k.query("LOCK TABLE racuni IN ACCESS EXCLUSIVE MODE"); return k; };
+    const zakleni = async () => { const k = new Client({ connectionString: DB }); await k.connect(); kl = k; await k.query("BEGIN"); await k.query("LOCK TABLE racuni IN ACCESS EXCLUSIVE MODE"); return k; };
     // 1. poizvedba obvisi na zaklepu (statement_timeout 2 s steje tudi cakanje na zaklep) -> 57014 -> 503 + Retry-After, povezava se vrne
-    let kl = await zakleni();
+    kl = await zakleni();
     for (const pot of ["/admin/api/opozorila", "/admin/api/racuni", "/admin/api/danes"]) {
       const t0 = Date.now();
       const x = await api(PORT, pot, T.admin);
@@ -372,7 +374,7 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
       assert(x.status === 503 && x.body.error === "admin_busy" && x.glave.get("retry-after") === "5", `${pot}: poizvedba preseze 2 s -> 503 admin_busy + Retry-After 5`, [x.status, x.body, x.glave.get("retry-after")]);
       assert(dt >= 1800, `${pot}: 503 sele po statement_timeout (${dt} ms)`);
     }
-    await kl.query("ROLLBACK"); await kl.end();
+    await sprostiKl();
     await pocakaj(200);
     assert(await aktivne() === 0, "po 57014 ni odprte transakcije admin_nadzor (ROLLBACK, povezava vrnjena)");
     const povrnjeno = [];
@@ -385,33 +387,103 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
     let najvec = 0, videno = 0, tece = true;
     const vzorcevalec = (async () => { while (tece) { const n = await aktivne(); najvec = Math.max(najvec, n); if (n > 0) videno++; await pocakaj(15); } })();
     const poti = ["/admin/api/danes", "/admin/api/opozorila", "/admin/api/racuni", "/admin/api/racuni?stanje=caka", "/admin/api/summary", "/admin/api/opozorila"];
-    const odgovori = Promise.all(poti.map(pot => api(PORT, pot, T.admin)));
+    // allSettled: odgovori imajo handler od prvega trenutka (zavrnjen fetch med cakanjem ne postane unhandled rejection)
+    const odgovori = Promise.allSettled(poti.map(pot => api(PORT, pot, T.admin)));
     await pocakaj(700);
-    await kl.query("ROLLBACK"); await kl.end();
-    const izidi = await odgovori;
+    await sprostiKl();
+    const nastali = await odgovori;
     tece = false; await vzorcevalec;
+    assert(nastali.every(x => x.status === "fulfilled"), "semafor: noben od 6 klicev ni padel z izjemo", nastali.filter(x => x.status !== "fulfilled").map(x => String(x.reason)));
+    const izidi = nastali.filter(x => x.status === "fulfilled").map(x => x.value);
     assert(videno > 0, "vzorcevalec je videl povezavo admin_nadzor (preverba ni prazna)", videno);
     assert(najvec === 1, "semafor: v pg_stat_activity najvec ENA povezava admin_nadzor hkrati (6 vzporednih klicev)", najvec);
     assert(izidi.every(x => x.status === 200 || (x.status === 503 && x.body.error === "admin_busy")), "izidi: 200 ali 503 admin_busy", izidi.map(x => x.status));
     assert(izidi.filter(x => x.status === 200).length >= 3, "vsaj trije klici (summary in cakajoci po sprostitvi) uspejo", izidi.map(x => x.status));
     assert(await aktivne() === 0, "po koncu ni odprte transakcije admin_nadzor");
     // 3. cakajoci drugacen izracun: ce povezava ostane zasedena dlje kot 2 s, dobi 503 admin_busy + Retry-After (enota: lazen pool, ki nikoli ne odgovori)
-    {
+    const nic4 = () => null;
+    const lazniRes = () => { const r = { glave: {}, kod: null, telo: null, set(k, v) { r.glave[String(k).toLowerCase()] = v; return r; }, status(c) { r.kod = c; return r; }, json(b) { r.telo = b; return r; } }; return r; };
+    const lazniModul = (pool4, env) => {
       const rute = {};
+      const modul = ustvari({ pool: pool4, router: { get: (p, h) => { rute[p] = h; } }, SQL_TESTNO_NAROCILO: SQL_TESTNO, razlogNerazpolozljivosti: nic4, nacinPlacilaZ: nic4,
+        sqlKlubStripePripravljen: () => "NULL::boolean AS club_stripe_ready, NULL::jsonb AS club_seller_raw", VIP_OD_CENTOV: "NULL", odgovoriNaNapako: (res) => res.status(500).json({ error: "napaka" }), env });
+      return { modul, rute };
+    };
+    {
       const obesen = { connect: async () => ({ on() {}, off() {}, release() {}, query: () => new Promise(() => {}) }) };
-      const modul3 = ustvari({ pool: obesen, router: { get: (p, h) => { rute[p] = h; } }, SQL_TESTNO_NAROCILO: SQL_TESTNO, razlogNerazpolozljivosti: () => null, nacinPlacilaZ: () => null,
-        sqlKlubStripePripravljen: () => "NULL::boolean AS club_stripe_ready, NULL::jsonb AS club_seller_raw", VIP_OD_CENTOV: "NULL", odgovoriNaNapako: (res) => res.status(500).json({}), env: { ADMIN_NADZOR_PREDPOMNILNIK_MS: "0" } });
-      const lazniRes = () => { const r = { glave: {}, kod: null, telo: null, set(k, v) { r.glave[String(k).toLowerCase()] = v; return r; }, status(c) { r.kod = c; return r; }, json(b) { r.telo = b; return r; } }; return r; };
+      const { modul: modul3, rute } = lazniModul(obesen, { ADMIN_NADZOR_PREDPOMNILNIK_MS: "0" });
       assert(typeof modul3.rdeceStevilo === "function" && modul3.rdeceStevilo() === null, "rdeceStevilo() brez izracuna je null (ne sprozi izracuna, ne caka)");
-      void rute["/opozorila"]({ query: {} }, lazniRes());   // zasede edino povezavo in ne vrne nikoli
+      const r1 = lazniRes();
+      const prvi = rute["/opozorila"]({ query: {} }, r1);   // zasede edino povezavo; obvisi do odjemalskega roka (3 s)
       await pocakaj(50);
       const r2 = lazniRes(), t1 = Date.now();
       await rute["/racuni"]({ query: {} }, r2);
       const dt1 = Date.now() - t1;
-      assert(r2.kod === 503 && r2.telo.error === "admin_busy" && r2.glave["retry-after"] === "5" && dt1 >= 1800 && dt1 < 3500, "zaseden semafor: drugacen izracun po ~2 s dobi 503 admin_busy + Retry-After", [r2.kod, r2.telo, r2.glave, dt1]);
+      assert(r2.kod === 503 && r2.telo.error === "admin_busy" && r2.glave["retry-after"] === "5" && dt1 >= 1800 && dt1 < 2900, "zaseden semafor: drugacen izracun po ~2 s dobi 503 admin_busy + Retry-After", [r2.kod, r2.telo, r2.glave, dt1]);
+      assert(r2.telo.message === "The dashboard is busy, try again shortly.", "zaseden semafor: sporocilo »busy« (koda ostane admin_busy)", r2.telo);
       const r3 = lazniRes(), t2 = Date.now();
       await rute["/danes"]({ query: {} }, r3);
-      assert(r3.kod === 503 && r3.telo.error === "admin_busy" && Date.now() - t2 < 5500, "zaseden semafor: tudi /danes konca z 503 admin_busy (ne obvisi)", [r3.kod, Date.now() - t2]);
+      assert(r3.kod === 503 && r3.telo.error === "admin_busy" && Date.now() - t2 < 8000, "obvisela povezava: tudi /danes konca z 503 admin_busy v omejenem casu (ne obvisi)", [r3.kod, Date.now() - t2]);
+      await prvi;
+      assert(r1.kod === 503 && r1.telo.error === "admin_busy" && /timed out/.test(r1.telo.message), "obvisela poizvedba: 503 admin_busy z »timed out« (odjemalski rok)", [r1.kod, r1.telo]);
+    }
+
+    console.log("\n# Odjemalski rok obviselih povezav (S1): povezava zavrzena, semafor prost, predpomnilnik ne obstane");
+    {
+      // lazni pool z nacini: visi (query se nikoli ne konca), zdrav, release_vrze, napaka_sqlstate (baza odgovori s 57014; ROLLBACK uspe)
+      const dnevnik = { poizvedbe: [], release: [] };
+      let nacin = "visi";
+      const zdravOdgovor = (sql) => {
+        if (/SELECT id, order_id, created_at FROM racuni/.test(sql) || /FROM events JOIN clubs/.test(sql)) return { rows: [] };
+        return { rows: [{ n: 0, najstarejsi: null, vracila: 0, spori: 0, povrnitve: 0, stanje: "caka" }] };
+      };
+      const pool4 = { connect: async () => {
+        const moj = nacin;
+        return { on() {}, off() {},
+          release(e) { dnevnik.release.push(e === undefined ? false : e); if (moj === "release_vrze") throw new Error("release je padel"); },
+          query: (sql) => {
+            sql = String(sql); dnevnik.poizvedbe.push(sql.slice(0, 14));
+            if (moj === "visi") return new Promise(() => {});
+            if (moj === "napaka_sqlstate" && !/ROLLBACK/.test(sql)) return Promise.reject(Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" }));
+            return Promise.resolve(/^(BEGIN|COMMIT|ROLLBACK)/.test(sql) ? { rows: [] } : zdravOdgovor(sql));
+          } };
+      } };
+      const { rute } = lazniModul(pool4, { ADMIN_NADZOR_PREDPOMNILNIK_MS: "1000" });
+      const poklici = async (pot) => { const r = lazniRes(), t0 = Date.now(); await rute[pot]({ query: {} }, r); return { r, dt: Date.now() - t0 }; };
+
+      // a) polodprta povezava: 503 v roku (stavek 2 s + 1 s), povezava zavrzena (release(true)), brez ROLLBACK na mrtvi povezavi (N2)
+      let x = await poklici("/racuni");
+      assert(x.r.kod === 503 && x.r.telo.error === "admin_busy" && x.r.glave["retry-after"] === "5" && /timed out/.test(x.r.telo.message), "obvisela povezava: /racuni 503 admin_busy + Retry-After 5 + »timed out«", [x.r.kod, x.r.telo, x.r.glave]);
+      assert(x.dt >= 2800 && x.dt < 4500, `odjemalski rok = rok stavka + 1 s (${x.dt} ms)`);
+      assert(dnevnik.release.length === 1 && dnevnik.release[0] === true, "obvisela povezava: release(true) (povezava zavrzena, ne vrnjena v pool)", dnevnik.release);
+      assert(dnevnik.poizvedbe.length === 1 && !dnevnik.poizvedbe.some(q => /ROLLBACK/.test(q)), "obvisela povezava: ROLLBACK se ne poskusa (zavrzemo jo, kot skenBranje)", dnevnik.poizvedbe);
+      // b) semafor je prost: naslednji klic z zdravo povezavo takoj uspe
+      nacin = "zdrav";
+      x = await poklici("/racuni");
+      assert(x.r.kod === null && x.r.telo && x.r.telo.items && x.dt < 500, "po izteku roka semafor prost: naslednji klic (zdrava povezava) uspe takoj", [x.r.kod, x.r.telo, x.dt]);
+      // c) predpomnilnik: neuspel izracun ne obstane (ne Infinity, ne zavrnjena obljuba): takoj naslednji klic /opozorila uspe
+      nacin = "visi";
+      x = await poklici("/opozorila");
+      assert(x.r.kod === 503 && x.r.telo.error === "admin_busy" && x.dt < 4500, "obvisela povezava: /opozorila 503 v roku", [x.r.kod, x.dt]);
+      nacin = "zdrav";
+      x = await poklici("/opozorila");
+      assert(x.r.kod === null && Array.isArray(x.r.telo.items) && x.dt < 500, "predpomnilnik ne obstane z neuspelim izracunom: naslednji klic /opozorila uspe", [x.r.kod, x.dt]);
+      const dobljeno = x.r.telo;
+      nacin = "visi";   // uspesen izracun je predpomnjen: klic znotraj trajanja baze sploh ne potrebuje (tudi ce bi obvisela)
+      x = await poklici("/opozorila");
+      assert(x.r.kod === null && x.r.telo === dobljeno && x.dt < 200, "uspesen izracun je predpomnjen (obvisela baza ne vpliva znotraj trajanja)", [x.r.kod, x.dt]);
+      // d) N1: release vrze -> semafor je vseeno sproscen
+      nacin = "release_vrze";
+      x = await poklici("/racuni");
+      assert(x.r.kod === 500, "release vrze: klic konca z napako (ne obvisi)", [x.r.kod, x.r.telo]);
+      nacin = "zdrav";
+      x = await poklici("/racuni");
+      assert(x.r.kod === null && x.dt < 500, "release je vrgel: semafor je vseeno sproscen, naslednji klic uspe", [x.r.kod, x.dt]);
+      // e) napaka s SQLSTATE (57014): povezava je ziva -> ROLLBACK, release(false); sporocilo »timed out«
+      nacin = "napaka_sqlstate"; dnevnik.poizvedbe.length = 0; dnevnik.release.length = 0;
+      x = await poklici("/racuni");
+      assert(x.r.kod === 503 && /timed out/.test(x.r.telo.message), "57014: 503 admin_busy »timed out«", [x.r.kod, x.r.telo]);
+      assert(dnevnik.poizvedbe.some(q => /ROLLBACK/.test(q)) && dnevnik.release.length === 1 && dnevnik.release[0] === false, "napaka s SQLSTATE: ROLLBACK in povezava vrnjena v pool (release(false))", [dnevnik.poizvedbe, dnevnik.release]);
     }
 
     console.log("\n# Dnevnik streznika");
@@ -421,7 +493,8 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
   } catch (e) {
     fail++; console.log("  ✗ izjema:", e && e.stack || e);
   } finally {
-    for (const s of vsi) s.proc.kill();
+    await sprostiKl();
+    for (const s of vsi) { try { s.proc.kill(); } catch (_) {} }
     jwksServer.close();
     await brezSprozilcev.end().catch(() => {});
     await pool.end().catch(() => {});

@@ -433,10 +433,10 @@ function ubezi(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&am
 function datum(s) { if (!s) return "—"; const d = new Date(s); return d.toLocaleString("sl-SI", { dateStyle: "short", timeStyle: "short" }); }
 function evri(c) { return c === null || c === undefined ? "—" : (c / 100).toFixed(2).replace(".", ",") + " €"; }
 
-async function klic(metoda, pot, telo, ponovno = true) {
+async function klic(metoda, pot, telo, ponovno = true, signal) {   // signal: neobvezen AbortSignal (rok klica; danes.js)
   const glave = { "Content-Type": "application/json" };
   if (seja.token) glave.Authorization = "Bearer " + seja.token;
-  const r = await fetch(API + pot, { method: metoda, headers: glave, body: telo === undefined ? undefined : JSON.stringify(telo) });
+  const r = await fetch(API + pot, { method: metoda, headers: glave, body: telo === undefined ? undefined : JSON.stringify(telo), signal });
   if (r.status === 401 && ponovno && seja.refresh) {
     const bil = seja.refresh;
     try { await osveziSejo(); }
@@ -444,11 +444,11 @@ async function klic(metoda, pot, telo, ponovno = true) {
       // drug zavihek je morda že osvežil (osveževalni žeton se je zamenjal): poskusi z njegovim.
       // Ob zavrnitvi mu damo 400 ms, da nov žeton res zapiše v hrambo (tekma dveh zavihkov).
       if (zavrnjenaOsvezitev(e)) await new Promise(r => setTimeout(r, 400));
-      if (seja.refresh && seja.refresh !== bil) return klic(metoda, pot, telo, false);
+      if (seja.refresh && seja.refresh !== bil) return klic(metoda, pot, telo, false, signal);
       if (!zavrnjenaOsvezitev(e)) throw new Error(`Osvežitev seje ni uspela (${e.status ? "strežnik: " + e.status : "omrežje"}). Poskusi znova.`);
       odjava("Seja je potekla. Prijavi se znova."); throw new Error("Seja je potekla.");
     }
-    return klic(metoda, pot, telo, false);
+    return klic(metoda, pot, telo, false, signal);
   }
   const bes = await r.text();
   let podatki = bes; try { podatki = JSON.parse(bes); } catch (_) {}

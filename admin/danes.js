@@ -5,7 +5,7 @@
 // XSS: podatki v DOM SAMO prek h() / textContent; brez innerHTML z nizi in brez inline-atributov (onclick-nizov) (test_admin_xss.js preverja tudi ta modul).
 (function () {
   "use strict";
-  const OSVEZI_MS = 20000, PREMOR_503_MS = 60000, NAJMANJ_MED_KLICI_MS = 3000;
+  const OSVEZI_MS = 20000, PREMOR_503_MS = 60000, NAJMANJ_MED_KLICI_MS = 3000, ROK_KLICA_MS = 15000;
   let podatki = null, zastarelo = false, sporocilo = "", zadnjiUspeh = 0, pavzaDo = 0, vTeku = false, casovnik = null;
 
   const cele = (n) => (Number.isSafeInteger(Number(n)) ? Number(n) : 0);
@@ -88,17 +88,26 @@
     if (!vidno()) { planiraj(OSVEZI_MS); return; }   // zavihek brskalnika ali panela ni viden: ne klici streznika
     osvezi(false);
   }
+  // Rok klica: brez njega obvisel zahtevek (polodprta povezava, strezniku nic ne odgovori) drzi vTeku=true za vedno in osvezevanje se tiho ustavi.
+  // Ob izteku fetch zavrze AbortSignal (TimeoutError), finally spodaj ponastavi vTeku, narisi() pokaze »podatki zastareli«, casovnik tece naprej.
+  function rokKlica() {
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") return AbortSignal.timeout(ROK_KLICA_MS);
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), ROK_KLICA_MS);
+    return ctrl.signal;
+  }
   async function osvezi(sila) {
     if (vTeku) return;
     if (!sila && Date.now() < pavzaDo) { planiraj(pavzaDo - Date.now() + 50); return; }   // veriga osvezevanja se ne sme ugasniti
     vTeku = true;
     let naslednji = OSVEZI_MS;
     try {
-      podatki = await klic("GET", "/admin/api/danes");
+      podatki = await klic("GET", "/admin/api/danes", undefined, true, rokKlica());
       zastarelo = false; sporocilo = ""; zadnjiUspeh = Date.now(); pavzaDo = 0;
     } catch (e) {
       zastarelo = true;
       if (e && e.status === 503) { naslednji = PREMOR_503_MS; pavzaDo = Date.now() + PREMOR_503_MS; sporocilo = "Strežnik je zaseden: nadzorna plošča se ne osvežuje 60 s. Prikazani so zadnji znani podatki."; }
+      else if (e && (e.name === "TimeoutError" || e.name === "AbortError")) sporocilo = "Strežnik ni odgovoril v " + (ROK_KLICA_MS / 1000) + " s. Prikazani so zadnji znani podatki.";
       else sporocilo = "Osveževanje ni uspelo: " + ((e && e.message) || "napaka");
     } finally {
       vTeku = false;
