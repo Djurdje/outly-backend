@@ -19,6 +19,7 @@ const NAJVEC_ZNAKOV_NAPAKE = 300;
 const NAJVEC_VRSTIC_NAPAKA = 100;     // racunov v stanju napaka, ki jih opozorila naštejejo posamično (stevci vedno stejejo vse)
 const NAJVEC_OPOZORIL = 500;          // zgornja meja odgovora (stevci stejejo vse)
 const OKNO_PLAKATA_DNI = 14;
+const ZAMUDA_OBJAVE_MS = 3 * 60 * 1000;   // osnutek z minulim publish_at toliko casa po roku ni objavljen -> rdece opozorilo (delavec teče vsako minuto, samodejna_objava.js)
 const STANJA_RACUNOV = ["caka", "izdan", "potrjen", "napaka", "preklican"];
 const RESNOST_VRSTNI_RED = { rdece: 0, oranzno: 1, rumeno: 2 };
 
@@ -192,7 +193,7 @@ function ustvari(dep) {
       // 2. dogodki (skriti klubi izpuščeni); stolpci in izracun placilnega nacina so isti kot v javnem GET /events (razlogNerazpolozljivosti)
       const dogodki = (await c.query(
         `SELECT events.id, left(events.title, 80) AS title, events.status, events.start_at, events.end_at, left(events.poster_url, 1) AS poster_url, events.ticket_price_cents, left(events.ticket_url, 1) AS ticket_url,
-                events.capacity, events.sales_paused, left(c.name, 60) AS club_name, c.is_demo AS club_is_demo,
+                events.capacity, events.sales_paused, events.publish_at, left(c.name, 60) AS club_name, c.is_demo AS club_is_demo,
                 ${VIP_OD_CENTOV} AS vip_from_cents, ${sqlKlubStripePripravljen()}
            FROM events JOIN clubs c ON c.id = events.club_id
           WHERE CASE WHEN $1::int IS NULL
@@ -208,6 +209,13 @@ function ustvari(dep) {
         const vip = e.vip_from_cents === null || e.vip_from_cents === undefined ? null : Number(e.vip_from_cents);
         if (e.poster_url === "" && zacetek > zdaj && zacetek <= zdaj + OKNO_PLAKATA_DNI * 864e5) {
           dodaj("brez_plakata", "oranzno", "dogodek", e.id, `${ime}: brez plakata, začetek v manj kot ${OKNO_PLAKATA_DNI} dneh${objavljen ? "" : " (osnutek)"}.`, e.start_at);
+        }
+        // Samodejna objava (#327, 061, I59), ki je ni bilo: delavec je osnutek pustil (rdeca ovira pred objavo, dogodek se je ze zacel, pregled ni uspel) ali ne tece.
+        // Samo v splosnem seznamu: pregled ENEGA dogodka (»Pred objavo«) ne sme dobiti rdeca vrstica, ki bi sama blokirala rocno objavo.
+        if (!objavljen && dogodekId === null && e.publish_at && new Date(e.publish_at).getTime() <= zdaj - ZAMUDA_OBJAVE_MS) {
+          const ob = new Date(e.publish_at).toLocaleString("sl-SI", { timeZone: "Europe/Ljubljana", dateStyle: "short", timeStyle: "short" });
+          dodaj("objava_zamujena", "rdece", "dogodek", e.id,
+            `${ime}: samodejna objava ob ${ob} ni uspela, dogodek je ostal osnutek (rdeča ovira pred objavo, dogodek se je že začel ali pregled ni uspel). Odpri dogodek, preveri »Pred objavo« in objavi ročno ali izbriši čas objave.`, e.publish_at);
         }
         if (!objavljen && dogodekId === null) continue;   // pregled enega dogodka (#328) preveri tudi osnutek: kaj bi veljalo ob objavi
         if (e.sales_paused === true) dodaj("prodaja_ustavljena", "oranzno", "dogodek", e.id, `${ime}: prodaja je ustavljena.`, e.start_at);
@@ -431,7 +439,13 @@ function ustvari(dep) {
       odgovoriNapaka,
     };
   }
-  return { opozorila, danes, danesNaCas: izracunajDanes, rdeceStevilo, racuni: racuniSeznam, zaAgenta };
+  // Za delavca samodejne objave (samodejna_objava.js, #327): ISTI izracun »Pred objavo« za en dogodek (GET /opozorila?dogodek=ID) prek LASTNEGA bralca (brez admin semaforja:
+  // delavec ne caka na ploscho in ona ne nanj; delavec dela zaporedno, torej najvec ena povezava). Ne gre v predpomnilnik in ne v »zadnji rdeci«.
+  function zaDelavca() {
+    const beriDelavec = ustvariBralca(brezSemaforja, () => {}, "samodejna_objava");
+    return { opozorilaDogodka: (id) => izracunajOpozorila(id, beriDelavec) };
+  }
+  return { opozorila, danes, danesNaCas: izracunajDanes, rdeceStevilo, racuni: racuniSeznam, zaAgenta, zaDelavca };
 }
 
 module.exports = { ustvari, ociscenaNapaka, prodajnoStanje, STANJA_RACUNOV };

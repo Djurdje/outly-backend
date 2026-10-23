@@ -831,6 +831,24 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     assert(nv.objavaBlokirana(13) === false && $8("dge_razsiritve").children.length === 0, "nov-dogodek.js: objavljen dogodek nima bloka Pred objavo in ni blokiran");
     assert(najdi($8("dge_gumbi"), e => idje(e, "dge_podvoji")).length >= 2, "nov-dogodek.js: gumb Podvoji pri vsakem odprtju urejevalnika (dogodki.js ustvari nov vsebnik)");
 
+    // samodejna objava (#327, 061): nacrtovani cas v bloku »Pred objavo« je besedilo (ljubljanski cas), brez elementov iz podatkov; brez casa bloka ni
+    odg8 = { "/admin/api/opozorila?dogodek=": { telo: { items: [], stevci: { rdece: 0, oranzno: 0, rumeno: 0 } } } };
+    nv.zaUrejevalnik({ event: { id: 16, status: "draft", title: ZLO8[0], start_at: "2030-06-01T10:00:00Z", publish_at: "2030-05-01T10:30:00Z" } }); await new Promise(r => setImmediate(r));
+    const nacrt = najdi($8("dge_razsiritve"), e => idje(e, "dge_objava_nacrt"));
+    assert(nacrt.length === 1 && nacrt[0].textContent.includes("Samodejna objava ob") && nacrt[0].textContent.includes("ljubljanski čas") && /12[.:]30/.test(nacrt[0].textContent),
+      "nov-dogodek.js: osnutek z nacrtovano objavo: vrstica »Samodejna objava ob … (ljubljanski čas)« (10:30 UTC = 12:30 poleti)", nacrt[0] && nacrt[0].textContent);
+    const prN = pregled($8("dge_razsiritve"));
+    assert(prN.elementi.every(t => DOV8.has(t)) && brezOn(prN), "nov-dogodek.js: blok z nacrtovano objavo nima elementov iz podatkov in on* atributov", [...new Set(prN.elementi)]);
+    nv.zaUrejevalnik({ event: { id: 17, status: "draft", title: "x", start_at: "2030-06-01T10:00:00Z", publish_at: ZLO8[0] } }); await new Promise(r => setImmediate(r));
+    const nacrtZlo = najdi($8("dge_razsiritve"), e => idje(e, "dge_objava_nacrt"));
+    assert(nacrtZlo.length === 1 && !nacrtZlo[0].textContent.includes("<img") && pregled($8("dge_razsiritve")).elementi.every(t => DOV8.has(t)), "nov-dogodek.js: neveljaven publish_at (niz z oznako) ne konča kot oznaka", nacrtZlo[0] && nacrtZlo[0].textContent);
+    nv.zaUrejevalnik({ event: { id: 18, status: "draft", title: "x", start_at: "2030-06-01T10:00:00Z" } }); await new Promise(r => setImmediate(r));
+    assert(najdi($8("dge_razsiritve"), e => idje(e, "dge_objava_nacrt")).length === 0, "nov-dogodek.js: osnutek brez nacrtovane objave nima vrstice o samodejni objavi");
+    const dogSrc = fs.readFileSync(path.join(__dirname, "..", "admin", "dogodki.js"), "utf8");
+    assert(dogSrc.includes('"Objavi samodejno ob"') && dogSrc.includes("dge_publishAt") && dogSrc.includes("publishAt") && dogSrc.includes("objava ob ") && dogSrc.includes("event.publish_auto") && dogSrc.includes('e.status === "draft" ? polje("dge_publishAt"'),
+      "dogodki.js: polje »Objavi samodejno ob« (samo osnutek), PATCH publishAt, seznam »objava ob …«, dnevnik event.publish_auto");
+    assert(dogSrc.includes('timeZone: "Europe/Ljubljana"'), "dogodki.js: cas samodejne objave se pokaze po ljubljanskem casu");
+
     // podvoji: rezultat s povezavami samo na #/dogodki/<stevilo>, naslovi kot besedilo
     el8.dge_razsiritve = new El8("div");
     odg8 = { "/admin/api/events/12/duplicate": { metoda: "POST", telo: { events: [{ id: 41, title: ZLO8[0], start_at: "2030-02-01T10:00:00Z", status: "draft" }, { id: "3<script>", title: ZLO8[1], start_at: "2030-02-08T10:00:00Z", status: "draft" }] } } };
