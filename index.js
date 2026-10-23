@@ -3115,6 +3115,14 @@ async function zapisiAdminDejanje(c, req, dejanje, ciljTip, ciljId, prej, potem,
     [req.user.userId === undefined ? null : req.user.userId, dejanje, ciljTip, String(ciljId), prej === null || prej === undefined ? null : JSON.stringify(prej),
      potem === null || potem === undefined ? null : JSON.stringify(potem), razlog || (nujno ? pr.razlogNujno : null) || null, pr ? pr.agentZetonId : null, pr ? pr.id : null, nujno]);
 }
+// Navaden uporabnik postane business (odobritev prosnje, nov klub, prenos lastnistva): ISTA transakcija kot UPDATE, vrstica `user.role` brez e-naslova (U3, #328).
+async function postaniBusiness(c, req, uporabnik, razlog) {
+  if (!uporabnik || uporabnik.role !== "user") return;
+  // WHERE role='user': soCasen PATCH vloge (npr. na admin) ne sme biti tiho znizan; vrstica v dnevniku samo, ce je vloga res bila user.
+  const r = await c.query("UPDATE users SET role='business' WHERE id=$1 AND role='user' RETURNING id", [uporabnik.id]);
+  if (r.rowCount !== 1) return;
+  await zapisiAdminDejanje(c, req, "user.role", "user", uporabnik.id, { role: "user" }, { role: "business" }, razlog);
+}
 // Primerljiva vrednost za dnevnik (Date -> ISO, NUMERIC/BIGINT niz ostane niz).
 const vrednostDnevnika = (v) => (v instanceof Date ? v.toISOString() : v === undefined ? null : v);
 // {prej, potem} samo za polja, ki so se res spremenila; null, ce se ni nic.
@@ -3758,7 +3766,7 @@ admin.post("/creator-applications/:id/approve", async (req, res) => {
     }
 
     // Admin ostane admin (requireRole admina povsod spusti); navaden uporabnik postane business.
-    if (u.role === "user") await c.query("UPDATE users SET role='business' WHERE id=$1", [u.id]);
+    await postaniBusiness(c, req, u, `Odobritev prosnje ${id}`);
 
     const kr = await c.query(
       `INSERT INTO clubs (owner_user_id, name, address, city, contact_email, contact_phone)
@@ -3941,7 +3949,7 @@ admin.post("/clubs", async (req, res) => {
       await c.query("ROLLBACK");
       return res.status(409).send(`User ${u.email} already owns club "${ima.rows[0].name}" (id ${ima.rows[0].id}). One club per business account.`);
     }
-    if (u.role === "user") await c.query("UPDATE users SET role='business' WHERE id=$1", [u.id]);
+    await postaniBusiness(c, req, u, "Nov klub");
 
     const stolpci = ["owner_user_id", ...Object.keys(pk.polja)];
     const vrednosti = [u.id, ...Object.values(pk.polja)];
@@ -3991,7 +3999,7 @@ admin.patch("/clubs/:id", async (req, res) => {
       if (l.uporabnik.id !== obstaja.rows[0].owner_user_id) {
         const ima = await c.query("SELECT id FROM clubs WHERE owner_user_id=$1 AND id<>$2 LIMIT 1", [l.uporabnik.id, id]);
         if (ima.rows.length > 0) { await c.query("ROLLBACK"); return res.status(409).send(`User ${l.uporabnik.email} already owns another club.`); }
-        if (l.uporabnik.role === "user") await c.query("UPDATE users SET role='business' WHERE id=$1", [l.uporabnik.id]);
+        await postaniBusiness(c, req, l.uporabnik, `Prenos lastnistva kluba ${id}`);
         polja.owner_user_id = l.uporabnik.id;
       }
     }

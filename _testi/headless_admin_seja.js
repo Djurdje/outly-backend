@@ -111,7 +111,7 @@ async function vpisi(page, origin, zapomni) {
   const strezi = http.createServer((req, res) => {
     if (req.url === "/admin/" || req.url.startsWith("/admin/index.html")) { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); return res.end(STRAN); }
     // Moduli panela (DECISIONS 21. 10. 2026: vec datotek): dialog.js, dogodki.js, dogodki.css iz mape admin/.
-    const mod = /^\/admin\/([a-z_]+\.(js|css))$/.exec(req.url.split("?")[0]);
+    const mod = /^\/admin\/([a-z_-]+\.(js|css))$/.exec(req.url.split("?")[0]);
     if (mod && fs.existsSync(path.join(__dirname, "..", "admin", mod[1]))) {
       res.writeHead(200, { "content-type": mod[2] === "js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8" });
       return res.end(fs.readFileSync(path.join(__dirname, "..", "admin", mod[1])));
