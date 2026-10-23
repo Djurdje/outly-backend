@@ -171,7 +171,7 @@ let srv = null, log = "";
     r = await api("PATCH", `/events/${E}`, T.admin, { salesOpenAt: ure(2), salesCloseAt: ure(1) });
     assert(r.status === 400 && r.body.error === "invalid_sales_window", "admin: obrnjeno okno -> 400 invalid_sales_window", r);
     for (const [ime, vrednost] of [["niz brez casa", "danes"], ["samo datum", "2030-01-01"], ["cas brez obmocja", "2030-01-01T10:00:00"], ["stevilo", 1893456000000],
-      ["prazen niz", ""], ["nesmiselen datum", "2030-13-45T10:00:00Z"], ["boolean", true], ["objekt", {}]]) {
+      ["prazen niz", ""], ["nesmiselen datum", "2030-13-45T10:00:00Z"], ["31. februar", "2026-02-31T10:00Z"], ["29. februar v navadnem letu", "2027-02-29T10:00:00Z"], ["leto 0001", "0001-01-01T00:00:00Z"], ["leto 0000", "0000-06-01T00:00:00Z"], ["leto 2101", "2101-01-01T00:00:00Z"], ["ura 24", "2030-01-01T24:00:00Z"], ["boolean", true], ["objekt", {}]]) {
       r = await api("PATCH", `/events/${E}`, T.lastnik, { salesCloseAt: vrednost });
       assert(r.status === 400 && !(r.body && r.body.error === "invalid_sales_window"), `salesCloseAt: ${ime} -> 400`, r);
       r = await api("PATCH", `/events/${E}`, T.lastnik, { salesOpenAt: vrednost });
@@ -186,6 +186,8 @@ let srv = null, log = "";
     const dvaH = ure(2);
     r = await api("PATCH", `/events/${E}`, T.lastnik, { sales_close_at: dvaH });
     assert(r.status === 200 && new Date(r.body.sales_close_at).getTime() === new Date(dvaH).getTime(), "sales_close_at (snake_case) deluje; zapre brez odprtja je veljavno", r.body);
+    r = await api("PATCH", `/events/${E}`, T.lastnik, { salesCloseAt: "2028-02-29T10:00:00+01:00" });
+    assert(r.status === 200 && r.body.sales_close_at === "2028-02-29T09:00:00.000Z", "29. 2. v prestopnem letu z odmikom +01:00 -> 200, shranjeno v UTC", r.body);
     r = await api("PATCH", `/events/${E}`, T.lastnik, { salesOpenAt: null, salesCloseAt: null });
     assert(r.status === 200 && r.body.sales_open_at === null && r.body.sales_close_at === null, "obe null -> brez omejitve", r.body);
     assert(JSON.stringify(await okno()) === JSON.stringify({ od: null, do: null }), "baza: obe polji NULL", await okno());

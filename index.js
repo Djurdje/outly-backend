@@ -3219,7 +3219,11 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
       const oknoV = b[camel] !== undefined ? b[camel] : b[stolpec];
       if (oknoV === undefined) continue;
       if (oknoV !== null) {
-        const cas = typeof oknoV === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})$/i.test(oknoV) ? new Date(oknoV) : null;
+        // Komponente morajo biti prave (V8 bi 31. 2. tiho premaknil v marec); leto 2000-2100 (leto 0000/0001 je za Postgres napaka 22008 -> bi bilo 500).
+        const m = typeof oknoV === "string" ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})$/i.exec(oknoV) : null;
+        const [ll, me, dn, ur, mi, se] = m ? [m[1], m[2], m[3], m[4], m[5], m[6] || "0"].map(Number) : [];
+        const prav = !!m && ll >= 2000 && ll <= 2100 && me >= 1 && me <= 12 && dn >= 1 && dn <= new Date(Date.UTC(ll, me, 0)).getUTCDate() && ur <= 23 && mi <= 59 && se <= 59;
+        const cas = prav ? new Date(oknoV) : null;
         if (!cas || !Number.isFinite(cas.getTime())) return res.status(400).send(`${camel} must be an ISO date-time with a time zone, or null.`);
         dovoljeno[stolpec] = cas.toISOString();
       } else dovoljeno[stolpec] = null;

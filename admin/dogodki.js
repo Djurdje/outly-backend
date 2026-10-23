@@ -261,6 +261,19 @@
     await odpri(cele(e.id));
   }
 
+  // Opozorila (ne zavrnitev) za okno prodaje glede na zacetek dogodka: prodaja se ob zacetku vedno zapre (napakaProdaje).
+  function opozorilaOkna(seznamS) {
+    const ima = (k) => seznamS.some(([x]) => x === k);
+    const zac = izLokalnega($("dge_start").value), t0 = zac ? new Date(zac).getTime() : NaN;
+    const od = izLokalnega($("dge_salesOpen").value), doo = izLokalnega($("dge_salesClose").value);
+    const o = [];
+    if (ima("sales_open_at") && od && Number.isFinite(t0) && new Date(od).getTime() >= t0)
+      o.push(h("p", { class: "opozorilo" }, "Pozor: »Prodaja od« je po začetku dogodka. Prodaja se ob začetku zapre, zato se nikoli ne bo odprla."));
+    if (ima("sales_close_at") && doo && Number.isFinite(t0) && new Date(doo).getTime() > t0)
+      o.push(h("p", { class: "opozorilo" }, "Opozorilo: »Prodaja do« je po začetku dogodka. To nima učinka, prodaja se ob začetku zapre sama."));
+    return o;
+  }
+
   async function shrani() {
     const { telo, seznamS } = spremembe();
     if (!seznamS.length) return;
@@ -279,6 +292,7 @@
       const brezCene = "ticketPriceCents" in telo && telo.ticketPriceCents === null;
       const ok = await potrdi({ naslov: "Shranim spremembe?", potrdiBesedilo: "Shrani", nevarno: brezCene,
         vsebina: [prejPotem(seznamS),
+          ...opozorilaOkna(seznamS),
           brezCene ? h("p", {}, "Prazna cena pomeni, da dogodek nima več vstopnic na Outlyju. Za začasno ustavitev raje uporabi stikalo »Ustavi prodajo«.") : null,
           seznamS.some(([k]) => k === "ticket_price_cents") && !brezCene ? h("p", {}, "Nova cena velja za nove nakupe. Kdor ima odprto plačilo, plača ceno, ki jo je videl.") : null] });
       if (!ok) return;
