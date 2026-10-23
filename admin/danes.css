@@ -1,4 +1,4 @@
-/* Admin panel: nadzorna plosca »Danes« (admin/danes.js) in zavihek »Opozorila« (admin/opozorila.js), #326, 23. 10. 2026.
+/* Admin panel: nadzorna plosca »Danes« (admin/danes.js), zavihek »Opozorila« (admin/opozorila.js), #326, in zavihek »Agent« (admin/agent.js), #330, 23. 10. 2026.
    Isti zetoni kot index.html (--bg, --panel, --ink ...); svetla tema sledi sistemski nastavitvi (kot dogodki.css). Brez ogrodja in brez gradnje. */
 :root { --rumena:#E3C547; --rumena-soft:#2A2610 }
 @media (prefers-color-scheme: light) { :root { --rumena:#8A6D00; --rumena-soft:#F7F0CF } }
@@ -41,7 +41,19 @@ a.op-vrstica:hover, a.op-vrstica:focus-visible { background:var(--panel2); outli
 .rc-polja small { display:block; font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--faint) }
 .rc-napaka { margin-top:8px; padding:8px 10px; border-radius:6px; background:var(--napaka-soft); color:var(--napaka); font-size:12.5px; overflow-wrap:anywhere; white-space:pre-wrap }
 
+/* --- Agent (zetoni) --- */
+.ag-nov { margin:0 0 14px; padding:12px 14px; border:1px solid var(--ok); border-left-width:3px; border-radius:8px; background:var(--panel2); display:flex; flex-direction:column; gap:10px }
+.ag-nov p { margin:0; font-size:12.5px; color:var(--muted) }
+.ag-vrstica { display:flex; gap:8px; align-items:stretch; flex-wrap:wrap }
+.ag-zeton { flex:1 1 260px; min-width:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px }
+.ag-obrazec { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin:0 0 14px }
+.ag-obrazec label { display:flex; flex-direction:column; gap:4px; min-width:0 }
+.ag-obrazec label small { font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--faint) }
+.ag-obrazec input { width:220px; max-width:100% }
+
 @media (max-width: 640px) {
+  .ag-obrazec { flex-direction:column; align-items:stretch }
+  .ag-obrazec input { width:100% }
   .dn-kartice { grid-template-columns:repeat(2,minmax(0,1fr)) }
   .stevilka b { font-size:22px }
   .dn-nocoj-seznam { grid-template-columns:minmax(0,1fr) }

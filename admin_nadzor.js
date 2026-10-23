@@ -284,25 +284,34 @@ function ustvari(dep) {
   // =====================================================================================================================
   // RACUNI (davcno potrjeni racuni lastnih dogodkov, I52): seznam po stanju, brez kupca
   // =====================================================================================================================
+  // Skupna logika za admin pot in /agent/api/racuni (agent_api.js): isti izracun, ista omejitev (ena povezava, READ ONLY, rok 2 s), brez kupca.
+  // Vrne { stevci, limit, items }; neveljavno stanje je napaka s kodo NEVELJAVNO_STANJE (klicatelj odgovori 400).
+  async function racuniSeznam(stanjeVhod, limitVhod) {
+    const stanje = stanjeVhod === undefined || stanjeVhod === null ? null : String(stanjeVhod);
+    if (stanje !== null && !STANJA_RACUNOV.includes(stanje)) throw Object.assign(new Error("stanje must be one of: " + STANJA_RACUNOV.join(", ") + "."), { code: "NEVELJAVNO_STANJE" });
+    const limit = Math.min(Math.max(Number.parseInt(limitVhod, 10) || 50, 1), 200);
+    const r = await beriReadOnly(async (c) => {
+      const stevila = await c.query("SELECT stanje, COUNT(*)::int AS n FROM racuni GROUP BY stanje");
+      const vrstice = await c.query(
+        `SELECT id, order_id, vrsta, stanje, znesek_cents, valuta, stevilka, ponudnik_stevilka, izdan_at, potrjen_at, poskusi,
+                left(zadnja_napaka, 2000) AS zadnja_napaka, created_at
+           FROM racuni WHERE ($1::text IS NULL OR stanje = $1) ORDER BY id DESC LIMIT $2`, [stanje, limit]);
+      return { stevila, vrstice };
+    });
+    const stevci = Object.fromEntries(STANJA_RACUNOV.map((x) => [x, 0]));
+    for (const x of r.stevila.rows) stevci[x.stanje] = x.n;
+    const items = r.vrstice.rows.map((x) => ({ ...x, valuta: String(x.valuta).trim(), zadnja_napaka: ociscenaNapaka(x.zadnja_napaka) }));
+    return { stevci, limit, items };
+  }
+
   router.get("/racuni", async (req, res) => {
     try {
       res.set("Cache-Control", "no-store");
-      const stanje = req.query.stanje === undefined ? null : String(req.query.stanje);
-      if (stanje !== null && !STANJA_RACUNOV.includes(stanje)) return res.status(400).send("stanje must be one of: " + STANJA_RACUNOV.join(", ") + ".");
-      const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
-      const r = await beriReadOnly(async (c) => {
-        const stevila = await c.query("SELECT stanje, COUNT(*)::int AS n FROM racuni GROUP BY stanje");
-        const vrstice = await c.query(
-          `SELECT id, order_id, vrsta, stanje, znesek_cents, valuta, stevilka, ponudnik_stevilka, izdan_at, potrjen_at, poskusi,
-                  left(zadnja_napaka, 2000) AS zadnja_napaka, created_at
-             FROM racuni WHERE ($1::text IS NULL OR stanje = $1) ORDER BY id DESC LIMIT $2`, [stanje, limit]);
-        return { stevila, vrstice };
-      });
-      const stevci = Object.fromEntries(STANJA_RACUNOV.map((x) => [x, 0]));
-      for (const x of r.stevila.rows) stevci[x.stanje] = x.n;
-      const items = r.vrstice.rows.map((x) => ({ ...x, valuta: String(x.valuta).trim(), zadnja_napaka: ociscenaNapaka(x.zadnja_napaka) }));
-      return res.json({ stevci, limit, items });
-    } catch (e) { return odgovoriNapaka(res, e, "GET /admin/api/racuni"); }
+      return res.json(await racuniSeznam(req.query.stanje, req.query.limit));
+    } catch (e) {
+      if (e && e.code === "NEVELJAVNO_STANJE") return res.status(400).send(e.message);
+      return odgovoriNapaka(res, e, "GET /admin/api/racuni");
+    }
   });
 
   // =====================================================================================================================
@@ -387,7 +396,8 @@ function ustvari(dep) {
     } catch (e) { return odgovoriNapaka(res, e, "GET /admin/api/danes"); }
   });
 
-  return { opozorila, danes, danesNaCas: izracunajDanes, rdeceStevilo };
+  // beriReadOnly in odgovoriNapaka sta izvozena za agent_api.js (#330): agent bere prek ISTEGA semaforja (ena povezava glavnega poola za vse nadzorne poti).
+  return { opozorila, danes, danesNaCas: izracunajDanes, rdeceStevilo, racuni: racuniSeznam, beriReadOnly, odgovoriNapaka };
 }
 
 module.exports = { ustvari, ociscenaNapaka, prodajnoStanje, STANJA_RACUNOV };
