@@ -17,6 +17,9 @@
  *  M6  napaka enega ne ustavi ostalih; transakcija na dogodek: sprozilec zavrne vpis v dnevnik za en dogodek -> ta ni spremenjen, ostali so
  *  M7  Stripe: 50 dogodkov hkrati v pavzi -> zapiranje sej nikoli ne preseze PAVZA_STRIPE_SKUPAJ hkratnih klicev (meja na proces, ne na dogodek); vse seje zaprte
  *  M8  zaklepi: dogodek z zaklepom vrstice (druga seja) -> 503 event_busy v mejah lock_timeout, ostali uspejo; sken ni blokiran z zaklepom dogodka
+ *  M11 posamicna pavza NE caka za mnozicno (procesna meja Stripa velja samo za mnozicno pot): seja posamicnega dogodka se zapre hitro, medtem ko mnozicna se tece
+ *  M12 prestavitev in nakup: nakup, ki ze drzi vrstico dogodka (vstavljeno narocilo), prestavitev ustavi -> has_sales, dogodek nespremenjen (cakanje na zaklep prek pg_stat_activity)
+ *  M13 proracun klica: z ADMIN_MNOZICNO_PRORACUN_MS=1 je obdelan prvi dogodek, ostali not_processed (503), nespremenjeni; razlog PATCH »Med osnutke« se reze po znakih Unicode
  *  M9  izvorna koda: admin_mnozicno.js brez skenPool, brez poti odpovedi/brisanja, brez Promise.all
  *  M10 omejevalnik: 10 klicev na minuto na admina, 11. -> 429 (zadnji del testa)
  */
@@ -284,7 +287,7 @@ let srv = null, log = "";
     await slabo("razlog samo presledki", { ...veljaven, razlog: "     " }, "invalid_reason");
     await slabo("razlog 501 znakov", { ...veljaven, razlog: "x".repeat(501) }, "invalid_reason");
     await slabo("razlog ni niz", { ...veljaven, razlog: 12345 }, "invalid_reason");
-    for (const [ime, z] of [["bidi override U+202E", "ok ‮ gnp.exe"], ["nicelna sirina U+200B", "ok​ok"], ["BOM U+FEFF", "﻿razlog"], ["mehki vezaj U+00AD", "raz­log"], ["kontrolni znak", "raz\u0007log"], ["nova vrstica", "vrstica 1\nvrstica 2"]]) {
+    for (const [ime, z] of [["bidi override U+202E", "ok ‮ gnp.exe"], ["nicelna sirina U+200B", "ok​ok"], ["BOM U+FEFF", "﻿razlog"], ["mehki vezaj U+00AD", "raz­log"], ["kontrolni znak", "raz\u0007log"], ["nova vrstica", "vrstica 1\nvrstica 2"], ["kontrolni znak na robu (pred trim)", "\nrazlog\u0007"], ["vodilna nova vrstica (surov niz)", "\nrazlog"]]) {
       await slabo(`razlog z ${ime}`, { ...veljaven, razlog: z }, "invalid_reason");
     }
     for (const z of [0, 1.5, "60", 43201, -43201, null]) await slabo(`reschedule z zamik_min ${JSON.stringify(z)}`, { ids: [R2], dejanje: "reschedule", zamik_min: z, razlog: RAZLOG }, "invalid_shift");
@@ -375,6 +378,65 @@ let srv = null, log = "";
     await lock.query("ROLLBACK");
     r = await bulk(T.admin, { ids: [Z1, Z2], dejanje: "pause", razlog: RAZLOG });
     assert(r.body.results.every(x => x.ok === true), "po sprostitvi zaklepa isti dogodki uspejo (nic ni obviselo)", r.body);
+
+
+    // ---------------- M11: posamicna pavza ne caka za mnozicno ----------------
+    console.log("\n# M11: posamicna pavza med mnozicno");
+    const vrstaPending = async (naslov, i, pref) => {
+      const e = await dogodek(naslov, { capacity: 10 });
+      const sid = "cs_test_" + pref + i;
+      S.seje[sid] = { id: sid, object: "checkout.session", status: "open", payment_status: "unpaid", livemode: false };
+      await pool.query(`INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, status, buyer_email, checkout_url, stripe_checkout_session_id)
+        VALUES ($1, $2, $3, 1, 1, 1500, 1500, 'pending', 'ana@primer.si', $4, $5)`, ["OUT-" + pref + i, anaId, e, "https://checkout.stripe.test/c/pay/" + sid, sid]);
+      return { e, sid };
+    };
+    const velika = []; for (let i = 0; i < 20; i++) velika.push(await vrstaPending("Velika " + i, i, "VE"));
+    const posamicen = await vrstaPending("Posamicen", 0, "PO");
+    S.potekle.length = 0; S.expireMs = 300;
+    r = await bulk(T.admin, { ids: velika.map(v => v.e), dejanje: "pause", razlog: "Velika pavza" });
+    assert(r.status === 200 && r.body.results.every(v => v.ok), "priprava: mnozicna pavza 20 dogodkov s pocasnim Stripom");
+    const tP = Date.now();
+    r = await api("PATCH", `/events/${posamicen.e}`, T.admin, { salesPaused: true });
+    assert(r.status === 200 && r.body.sales_paused === true, "posamicno stikalo takoj po mnozicni pavzi: 200");
+    assert(await cakajPogoj(() => S.potekle.includes(posamicen.sid), 10000), "seja posamicnega dogodka zaprta");
+    const dtP = Date.now() - tP, velikihZaprtih = velika.filter(v => S.potekle.includes(v.sid)).length;
+    assert(dtP < 1200 && velikihZaprtih < 20, `posamicna seja zaprta v ${dtP} ms (ne caka za mnozicno), medtem ko je od 20 mnozicnih zaprtih ${velikihZaprtih}`, { dtP, velikihZaprtih });
+    assert(await cakajPogoj(() => velika.every(v => S.potekle.includes(v.sid)), 30000), "vse mnozicne seje na koncu zaprte");
+    S.expireMs = 0;
+    await bulk(T.admin, { ids: velika.map(v => v.e), dejanje: "resume", razlog: "Konec" });
+
+    // ---------------- M12: nakup drzi vrstico dogodka, prestavitev ga ne preskoci ----------------
+    console.log("\n# M12: prestavitev in nakup");
+    const Q = await dogodek("Dirka", { start: new Date(Date.now() + 5 * DAN) });
+    const predQ = await ev(Q);
+    await lock.query("BEGIN");
+    await lock.query(`INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, status, buyer_email)
+      VALUES ('OUT-DIRKA', $1, $2, 1, 1, 1500, 1500, 'pending', 'ana@primer.si')`, [anaId, Q]);   // sprozilec rezerviraj_zalogo zdaj drzi vrstico dogodka
+    const prestavljanje = bulk(T.admin, { ids: [Q], dejanje: "reschedule", zamik_min: 1440, razlog: "Dirka" });
+    assert(await cakajPogoj(async () => (await pool.query("SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%FOR NO KEY UPDATE%' AND pid <> pg_backend_pid()")).rows.length > 0, 5000),
+      "prestavitev caka na zaklep vrstice, ki ga drzi nakup");
+    await lock.query("COMMIT");
+    r = await prestavljanje;
+    assert(r.status === 200 && r.body.results[0].ok === false && r.body.results[0].napaka === "has_sales" && JSON.stringify(await ev(Q)) === JSON.stringify(predQ),
+      "po commitu nakupa prestavitev vidi narocilo: 409 has_sales, dogodek nespremenjen", r.body);
+
+    // ---------------- M13: proracun klica, razlog po znakih ----------------
+    console.log("\n# M13: proracun klica");
+    const srv2 = spawn("node", ["index.js"], { env: { ...process.env, PORT: "6284", SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test", STRIPE_SECRET_KEY: "", STRIPE_WEBHOOK_SECRET: "", TEST_PLACILA: "",
+      ADMIN_MNOZICNO_PRORACUN_MS: "1", ADMIN_NADZOR_PREDPOMNILNIK_MS: "0" }, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      for (let i = 0; i < 60; i++) { try { await fetch("http://127.0.0.1:6284/"); break; } catch { await pocakaj(100); } }
+      const [B1, B2, B3] = [await dogodek("Proracun 1"), await dogodek("Proracun 2"), await dogodek("Proracun 3")];
+      const rr = await fetch("http://127.0.0.1:6284/admin/api/events/bulk", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + T.admin }, body: JSON.stringify({ ids: [B1, B2, B3], dejanje: "pause", razlog: "Proracun" }) });
+      const jj = await rr.json();
+      assert(rr.status === 200 && jj.results[0].ok === true && jj.results[1].ok === false && jj.results[1].napaka === "not_processed" && jj.results[1].status === 503 && jj.results[2].napaka === "not_processed",
+        "proracun 1 ms: prvi dogodek obdelan, ostala not_processed (503)", jj);
+      assert((await ev(B1)).sales_paused === true && (await ev(B2)).sales_paused === false && (await ev(B3)).sales_paused === false && (await dnevnik(B2)).length === 0, "not_processed: dogodka nespremenjena in brez vrstice v dnevniku");
+    } finally { srv2.kill("SIGTERM"); }
+    const dolgRazlog = "😀".repeat(600);
+    r = await api("PATCH", `/admin/api/events/${E5}`, T.admin, { status: "published", reason: dolgRazlog });
+    const rz = (await dnevnik(E5)).slice(-1)[0].razlog;
+    assert(r.status === 200 && [...rz].length === 500 && !/�/.test(rz), "razlog PATCH »Med osnutke«/objava: odrezan na 500 znakov Unicode (emoji se ne razpolovi)", [...rz].length);
 
     // ---------------- M9: izvorna koda ----------------
     console.log("\n# M9: izvorna koda");

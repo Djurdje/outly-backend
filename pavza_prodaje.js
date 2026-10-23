@@ -43,7 +43,7 @@ function ustvari({ pool, stripe, jeLive, razprodanoPozabi }) {
   const PONOVNO_MS = okoljeSt("PAVZA_PONOVNO_MS", 90000, 0, 600000);
   const KMALU_MS = okoljeSt("PAVZA_KMALU_MS", 3000, 0, 60000);
   // MNOZICNA pavza (#329): do 50 dogodkov hkrati bi sicer pognalo 50 x PAVZA_STRIPE_VZPOREDNO klicev Stripa (meja je na klic zapriSeje, ne na proces) in 50 hkratnih
-  // transakcij ponovnega koraka (pool.connect). Zato SKUPNA meja na proces: najvec PAVZA_STRIPE_SKUPAJ (privzeto 8) hkratnih `expire` in PAVZA_DB_SKUPAJ (privzeto 2)
+  // transakcij ponovnega koraka (pool.connect). Zato SKUPNA meja na proces, a SAMO za mnozicno pot (`zazeni(.., { mnozicno: true })`): posamicna pavza (in nujna pavza agenta) NE caka v vrsti za mnozicno, njeno okno »najvec ~3 s« (I53) ostane nespremenjeno. Meja: najvec PAVZA_STRIPE_SKUPAJ (privzeto 8) hkratnih `expire` in PAVZA_DB_SKUPAJ (privzeto 2)
   // hkratnih transakcij ponovnega koraka. Dovoljenje se drzi samo med enim klicem (ne med premorom), zato en dogodek ne zadrzi drugih.
   const vrstaMeja = (najvec) => {
     let tece = 0; const cakajo = [];
@@ -62,10 +62,10 @@ function ustvari({ pool, stripe, jeLive, razprodanoPozabi }) {
   // Trajna napaka Stripa (seja ni vec odprta, ne obstaja, napacen nacin): ne ponavljamo. Omrezje, 429, 5xx: ponovimo.
   const trajna = (e) => !!e && (e.type === "StripeInvalidRequestError" || e.statusCode === 400 || e.statusCode === 404);
 
-  async function zapri(s, eventId, sejaId) {
+  async function zapri(s, eventId, sejaId, mnozicno) {
     for (let poskus = 1; poskus <= POSKUSOV; poskus++) {
       try {
-        await SKUPAJ_STRIPE(() => s.checkout.sessions.expire(sejaId));
+        await (mnozicno ? SKUPAJ_STRIPE : (f) => f())(() => s.checkout.sessions.expire(sejaId));
         console.log(`[pavza] dogodek ${eventId}: placilno okno ${sejaId} zaprto`);
         return "zaprto";
       } catch (e) {
@@ -86,7 +86,7 @@ function ustvari({ pool, stripe, jeLive, razprodanoPozabi }) {
   }
 
   // Seje preklicanih narocil dogodka (od trenutka pavze `od`), ki jih se nismo zaprli. Kratka poizvedba, povezava se ne drzi.
-  async function zapriSeje(eventId, od) {
+  async function zapriSeje(eventId, od, mnozicno = false) {
     const s = stripe();
     if (!s) return { zaprto: 0, skupaj: 0 };
     const r = await pool.query(
@@ -100,7 +100,7 @@ function ustvari({ pool, stripe, jeLive, razprodanoPozabi }) {
     const delavec = async () => {
       while (i < seje.length) {
         const id = seje[i++];
-        const izid = await zapri(s, eventId, id);
+        const izid = await zapri(s, eventId, id, mnozicno);
         if (izid !== "napaka") ze.add(id);
         if (izid === "zaprto") zaprto++;
       }
@@ -110,11 +110,11 @@ function ustvari({ pool, stripe, jeLive, razprodanoPozabi }) {
   }
 
   // Korak 2 (po COMMIT-u, brez await pri klicatelju). `od` = cas pavze (NOW() transakcije), da ne zapiramo sej starih preklicev.
-  function zazeni(eventId, od) {
+  function zazeni(eventId, od, { mnozicno = false } = {}) {
     const tek = async (drugic) => {
       try {
         if (drugic) {
-          const n = await SKUPAJ_DB(async () => {
+          const n = await (mnozicno ? SKUPAJ_DB : (f) => f())(async () => {
             const c = await pool.connect();
             try {
               await c.query("BEGIN");
@@ -126,7 +126,7 @@ function ustvari({ pool, stripe, jeLive, razprodanoPozabi }) {
           });
           if (n > 0) { console.log(`[pavza] dogodek ${eventId}: ponovni korak je preklical se ${n} cakajocih narocil (nakup tik pred pavzo)`); if (razprodanoPozabi) razprodanoPozabi(eventId); }
         }
-        const { zaprto, skupaj } = await zapriSeje(eventId, od);
+        const { zaprto, skupaj } = await zapriSeje(eventId, od, mnozicno);
         if (skupaj > 0 || !drugic) console.log(`[pavza] dogodek ${eventId}: ${drugic ? "ponovni korak" : "prvi korak"}, zaprtih placilnih oken ${zaprto} od ${skupaj}`);
       } catch (e) {
         console.error(`[pavza] POZOR: dogodek ${eventId}: prekinitev placilnih oken ni uspela (${e && e.message}); pospravljalec in zakljuci() ujameta preostanek.`);

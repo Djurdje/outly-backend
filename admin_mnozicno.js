@@ -16,7 +16,7 @@
 // reschedule: premik za `zamik_min` minut (celo, != 0, najvec +-30 dni). Zacetek se premakne po LJUBLJANSKI uri (ura ostane ista tudi cez prehod poletnega casa, kot
 // podvajanje), konec in okno prodaje (sales_open_at / sales_close_at, ce sta nastavljena) za ISTI absolutni zamik: trajanje in zamik okna od zacetka ostaneta.
 // 409 `has_sales`: dogodek ima placana ali delno vracena narocila, narocilo v teku (pending) ali veljavno/unovceno vstopnico (tudi guest lista in VIP miza, ker gredo
-// vse prek orders/tickets). Preverba je v transakciji POD zaklepom vrstice, zato nakup (sprozilec rezerviraj_zalogo zaklene isto vrstico) ne more uiti. Pravno odprto: #259
+// vse prek orders/tickets). Preverba je v transakciji POD zaklepom vrstice: nakup, ki je ze vstavil narocilo (sprozilec rezerviraj_zalogo drzi vrstico dogodka do COMMIT-a), prestavitev ustavi (has_sales). PREOSTALO OKNO (priznano, I60): nakup, ki je dogodek PREBRAL pred prestavitvijo in narocilo vstavi sele po njenem COMMIT-u (caka v sprozilcu), se zakljuci s starim prikazom datuma; vstopnica velja za dogodek s NOVIM datumom. Izkljucni advisory 73112 tega ne zapre (nakup ga vzame deljenega sele tik pred COMMIT-om, po vstavitvi), zapiranje bi zahtevalo primerjavo start_at v vseh nakupnih poteh (obcutljivo, I53/I2). Zato pavza (pause) pred prestavitvijo in prestavitev izven konice prodaje. Pravno odprto: #259
 // (obvestilo kupcem), I42. 409 `event_finished`: dogodek se je ze zacel. 400 `start_in_past`: nov zacetek ni v prihodnosti. 409 `event_cancelled`: odpovedan dogodek.
 const { NEVIDNI } = require("./agent_predlogi");
 
@@ -67,7 +67,7 @@ function ustvari({ pool, urediDogodek, adminStatusDogodka, celoId4 }) {
     if (st.sales_close_at) telo.salesCloseAt = iso(st.sales_close_at);
     const res = zajemi();
     await urediDogodek({ user: req.user, klub: req.klub, params: { id: String(id) }, body: telo }, res, {
-      razlog, predZaklepom,
+      razlog, predZaklepom, mnozicno: true,
       // V transakciji po zaklepu vrstice: dogodek se od branja zgoraj ni spremenil in nima prodaje (zaklep vrstice zaustavi tudi nakup, ki bi ravnokar nastal).
       predlog: async (c, trenutni) => {
         const e = (await c.query(
@@ -76,7 +76,11 @@ function ustvari({ pool, urediDogodek, adminStatusDogodka, celoId4 }) {
                   EXISTS (SELECT 1 FROM tickets t WHERE t.event_id = e.id AND t.status IN ('valid', 'used')) AS vstopnice
              FROM events e WHERE e.id = $1`, [id])).rows[0];
         const odgovor = (status, error, message) => { const x = new Error(error); x.odgovor = { status, telo: { error, message } }; return x; };
-        if (new Date(trenutni.start_at).getTime() !== new Date(st.start_at).getTime()) throw odgovor(409, "event_changed", "The event was changed in the meantime. Try again.");
+        const cas = (v) => (v === null || v === undefined ? null : new Date(v).getTime());
+        // Vsa poslana polja (zacetek, konec, okno prodaje) morajo biti taka, kot smo jih prebrali (sicer bi prepisali tuj premik).
+        const spremenjeno = [["start_at", "start_at"], ["end_at", "end_at"], ["sales_open_at", "sales_open_at"], ["sales_close_at", "sales_close_at"]]
+          .some(([k]) => k in trenutni && cas(trenutni[k]) !== cas(st[k]));
+        if (spremenjeno) throw odgovor(409, "event_changed", "The event was changed in the meantime. Try again.");
         if (e.status === "cancelled") throw odgovor(409, "event_cancelled", "The event is cancelled.");
         if (e.narocila || e.vstopnice) throw odgovor(409, "has_sales", "The event has paid or pending orders or tickets, so it can't be moved in bulk. Move it on its own page.");
       },
@@ -93,7 +97,7 @@ function ustvari({ pool, urediDogodek, adminStatusDogodka, celoId4 }) {
     const res = zajemi();
     const sub = { user: req.user, klub: req.klub, params: { id: String(id) } };
     if (dejanje === "draft") await adminStatusDogodka({ ...sub, body: { status: "draft", reason: razlog } }, res, { brezOdpovedanih: true, predZaklepom });
-    else await urediDogodek({ ...sub, body: { salesPaused: dejanje === "pause" } }, res, { razlog, predZaklepom });
+    else await urediDogodek({ ...sub, body: { salesPaused: dejanje === "pause" } }, res, { razlog, predZaklepom, mnozicno: true });
     if (res.o.status !== 200) return izNapake(res.o);
     const spremenjeno = dejanje === "draft" ? prej.status !== "draft" : prej.sales_paused !== (dejanje === "pause");
     return { spremenjeno };
@@ -115,7 +119,7 @@ function ustvari({ pool, urediDogodek, adminStatusDogodka, celoId4 }) {
     const surov = b.razlog !== undefined ? b.razlog : b.reason;
     const razlog = typeof surov === "string" ? surov.trim() : "";
     const dolzina = [...razlog].length;   // znaki Unicode (emoji = 1), kot char_length v bazi
-    if (dolzina < RAZLOG_MIN || dolzina > RAZLOG_NAJVEC || NEVIDNI.test(typeof surov === "string" ? surov : "") || /[\u0000-\u001f\u007f-\u009f]/.test(razlog)) {
+    if (dolzina < RAZLOG_MIN || dolzina > RAZLOG_NAJVEC || NEVIDNI.test(typeof surov === "string" ? surov : "") || /[\u0000-\u001f\u007f-\u009f]/.test(typeof surov === "string" ? surov : "")) {
       return napaka(res, 400, "invalid_reason", `razlog is required: ${RAZLOG_MIN}-${RAZLOG_NAJVEC} characters, no control or invisible characters.`);
     }
     let zamik = null;

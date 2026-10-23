@@ -3363,7 +3363,7 @@ async function urediDogodek(req, res, opcije = {}) {
     razprodanoPozabi("v:" + d.id);   // capacity ali status se je morda spremenil
     if (pavzaOd) {
       console.log(`[pavza] dogodek ${d.id}: prodaja ustavljena (uporabnik ${req.user.userId}), preklicanih cakajocih narocil ${preklicanih}`);
-      void pavzaOkna.zazeni(d.id, pavzaOd);   // po COMMIT-u, brez await: odgovor ne caka na Stripe
+      void pavzaOkna.zazeni(d.id, pavzaOd, { mnozicno: opcije.mnozicno === true });   // po COMMIT-u, brez await: odgovor ne caka na Stripe
     } else if (prej && prej.sales_paused === true && r.rows[0].sales_paused === false) {
       console.log(`[pavza] dogodek ${d.id}: prodaja spet tece (uporabnik ${req.user.userId})`);
     }
@@ -4154,7 +4154,7 @@ async function adminStatusDogodka(req, res, opcije = {}) {
   const b = req.body || {};
   const status = b.status;
   if (!["draft", "published", "cancelled"].includes(status)) return res.status(400).send("status must be draft, published or cancelled.");
-  const razlog = b.reason === undefined || b.reason === null ? null : String(b.reason).trim().slice(0, 500) || null;
+  const razlog = b.reason === undefined || b.reason === null ? null : [...String(b.reason).trim()].slice(0, 500).join("") || null;   // po znakih Unicode (ne po UTF-16 enotah: emoji se ne razpolovi)
   const c = await pool.connect();
   let r, star;
   try {
