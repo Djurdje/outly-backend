@@ -31,20 +31,27 @@ const STANJA = ["caka", "potrjen", "zavrnjen", "potekel", "neuspel"];
 const SPREMEMBE_NAJVEC = 20000;      // znakov JSON (naslov z 95 000 znaki ne pride niti do validacije poti)
 const PREJ_NAJVEC = 200000;          // znakov JSON posnetka (opis v bazi nima omejitve)
 const RAZLOG_NAJVEC = 1000;
-const ZAKLEP_RAZRED = 73120;
+const ZAKLEP_RAZRED = 73120;         // advisory (razred, id zetona): stetje cakajocih in vstavljanje zaporedno tudi cez instance; 73110/73112 sta nakup/pavza
 // Besedila, ki morajo biti niz (obstojeca PATCH pot sprejme npr. opis null/stevilo; predlog je strozji, pot ostane nespremenjena za iOS/splet).
 const BESEDILNA = new Set(["title", "description", "venueName", "venueAddress", "venueCity", "posterUrl"]);
 // Bidi kontrolni znaki in znaki nicelne sirine: z njimi bi agent besedilo v panelu prikazal drugace, kot je shranjeno (prevara pri »prej -> potem«).
-const NEVIDNI = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/;
+// (pregled #340 N2/N2b: tudi U+061C arabska oznaka smeri, U+00AD mehki vezaj, U+034F, locila vrstice/odstavka U+2028/U+2029, U+2060-U+2064)
+const NEVIDNI = /[\u00AD\u034F\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
 const imaNevidne = (v, g = 0) => (typeof v === "string" ? NEVIDNI.test(v) : v && typeof v === "object" && g < 5 ? Object.entries(v).some(([k, x]) => NEVIDNI.test(k) || imaNevidne(x, g + 1)) : false);
 // Plakat v predlogu samo iz NASEGA Cloudinaryja (kot avatar, PUT /me/avatar): agent ne more podtakniti slike s tujega gostitelja (sledenje, vsebina).
 // Obstojeca pot (PATCH /events/:id, iOS/splet) sprejme vsak http(s) in ostane, kot je.
+// Pregled #340 S1b: predpona na surovem nizu ni dovolj (`/<oblak>/../drugi/`, `%2e%2e`, `image/fetch/https://tuj`): razclenjen URL, tocen gostitelj, brez
+// vrat/uporabnika/query/hash, brez `..` in kodiranih `.`/`/`/`\` (surovo in v poti), samo dostava `/<oblak>/image/upload/`.
+const NEVARNA_POT = /\.\.|%2e|%2f|%5c|\\/i;
 function plakatDovoljen(url) {
   if (url === undefined || url === null || url === "") return true;
   const oblak = process.env.CLOUDINARY_CLOUD_NAME;
-  if (!oblak || typeof url !== "string" || !url.startsWith(`https://res.cloudinary.com/${oblak}/`)) return false;
-  try { const u = new URL(url); return u.protocol === "https:" && u.hostname === "res.cloudinary.com" && !u.username && !u.password; } catch (_) { return false; }
-}         // advisory (razred, id zetona): stetje cakajocih in vstavljanje zaporedno tudi cez instance; 73110/73112 sta nakup/pavza
+  if (!oblak || !/^[A-Za-z0-9_-]{1,100}$/.test(oblak) || typeof url !== "string" || NEVARNA_POT.test(url)) return false;
+  let u;
+  try { u = new URL(url); } catch (_) { return false; }
+  return u.protocol === "https:" && u.hostname === "res.cloudinary.com" && !u.port && !u.username && !u.password && !u.search && !u.hash && !url.includes("?") && !url.includes("#")
+    && !NEVARNA_POT.test(u.pathname) && u.pathname.startsWith("/" + oblak + "/image/upload/") && url === u.href;
+}
 
 const veljaven = (v) => (v instanceof Date ? v.toISOString() : v === undefined ? null : v);
 const enako = (a, b) => JSON.stringify(veljaven(a)) === JSON.stringify(veljaven(b));
@@ -164,6 +171,8 @@ function ustvari(dep) {
       if (JSON.stringify(spr).length > SPREMEMBE_NAJVEC) return napaka(400, "spremembe_prevelike", `spremembe must be at most ${SPREMEMBE_NAJVEC} characters of JSON.`);
       const tuje = Object.keys(spr).filter((k) => !opis.polja.includes(k));
       if (tuje.length) return napaka(400, "sprememba_ni_dovoljena", "These fields can't be changed by an agent proposal.", { polja: tuje.slice(0, 10).map((k) => k.slice(0, 40)) });
+      // N8: opis null = »pocisti opis« (stolpec je NOT NULL DEFAULT ''; obstojeca pot bi z null padla v bazi)
+      if (spr.description === null) spr.description = "";
       const napacenTip = Object.keys(spr).filter((k) => BESEDILNA.has(k) && typeof spr[k] !== "string" && !(k === "posterUrl" && spr[k] === null));
       if (napacenTip.length) return napaka(400, "neveljaven_tip", "These fields must be text.", { polja: napacenTip });
       if (imaNevidne(spr)) return napaka(400, "nevidni_znaki", "Invisible or bidirectional control characters are not allowed in a proposal.");

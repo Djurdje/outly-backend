@@ -225,33 +225,48 @@ function nicOsebnega(ime, tekst) {
     r = await predlagaj({ dejanje: "event.okno_prodaje", cilj: { tip: "event", id: E.okno }, spremembe: { salesOpenAt: "2026-02-31T10:00:00Z" }, razlog: "okno" });
     assert(r.status === 400 && r.body.error === "invalid_changes" && /salesOpenAt/.test(r.body.message), "okno prodaje: neveljaven datum (31. 2.) -> 400 po obstojeci poti", [r.status, r.body]);
     // N1: besedila, ki niso niz -> 400 (obstojeca PATCH pot tega ne zahteva za opis; tam ostane, kot je)
-    for (const [spr, opis] of [[{ description: 12345 }, "opis stevilo"], [{ description: { a: 1 } }, "opis objekt"], [{ description: null }, "opis null"]]) {
+    for (const [spr, opis] of [[{ description: 12345 }, "opis stevilo"], [{ description: { a: 1 } }, "opis objekt"]]) {
       const x = await predlagaj(UREDI(E.a, spr));
       assert(x.status === 400 && x.body.error === "neveljaven_tip", `${opis} -> 400 neveljaven_tip`, [x.status, x.body]);
     }
+    // N8: description null v predlogu = pocisti opis (prazen niz; stolpec je NOT NULL, obstojeca pot bi z null padla)
+    r = await predlagaj(UREDI(E.a, { description: null }));
+    assert(r.status === 201 && r.body.predlog.spremembe.description === "", "opis null -> predlog »pocisti opis« (prazen niz)", [r.status, r.body]);
+    await api(PORT, "POST", `/admin/api/predlogi/${r.body.predlog.id}/zavrni`, T.admin, {});
     r = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: "Nov", startAt: "2027-01-01T22:00:00Z", venueName: 5 }, razlog: "nov dogodek" });
     assert(r.status === 400 && r.body.error === "neveljaven_tip", "nov osnutek: venueName stevilo -> 400 neveljaven_tip", [r.status, r.body]);
     // N2: bidi in znaki nicelne sirine v besedilih predloga in razlogu -> 400
-    for (const z of ["\u200B", "\u200F", "\u202E", "\u2066", "\u2069", "\uFEFF"]) {
+    for (const z of ["\u200B", "\u200F", "\u202E", "\u2066", "\u2069", "\uFEFF", "\u061C", "\u00AD", "\u034F", "\u2028", "\u2029", "\u2060", "\u2064"]) {
       const x = await predlagaj(UREDI(E.a, { title: "Petek" + z + "vecer" }));
       assert(x.status === 400 && x.body.error === "nevidni_znaki", `naslov z U+${z.charCodeAt(0).toString(16).toUpperCase()} -> 400 nevidni_znaki`, [x.status, x.body]);
     }
     r = await predlagaj(UREDI(E.a, { genres: ["techno\u200B"] }));
     assert(r.status === 400 && r.body.error === "nevidni_znaki", "zanr z nicelno sirino -> 400", [r.status, r.body]);
-    r = await predlagaj(UREDI(E.a, { title: "Petkov vecer (x)" }, "Razlog \u202Eskrito\u202C besedilo"));
-    assert(r.status === 400 && r.body.error === "invalid_reason", "razlog z bidi znaki -> 400 invalid_reason", [r.status, r.body]);
+    for (const z of ["\u202E", "\u061C", "\u00AD", "\u034F", "\u2028", "\u2029", "\u2060", "\u2063"]) {
+      const x = await predlagaj(UREDI(E.a, { title: "Petkov vecer (x)" }, "Razlog " + z + "skrito besedilo"));
+      assert(x.status === 400 && x.body.error === "invalid_reason", `razlog z U+${z.charCodeAt(0).toString(16).toUpperCase()} -> 400 invalid_reason`, [x.status, x.body]);
+    }
     // N3: neobstojec gostiteljski klub -> 400 z jasno kodo (ne 404 cilj_ni_najden)
     r = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: "Nov", startAt: "2027-01-01T22:00:00Z", venueClubId: 999999 }, razlog: "nov dogodek" });
     assert(r.status === 400 && r.body.error === "invalid_changes" && r.body.koda === "venue_club_not_found", "nov osnutek: neobstojec venueClubId -> 400 venue_club_not_found", [r.status, r.body]);
     r = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: 999999 }, spremembe: { title: "Nov", startAt: "2027-01-01T22:00:00Z" }, razlog: "nov dogodek" });
     assert(r.status === 404 && r.body.error === "cilj_ni_najden", "nov osnutek: neobstojec klub (cilj) -> 404 cilj_ni_najden", [r.status, r.body]);
     // S1: plakat samo iz nasega Cloudinaryja (kot avatar); obstojeca pot za iOS/splet ostane (vsak http(s))
-    for (const url of ["https://evil.test/plakat.jpg", "https://res.cloudinary.com/drugi/image/upload/x.jpg", "http://res.cloudinary.com/outlytest/image/upload/x.jpg", "https://res.cloudinary.com.evil.test/outlytest/x.jpg"]) {
+    for (const url of ["https://evil.test/plakat.jpg", "https://res.cloudinary.com/drugi/image/upload/x.jpg", "http://res.cloudinary.com/outlytest/image/upload/x.jpg", "https://res.cloudinary.com.evil.test/outlytest/x.jpg",
+      // S1b: obhodi predpone (pot z .., kodirane pike/posevnice, fetch tujega URL-ja, query/hash, vrata)
+      "https://res.cloudinary.com/outlytest/../drugi/image/upload/x.jpg", "https://res.cloudinary.com/outlytest/%2e%2e/drugi/image/upload/x.jpg",
+      "https://res.cloudinary.com/outlytest/%2E%2E/drugi/image/upload/x.jpg", "https://res.cloudinary.com/outlytest/..././../drugi/image/upload/x.jpg",
+      "https://res.cloudinary.com/outlytest/image/fetch/https://evil.test/x.jpg", "https://res.cloudinary.com/outlytest/image/upload/..%2fdrugi/x.jpg",
+      "https://res.cloudinary.com/outlytest/image/upload/%5c..%5cx.jpg", "https://res.cloudinary.com/outlytest/image/upload/x.jpg?u=https://evil.test",
+      "https://res.cloudinary.com/outlytest/image/upload/x.jpg#evil", "https://res.cloudinary.com:8443/outlytest/image/upload/x.jpg",
+      "https://res.cloudinary.com/outlytest/video/upload/x.mp4", "https://RES.cloudinary.com/outlytest/image/fetch/x.jpg"]) {
       const x = await predlagaj(UREDI(E.a, { posterUrl: url }));
       assert(x.status === 400 && x.body.error === "plakat_ni_dovoljen", `plakat ${url.slice(0, 50)} -> 400 plakat_ni_dovoljen`, [x.status, x.body]);
     }
-    r = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: "Nov", startAt: "2027-01-01T22:00:00Z", posterUrl: "https://evil.test/p.jpg" }, razlog: "nov dogodek" });
-    assert(r.status === 400 && r.body.error === "plakat_ni_dovoljen", "nov osnutek s tujim plakatom -> 400", [r.status, r.body]);
+    for (const url of ["https://evil.test/p.jpg", "https://res.cloudinary.com/outlytest/../drugi/image/upload/x.jpg", "https://res.cloudinary.com/outlytest/image/fetch/https://evil.test/x.jpg", "https://res.cloudinary.com/outlytest/%2e%2e/drugi/image/upload/x.jpg"]) {
+      const x = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: "Nov", startAt: "2027-01-01T22:00:00Z", posterUrl: url }, razlog: "nov dogodek" });
+      assert(x.status === 400 && x.body.error === "plakat_ni_dovoljen", `nov osnutek s plakatom ${url.slice(0, 60)} -> 400`, [x.status, x.body]);
+    }
     r = await api(PORT, "PATCH", `/events/${E.e}`, T.admin, { posterUrl: "https://evil.test/plakat.jpg" });
     assert(r.status === 200, "obstojeca pot (PATCH) tuj http(s) plakat se vedno sprejme (iOS/splet nespremenjeno)", r.status);
     r = await predlagaj(UREDI(E.e, { posterUrl: "https://res.cloudinary.com/outlytest/image/upload/v1/plakat.jpg" }));
