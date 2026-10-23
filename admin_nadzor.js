@@ -11,6 +11,9 @@
 // Odvisnosti iz index.js so podane ob ustvari() (en sam pogoj I34/I36/I49: razlogNerazpolozljivosti, ne podvajamo ga).
 
 const ROK_STAVKA_MS = 2000;
+const ROK_MIRUJOCE_MS = 5000;         // idle_in_transaction_session_timeout (STATE past »Vsak pool.connect() z dolgo transakcijo«)
+const SEMAFOR_CAKANJE_MS = 2000;      // koliko dolgo drugacen izracun caka na edino povezavo, nato 503 admin_busy
+const RDECA_VELJA_MS = 60000;         // koliko casa summary uporabi zadnje izracunano stevilo rdecih opozoril
 const NAJVEC_ZNAKOV_NAPAKE = 300;
 const NAJVEC_VRSTIC_NAPAKA = 100;     // racunov v stanju napaka, ki jih opozorila naštejejo posamično (stevci vedno stejejo vse)
 const NAJVEC_OPOZORIL = 500;          // zgornja meja odgovora (stevci stejejo vse)
@@ -31,8 +34,10 @@ function ociscenaNapaka(s) {
 // Prodajno stanje nocojsnjega dogodka: isti vrstni red kot v panelu dogodkov (dogodki.js, prodaja()).
 function prodajnoStanje(e, zdaj) {
   if (e.sales_paused === true) return "ustavljena";
-  if (e.ticket_price_cents === null || e.ticket_price_cents === undefined) return "zaprta";   // brez vstopnic na Outlyju (zunanja prodaja ali nic)
-  if (e.capacity !== null && e.capacity !== undefined && e.sold_count >= e.capacity) return "razprodano";
+  const brezVstopnic = e.ticket_price_cents === null || e.ticket_price_cents === undefined;
+  const samoVip = brezVstopnic && e.vip_from_cents !== null && e.vip_from_cents !== undefined;   // dogodek samo z VIP mizami (aktivna miza): prodaja miz, prostih miz ne stejemo
+  if (brezVstopnic && !samoVip) return "zaprta";   // brez vstopnic in miz na Outlyju (zunanja prodaja ali nic)
+  if (!brezVstopnic && e.capacity !== null && e.capacity !== undefined && e.sold_count >= e.capacity) return "razprodano";
   if (new Date(e.start_at).getTime() <= zdaj) return "zaprta";
   if (e.sales_open_at && new Date(e.sales_open_at).getTime() > zdaj) return "zaprta";
   if (e.sales_close_at && new Date(e.sales_close_at).getTime() < zdaj) return "zaprta";
@@ -47,46 +52,74 @@ function ustvari(dep) {
     return Number.isInteger(n) && n >= 0 && n <= 600000 ? n : 10000;
   })();
 
-  // --- predpomnilnik (proces): kljuc -> { do, obljuba }; neuspeh se ne obdrzi ---
+  // --- predpomnilnik (proces): kljuc -> { do, obljuba }; rok `do` se steje od RAZRESITVE izracuna (med izracunom velja Infinity: sočasni klici
+  // dobijo isto obljubo, pocasen izracun ne sprozi vzporednega); neuspeh se ne obdrzi ---
   const predpomnilnik = new Map();
   function predpomni(kljuc, fn) {
     if (predpomnilnikMs === 0) return fn();
-    const zdaj = Date.now();
     const v = predpomnilnik.get(kljuc);
-    if (v && v.do > zdaj) return v.obljuba;
-    const zapis = { do: zdaj + predpomnilnikMs, obljuba: fn() };
+    if (v && v.do > Date.now()) return v.obljuba;
+    const zapis = { do: Infinity, obljuba: null };
+    zapis.obljuba = fn().then(
+      (r) => { zapis.do = Date.now() + predpomnilnikMs; return r; },
+      (e) => { if (predpomnilnik.get(kljuc) === zapis) predpomnilnik.delete(kljuc); throw e; });
     predpomnilnik.set(kljuc, zapis);
-    zapis.obljuba.catch(() => { if (predpomnilnik.get(kljuc) === zapis) predpomnilnik.delete(kljuc); });
     return zapis.obljuba;
   }
 
-  // --- ena povezava, READ ONLY, rok stavka ---
+  // --- semafor: NAJVEC ENA povezava glavnega poola za vse poti tega modula (admin z vec zavihki ali vec adminov ne zaseda poola, ki ga rabi nakup).
+  // Cakajoci drugacni izracun caka najvec SEMAFOR_CAKANJE_MS, nato napaka ADMIN_BUSY -> 503 admin_busy + Retry-After. Enak izracun si deli obljubo (predpomni). ---
+  let semaforZaseden = false;
+  const semaforCakajoci = [];
+  function semaforVstopi() {
+    if (!semaforZaseden) { semaforZaseden = true; return Promise.resolve(); }
+    return new Promise((resolve, reject) => {
+      const c = { resolve: null, rok: null };
+      c.resolve = () => { clearTimeout(c.rok); resolve(); };
+      c.rok = setTimeout(() => {
+        const i = semaforCakajoci.indexOf(c);
+        if (i >= 0) semaforCakajoci.splice(i, 1);
+        reject(Object.assign(new Error("admin_nadzor: povezava je zasedena"), { code: "ADMIN_BUSY" }));
+      }, SEMAFOR_CAKANJE_MS);
+      semaforCakajoci.push(c);
+    });
+  }
+  function semaforIzstopi() {
+    const n = semaforCakajoci.shift();
+    if (n) n.resolve(); else semaforZaseden = false;
+  }
+
+  // --- ena povezava, READ ONLY, rok stavka, rok mirujoce transakcije ---
   async function beriReadOnly(fn) {
-    const c = await pool.connect();
+    await semaforVstopi();
+    let c;
+    try { c = await pool.connect(); } catch (e) { semaforIzstopi(); throw e; }
     let pokvarjena = false;
     const naNapako = (e) => { pokvarjena = true; console.error("[admin-nadzor] povezava s bazo prekinjena:", e && e.message); };
     c.on("error", naNapako);
     try {
-      await c.query("BEGIN READ ONLY");
-      await c.query(`SET LOCAL statement_timeout = ${ROK_STAVKA_MS}`);
+      // en sam krog do baze; application_name samo znotraj transakcije (pg_stat_activity: test semaforja)
+      await c.query(`BEGIN READ ONLY; SET LOCAL statement_timeout = ${ROK_STAVKA_MS}; SET LOCAL idle_in_transaction_session_timeout = ${ROK_MIRUJOCE_MS}; SET LOCAL application_name = 'admin_nadzor'`);
       const r = await fn(c);
       await c.query("COMMIT");
       return r;
     } catch (e) {
-      // napaka brez SQLSTATE (prekinjena povezava, odjemalski rok): povezave ni varno vrniti v pool
-      if (!(e && /^[0-9A-Z]{5}$/.test(String(e.code || "")))) pokvarjena = true;
-      await c.query("ROLLBACK").catch(() => {});
+      // napaka brez SQLSTATE (prekinjena povezava, odjemalski rok): povezave ni varno vrniti v pool (kot skenBranje: SQLSTATE ima vedno stevko)
+      const koda = String((e && e.code) || "");
+      if (!(/^[0-9A-Z]{5}$/.test(koda) && /[0-9]/.test(koda))) pokvarjena = true;
+      await c.query("ROLLBACK").catch(() => { pokvarjena = true; });
       throw e;
     } finally {
       c.off("error", naNapako);
       if (pokvarjena) c.on("error", () => {});   // pozen 'error' zavrzene povezave ne sme sesuti procesa
       c.release(pokvarjena);
+      semaforIzstopi();
     }
   }
 
   function odgovoriNapaka(res, e, kje) {
-    if (e && e.code === "57014") {
-      console.error(`[admin-nadzor] ${kje}: preseglo statement_timeout ${ROK_STAVKA_MS} ms`);
+    if (e && (e.code === "57014" || e.code === "ADMIN_BUSY")) {
+      console.error(`[admin-nadzor] ${kje}: ${e.code === "ADMIN_BUSY" ? "povezava zasedena (semafor)" : `preseglo statement_timeout ${ROK_STAVKA_MS} ms`}`);
       return res.status(503).set("Retry-After", "5").json({ error: "admin_busy", message: "The dashboard query timed out. Try again in a few seconds." });
     }
     return odgovoriNaNapako(res, e, kje);
@@ -185,7 +218,15 @@ function ustvari(dep) {
       return { items: items.slice(0, NAJVEC_OPOZORIL), stevci };
     });
   }
-  const opozorila = () => predpomni("opozorila", izracunajOpozorila);
+  // Zadnje izracunano stevilo rdecih (summary ga vzame brez lastnega izracuna in brez cakanja: sicer null).
+  let zadnjiRdeci = null;
+  const izracunajOpozorilaZapomni = async () => {
+    const r = await izracunajOpozorila();
+    zadnjiRdeci = { n: r.stevci.rdece, ob: Date.now() };
+    return r;
+  };
+  const opozorila = () => predpomni("opozorila", izracunajOpozorilaZapomni);
+  const rdeceStevilo = () => (zadnjiRdeci && Date.now() - zadnjiRdeci.ob < RDECA_VELJA_MS ? zadnjiRdeci.n : null);
 
   router.get("/opozorila", async (req, res) => {
     try {
@@ -260,12 +301,13 @@ function ustvari(dep) {
 
       // nocoj = objavljeni dogodki, katerih okno skena je danes: zacetek med zdaj-12 h in zdaj+24 h ali v teku (konec ali zacetek + 12 h, kot sken_okno.js)
       const ev = (await c.query(
-        `SELECT e.id, e.title, cl.name AS club_name, e.start_at, e.end_at, e.sold_count, e.capacity, e.sales_paused, e.ticket_price_cents, e.sales_open_at, e.sales_close_at
-           FROM events e JOIN clubs cl ON cl.id = e.club_id
-          WHERE e.status = 'published' AND NOT cl.hidden
-            AND ((e.start_at >= $1::timestamptz - INTERVAL '12 hours' AND e.start_at <= $1::timestamptz + INTERVAL '24 hours')
-              OR (e.start_at <= $1::timestamptz AND COALESCE(e.end_at, e.start_at + INTERVAL '12 hours') > $1::timestamptz))
-          ORDER BY e.start_at, e.id LIMIT 50`, [t.cas])).rows;
+        `SELECT events.id, events.title, cl.name AS club_name, events.start_at, events.end_at, events.sold_count, events.capacity, events.sales_paused,
+                events.ticket_price_cents, events.sales_open_at, events.sales_close_at, ${VIP_OD_CENTOV} AS vip_from_cents
+           FROM events JOIN clubs cl ON cl.id = events.club_id
+          WHERE events.status = 'published' AND NOT cl.hidden
+            AND ((events.start_at >= $1::timestamptz - INTERVAL '12 hours' AND events.start_at <= $1::timestamptz + INTERVAL '24 hours')
+              OR (events.start_at <= $1::timestamptz AND COALESCE(events.end_at, events.start_at + INTERVAL '12 hours') > $1::timestamptz))
+          ORDER BY events.start_at, events.id LIMIT 50`, [t.cas])).rows;
       const vstopi = new Map();
       if (ev.length) {
         const v = await c.query(
@@ -296,7 +338,7 @@ function ustvari(dep) {
     } catch (e) { return odgovoriNapaka(res, e, "GET /admin/api/danes"); }
   });
 
-  return { opozorila, danes, danesNaCas: izracunajDanes, rdeceStevilo: async () => (await opozorila()).stevci.rdece };
+  return { opozorila, danes, danesNaCas: izracunajDanes, rdeceStevilo };
 }
 
 module.exports = { ustvari, ociscenaNapaka, prodajnoStanje, STANJA_RACUNOV };

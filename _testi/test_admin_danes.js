@@ -83,7 +83,7 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
   await brezSprozilcev.query("SET session_replication_role = replica");
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
   const A = zazeni(PORT, { ADMIN_NADZOR_PREDPOMNILNIK_MS: "0" });
-  const B = zazeni(PORT_PRED, { ADMIN_NADZOR_PREDPOMNILNIK_MS: "1500" });
+  const B = zazeni(PORT_PRED, { ADMIN_NADZOR_PREDPOMNILNIK_MS: "3000" });
   const C = zazeni(PORT_PRIVZETO, {});
   const vsi = [A, B, C];
   for (const [p] of [[PORT], [PORT_PRED], [PORT_PRIVZETO]]) await cakajStreznik(p);
@@ -181,6 +181,10 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
     // VIP miza danes: steje v narocila in bruto, ne v vstopnice
     const miza = (await pool.query("INSERT INTO club_tables (club_id, label, x, y, w, h, seats, price_cents) VALUES ($1, 'M1', 1, 1, 1, 1, 4, 2500) RETURNING id", [K1])).rows[0].id;
     await kupec({ qty: 1, price: 2500, created: cDanes, tableId: miza });
+    // dogodka samo z VIP mizami (brez vstopnice): prodaja miz tece, ko se zacet - zaprta (ne »zaprta« zaradi manjkajoce cene vstopnice)
+    E.vip = await dogodek(K1, "Samo VIP", { start: "8 hours", end: "14 hours", price: null, capacity: null });
+    E.vipZacet = await dogodek(K1, "Samo VIP zacet", { start: "-1 hour", end: "5 hours", price: null, capacity: null });
+    await pool.query("UPDATE events SET vip_enabled = TRUE WHERE id = ANY($1)", [[E.vip, E.vipZacet]]);
     // PRICAKOVANO: danes: 4 narocila (3000 + 1500 delno vrnjeno + 1500 live + 2500 miza); bruto 3000 + 1500 + 1500 + 2500 = 8500; vstopnice 2 + 1 + 1 = 4
     //              7 dni: + vceraj (1500, 1) + pred 6 dnevi (1500, 1) = 6 narocil; bruto 11500; vstopnice 6
     //              testno_danes: 2 narocili, 6000, 4 vstopnice
@@ -221,7 +225,7 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
     const nocoj = d.nocoj;
     const idji = nocoj.map(e => e.id);
     // pred13h: zacetek pred 13 h, brez konca -> privzeto trajanje 12 h -> konec pred 1 h: izven; vTeku (zacel -30 h, konec +10 h): v teku -> noter
-    const pricakovano = [E.vTeku, E.tece, E.pozneje, E.razprodano, E.zunanja, E.okno, E.ustavljena, E.kmalu23];
+    const pricakovano = [E.vTeku, E.tece, E.pozneje, E.razprodano, E.zunanja, E.okno, E.ustavljena, E.kmalu23, E.vip, E.vipZacet];
     assert(JSON.stringify([...idji].sort((a, b) => a - b)) === JSON.stringify([...pricakovano].sort((a, b) => a - b)), "nocoj: natanko dogodki z oknom skena danes", { dobljeno: idji, pricakovano });
     assert(!idji.includes(E.cez25) && !idji.includes(E.cez3dni) && !idji.includes(E.vceraj) && !idji.includes(E.osnutek) && !idji.includes(E.skrit) && !idji.includes(E.pred13h), "izven: cez 25 h, cez 3 dni, vceraj koncan, osnutek, skriti klub, pred 13 h brez konca (12 h trajanje je mimo)");
     assert(JSON.stringify(idji) === JSON.stringify([...nocoj].sort((a, b) => new Date(a.start_at) - new Date(b.start_at)).map(e => e.id)), "razvrsceno po zacetku");
@@ -236,6 +240,7 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
     assert(po(E.razprodano).prodaja === "razprodano", "prodaja: sold_count >= capacity = razprodano");
     assert(po(E.zunanja).prodaja === "zaprta" && po(E.zunanja).kapaciteta === null, "prodaja: brez cene (zunanja) = zaprta, kapaciteta null");
     assert(po(E.okno).prodaja === "zaprta", "prodaja: okno prodaje zaprto = zaprta");
+    assert(po(E.vip).prodaja === "tece" && po(E.vipZacet).prodaja === "zaprta", "prodaja: dogodek samo z VIP mizami: tece (ne zaprta zaradi manjkajoce cene vstopnice); ko se zacne: zaprta", [po(E.vip).prodaja, po(E.vipZacet).prodaja]);
     assert(po(E.kmalu23).prodaja === "tece", "dogodek cez 23 h 50 min je se nocoj in tece");
     assert(po(E.tece).start_at === new Date(po(E.tece).start_at).toISOString(), "start_at je ISO");
 
@@ -299,36 +304,115 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
     const dan25 = await modul.danesNaCas(new Date(Date.UTC(2031, 9, 26, 12, 0)));   // 26. 10. 2031: dan s 25 urami
     assert(dnevi(dan23) === 23 && dnevi(dan25) === 25, "dan menjave ure ima 23 oziroma 25 narocil (po eno na uro)", [dnevi(dan23), dnevi(dan25)]);
 
-    console.log("\n# Predpomnilnik");
+    console.log("\n# Predpomnilnik (trajanje 3 s; preverba po STANJU, ne po uri: ob pocasnem racunalniku se poskus ponovi)");
     const tokB = T.admin;
     const stDanes = (x) => x.body.prodaja.danes.narocila;
-    const b1 = await api(PORT_PRED, "/admin/api/danes", tokB);
-    await narocilo(E.cez3dni, K1, { qty: 1, created: cDanes });
-    const b2 = await api(PORT_PRED, "/admin/api/danes", tokB);
-    assert(b1.status === 200 && stDanes(b2) === stDanes(b1) && b2.body.cas === b1.body.cas, "predpomnilnik: drugi klic znotraj trajanja ne vidi novega narocila (isti cas)", [stDanes(b1), stDanes(b2)]);
-    const bSocasni = await Promise.all([1, 2, 3, 4, 5].map(() => api(PORT_PRED, "/admin/api/danes", tokB)));
-    assert(bSocasni.every(x => x.body.cas === b1.body.cas), "5 socasnih klicev = ista poizvedba (isti cas)");
-    await pocakaj(1700);
-    const b3 = await api(PORT_PRED, "/admin/api/danes", tokB);
-    assert(stDanes(b3) === stDanes(b1) + 1 && b3.body.cas !== b1.body.cas, "po izteku predpomnilnika vidi novo narocilo", [stDanes(b1), stDanes(b3)]);
-    // tudi opozorila so predpomnjena enako
-    const o1 = await api(PORT_PRED, "/admin/api/opozorila", tokB);
-    const kopija = await pool.query("INSERT INTO events (club_id, title, status, start_at, end_at, poster_url, ticket_price_cents, capacity) VALUES ($1, 'Brez plakata predpomnilnik', 'published', NOW() + INTERVAL '2 days', NOW() + INTERVAL '3 days', '', 1000, 10) RETURNING id", [K1]);
-    const o2 = await api(PORT_PRED, "/admin/api/opozorila", tokB);
-    assert(o2.body.items.length === o1.body.items.length, "opozorila: drugi klic znotraj trajanja je predpomnjen", [o1.body.items.length, o2.body.items.length]);
-    await pocakaj(1700);
-    const o3 = await api(PORT_PRED, "/admin/api/opozorila", tokB);
-    assert(o3.body.items.length === o1.body.items.length + 1, "opozorila: po izteku vidi nov dogodek brez plakata", [o1.body.items.length, o3.body.items.length]);
-    await pool.query("DELETE FROM events WHERE id = $1", [kopija.rows[0].id]);
-    // brez nastavljenega trajanja (privzeto 10 s): dva klica 2,5 s narazen sta ista poizvedba
+    const getB = (p) => api(PORT_PRED, p, tokB);
+    // Svez izracun: pocakaj, da se `cas` spremeni (predpomnilnik je potekel in se je izracunalo na novo).
+    async function svezDanes() {
+      let prej = (await getB("/admin/api/danes")).body.cas;
+      for (let i = 0; i < 80; i++) { await pocakaj(250); const r = await getB("/admin/api/danes"); if (r.body.cas !== prej) return r; prej = r.body.cas; }
+      throw new Error("predpomnilnik danes ni potekel v 20 s");
+    }
+    let uspelo = false, osnova = 0;
+    for (let poskus = 1; poskus <= 5 && !uspelo; poskus++) {
+      const b1 = await svezDanes();                  // izracunano ravnokar: predpomnilnik velja ~3 s od razresitve
+      const t0 = Date.now();
+      await narocilo(E.cez3dni, K1, { qty: 1, created: cDanes });
+      const b2 = await getB("/admin/api/danes");
+      const socasni = await Promise.all([1, 2, 3, 4, 5].map(() => getB("/admin/api/danes")));
+      if (Date.now() - t0 > 1500) { console.log(`  (poskus ${poskus}: pocasno racunalnik, ${Date.now() - t0} ms; ponavljam)`); continue; }
+      uspelo = true; osnova = stDanes(b1);
+      assert(b2.status === 200 && stDanes(b2) === stDanes(b1) && b2.body.cas === b1.body.cas, "predpomnilnik: drugi klic znotraj trajanja ne vidi novega narocila (isti cas)", [stDanes(b1), stDanes(b2)]);
+      assert(socasni.every(x => x.body.cas === b1.body.cas && stDanes(x) === stDanes(b1)), "5 socasnih klicev = ista poizvedba (isti cas)");
+    }
+    assert(uspelo, "predpomnilnik: preverba uspela v 5 poskusih");
+    let vidi = false;
+    for (let i = 0; i < 80 && !vidi; i++) { const x = await getB("/admin/api/danes"); vidi = stDanes(x) > osnova; if (!vidi) await pocakaj(250); }
+    assert(vidi, "po izteku predpomnilnika (stanje, ne ura) klic vidi novo narocilo");
+    // opozorila: isti vzorec
+    const stOp = async () => (await getB("/admin/api/opozorila")).body.items.length;
+    let opUspelo = false, opOsnova = 0;
+    for (let poskus = 1; poskus <= 5 && !opUspelo; poskus++) {
+      await pocakaj(3300);                           // predpomnilnik (3 s od razresitve) je zagotovo potekel (daljse cakanje ne moti, krajse bi)
+      const n1 = await stOp();                      // svez izracun (predpomnilnik je zagotovo potekel)
+      const t0 = Date.now();
+      await pool.query("INSERT INTO events (club_id, title, status, start_at, end_at, poster_url, ticket_price_cents, capacity) VALUES ($1, $2, 'published', NOW() + INTERVAL '2 days', NOW() + INTERVAL '3 days', '', 1000, 10)", [K1, "Brez plakata predpomnilnik " + poskus]);
+      const n2 = await stOp();
+      if (Date.now() - t0 > 1500) continue;
+      opUspelo = true; opOsnova = n1;
+      assert(n2 === n1, "opozorila: drugi klic znotraj trajanja je predpomnjen", [n1, n2]);
+    }
+    assert(opUspelo, "opozorila: preverba predpomnilnika uspela");
+    let opVidi = false;
+    for (let i = 0; i < 80 && !opVidi; i++) { opVidi = (await stOp()) > opOsnova; if (!opVidi) await pocakaj(250); }
+    assert(opVidi, "opozorila: po izteku predpomnilnika (stanje, ne ura) klic vidi nov dogodek brez plakata");
+    await pool.query("DELETE FROM events WHERE title LIKE 'Brez plakata predpomnilnik%'");
+    // brez nastavljenega trajanja (privzeto 10 s): klica 2 s narazen sta ista poizvedba (ce racunalnik ni bil > 7 s pocasnejsi)
+    const tC = Date.now();
     const c1 = await api(PORT_PRIVZETO, "/admin/api/danes", tokB);
-    await pocakaj(2500);
+    await pocakaj(2000);
     const c2 = await api(PORT_PRIVZETO, "/admin/api/danes", tokB);
-    assert(c2.body.cas === c1.body.cas, "privzeto trajanje predpomnilnika je daljse od 2,5 s (10 s)", [c1.body.cas, c2.body.cas]);
+    if (Date.now() - tC < 8000) assert(c2.body.cas === c1.body.cas, "privzeto trajanje predpomnilnika je daljse od 2 s (10 s)", [c1.body.cas, c2.body.cas]);
+    else assert(true, "privzeto trajanje: preskoceno (racunalnik je bil prepocasen za casovno preverbo)");
     // brez predpomnilnika (strezniki A) vsak klic bere bazo
     const a1 = await api(PORT, "/admin/api/danes", T.admin);
     const a2 = await api(PORT, "/admin/api/danes", T.admin);
     assert(a1.body.cas !== a2.body.cas, "ADMIN_NADZOR_PREDPOMNILNIK_MS=0: brez predpomnilnika");
+
+    console.log("\n# Zanesljivost: 57014 -> 503, vracanje povezave, semafor (najvec ena povezava)");
+    const aktivne = async () => (await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE application_name = 'admin_nadzor'")).rows[0].n;
+    const zakleni = async () => { const k = new Client({ connectionString: DB }); await k.connect(); await k.query("BEGIN"); await k.query("LOCK TABLE racuni IN ACCESS EXCLUSIVE MODE"); return k; };
+    // 1. poizvedba obvisi na zaklepu (statement_timeout 2 s steje tudi cakanje na zaklep) -> 57014 -> 503 + Retry-After, povezava se vrne
+    let kl = await zakleni();
+    for (const pot of ["/admin/api/opozorila", "/admin/api/racuni", "/admin/api/danes"]) {
+      const t0 = Date.now();
+      const x = await api(PORT, pot, T.admin);
+      const dt = Date.now() - t0;
+      assert(x.status === 503 && x.body.error === "admin_busy" && x.glave.get("retry-after") === "5", `${pot}: poizvedba preseze 2 s -> 503 admin_busy + Retry-After 5`, [x.status, x.body, x.glave.get("retry-after")]);
+      assert(dt >= 1800, `${pot}: 503 sele po statement_timeout (${dt} ms)`);
+    }
+    await kl.query("ROLLBACK"); await kl.end();
+    await pocakaj(200);
+    assert(await aktivne() === 0, "po 57014 ni odprte transakcije admin_nadzor (ROLLBACK, povezava vrnjena)");
+    const povrnjeno = [];
+    for (const pot of ["/admin/api/opozorila", "/admin/api/racuni", "/admin/api/danes", "/admin/api/summary"]) povrnjeno.push((await api(PORT, pot, T.admin)).status);
+    assert(povrnjeno.every(c => c === 200), "po zaklepu vsi klici spet 200 (semafor in povezava sta sproscena)", povrnjeno);
+    const zdravje = await api(PORT, "/healthz", null);
+    assert(zdravje.status === 200, "/healthz 200 (pool ni izcrpan)", zdravje.status);
+    // 2. semafor: hkratni /danes + /opozorila + /racuni + /summary, medtem ko prva poizvedba caka na zaklep: najvec ENA povezava admin_nadzor
+    kl = await zakleni();
+    let najvec = 0, videno = 0, tece = true;
+    const vzorcevalec = (async () => { while (tece) { const n = await aktivne(); najvec = Math.max(najvec, n); if (n > 0) videno++; await pocakaj(15); } })();
+    const poti = ["/admin/api/danes", "/admin/api/opozorila", "/admin/api/racuni", "/admin/api/racuni?stanje=caka", "/admin/api/summary", "/admin/api/opozorila"];
+    const odgovori = Promise.all(poti.map(pot => api(PORT, pot, T.admin)));
+    await pocakaj(700);
+    await kl.query("ROLLBACK"); await kl.end();
+    const izidi = await odgovori;
+    tece = false; await vzorcevalec;
+    assert(videno > 0, "vzorcevalec je videl povezavo admin_nadzor (preverba ni prazna)", videno);
+    assert(najvec === 1, "semafor: v pg_stat_activity najvec ENA povezava admin_nadzor hkrati (6 vzporednih klicev)", najvec);
+    assert(izidi.every(x => x.status === 200 || (x.status === 503 && x.body.error === "admin_busy")), "izidi: 200 ali 503 admin_busy", izidi.map(x => x.status));
+    assert(izidi.filter(x => x.status === 200).length >= 3, "vsaj trije klici (summary in cakajoci po sprostitvi) uspejo", izidi.map(x => x.status));
+    assert(await aktivne() === 0, "po koncu ni odprte transakcije admin_nadzor");
+    // 3. cakajoci drugacen izracun: ce povezava ostane zasedena dlje kot 2 s, dobi 503 admin_busy + Retry-After (enota: lazen pool, ki nikoli ne odgovori)
+    {
+      const rute = {};
+      const obesen = { connect: async () => ({ on() {}, off() {}, release() {}, query: () => new Promise(() => {}) }) };
+      const modul3 = ustvari({ pool: obesen, router: { get: (p, h) => { rute[p] = h; } }, SQL_TESTNO_NAROCILO: SQL_TESTNO, razlogNerazpolozljivosti: () => null, nacinPlacilaZ: () => null,
+        sqlKlubStripePripravljen: () => "NULL::boolean AS club_stripe_ready, NULL::jsonb AS club_seller_raw", VIP_OD_CENTOV: "NULL", odgovoriNaNapako: (res) => res.status(500).json({}), env: { ADMIN_NADZOR_PREDPOMNILNIK_MS: "0" } });
+      const lazniRes = () => { const r = { glave: {}, kod: null, telo: null, set(k, v) { r.glave[String(k).toLowerCase()] = v; return r; }, status(c) { r.kod = c; return r; }, json(b) { r.telo = b; return r; } }; return r; };
+      assert(typeof modul3.rdeceStevilo === "function" && modul3.rdeceStevilo() === null, "rdeceStevilo() brez izracuna je null (ne sprozi izracuna, ne caka)");
+      void rute["/opozorila"]({ query: {} }, lazniRes());   // zasede edino povezavo in ne vrne nikoli
+      await pocakaj(50);
+      const r2 = lazniRes(), t1 = Date.now();
+      await rute["/racuni"]({ query: {} }, r2);
+      const dt1 = Date.now() - t1;
+      assert(r2.kod === 503 && r2.telo.error === "admin_busy" && r2.glave["retry-after"] === "5" && dt1 >= 1800 && dt1 < 3500, "zaseden semafor: drugacen izracun po ~2 s dobi 503 admin_busy + Retry-After", [r2.kod, r2.telo, r2.glave, dt1]);
+      const r3 = lazniRes(), t2 = Date.now();
+      await rute["/danes"]({ query: {} }, r3);
+      assert(r3.kod === 503 && r3.telo.error === "admin_busy" && Date.now() - t2 < 5500, "zaseden semafor: tudi /danes konca z 503 admin_busy (ne obvisi)", [r3.kod, Date.now() - t2]);
+    }
 
     console.log("\n# Dnevnik streznika");
     for (const [ime, s] of [["A", A], ["B", B], ["C", C]]) {

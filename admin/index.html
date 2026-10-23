@@ -537,8 +537,9 @@ async function naloziPregled() {
       kosPozor(s.dispute_recovery_attention, "povrnitev sporov za pozornost", "pozor");
     const nV = (Number(s.refunds_attention) || 0) + (Number(s.dispute_recovery_attention) || 0);
     $("nVracil").textContent = nV; $("nVracil").classList.toggle("skrito", !nV);
-    const nRdeca = Number(s.warnings_red) || 0;   // DODANO polje (#326); star backend ga nima -> znacka skrita
-    $("nOpozorila").textContent = nRdeca; $("nOpozorila").classList.toggle("skrito", !nRdeca);
+    if (typeof s.warnings_red === "number") {   // DODANO polje (#326); null = se ni izracunano (znacko postavi »Danes« ali zavihek Opozorila), star backend ga nima
+      $("nOpozorila").textContent = s.warnings_red; $("nOpozorila").classList.toggle("skrito", !s.warnings_red);
+    }
     $("nProsenj").textContent = s.new_applications; $("nProsenj").classList.toggle("skrito", !s.new_applications);
     $("nPrijav").textContent = s.open_reports || 0; $("nPrijav").classList.toggle("skrito", !s.open_reports);
   });

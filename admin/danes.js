@@ -90,7 +90,7 @@
   }
   async function osvezi(sila) {
     if (vTeku) return;
-    if (!sila && Date.now() < pavzaDo) return;
+    if (!sila && Date.now() < pavzaDo) { planiraj(pavzaDo - Date.now() + 50); return; }   // veriga osvezevanja se ne sme ugasniti
     vTeku = true;
     let naslednji = OSVEZI_MS;
     try {

@@ -129,6 +129,7 @@
     });
   }
   window.naloziOpozorila = async function () {
-    await Promise.all([naloziOpozorila(), naloziRacune()]);
+    await naloziOpozorila();   // zaporedoma, ne vzporedno: streznik ima za nadzorne poti eno povezavo (semafor), vzporeden klic bi caka
+    await naloziRacune();
   };
 })();

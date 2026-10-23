@@ -175,6 +175,11 @@ async function api(method, path, token) {
     const nVracilo = await narocilo(D.ok, K_OK, { pi: "pi_skrivni456", session: "cs_live_skrivni789" });
 
     const dobi = async (pot = "/admin/api/opozorila") => api("GET", pot, T.admin);
+    // summary NE sprozi izracuna opozoril: na svezem strezniku (se noben klic /opozorila ali /danes) je warnings_red null, tudi ob ponovnem klicu
+    let sv = await dobi("/admin/api/summary");
+    assert(sv.status === 200 && sv.body.warnings_red === null, "svez streznik: summary.warnings_red je null (izracuna ne sprozi)", sv.body.warnings_red);
+    sv = await dobi("/admin/api/summary");
+    assert(sv.body.warnings_red === null, "ponovni summary je se vedno null (se vedno brez izracuna)", sv.body.warnings_red);
     const ima = (items, vrsta, cilj_id) => items.some(i => i.vrsta === vrsta && (cilj_id === undefined || String(i.cilj_id) === String(cilj_id)));
     const stevci = (items) => { const s = { rdece: 0, oranzno: 0, rumeno: 0 }; for (const i of items) s[i.resnost]++; return s; };
 
@@ -323,11 +328,11 @@ async function api(method, path, token) {
     assert(r.body.stevci.caka === 233, "stevci steje vse, ne samo prikazanih (233 caka)", r.body.stevci);
 
     console.log("\n# GET /admin/api/summary");
+    const op = (await dobi()).body;   // izracun opozoril; summary nato vzame zadnje stevilo
     r = await dobi("/admin/api/summary");
     const STARA = ["new_applications", "clubs", "hidden_clubs", "users", "business_users", "admins", "events", "upcoming_events", "open_reports", "refunds_attention", "open_disputes", "dispute_recovery_attention"];
     assert(r.status === 200 && STARA.every(k => typeof r.body[k] === "number"), "vsa stara polja summary so se vedno tu (stevila)", STARA.filter(k => typeof r.body[k] !== "number"));
     assert(r.body.racuni_napaka === 2, "racuni_napaka = 2", r.body.racuni_napaka);
-    const op = (await dobi()).body;
     assert(typeof r.body.warnings_red === "number" && r.body.warnings_red === op.stevci.rdece, "warnings_red = stevilo rdecih opozoril", [r.body.warnings_red, op.stevci.rdece]);
     assert(r.body.warnings_red >= 2, "warnings_red vkljucuje racuna v napaki", r.body.warnings_red);
 

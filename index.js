@@ -3609,8 +3609,7 @@ function celoId4(v) { const n = celoId(v); return n !== null && n <= 2147483647 
 // --- pregled ---
 admin.get("/summary", async (req, res) => {
   try {
-    // warnings_red (DODANO, 23. 10. 2026, #326): stevilo rdecih opozoril (admin_nadzor.js, predpomnilnik 10 s); ob napaki null, pregled se zaradi tega ne podre.
-    const rdeca = adminNadzor.rdeceStevilo().catch((e) => { console.error("[admin] summary: rdeca opozorila niso na voljo:", e && e.message); return null; });
+    // warnings_red (DODANO, #326): zadnje izracunano stevilo rdecih opozoril (admin_nadzor.js, najvec 60 s staro) ali null; summary NE sprozi izracuna in ne caka.
     const r = await pool.query(`
       SELECT
         (SELECT COUNT(*)::int FROM creator_applications WHERE status='new') AS new_applications,
@@ -3626,7 +3625,7 @@ admin.get("/summary", async (req, res) => {
         (SELECT COUNT(*)::int FROM spori WHERE zaprt_at IS NULL)             AS open_disputes,
         (SELECT COUNT(*)::int FROM spori WHERE povrnitev_stanje IN ('ni_uspelo','rocno')) AS dispute_recovery_attention,
         (SELECT COUNT(*)::int FROM racuni WHERE stanje='napaka')             AS racuni_napaka`);
-    return res.json({ ...r.rows[0], warnings_red: await rdeca });
+    return res.json({ ...r.rows[0], warnings_red: adminNadzor.rdeceStevilo() });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
