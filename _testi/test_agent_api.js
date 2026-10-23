@@ -104,6 +104,11 @@ function nicOsebnega(ime, tekst) {
   for (const p of [PORT, PORT_OFF, PORT_ZETON, PORT_IP]) await cakajStreznik(p);
   const zakleni = async (...tabele) => { const k = new Client({ connectionString: DB }); await k.connect(); await k.query("BEGIN"); for (const t of tabele) await k.query(`LOCK TABLE ${t} IN ACCESS EXCLUSIVE MODE`); return k; };
   const odkleni = async (k) => { await k.query("ROLLBACK"); await k.end(); };
+  // Cakanje na POGOJ (ne na cas, pregled #337): fn se preverja vsakih ~20 ms do roka; vrne true, ce je pogoj izpolnjen. pg_stat_activity samo v tej bazi.
+  const cakajNa = async (fn, rokMs = 10000, korakMs = 20) => { const konec = Date.now() + rokMs; for (;;) { if (await fn()) return true; if (Date.now() > konec) return false; await pocakaj(korakMs); } };
+  const agentPovezav = async (samoCakaZaklep = false) => (await pool.query(`SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'agent_api'${samoCakaZaklep ? " AND wait_event_type = 'Lock'" : ""}`)).rows[0].n;
+  // agentova poizvedba caka na zaklep tabele (npr. prvi klic visi na zaklenjeni racuni): pogoj, da je semafor agenta res zaseden
+  const agentCakaZaklep = () => cakajNa(async () => (await agentPovezav(true)) >= 1, 5000);
 
   try {
     const T = { admin: jwt("admin@outly.si", uuid(1)), poslovni: jwt("lastnik@outly.si", uuid(2)), kupec: jwt(TAJNO.emailKupca, uuid(3)) };
@@ -483,7 +488,7 @@ function nicOsebnega(ime, tekst) {
     // 6a. hkrati: prvi klic obvisi na zaklepu racuni (2 s), drugi istega zetona takoj 429 agent_busy
     kl = await zakleni("racuni");
     const prvi = api(PORT, "GET", "/agent/api/racuni", TOK);
-    await pocakaj(400);
+    assert(await agentCakaZaklep(), "predpogoj 6a: prvi klic agenta caka na zaklep racuni (semafor zaseden)");
     const drugi = await api(PORT, "GET", "/agent/api/opozorila", TOK);
     assert(drugi.status === 429 && drugi.body.error === "agent_busy" && drugi.glave.get("retry-after") === "1", "drugi hkraten klic agenta -> 429 agent_busy + Retry-After (odgovor pride, ceprav prvi klic caka na zaklep: brez cakalne vrste)", [drugi.status, drugi.body]);
     const prviIzid = await prvi;
@@ -495,7 +500,7 @@ function nicOsebnega(ime, tekst) {
     const DRUGI_ZETON = (await api(PORT, "POST", "/admin/api/agent-zetoni", T.admin, { ime: "Drugi" })).body.zeton;
     kl = await zakleni("racuni");
     const hit1 = api(PORT, "GET", "/agent/api/racuni", TOK);
-    await pocakaj(300);
+    assert(await agentCakaZaklep(), "predpogoj: klic prvega zetona caka na zaklep racuni (semafor zaseden)");
     const hit2 = await api(PORT, "GET", "/agent/api/racuni", DRUGI_ZETON);
     assert(hit2.status === 429 && hit2.body.error === "agent_busy", "semafor agenta je za proces (najvec ENA agentova povezava): tudi drug zeton dobi takoj 429 agent_busy", [hit2.status, hit2.body]);
     await hit1; await odkleni(kl);
@@ -503,25 +508,43 @@ function nicOsebnega(ime, tekst) {
     kl = await zakleni("racuni");
     const ac = new AbortController();
     const pre = fetch(`http://127.0.0.1:${PORT}/agent/api/racuni`, { headers: { authorization: "Bearer " + TOK }, signal: ac.signal }).catch(() => null);
-    await pocakaj(300); ac.abort(); await pre; await pocakaj(300);
+    assert(await agentCakaZaklep(), "predpogoj: klic, ki ga bo odjemalec prekinil, caka na zaklep racuni");
+    ac.abort(); await pre;
+    await api(PORT, "GET", "/healthz", null);   // pregrada: streznik je obdelal zaprtje prekinjenega zahtevka (dogodek close), preden pride naslednji klic agenta
+    assert((await agentPovezav(true)) >= 1, "predpogoj: poizvedba prekinjenega klica se vedno caka na zaklep (statement_timeout se ni potekel)");
     const poPrekinitvi = await dobi("/opozorila");   // zaklep se drzi: poizvedba prekinjenega klica na povezavi se tece -> semafor se NE sprosti (najvec ena povezava), nov klic 429 agent_busy
     assert(poPrekinitvi.status === 429 && poPrekinitvi.body.error === "agent_busy", "prekinitev odjemalca ne sprosti semaforja, dokler poizvedba tece (agent nikoli ne drzi 2 povezav)", [poPrekinitvi.status, poPrekinitvi.body]);
-    await odkleni(kl); await pocakaj(2200);
-    r = await dobi("/opozorila");
+    await odkleni(kl);
+    // iztek: poizvedba se konca (zaklep sproscen ali statement_timeout 2 s); cakaj, da naslednji klic ni vec 429 agent_busy (rok 10 s)
+    await cakajNa(async () => (await agentPovezav()) === 0, 10000);
+    await cakajNa(async () => { r = await dobi("/opozorila"); return !(r.status === 429 && r.body.error === "agent_busy"); }, 10000, 50);
     assert(r.status === 200, "po koncu poizvedbe se semafor sprosti (spet 200)", [r.status, r.body]);
 
     // S1-b: prekinitev odjemalca MED visecim iskanjem zetona: prekinjen zahtevek ne sme zaceti novega dela (finance bi obvisela na zaklepu orders), agent nikoli ne drzi 2 povezav
     {
-      let maks = 0, videno = 0, teci = true;
-      const vzorcevalec = (async () => { while (teci) { const n = (await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE application_name = 'agent_api'")).rows[0].n; maks = Math.max(maks, n); if (n > 0) videno++; await pocakaj(15); } })();
+      let maks = 0, videno = 0, teci = true, naOrders = 0;
+      // vzorcevalec: stevilo povezav agent_api (najvec 1) in ali je katera agentova poizvedba kdaj cakala na zaklep orders (= finance se je zacela)
+      const vzorcevalec = (async () => { while (teci) {
+        const v = (await pool.query(`SELECT COUNT(*)::int AS n, COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = a.pid AND NOT l.granted AND l.relation = 'orders'::regclass))::int AS o
+                                     FROM pg_stat_activity a WHERE a.datname = current_database() AND a.application_name = 'agent_api'`)).rows[0];
+        maks = Math.max(maks, v.n); if (v.n > 0) videno++; naOrders += v.o; await pocakaj(15); } })();
       const ko = await zakleni("orders");
       for (let i = 0; i < 3; i++) {
         const kz = await zakleni("agent_zetoni");
         const ac = new AbortController();
         const p = fetch(`http://127.0.0.1:${PORT}/agent/api/finance`, { headers: { authorization: "Bearer " + TOK }, signal: ac.signal }).then((x) => x.status, () => "prekinjeno");
-        await pocakaj(150); ac.abort(); await p; await pocakaj(50);
-        await odkleni(kz); await pocakaj(400);   // iskanje zetona se zakljuci; finance NE sme zaceti
-        const n = (await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE application_name = 'agent_api'")).rows[0].n;
+        assert(await agentCakaZaklep(), `predpogoj (${i + 1}.): iskanje zetona visi na zaklepu agent_zetoni`);
+        ac.abort(); await p;
+        await api(PORT, "GET", "/healthz", null);   // pregrada: streznik je obdelal zaprtje prekinjenega zahtevka
+        const naOrdersPrej = naOrders;
+        await odkleni(kz);
+        // iskanje zetona se zakljuci; finance NE sme zaceti. Pogoj konca: semafor agenta je spet prost (poskusni klic /racuni ni 429 agent_busy; racuni ni zaklenjena).
+        // Ce bi se finance zacela, bi drzala semafor in visela na zaklepu orders do statement_timeout (2 s): vzorcevalec bi to videl (naOrders).
+        let poskus;
+        const prost = await cakajNa(async () => { poskus = await dobi("/racuni"); return !(poskus.status === 429 && poskus.body.error === "agent_busy"); }, 10000, 50);
+        assert(prost && poskus.status === 200, `prekinjen zahtevek (${i + 1}.): semafor se sprosti, poskusni klic /racuni 200`, poskus && [poskus.status, poskus.body]);
+        assert(naOrders === naOrdersPrej, `prekinjen zahtevek (${i + 1}.) po koncu iskanja ne zacne finance: nobena poizvedba agent_api ni cakala na zaklep orders`, naOrders - naOrdersPrej);
+        const n = await agentPovezav();
         assert(n === 0, `prekinjen zahtevek (${i + 1}.) po koncu iskanja ne zacne finance: nobene povezave agent_api`, n);
       }
       const navadna = await api(PORT, "GET", "/agent/api/finance", TOK);   // orders je se zaklenjen: poizvedba preseze 2 s
@@ -587,14 +610,14 @@ function nicOsebnega(ime, tekst) {
       // iskanje zetona obvisi (zaklep agent_zetoni): zaseden je SAMO semafor agenta; plosca dela, drugi klic agenta takoj 429
       kl = await zakleni("agent_zetoni");
       const obvisel = api(PORT, "GET", "/agent/api/danes", TOK);
-      await pocakaj(300);
+      assert(await agentCakaZaklep(), "predpogoj: prijava agenta visi na zaklepu agent_zetoni");
       const sociasni = await Promise.all([api(PORT, "GET", "/admin/api/danes", T.admin), api(PORT, "GET", "/admin/api/opozorila", T.admin), api(PORT, "GET", "/admin/api/racuni", T.admin), api(PORT, "GET", "/agent/api/danes", TOK)]);
       assert(sociasni.slice(0, 3).every((x) => x.status === 200), "med viseco prijavo agenta so admin /danes, /opozorila, /racuni 200", sociasni.map((x) => x.status));
       assert(sociasni[3].status === 429 && sociasni[3].body.error === "agent_busy", "drugi klic agenta med viseco prijavo: takoj 429 agent_busy (brez cakalne vrste)", [sociasni[3].status, sociasni[3].body]);
       const o = await obvisel;
       assert(o.status === 503, "viseca prijava agenta konca 503 (ne 401)", o.status);
       await odkleni(kl);
-      const pg2 = await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE application_name IN ('admin_nadzor', 'agent_api')");
+      const pg2 = await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND application_name IN ('admin_nadzor', 'agent_api')");
       assert(pg2.rows[0].n === 0, "po koncu ni odprte transakcije admin_nadzor / agent_api");
     }
 
