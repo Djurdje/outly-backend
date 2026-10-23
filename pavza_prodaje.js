@@ -6,7 +6,7 @@
 //     z odprto ali se ustvarjajoco Stripe sejo na `cancelled` (sprozilec sprosti zalogo, unikatni indeks mize jo spusti). Placila v obdelavi (odlozeno placilo:
 //     seja `complete`, `checkout_url` NULL ob obstojeci seji) NE: kupec je svoj del ze opravil, denar je na poti.
 //  2. PO COMMIT-u, asinhrono (`zazeni(eventId)`): Stripove seje teh narocil se zaprejo (`checkout.sessions.expire`). Povezava z bazo se med klici Stripa
-//     NE drzi (seznam se prebere s kratko poizvedbo), najvec PAVZA_STRIPE_VZPOREDNO klicev hkrati, vsak do PAVZA_STRIPE_POSKUSOV poskusov z narascajocim
+//     NE drzi (seznam se prebere s kratko poizvedbo), najvec PAVZA_STRIPE_VZPOREDNO klicev hkrati na dogodek (in PAVZA_STRIPE_SKUPAJ na proces, #329), vsak do PAVZA_STRIPE_POSKUSOV poskusov z narascajocim
 //     premorom; vse v dnevnik `[pavza]`. Po PAVZA_KMALU_MS (3 s) in PAVZA_PONOVNO_MS (90 s) se oba koraka ponovita: ujameta nakup mize, ki je dogodek prebral
 //     TIK pred pavzo in se commital med njo (nakup mize vrstice dogodka ne zaklene; nakup vstopnic pocaka na zaklep v sprozilcu rezerviraj_zalogo in ga
 //     nakupStripeSeja zavrne), ter sejo, ki je bila ob prvem koraku sele v nastajanju. Preostalo okno (I53): nakup mize, ki je sejo zapisal pred COMMIT-om
@@ -42,16 +42,30 @@ function ustvari({ pool, stripe, jeLive, razprodanoPozabi }) {
   const PREMOR_MS = okoljeSt("PAVZA_STRIPE_PREMOR_MS", 1000, 0, 60000);
   const PONOVNO_MS = okoljeSt("PAVZA_PONOVNO_MS", 90000, 0, 600000);
   const KMALU_MS = okoljeSt("PAVZA_KMALU_MS", 3000, 0, 60000);
+  // MNOZICNA pavza (#329): do 50 dogodkov hkrati bi sicer pognalo 50 x PAVZA_STRIPE_VZPOREDNO klicev Stripa (meja je na klic zapriSeje, ne na proces) in 50 hkratnih
+  // transakcij ponovnega koraka (pool.connect). Zato SKUPNA meja na proces, a SAMO za mnozicno pot (`zazeni(.., { mnozicno: true })`): posamicna pavza (in nujna pavza agenta) NE caka v vrsti za mnozicno, njeno okno »najvec ~3 s« (I53) ostane nespremenjeno. Meja: najvec PAVZA_STRIPE_SKUPAJ (privzeto 8) hkratnih `expire` in PAVZA_DB_SKUPAJ (privzeto 2)
+  // hkratnih transakcij ponovnega koraka. Dovoljenje se drzi samo med enim klicem (ne med premorom), zato en dogodek ne zadrzi drugih.
+  const vrstaMeja = (najvec) => {
+    let tece = 0; const cakajo = [];
+    return async (f) => {
+      if (tece >= najvec) await new Promise((r) => cakajo.push(r));
+      else tece++;
+      try { return await f(); }
+      finally { const naslednji = cakajo.shift(); if (naslednji) naslednji(); else tece--; }
+    };
+  };
+  const SKUPAJ_STRIPE = vrstaMeja(okoljeSt("PAVZA_STRIPE_SKUPAJ", 8, 1, 100));
+  const SKUPAJ_DB = vrstaMeja(okoljeSt("PAVZA_DB_SKUPAJ", 2, 1, 10));
   const zaprte = new Map();   // eventId -> Set(id seje), da drugi korak iste seje ne zapira znova (samo v procesu; ponovni expire bi bil le odvecen klic)
   const pocakaj = (ms) => new Promise((r) => setTimeout(r, ms).unref?.());
 
   // Trajna napaka Stripa (seja ni vec odprta, ne obstaja, napacen nacin): ne ponavljamo. Omrezje, 429, 5xx: ponovimo.
   const trajna = (e) => !!e && (e.type === "StripeInvalidRequestError" || e.statusCode === 400 || e.statusCode === 404);
 
-  async function zapri(s, eventId, sejaId) {
+  async function zapri(s, eventId, sejaId, mnozicno) {
     for (let poskus = 1; poskus <= POSKUSOV; poskus++) {
       try {
-        await s.checkout.sessions.expire(sejaId);
+        await (mnozicno ? SKUPAJ_STRIPE : (f) => f())(() => s.checkout.sessions.expire(sejaId));
         console.log(`[pavza] dogodek ${eventId}: placilno okno ${sejaId} zaprto`);
         return "zaprto";
       } catch (e) {
@@ -72,7 +86,7 @@ function ustvari({ pool, stripe, jeLive, razprodanoPozabi }) {
   }
 
   // Seje preklicanih narocil dogodka (od trenutka pavze `od`), ki jih se nismo zaprli. Kratka poizvedba, povezava se ne drzi.
-  async function zapriSeje(eventId, od) {
+  async function zapriSeje(eventId, od, mnozicno = false) {
     const s = stripe();
     if (!s) return { zaprto: 0, skupaj: 0 };
     const r = await pool.query(
@@ -86,7 +100,7 @@ function ustvari({ pool, stripe, jeLive, razprodanoPozabi }) {
     const delavec = async () => {
       while (i < seje.length) {
         const id = seje[i++];
-        const izid = await zapri(s, eventId, id);
+        const izid = await zapri(s, eventId, id, mnozicno);
         if (izid !== "napaka") ze.add(id);
         if (izid === "zaprto") zaprto++;
       }
@@ -96,21 +110,23 @@ function ustvari({ pool, stripe, jeLive, razprodanoPozabi }) {
   }
 
   // Korak 2 (po COMMIT-u, brez await pri klicatelju). `od` = cas pavze (NOW() transakcije), da ne zapiramo sej starih preklicev.
-  function zazeni(eventId, od) {
+  function zazeni(eventId, od, { mnozicno = false } = {}) {
     const tek = async (drugic) => {
       try {
         if (drugic) {
-          const c = await pool.connect();
-          let n = 0;
-          try {
-            await c.query("BEGIN");
-            n = await prekliciCakajoca(c, eventId, { samoCePavza: true });
-            await c.query("COMMIT");
-          } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
-          finally { c.release(); }
+          const n = await (mnozicno ? SKUPAJ_DB : (f) => f())(async () => {
+            const c = await pool.connect();
+            try {
+              await c.query("BEGIN");
+              const x = await prekliciCakajoca(c, eventId, { samoCePavza: true });
+              await c.query("COMMIT");
+              return x;
+            } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
+            finally { c.release(); }
+          });
           if (n > 0) { console.log(`[pavza] dogodek ${eventId}: ponovni korak je preklical se ${n} cakajocih narocil (nakup tik pred pavzo)`); if (razprodanoPozabi) razprodanoPozabi(eventId); }
         }
-        const { zaprto, skupaj } = await zapriSeje(eventId, od);
+        const { zaprto, skupaj } = await zapriSeje(eventId, od, mnozicno);
         if (skupaj > 0 || !drugic) console.log(`[pavza] dogodek ${eventId}: ${drugic ? "ponovni korak" : "prvi korak"}, zaprtih placilnih oken ${zaprto} od ${skupaj}`);
       } catch (e) {
         console.error(`[pavza] POZOR: dogodek ${eventId}: prekinitev placilnih oken ni uspela (${e && e.message}); pospravljalec in zakljuci() ujameta preostanek.`);

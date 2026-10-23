@@ -3182,6 +3182,7 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), (req, res) =>
 // Telo PATCH /events/:id. `opcije` uporablja samo agent_predlogi.js (#330, I57; obstojeca pot ostane ena sama, brez kopije validacije):
 //   samoPreveri(dovoljeno, d)  po CELOTNI validaciji, pred transakcijo: vrne normalizirana polja, nic ne zapise in nic ne zaklene (predlog agenta);
 //   predZaklepom(c)            takoj po BEGIN, PRED zaklepom vrstice dogodka (nujni nacin agenta, I58: globalni advisory zaklep 73121);
+//   razlog                     besedilo za stolpec `razlog` vrstice admin_dejanja (mnozicna dejanja, #329);
 //   predlog(c, st)             v transakciji po zaklepu vrstice dogodka in branju starih vrednosti: zaklep predloga, zastarelost, caka -> potrjen (vrze e.odgovor).
 async function urediDogodek(req, res, opcije = {}) {
   try {
@@ -3348,7 +3349,7 @@ async function urediDogodek(req, res, opcije = {}) {
       }
       if (admin) {
         const dnevnik = razlikaPolj(polja, st, r.rows[0]);
-        if (dnevnik) await zapisiAdminDejanje(c, req, dejanjeDogodka(dnevnik.prej, dnevnik.potem), "event", d.id, dnevnik.prej, dnevnik.potem);
+        if (dnevnik) await zapisiAdminDejanje(c, req, dejanjeDogodka(dnevnik.prej, dnevnik.potem), "event", d.id, dnevnik.prej, dnevnik.potem, opcije.razlog);
       }
       await c.query("COMMIT");
     } catch (e) {
@@ -3370,7 +3371,7 @@ async function urediDogodek(req, res, opcije = {}) {
     razprodanoPozabi("v:" + d.id);   // capacity ali status se je morda spremenil
     if (pavzaOd) {
       console.log(`[pavza] dogodek ${d.id}: prodaja ustavljena (uporabnik ${req.user.userId}), preklicanih cakajocih narocil ${preklicanih}`);
-      void pavzaOkna.zazeni(d.id, pavzaOd);   // po COMMIT-u, brez await: odgovor ne caka na Stripe
+      void pavzaOkna.zazeni(d.id, pavzaOd, { mnozicno: opcije.mnozicno === true });   // po COMMIT-u, brez await: odgovor ne caka na Stripe
     } else if (prej && prej.sales_paused === true && r.rows[0].sales_paused === false) {
       console.log(`[pavza] dogodek ${d.id}: prodaja spet tece (uporabnik ${req.user.userId})`);
     }
@@ -4153,19 +4154,26 @@ admin.get("/events", async (req, res) => {
 // Odpoved gre prek sprozilca events_odpoved + sweep vracil (I37). Od faze 1 panela (055, I53): zapis v admin_dejanja v ISTI transakciji, zaklep vrstice
 // (FOR NO KEY UPDATE: hkratni PATCH istega dogodka pocaka), objava obvesti sledilce kot PATCH /events/:id (U1; prej jih panel ni obvestil).
 // Neobvezen `reason` (do 500 znakov) gre v dnevnik.
-admin.patch("/events/:id", async (req, res) => {
+admin.patch("/events/:id", (req, res) => adminStatusDogodka(req, res));
+// `opcije.predZaklepom(c)` takoj po BEGIN (kot pri urediDogodek); `opcije.brezOdpovedanih` (mnozicna dejanja, #329): odpovedan dogodek se NE vrne med osnutke (vracila so ze v vrsti, I37) -> 409 event_cancelled.
+async function adminStatusDogodka(req, res, opcije = {}) {
   const id = celoId4(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const b = req.body || {};
   const status = b.status;
   if (!["draft", "published", "cancelled"].includes(status)) return res.status(400).send("status must be draft, published or cancelled.");
-  const razlog = b.reason === undefined || b.reason === null ? null : String(b.reason).trim().slice(0, 500) || null;
+  const razlog = b.reason === undefined || b.reason === null ? null : [...String(b.reason).trim()].slice(0, 500).join("") || null;   // po znakih Unicode (ne po UTF-16 enotah: emoji se ne razpolovi)
   const c = await pool.connect();
   let r, star;
   try {
     await c.query("BEGIN");
+    if (opcije.predZaklepom) await opcije.predZaklepom(c);
     star = (await c.query("SELECT id, club_id, status FROM events WHERE id = $1 FOR NO KEY UPDATE", [id])).rows[0];
     if (!star) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+    if (opcije.brezOdpovedanih && star.status === "cancelled") {
+      await c.query("ROLLBACK");
+      return res.status(409).json({ error: "event_cancelled", message: "The event is cancelled; it can't be moved back to drafts in bulk." });
+    }
     r = await c.query(
       `UPDATE events SET status=$2 WHERE id=$1
        RETURNING id, club_id, title, start_at, status`, [id, status]
@@ -4174,7 +4182,11 @@ admin.patch("/events/:id", async (req, res) => {
       await zapisiAdminDejanje(c, req, dejanjeDogodka({ status: star.status }, { status }), "event", id, { status: star.status }, { status }, razlog);
     }
     await c.query("COMMIT");
-  } catch (e) { await c.query("ROLLBACK").catch(() => {}); console.error(e); return res.status(500).send("Server error."); }
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (e && (e.code === "40P01" || e.code === "55P03")) return res.status(503).set("Retry-After", "2").send("The event is busy. Please try again.");   // kot PATCH /events/:id; nic spremenjeno
+    console.error(e); return res.status(500).send("Server error.");
+  }
   finally { c.release(); }
   razprodanoPozabi("v:" + id);
   console.log(`Admin ${req.user.userId} dogodek ${id} -> ${status}`);
@@ -4183,7 +4195,7 @@ admin.patch("/events/:id", async (req, res) => {
     catch (e) { console.error("Obvescanje sledilcev ni uspelo:", e.message); }
   }
   return res.status(200).json(r.rows[0]);
-});
+}
 
 // POST /admin/api/events/:id/duplicate (#328): podvoji dogodek v OSNUTEK/OSNUTKE. Telo: { startAt } (ISO z obmocjem) ali { startAt, ponovi: "weekly", n } (1 <= n <= 12;
 // n je SKUPNO stevilo osnutkov, prvi je na startAt, vsak naslednji 7 koledarskih dni pozneje po ljubljanskem casu, zato ura po spremembi poletnega casa ostane).
@@ -4272,6 +4284,12 @@ async function podvojiDogodek(req, res, opcije = {}) {
   console.log(`Admin ${req.user.userId} podvojil dogodek ${id} -> ${nove.length} osnutkov`);
   return res.status(201).json({ events: nove.map((x) => ({ id: x.id, title: x.title, start_at: new Date(x.start_at).toISOString(), status: x.status })) });
 }
+
+// POST /admin/api/events/bulk (#329, I60): mnozicna dejanja nad dogodki (pause | resume | draft | reschedule); logika in odlocitve v admin_mnozicno.js.
+// Omejevalnik: 10 klicev na minuto na admina (vsak klic = do 50 zaporednih transakcij na glavnem poolu; clovek ne klikne pogosteje, zanka agenta ali dvojni klik pa ne sme
+// zasesti poola, ki ga rabijo nakupi). Okvara omejevalnika: lokalni stevec (kot ostale admin poti). Nic na skenPool.
+admin.post("/events/bulk", omeji({ kljuc: "admin-bulk", najvec: 10, oknoSekund: 60, poUporabniku: true, priNapaki: "lokalno" }),
+  require("./admin_mnozicno").ustvari({ pool, urediDogodek, adminStatusDogodka, celoId4 }));
 
 // GET /admin/api/events/:id — vsa urejljiva polja dogodka (za urejevalnik v panelu) + stevci + zadnjih 30 vrstic dnevnika (055, I53).
 // Samo branje v READ ONLY transakciji s casovno mejo (glavni pool nima statement_timeout); vse po indeksih (orders_event_idx, tickets_event_idx, admin_dejanja_cilj_idx).
