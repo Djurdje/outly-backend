@@ -11,6 +11,8 @@
  * Izvajalni del: odsek zaženemo v minimalnem lažnem DOM-u (ustvarjeni elementi, `innerHTML` setter beleži), v API odgovore
  * vstavimo `<img src=x onerror=...>` in preverimo, da vsebina konča kot besedilo (text node), ne kot element.
  * Vsak korak, ki ga ne najde, PADE (ne preskoči).
+ * Odsek 6 (U3, 23. 10. 2026): zavihek Uporabniki. Vrstica prek h(), brez onclick/onchange nizov; izbira vloge ne kliče API-ja, PATCH šele po potrdi()
+ * (vpis e-naslova + obvezen razlog za admin/backup in odvzem vloge admin); preklic vrne izbiro.
  */
 const fs = require("fs");
 const path = require("path");
@@ -192,6 +194,115 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     const p5 = pregled(body);
     assert(p5.elementi.every(t => new Set(["body", "div", "h3", "label", "input", "textarea", "button"]).has(t)), "dialog.js: nizi iz podatkov ne postanejo elementi", [...new Set(p5.elementi)]);
     for (const z of [ZLO[0], ZLO[1], ZLO[2]]) assert(p5.besedila.includes(z), "dialog.js: niz konča kot besedilo: " + z);
+    // N5: vpisno polje z e-naslovom (vsebuje @): tipkovnica za e-naslove in brez samodejnih velikih črk; sicer kot prej (velike črke)
+    const vpisnaPolja = () => { const r = []; sprehod(body, (e) => { if (e.nodeType === 1 && e.tagName === "input") r.push(e); }); return r; };
+    let polja = vpisnaPolja();
+    assert(polja.length === 1 && polja[0].attrs.autocapitalize === "characters" && polja[0].attrs.inputmode === undefined, "dialog.js: vpis ODPOVEJ: autocapitalize=characters, brez inputmode", polja.map(x => x.attrs));
+    okno.potrdi({ naslov: "x", vsebina: "y", vpis: "ana@primer.si" });
+    polja = vpisnaPolja();
+    const zadnje = polja[polja.length - 1];
+    assert(zadnje && zadnje.attrs.inputmode === "email" && zadnje.attrs.autocapitalize === "off" && zadnje.attrs.autocomplete === "off", "dialog.js: vpis e-naslova: inputmode=email, autocapitalize=off", zadnje && zadnje.attrs);
+  }
+
+  // N3: h() nikoli ne nastavi on* atributa iz niza (setAttribute("onclick", "...")); funkcija gre kot lastnost
+  {
+    const hh = new Function("document", mh[0] + "\nreturn h;")(dok);
+    const gumb = hh("button", { onclick: "alert(1)", onmouseover: "alert(2)", onChange: "alert(3)", "data-x": "ok" }, "t");
+    assert(!Object.keys(gumb.attrs).some(k => /^on/i.test(k)) && gumb.onclick === null && gumb.attrs["data-x"] === "ok", "h(): on* z nizom ne postane atribut ne lastnost", gumb.attrs);
+    const f = () => 1;
+    const gumb2 = hh("button", { onclick: f, class: "a" }, "t");
+    assert(gumb2.onclick === f && gumb2.className === "a" && !Object.keys(gumb2.attrs).some(k => /^on/i.test(k)), "h(): on* s funkcijo je lastnost");
+  }
+
+  // --- 6. zavihek Uporabniki (U3, 23. 10. 2026): vrstica prek h(), sprememba vloge samo prek potrdi(), brez onclick/onchange nizov ---
+  {
+    const U0 = "// ---------- uporabniki", U1 = "// ---------- guest lists";
+    const iu = skripta.indexOf(U0), ik2 = skripta.indexOf(U1);
+    mora(iu >= 0 && ik2 > iu, `odsek »${U0}« … »${U1}« ni najden (preimenovan komentar? popravi test, ne preskoči)`);
+    const odsekU = skripta.slice(iu, ik2);
+    for (const f of ["naloziUporabnike", "uVrstica", "uSpremeniVlogo", "uOdkleni", "uPotrdi"]) mora(new RegExp(`function ${f}\\(`).test(odsekU), `funkcija ${f} ni v odseku Uporabniki`);
+    const kU = [];
+    for (const m of odsekU.matchAll(NEVARNO)) { const rep = odsekU.slice(m.index, m.index + 60); if (/^\.innerHTML\s*=\s*(""|'')\s*[;,)}]/.test(rep)) continue; kU.push(rep.split("\n")[0]); }
+    assert(kU.length === 0, "odsek Uporabniki: brez innerHTML/outerHTML/insertAdjacentHTML/eval s podatki", kU);
+    assert(!/\bon(click|change|input|keydown)\s*=\s*["'`]/i.test(odsekU), "odsek Uporabniki: brez onclick=\"...\" / onchange=\"...\" atributov v nizih");
+    assert(!/\btabela\(/.test(odsekU), "odsek Uporabniki: ne rabi tabela() (ta piše innerHTML iz nizov)");
+    assert(!html.includes('onchange="uVloga') && !/\buVloga\(/.test(html), "nikjer v panelu ni več takojšnje spremembe vloge (onchange=\"uVloga...\")");
+    const fnSprememba = odsekU.slice(odsekU.indexOf("async function uSpremeniVlogo("), odsekU.indexOf("async function uOdkleni("));
+    assert(fnSprememba.includes("await potrdi(") && fnSprememba.indexOf("await potrdi(") < fnSprememba.indexOf('klic("PATCH"'), "uSpremeniVlogo: PATCH šele po potrdi()");
+    assert((odsekU.match(/role:/g) || []).length === 1 && fnSprememba.includes("role: potem"), "vloga se pošlje samo iz uSpremeniVlogo (za potrdi())");
+    assert(/vpis:\s*stroga\s*\?\s*\(?x\.email/.test(fnSprememba) && /razlog:\s*stroga\s*\?\s*"obvezen"\s*:\s*"neobvezen"/.test(fnSprememba), "stroga sprememba: vpis e-naslova + obvezen razlog; sicer neobvezen razlog");
+
+    const mc = skripta.match(/function cel\(n\) \{[^\n]*\}/);
+    mora(mc, "funkcija cel() ni najdena");
+    const potrdiKlici = [], apiKlici = [];
+    let potrdiOdgovor = null;
+    const potrdiStub = async (o) => { potrdiKlici.push(o); return potrdiOdgovor; };
+    const klicU = async (metoda, pot, telo) => {
+      apiKlici.push([metoda, pot, telo]);
+      if (metoda === "GET") return JSON.parse(JSON.stringify(odgovoriU));
+      return { email: "a@b.si", role: telo && telo.role };
+    };
+    const innerPred = innerHTMLZapisi.length;
+    let odgovoriU = [];
+    const zU = new Function("document", "$", "klic", "varno", "obvesti", "naloziPregled", "potrdi",
+      `${md[0]}\n${mh[0]}\n${mc[0]}\n${odsekU}\nreturn { naloziUporabnike };`);
+    const { naloziUporabnike } = zU(dok, $, klicU, varno, obvesti, naloziPregled, potrdiStub);
+    const uporabnik = (id, vloga, polja) => ({ id, email: ZLO[0], username: ZLO[1], role: vloga, email_verified: false, phone: ZLO[2], country: ZLO[3], locked_until: "2099-01-01T00:00:00Z",
+      failed_login_count: 3, club_count: 1, created_at: "2026-10-12T10:00:00Z", onboarded_at: null, ...polja });
+    odgovoriU = [uporabnik(1, "user"), uporabnik(2, "admin", { email_verified: true, locked_until: null }), uporabnik(3, "business", { email: "poste@outly.si", username: "poste" })];
+    $("uIsci").value = "";
+    await naloziUporabnike();
+    const pU = pregled($("uTabela"));
+    assert(pU.elementi.length > 0, `izvajalno: Uporabniki narisani (${pU.elementi.length} elementov)`);
+    assert(pU.elementi.every(t => new Set(["table", "thead", "tbody", "tr", "th", "td", "div", "span", "select", "option", "button"]).has(t)), "izvajalno: Uporabniki: nobenega elementa iz podatkov (img/script/svg), atributov on*", [...new Set(pU.elementi)]);
+    for (const z of ZLO) assert(pU.besedila.includes(z), "izvajalno: Uporabniki: niz iz podatkov konča kot besedilo: " + z);
+    assert(innerHTMLZapisi.length === innerPred || innerHTMLZapisi.slice(innerPred).every(v => v === ""), "izvajalno: Uporabniki: innerHTML ni bil uporabljen za podatke");
+    assert(apiKlici.length === 1 && apiKlici[0][0] === "GET", "izvajalno: izris samo bere (en GET)", apiKlici);
+
+    const vrstice = [];
+    sprehod($("uTabela"), (e) => { if (e.nodeType === 1 && e.tagName === "tr" && e.children.some(c => c.tagName === "td")) vrstice.push(e); });
+    assert(vrstice.length === 3, "izvajalno: Uporabniki: tri vrstice", vrstice.length);
+    const iz = (vrstica, tag, besedilo) => { let r = null; sprehod(vrstica, (e) => { if (!r && e.nodeType === 1 && e.tagName === tag && (!besedilo || e.textContent === besedilo)) r = e; }); return r; };
+    const izbira = (v) => iz(v, "select"), gumbVloga = (v) => iz(v, "button", "Spremeni vlogo");
+    assert(vrstice.every(v => izbira(v) && gumbVloga(v) && gumbVloga(v).disabled === true), "izvajalno: gumb »Spremeni vlogo« je onemogočen, dokler izbira ni drugačna od trenutne vloge");
+    assert(vrstice.map(v => izbira(v).value).join() === "user,admin,business", "izvajalno: izbira kaže trenutno vlogo", vrstice.map(v => izbira(v).value));
+    assert(vrstice.every(v => !Object.keys(izbira(v).attrs).some(k => /^on/i.test(k)) && !Object.keys(gumbVloga(v).attrs).some(k => /^on/i.test(k))), "izvajalno: select in gumb brez on* atributov (le lastnosti-funkcije)");
+
+    // izbira vloge sama ne kliče API-ja ne okna
+    apiKlici.length = 0;
+    const v1 = vrstice[0];
+    izbira(v1).value = "admin"; izbira(v1).onchange();
+    assert(apiKlici.length === 0 && potrdiKlici.length === 0, "izbira v seznamu NE pokliče API-ja in ne odpre okna");
+    assert(gumbVloga(v1).disabled === false, "izbira druge vloge odklene gumb");
+
+    // preklic: nazaj na prejšnjo vrednost, brez PATCH
+    potrdiOdgovor = null;
+    await gumbVloga(v1).onclick();
+    assert(potrdiKlici.length === 1 && apiKlici.length === 0, "preklic: okno odprto, API ni poklican", { potrdi: potrdiKlici.length, api: apiKlici });
+    assert(izbira(v1).value === "user", "preklic vrne izbiro na prejšnjo vrednost", izbira(v1).value);
+    const o1 = potrdiKlici[0];
+    assert(o1.vpis === ZLO[0] && o1.razlog === "obvezen" && o1.nevarno === true, "user → admin: vpis = e-naslov uporabnika, razlog obvezen, nevarno", { vpis: o1.vpis, razlog: o1.razlog });
+    const okoli = new El("div"); okoli.append(...[].concat(o1.vsebina).filter(Boolean));
+    const pV = pregled(okoli);
+    assert(pV.elementi.every(t => new Set(["div", "b", "s"]).has(t)), "vsebina okna: samo div/b/s (podatki kot besedilo)", [...new Set(pV.elementi)]);
+    assert(pV.besedila.join("").includes("user") && pV.besedila.join("").includes("admin") && pV.besedila.join("").includes(ZLO[0]), "vsebina okna kaže »prej → potem«", pV.besedila);
+
+    // potrditev: PATCH z vlogo in razlogom
+    izbira(v1).value = "admin"; potrdiOdgovor = { razlog: "nov vodja" }; apiKlici.length = 0;
+    await gumbVloga(v1).onclick();
+    const patch = apiKlici.find(k => k[0] === "PATCH");
+    assert(patch && patch[1] === "/admin/api/users/1" && JSON.stringify(patch[2]) === JSON.stringify({ role: "admin", reason: "nov vodja" }), "potrditev: PATCH { role, reason }", apiKlici);
+
+    // stroge in nestroge spremembe
+    const preveri = async (prej, potem, stroga) => {
+      potrdiKlici.length = 0; potrdiOdgovor = null;
+      odgovoriU = [uporabnik(9, prej, { email: "u9@outly.si" })]; await naloziUporabnike();
+      const r = []; sprehod($("uTabela"), (e) => { if (e.nodeType === 1 && e.tagName === "tr" && e.children.some(c => c.tagName === "td")) r.push(e); });
+      izbira(r[0]).value = potem; izbira(r[0]).onchange(); await gumbVloga(r[0]).onclick();
+      const o = potrdiKlici[0];
+      assert(o && (o.vpis === "u9@outly.si") === stroga && o.razlog === (stroga ? "obvezen" : "neobvezen"), `${prej} → ${potem}: ${stroga ? "vpis e-naslova + obvezen razlog" : "brez vpisa, neobvezen razlog"}`, o && { vpis: o.vpis, razlog: o.razlog });
+    };
+    for (const [a, b2, st] of [["user", "business", false], ["business", "user", false], ["user", "admin", true], ["user", "backup", true], ["business", "admin", true], ["admin", "user", true], ["admin", "business", true], ["admin", "backup", true], ["backup", "user", false], ["backup", "business", false]]) await preveri(a, b2, st);
   }
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
