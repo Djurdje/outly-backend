@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–057, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–056 in 058, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict NeTdYRGUQBtV3yW7Y6dRd12ricTSN2ROYYkCkC7G2qRk6ZlOLf86jZFHhhIQdXF
+\restrict fl0EWOcjuW3lA4tZ0IiOAs5KfCCGaCw4aymebBzOhj8kMipxzxgoArR1bqYXLYp
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -272,7 +272,7 @@ COMMENT ON TABLE public.admin_dejanja IS 'Dnevnik admin dejanj (055, admin panel
 -- Name: COLUMN admin_dejanja.agent_zeton_id; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.admin_dejanja.agent_zeton_id IS 'Zeton agenta, ki je dejanje sprozil (057); NULL = dejanje je naredil admin sam. Brez tujega kljuca.';
+COMMENT ON COLUMN public.admin_dejanja.agent_zeton_id IS 'Zeton agenta, ki je dejanje sprozil (058); NULL = dejanje je naredil admin sam. Brez tujega kljuca.';
 
 
 --
@@ -318,7 +318,7 @@ CREATE TABLE public.agent_zetoni (
 -- Name: TABLE agent_zetoni; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.agent_zetoni IS 'Zetoni agenta (057, #330): samo SHA-256 zetona, obseg (zdaj samo beri), rok, preklic. Zeton odpre samo /agent/api/* (I55). Cistopis zetona se nikjer ne hrani.';
+COMMENT ON TABLE public.agent_zetoni IS 'Zetoni agenta (058, #330): samo SHA-256 zetona, obseg (zdaj samo beri), rok, preklic. Zeton odpre samo /agent/api/* (I56). Cistopis zetona se nikjer ne hrani.';
 
 
 --
@@ -3912,5 +3912,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict NeTdYRGUQBtV3yW7Y6dRd12ricTSN2ROYYkCkC7G2qRk6ZlOLf86jZFHhhIQdXF
+\unrestrict fl0EWOcjuW3lA4tZ0IiOAs5KfCCGaCw4aymebBzOhj8kMipxzxgoArR1bqYXLYp
 

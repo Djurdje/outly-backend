@@ -1,5 +1,5 @@
 "use strict";
-// Dostop za agenta (Claude) z zetonom SAMO ZA BRANJE (23. 10. 2026, issue #330, 1. del; migracija 057; ARCHITECTURE »Dostop za agenta«, invarianta I55).
+// Dostop za agenta (Claude) z zetonom SAMO ZA BRANJE (23. 10. 2026, issue #330, 1. del; migracija 058; ARCHITECTURE »Dostop za agenta«, invarianta I56).
 // Nacrt: outly-hq docs/ideje/2026-10-23-admin-panel-nadgradnja.md, razdelek 3. Martin 23. 10.: zeton iz panela + Network secret; pisanje SAMO prek predlogov (kasneje, 2. in 3. del).
 //
 // Dva dela:
@@ -7,11 +7,14 @@
 //  2. /agent/api/* (lasten router, NE gre skozi requireAuth): samo GET, obseg `beri`. Zeton `outly_agent_…` je na vseh drugih poteh 403 (requireAuthNa v index.js).
 //
 // Meje /agent/api/*:
-//  - vrstni red: stikalo AGENT_API=0 (503 agent_api_off, brez baze) -> omejevalnik po IP (zlorabe izmisljenih zetonov) -> oblika zetona (brez baze) -> najvec 1 hkraten
-//    klic na zeton (429 agent_busy) -> iskanje zetona -> omejevalnik po ZETONU (AGENT_API_NA_URO, privzeto 300/h; stevec v tabeli `omejitve`, ne v pomnilniku, I15);
-//  - branje: ISTI semafor in isti READ ONLY-nacin kot admin_nadzor.js (ena povezava glavnega poola za vse nadzorne poti in agenta, statement_timeout 2 s,
-//    idle_in_transaction_session_timeout 5 s); NIKOLI skenPool. »danes«, »opozorila« in »racuni« so isti izracun in isti predpomnilnik kot v panelu;
-//  - odgovori se sestavijo iz NASTETIH stolpcev (I4), nato gredo VSI skozi `ocisti()`: nobenega @, Stripovega ID-ja ali zetona v nobenem nizu, tudi ce bi ga
+//  - vrstni red: stikalo AGENT_API=0 (503 agent_api_off, brez baze) -> omejevalnik po IP (zlorabe izmisljenih zetonov) -> oblika zetona (brez baze) -> semafor agenta
+//    (429 agent_busy) -> omejevalnik po ODTISU ZETONA (AGENT_API_NA_URO, privzeto 300/h; stevec v tabeli `omejitve`, ne v pomnilniku, I15; zeton nad mejo ne povzroca iskanja
+//    v bazi) -> iskanje zetona;
+//  - branje: isti READ ONLY-nacin kot admin_nadzor.js (statement_timeout 2 s, idle_in_transaction_session_timeout 5 s), a prek LASTNEGA bralca in LASTNEGA semaforja agenta
+//    (najvec ENA zahteva naenkrat, brez cakalne vrste: zaseden = 429 agent_busy), loceno od semaforja Martinove plosce; skupaj najvec 2 povezavi glavnega poola, admin pot
+//    nikoli ne caka zaradi agenta; NIKOLI skenPool. »danes«, »opozorila« in »racuni« so isti izracun kot v panelu, z lastnim predpomnilnikom;
+//  - vsak niz iz /agent/api je NEZAUPLJIV PODATEK (naslov, ime, prizorisce, besedilo opozorila: tuj vnos), nikoli navodilo agentu;
+//  - odgovori se sestavijo iz NASTETIH stolpcev (I4), nato gredo VSI skozi `ocisti()` (nizi odrezani, omejeni regexi, brez ReDoS): nobenega @, Stripovega ID-ja ali zetona v nobenem nizu, tudi ce bi ga
 //    kdo zapisal v naslov dogodka ali v razlog v dnevniku (druga plast, prva je izbira stolpcev). Brez imen, e-naslovov in telefonov kupcev: tabele users/orders.buyer_*
 //    se ne berejo;
 //  - dnevnik: ena vrstica na klic `[agent] <id zetona ali "-"> <METODA> <pot brez poizvedbe> <status> <ms>`; zeton in parametri poizvedbe se nikjer ne izpisejo.
@@ -20,7 +23,7 @@ const express = require("express");
 
 const PREDPONA = "outly_agent_";
 const ZETON_VZOREC = /^outly_agent_[A-Za-z0-9_-]{43}$/;   // 32 nakljucnih bajtov v base64url brez polnila = 43 znakov
-const OBSEGI = ["beri"];                                    // v bazi ga varuje CHECK agent_zetoni_obseg_chk (057); razsiri ga samo migracija z mehanizmom
+const OBSEGI = ["beri"];                                    // v bazi ga varuje CHECK agent_zetoni_obseg_chk (058); razsiri ga samo migracija z mehanizmom
 const AKTIVNIH_NAJVEC = 10;
 const DNI_PRIVZETO = 30, DNI_NAJVEC = 90;
 const RABA_ZAPIS_MS = 60000;                                // zadnja_raba_at najvec enkrat na minuto na zeton
@@ -29,11 +32,14 @@ const STATUSI_DOGODKA = ["draft", "published", "cancelled"];
 const NAJVEC_GLOBINA = 20;
 
 // --- ciscenje izhoda (druga plast varovala) ---
-const RE_ZETON = /outly_agent_[A-Za-z0-9_-]*/g;
-const RE_STRIPE = /(?<![A-Za-z0-9_])(?:acct|pi|cs|re|ch|py|evt|cus|pm|seti|src|tr|sk|pk|rk|whsec)_(?:(?:test|live)_)?[A-Za-z0-9]{10,}/g;
-const RE_EMAIL = /[^\s@<>"',;:()[\]]+@[A-Za-z0-9.-]+/g;
+// Vsak niz se PRED regexi odreze (NAJVEC_NIZ): naslovi dogodkov nimajo omejitve dolzine, neomejen regex nad 95 000 znaki pa je blokiral proces (ReDoS, #330 K1).
+// Kvantifikatorji so omejeni (lokalni del e-naslova najvec 64, domena najvec 255 znakov), zato je poraba linearna v dolzini niza.
+const NAJVEC_NIZ = 2000;
+const RE_ZETON = /outly_agent_[A-Za-z0-9_-]{0,200}/g;
+const RE_STRIPE = /(?<![A-Za-z0-9_])(?:acct|pi|cs|re|ch|py|evt|cus|pm|seti|src|tr|sk|pk|rk|whsec)_(?:(?:test|live)_)?[A-Za-z0-9]{10,100}/g;
+const RE_EMAIL = /[^\s@<>"',;:()[\]]{1,64}@[A-Za-z0-9.-]{1,255}/g;
 function ocistiNiz(s) {
-  return s.replace(RE_ZETON, "[zeton]").replace(RE_STRIPE, "[stripe-id]").replace(RE_EMAIL, "[e-naslov]").replace(/@/g, "[at]");
+  return s.slice(0, NAJVEC_NIZ).replace(RE_ZETON, "[zeton]").replace(RE_STRIPE, "[stripe-id]").replace(RE_EMAIL, "[e-naslov]").replace(/@/g, "[at]");
 }
 // Rekurzivna KOPIJA (predpomnjeni objekti admin_nadzor.js se ne smejo spremeniti): nizi ociscenii, Date ostane, globina omejena.
 function ocisti(v, globina = 0) {
@@ -43,6 +49,21 @@ function ocisti(v, globina = 0) {
   if (Array.isArray(v)) return v.map((x) => ocisti(x, globina + 1));
   const o = {};
   for (const [k, x] of Object.entries(v)) o[ocistiNiz(k)] = ocisti(x, globina + 1);
+  return o;
+}
+
+// Dnevnik admin dejanj za agenta (S2): besedilna polja so lahko tuj vnos (opis dogodka, naslovi, kontakti) = nezaupljiv podatek in prompt injection.
+// Ostanejo SAMO stevila, boolovi, null, datumi (ISO) in vrednosti ključev z znanim naborom (status, role, currency, obseg); vsak drug niz postane PLACEHOLDER.
+const PLACEHOLDER = "[besedilo spremenjeno]";
+const KLJUCI_NABORA = new Set(["status", "role", "currency", "obseg"]);
+const RE_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+function brezBesedil(v, kljuc = "", globina = 0) {
+  if (typeof v === "string") return (KLJUCI_NABORA.has(kljuc) && /^[a-z_]{1,30}$/.test(v)) || RE_ISO.test(v) ? v : PLACEHOLDER;
+  if (v === null || typeof v !== "object") return v;   // stevila, boolovi, null
+  if (globina >= NAJVEC_GLOBINA) return PLACEHOLDER;
+  if (Array.isArray(v)) return v.map((x) => brezBesedil(x, kljuc, globina + 1));
+  const o = {};
+  for (const [k, x] of Object.entries(v)) o[k] = brezBesedil(x, k, globina + 1);   // kljuci so nasa imena polj
   return o;
 }
 
@@ -59,6 +80,10 @@ const veljavenDan = (s) => {
 function ustvari(dep) {
   const { pool, adminRouter, nadzor, omeji, zapisiAdminDejanje, celoId4, SQL_TESTNO_NAROCILO, SQL_NAROCILO_PLATFORMNO, paymentsMode } = dep;
   const T = SQL_TESTNO_NAROCILO;
+  let zaseden = false, zahtevekZaprt = true, vBranju = 0;
+  const sprosti = () => { if (zaseden && zahtevekZaprt && vBranju === 0) zaseden = false; };
+  // lasten bralec (brez admin semaforja) in lasten predpomnilnik (#330 S1); vsako branje se steje, semafor agenta se sprosti sele po koncu branj
+  const agent = nadzor.zaAgenta({ zacni: () => { vBranju++; }, konec: () => { vBranju--; sprosti(); } });
   const MEJA_ZETON = okoljeCelo("AGENT_API_NA_URO", 300, 1, 100000);   // zahtevkov na uro na zeton
   const MEJA_IP = okoljeCelo("AGENT_API_IP_NA_MIN", 120, 1, 100000);   // zahtevkov na minuto na IP (pred prijavo: napacni zetoni)
 
@@ -163,58 +188,67 @@ function ustvari(dep) {
   router.use(omeji({ kljuc: "agent_ip", najvec: MEJA_IP, oknoSekund: 60,
     telo429: { error: "too_many_requests", message: "Too many requests. Please try again later." } }));
 
+  // LASTEN semafor agenta (S1): najvec ENA zahteva agenta naenkrat v procesu, BREZ cakalne vrste (zaseden = takoj 429 agent_busy) in loceno od semaforja Martinove nadzorne
+  // plosce (admin_nadzor.js): skupaj najvec 2 povezavi glavnega poola, admin pot nikoli ne caka zaradi agenta (tudi ne ob izmisljenih zetonih). Semafor drzi zahteva od oblike
+  // zetona do KONCA odgovora IN do konca vseh njenih branj (prekinitev odjemalca ne sprosti semaforja, dokler poizvedba na povezavi se tece).
+
   const zadnjaRaba = new Map();   // id zetona -> ms zadnjega zapisa (omejitev pisanja na minuto)
-  function zapisiRabo(id) {
+  // Zapis se opravi V zahtevku (ob prvem klicu v minuti, nekaj ms), da agent skupaj nikoli ne drzi vec kot ene povezave glavnega poola; zunaj READ ONLY transakcije
+  // (pisanje), z mejnima casoma (lock_timeout 1 s, statement_timeout 2 s); napaka se ne pozna odgovoru. Pogoj v SQL-u zadrzi mejo tudi med vec instancami.
+  async function zapisiRabo(id) {
     const zdaj = Date.now();
     const prej = zadnjaRaba.get(id);
     if (prej !== undefined && zdaj - prej < RABA_ZAPIS_MS) return;
     zadnjaRaba.set(id, zdaj);
-    // Zunaj odgovora in zunaj READ ONLY transakcije (pisanje); napaka se ne pozna odgovoru. Pogoj v SQL-u zadrzi mejo tudi med vec instancami.
-    // Mejna casa (lock_timeout, statement_timeout): zaklep na agent_zetoni ne sme obdrzati povezave glavnega poola.
-    setImmediate(async () => {
-      let c;
-      try {
-        c = await pool.connect();
-        await c.query("BEGIN");
-        await c.query("SET LOCAL lock_timeout = 1000");
-        await c.query("SET LOCAL statement_timeout = 2000");
-        await c.query("UPDATE agent_zetoni SET zadnja_raba_at = NOW() WHERE id = $1 AND (zadnja_raba_at IS NULL OR zadnja_raba_at < NOW() - INTERVAL '1 minute')", [id]);
-        await c.query("COMMIT");
-      } catch (e) {
-        if (c) await c.query("ROLLBACK").catch(() => {});
-        console.error("[agent] zadnja_raba_at ni zapisana:", e && e.message);
-      } finally { if (c) c.release(); }
-    });
+    let c;
+    try {
+      c = await pool.connect();
+      await c.query("BEGIN");
+      await c.query("SET LOCAL lock_timeout = 1000");
+      await c.query("SET LOCAL statement_timeout = 2000");
+      await c.query("UPDATE agent_zetoni SET zadnja_raba_at = NOW() WHERE id = $1 AND (zadnja_raba_at IS NULL OR zadnja_raba_at < NOW() - INTERVAL '1 minute')", [id]);
+      await c.query("COMMIT");
+    } catch (e) {
+      if (c) await c.query("ROLLBACK").catch(() => {});
+      console.error("[agent] zadnja_raba_at ni zapisana:", e && e.message);
+    } finally { if (c) c.release(); }
   }
 
-  // 1. oblika zetona + odtis (brez baze), nato najvec 1 hkraten klic na zeton, sele nato iskanje v bazi: drugi hkraten klic istega zetona dobi 429 agent_busy takoj,
-  //    ne da bi cakal na semafor (ki ga prvi klic morda drzi). Kljuc je odtis predlozenega niza, zato ne rabi baze; vnos v mnozici zivi samo med klicem.
-  const vTeku = new Set();
+  // 1. oblika zetona + odtis (brez baze); napacna oblika ne zasede semaforja
   router.use((req, res, next) => {
     const header = req.headers.authorization || "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-    if (!ZETON_VZOREC.test(token)) return res.status(401).json({ error: "invalid_token", message: "Missing or invalid agent token." });   // oblika narobe: brez baze
+    if (!ZETON_VZOREC.test(token)) return res.status(401).json({ error: "invalid_token", message: "Missing or invalid agent token." });
     req.zetonOdtis = crypto.createHash("sha256").update(token).digest("hex");
-    if (vTeku.has(req.zetonOdtis)) return res.status(429).set("Retry-After", "1").json({ error: "agent_busy", message: "Only one request at a time per agent token." });
-    vTeku.add(req.zetonOdtis);
-    res.once("close", () => vTeku.delete(req.zetonOdtis));   // ob koncu ali prekinitvi odgovora
     next();
   });
 
-  // 2. prijava: odtis -> vrstica; napacen/preklican/potekel = 401 (isti odgovor, ne razkrivamo, kateri); izpad baze = 503 (I10).
-  // Iskanje gre prek ISTEGA semaforja in READ ONLY-nacina kot ostalo branje (nadzor.beriReadOnly: statement_timeout 2 s): agent iz glavnega poola nikoli ne drzi
-  // vec kot ENE povezave, zaklep na agent_zetoni (npr. migracija) ga ne more obesiti, nakup in sken pa agenta sploh ne cutita. Preklic velja takoj (brez predpomnilnika).
+  // 2. semafor agenta (zaseden = takoj 429, brez cakanja)
+  router.use((req, res, next) => {
+    if (zaseden) return res.status(429).set("Retry-After", "1").json({ error: "agent_busy", message: "Only one agent request at a time." });
+    zaseden = true; zahtevekZaprt = false;
+    res.once("close", () => { zahtevekZaprt = true; sprosti(); });
+    next();
+  });
+
+  // 3. meja po zetonu: 300/h (AGENT_API_NA_URO); kljuc je ODTIS predlozenega zetona, zato velja PRED iskanjem v bazi (zeton nad mejo ne povzroca vec poizvedb; N1);
+  // stevec v bazi, ne v pomnilniku (I15). Izmisljeni zetoni dobijo vsak svojo vrstico (omejeno z mejo po IP zgoraj in ciscenjem izteklih vrstic).
+  router.use(omeji({ kljuc: "agent_zeton", najvec: MEJA_ZETON, oknoSekund: 3600, kljucIz: (req) => "agent:" + req.zetonOdtis.slice(0, 32),
+    telo429: { error: "agent_rate_limited", message: "Hourly request limit for this agent token reached." } }));
+
+  // 4. prijava: odtis -> vrstica; napacen/preklican/potekel = 401 (isti odgovor); izpad baze = 503 (I10). Iskanje gre prek bralca agenta (READ ONLY, 2 s), ne prek
+  // semaforja plosce. Preklic velja takoj (brez predpomnilnika).
   async function prijava(req, res, next) {
     let v;
     try {
-      v = (await nadzor.beriReadOnly((c) => c.query(
+      v = (await agent.beri((c) => c.query(
         "SELECT id, obseg, preklican_at, (velja_do > NOW()) AS veljaven FROM agent_zetoni WHERE zeton_sha256 = $1", [req.zetonOdtis]))).rows[0];
-    } catch (e) { return nadzor.odgovoriNapaka(res, e, "agent prijava"); }
+    } catch (e) { return agent.odgovoriNapaka(res, e, "agent prijava"); }
     if (!v) return res.status(401).json({ error: "invalid_token", message: "Missing or invalid agent token." });
     req.agentId = v.id;   // za dnevnik
     if (v.preklican_at || !v.veljaven) return res.status(401).json({ error: "invalid_token", message: "Missing or invalid agent token." });
     req.user = { role: "agent", agentZetonId: v.id, obseg: v.obseg };   // brez userId: nobena pot, ki isce uporabnika, agenta ne najde
-    zapisiRabo(v.id);
+    await zapisiRabo(v.id);
     next();
   }
   router.use(prijava);
@@ -223,10 +257,6 @@ function ustvari(dep) {
     return (req, res, next) => (req.user.obseg.includes(obseg) ? next() : res.status(403).json({ error: "insufficient_scope", message: `This token lacks the "${obseg}" scope.` }));
   }
   router.use(zahtevaj("beri"));
-
-  // meja po zetonu: 300/h (AGENT_API_NA_URO); stevec v bazi, ne v pomnilniku (I15)
-  router.use(omeji({ kljuc: "agent_zeton", najvec: MEJA_ZETON, oknoSekund: 3600, kljucIz: (req) => "agent:" + req.user.agentZetonId,
-    telo429: { error: "agent_rate_limited", message: "Hourly request limit for this agent token reached." } }));
 
   router.use((req, res, next) => {
     if (req.method === "GET") return next();
@@ -239,17 +269,21 @@ function ustvari(dep) {
     return res.json(ocisti(telo));
   }
   const napaka400 = (res, error, message) => res.status(400).json({ error, message });
-  const odgovoriNapaka = (res, e, kje) => nadzor.odgovoriNapaka(res, e, kje);
+  const odgovoriNapaka = (res, e, kje) => agent.odgovoriNapaka(res, e, kje);
 
   // --- danes, opozorila, racuni: isti izracun in predpomnilnik kot v panelu ---
   router.get("/danes", async (req, res) => {
-    try { return posljiJson(res, await nadzor.danes()); } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/danes"); }
+    try {
+      const d = await agent.danes();
+      const rez200 = (x) => (typeof x === "string" ? x.slice(0, 200) : x);   // naslov in klub nocojsnjega dogodka: najvec 200 znakov (kopija, predpomnjeni objekt ostane nespremenjen)
+      return posljiJson(res, { ...d, nocoj: Array.isArray(d.nocoj) ? d.nocoj.map((n) => ({ ...n, naslov: rez200(n.naslov), klub: rez200(n.klub) })) : d.nocoj });
+    } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/danes"); }
   });
   router.get("/opozorila", async (req, res) => {
-    try { return posljiJson(res, await nadzor.opozorila()); } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/opozorila"); }
+    try { return posljiJson(res, await agent.opozorila()); } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/opozorila"); }
   });
   router.get("/racuni", async (req, res) => {
-    try { return posljiJson(res, await nadzor.racuni(req.query.stanje, req.query.limit)); }
+    try { return posljiJson(res, await agent.racuni(req.query.stanje, req.query.limit)); }
     catch (e) {
       if (e && e.code === "NEVELJAVNO_STANJE") return napaka400(res, "invalid_stanje", e.message);
       return odgovoriNapaka(res, e, "GET /agent/api/racuni");
@@ -258,9 +292,10 @@ function ustvari(dep) {
 
   // --- dogodki ---
   // Nasteti stolpci (I4): brez opisa, zunanje povezave za vstopnice (samo has_ticket_url), posnetka, naslova in koordinat prizorisca, floor_plan.
-  const STOLPCI_DOGODKA = `e.id, e.club_id, c.name AS club_name, c.hidden AS club_hidden, c.is_demo AS club_is_demo, e.title, e.status, e.start_at, e.end_at,
-    e.ticket_price_cents, e.currency, e.capacity, e.sold_count, e.sales_paused, e.sales_open_at, e.sales_close_at, e.poster_url, e.min_age, e.genres, e.vip_enabled,
-    e.venue_name, e.venue_city, (e.ticket_url <> '') AS has_ticket_url, e.created_at`;
+  // Besedila so odrezana ze v SQL-u (naslov dogodka nima omejitve dolzine, #330 K1): agent ne dobi niti ne obdela vec kot 200 znakov naslova, imena kluba ali prizorisca.
+  const STOLPCI_DOGODKA = `e.id, e.club_id, left(c.name, 200) AS club_name, c.hidden AS club_hidden, c.is_demo AS club_is_demo, left(e.title, 200) AS title, e.status, e.start_at, e.end_at,
+    e.ticket_price_cents, e.currency, e.capacity, e.sold_count, e.sales_paused, e.sales_open_at, e.sales_close_at, left(e.poster_url, 500) AS poster_url, e.min_age, e.genres, e.vip_enabled,
+    left(e.venue_name, 200) AS venue_name, left(e.venue_city, 200) AS venue_city, (e.ticket_url <> '') AS has_ticket_url, e.created_at`;
 
   // Stevci prodaje po dogodkih (kot stats v GET /admin/api/events/:id): pravi in testni promet LOCENO (I39), brez guest liste (I24), samo stevila.
   async function prodajaDogodkov(c, ids) {
@@ -290,7 +325,7 @@ function ustvari(dep) {
     if (q.od !== undefined && q.do !== undefined && q.od > q.do) return napaka400(res, "invalid_range", "od must not be after do.");
     const limit = Math.min(Math.max(Number.parseInt(q.limit, 10) || 50, 1), 200);
     try {
-      const r = await nadzor.beriReadOnly(async (c) => {
+      const r = await agent.beri(async (c) => {
         const ev = await c.query(
           `SELECT ${STOLPCI_DOGODKA}
              FROM events e JOIN clubs c ON c.id = e.club_id
@@ -309,7 +344,7 @@ function ustvari(dep) {
     const id = celoId4(req.params.id);
     if (!id) return napaka400(res, "invalid_id", "Invalid event id.");
     try {
-      const r = await nadzor.beriReadOnly(async (c) => {
+      const r = await agent.beri(async (c) => {
         const ev = await c.query(`SELECT ${STOLPCI_DOGODKA} FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
         if (!ev.rows.length) return null;
         return { e: ev.rows[0], prodaja: (await prodajaDogodkov(c, [id])).get(id) };
@@ -334,7 +369,7 @@ function ustvari(dep) {
     const KJE = `${KJE_VSE} AND NOT ${T}`;   // pravi promet
     const PLATFORMNO = SQL_NAROCILO_PLATFORMNO("o");   // I50: prodajalec je platforma (v index.js je placilaStripe definiran sele za ustvari(): zato sele tu)
     try {
-      const r = await nadzor.beriReadOnly(async (c) => {
+      const r = await agent.beri(async (c) => {
         const skupaj = await c.query(
           `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                   COALESCE(SUM(o.application_fee_cents) FILTER (WHERE ${NETO}),0)::int AS fee_cents,
@@ -356,7 +391,7 @@ function ustvari(dep) {
                   COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL AND ${NETO}),0)::int AS tickets_sold
              FROM orders o WHERE ${KJE_VSE} AND ${T}`, p);
         const poDogodkih = await c.query(
-          `SELECT e.id, e.title, e.start_at, e.status, e.ticket_price_cents, e.capacity, e.sold_count, c.name AS club_name,
+          `SELECT e.id, left(e.title, 200) AS title, e.start_at, e.status, e.ticket_price_cents, e.capacity, e.sold_count, left(c.name, 200) AS club_name,
                   COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                   COALESCE(SUM(o.application_fee_cents) FILTER (WHERE ${NETO}),0)::int AS fee_cents,
                   COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
@@ -384,27 +419,28 @@ function ustvari(dep) {
     } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/finance"); }
   });
 
-  // --- dnevnik admin dejanj: BREZ e-naslova admina (admin_user_id in agent_zeton_id sta samo stevilki) ---
+  // --- dnevnik admin dejanj: BREZ e-naslova admina in brez besedil (S2: brezBesedil, ima_razlog) (admin_user_id in agent_zeton_id sta samo stevilki) ---
   router.get("/audit", async (req, res) => {
     const tip = req.query.target_type, cilj = req.query.target_id;
     if (tip !== undefined && (typeof tip !== "string" || !/^[a-z_]{1,30}$/.test(tip))) return napaka400(res, "invalid_target_type", "Invalid target_type.");
     if (cilj !== undefined && (typeof cilj !== "string" || !/^[\w-]{1,60}$/.test(cilj))) return napaka400(res, "invalid_target_id", "Invalid target_id.");
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
     try {
-      const r = await nadzor.beriReadOnly((c) => c.query(
-        `SELECT a.id, a.cas, a.dejanje, a.cilj_tip AS target_type, a.cilj_id AS target_id, a.prej, a.potem, a.razlog, a.admin_user_id, a.agent_zeton_id
+      const r = await agent.beri((c) => c.query(
+        `SELECT a.id, a.cas, a.dejanje, a.cilj_tip AS target_type, a.cilj_id AS target_id, a.prej, a.potem, (a.razlog IS NOT NULL) AS ima_razlog, a.admin_user_id, a.agent_zeton_id
            FROM admin_dejanja a
           WHERE ($1::text IS NULL OR a.cilj_tip = $1) AND ($2::text IS NULL OR a.cilj_id = $2)
           ORDER BY a.cas DESC, a.id DESC LIMIT $3`, [tip === undefined ? null : tip, cilj === undefined ? null : cilj, limit]));
-      return posljiJson(res, { limit, items: r.rows });
+      // S2: prej/potem brez besedil (opis, naslovi, URL-ji, kontakti = tuj vnos), razlog sploh ne gre ven (lahko vsebuje ime osebe): samo `ima_razlog`
+      return posljiJson(res, { limit, items: r.rows.map((x) => ({ ...x, prej: brezBesedil(x.prej), potem: brezBesedil(x.potem) })) });
     } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/audit"); }
   });
 
   // vse ostalo pod /agent/api: 404 v JSON (po prijavi: neprijavljen odjemalec ne izve, katere poti obstajajo)
   router.use((req, res) => res.status(404).json({ error: "not_found", message: "Unknown agent API path." }));
 
-  console.log(`[agent] /agent/api ${process.env.AGENT_API === "0" ? "IZKLOPLJEN (AGENT_API=0)" : "vklopljen"}: ${MEJA_ZETON}/h na zeton, ${MEJA_IP}/min na IP, 1 hkraten klic na zeton`);
+  console.log(`[agent] /agent/api ${process.env.AGENT_API === "0" ? "IZKLOPLJEN (AGENT_API=0)" : "vklopljen"}: ${MEJA_ZETON}/h na zeton, ${MEJA_IP}/min na IP, 1 zahteva agenta naenkrat`);
   return { router, ocisti };
 }
 
-module.exports = { ustvari, ocisti, ocistiNiz, PREDPONA, OBSEGI };
+module.exports = { ustvari, ocisti, ocistiNiz, brezBesedil, PREDPONA, OBSEGI };
