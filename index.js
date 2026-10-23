@@ -3948,22 +3948,28 @@ admin.get("/users", async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
-// PATCH /admin/api/users/:id — { role } | { unlock: true } | { emailVerified: true }
+// PATCH /admin/api/users/:id — { role, reason? } | { unlock: true } | { emailVerified: true }
+// Sprememba vloge (U3, 23. 10. 2026): neobvezen `reason` (niz, do 500 znakov) gre v dnevnik; ob SPREMEMBI vloge se v ISTI transakciji kot UPDATE
+// zapise vrstica admin_dejanja (dejanje `user.role`, cilj `user`, prej/potem `{ role }`). Brez e-naslovov v dnevniku. Enaka vloga (brez spremembe) vrstice ne pusti.
 admin.patch("/users/:id", async (req, res) => {
+  let c = null;
   try {
     const id = celoId(req.params.id);
     if (!id) return res.status(400).send("Invalid user id.");
     const b = req.body || {};
     const sets = [], vrednosti = [];
     const dodaj = (k, v) => { vrednosti.push(v); sets.push(`${k} = $${vrednosti.length}`); };
-    let prekliciZetone = false;
+    let razlog = null;
+    if (b.reason !== undefined && b.reason !== null) {
+      if (typeof b.reason !== "string" || b.reason.length > 500) return res.status(400).send("reason must be a string of at most 500 characters.");
+      razlog = b.reason.trim() || null;
+    }
 
     if (b.role !== undefined) {
       if (!["user", "business", "admin", "backup"].includes(b.role)) return res.status(400).send("role must be user, business, admin or backup.");
       // Admin si sam ne more vzeti vloge: sicer bi lahko ostal panel brez admina.
       if (id === req.user.userId && b.role !== "admin") return res.status(400).send("You cannot remove your own admin role.");
       dodaj("role", b.role);
-      prekliciZetone = true;
     }
     if (b.unlock !== undefined) {
       if (b.unlock !== true) return res.status(400).send("unlock must be true.");
@@ -3979,15 +3985,30 @@ admin.patch("/users/:id", async (req, res) => {
     if (sets.length === 0) return res.status(400).send("Nothing to update.");
 
     vrednosti.push(id);
-    const r = await pool.query(
+    c = await pool.connect();
+    await c.query("BEGIN");
+    let staraVloga = null;
+    if (b.role !== undefined) {
+      const star = await c.query("SELECT role FROM users WHERE id = $1 FOR NO KEY UPDATE", [id]);
+      if (star.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("User not found."); }
+      staraVloga = star.rows[0].role;
+    }
+    const r = await c.query(
       `UPDATE users SET ${sets.join(", ")} WHERE id = $${vrednosti.length}
        RETURNING ${ADMIN_POLJA_UPORABNIKA}`, vrednosti
     );
-    if (r.rows.length === 0) return res.status(404).send("User not found.");
+    if (r.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("User not found."); }
+    if (b.role !== undefined && staraVloga !== b.role) {
+      await zapisiAdminDejanje(c, req, "user.role", "user", id, { role: staraVloga }, { role: b.role }, razlog);
+    }
+    await c.query("COMMIT");
     // Vloga pride iz baze ob vsakem klicu (Supabase Auth), preklic žetonov ni več potreben.
-    console.log(`Admin ${req.user.userId} spremenil uporabnika ${id}:`, JSON.stringify(b));
+    console.log(`Admin ${req.user.userId} spremenil uporabnika ${id}:`, JSON.stringify({ ...b, reason: undefined }));
     return res.status(200).json(r.rows[0]);
-  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+  } catch (e) {
+    if (c) await c.query("ROLLBACK").catch(() => {});
+    console.error(e); return res.status(500).send("Server error.");
+  } finally { if (c) c.release(); }
 });
 
 // Testno naročilo (alias `o`), glej komentar »TESTNI PROMET (#230)« pri GET /admin/api/finance. Uporabljajo: /finance, /admin/api/events (#236), GET /business/sales (#236).
