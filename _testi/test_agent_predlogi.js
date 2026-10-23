@@ -208,6 +208,19 @@ function nicOsebnega(ime, tekst) {
       assert(x.status === 400 && x.body.error === "invalid_changes" && xp.status === 400 && (koda === null || (x.body.koda === koda && xp.body.error === koda)),
         `${opis}: predlog 400 invalid_changes (koda iz poti) = PATCH /events/:id 400`, [x.status, x.body, xp.status, xp.body]);
     }
+    // meja naslova (#339, NASLOV_NAJVEC 200) velja ze ob predlogu, ker gre validacija skozi isto pot (ne sele ob potrditvi)
+    for (const [naslov, opis] of [["N".repeat(201), "201 znakov"], [12345, "ni niz"], [null, "null"], ["   ", "prazen"]]) {
+      const x = await predlagaj(UREDI(E.a, { title: naslov }));
+      const xp = await api(PORT, "PATCH", `/events/${E.a}`, T.admin, { title: naslov });
+      assert(x.status === 400 && x.body.error === "invalid_changes" && xp.status === 400, `naslov ${opis}: predlog 400 invalid_changes (= PATCH 400), ze ob POST`, [x.status, x.body, xp.status]);
+    }
+    r = await predlagaj(UREDI(E.a, { title: "N".repeat(200) }));
+    assert(r.status === 201, "naslov s tocno 200 znaki: predlog sprejet", [r.status, r.body]);
+    await api(PORT, "POST", `/admin/api/predlogi/${r.body.predlog.id}/zavrni`, T.admin, {});
+    for (const naslov of ["N".repeat(201), 12345]) {
+      const x = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: naslov, startAt: "2027-01-01T22:00:00Z" }, razlog: "nov" });
+      assert(x.status === 400 && x.body.error === "invalid_changes", `nov osnutek: naslov ${typeof naslov === "string" ? "201 znakov" : "ni niz"} -> 400 ze ob POST`, [x.status, x.body]);
+    }
     r = await predlagaj({ dejanje: "event.okno_prodaje", cilj: { tip: "event", id: E.okno }, spremembe: { salesOpenAt: "2026-02-31T10:00:00Z" }, razlog: "okno" });
     assert(r.status === 400 && r.body.error === "invalid_changes" && /salesOpenAt/.test(r.body.message), "okno prodaje: neveljaven datum (31. 2.) -> 400 po obstojeci poti", [r.status, r.body]);
     r = await predlagaj({ dejanje: "event.podvoji", cilj: { tip: "event", id: E.a }, spremembe: { startAt: "2020-01-01T22:00:00Z" }, razlog: "podvoji" });
