@@ -109,7 +109,7 @@
     const zad = vsi.filter((x) => ujema(x, f));
     $("dg_stevec").textContent = `${zad.length} od ${vsi.length}`;
     const el = $("dTabela");
-    if (!zad.length) { el.replaceChildren(h("div", { class: "prazno" }, vsi.length ? "Noben dogodek ne ustreza filtrom." : "Ni dogodkov.")); return; }
+    if (!zad.length) { el.replaceChildren(h("div", { class: "prazno" }, vsi.length ? "Noben dogodek ne ustreza filtrom." : "Ni dogodkov.")); if (window.mnozicno) window.mnozicno.zaSeznam({ vsebnik: el, dogodki: [], osvezi: seznam }); return; }
     const vrstice = zad.map((x) => {
       const tr = h("tr", { class: "dg-vrstica", tabindex: "0" },
         h("td", { class: "mono dg-id" }, String(cele(x.id))),
@@ -125,6 +125,7 @@
     el.replaceChildren(h("table", { class: "dg-tabela" },
       h("thead", {}, h("tr", {}, ["#", "Dogodek", "Začetek", "Cena / prodano", "Prodaja", "Stanje"].map((g) => h("th", {}, g)))),
       h("tbody", {}, vrstice)));
+    if (window.mnozicno) window.mnozicno.zaSeznam({ vsebnik: el, dogodki: zad, osvezi: seznam });   // kljukice in vrstica dejanj (admin/mnozicno.js, #329)
   }
   async function seznam() {
     $("dg_seznam").classList.remove("skrito"); $("dg_urejevalnik").classList.add("skrito");

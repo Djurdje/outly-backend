@@ -11,6 +11,8 @@
  * Izvajalni del: odsek zaženemo v minimalnem lažnem DOM-u (ustvarjeni elementi, `innerHTML` setter beleži), v API odgovore
  * vstavimo `<img src=x onerror=...>` in preverimo, da vsebina konča kot besedilo (text node), ne kot element.
  * Vsak korak, ki ga ne najde, PADE (ne preskoči).
+ * Odsek 9 (#329, 23. 10. 2026): admin/mnozicno.js (mnozicna dejanja nad dogodki): kljukice in naslovi iz podatkov kot besedilo, klik na kljukico ne odpre urejevalnika, potrdi() z obveznim razlogom
+ * in seznamom izbranih, POST /admin/api/events/bulk s pravimi polji, premik v dneh -> minute, rezultat po dogodkih (sporocila API-ja kot besedilo), najvec 50 izbranih.
  * Odsek 8 (#328, 23. 10. 2026): admin/nov-dogodek.js (»Nov dogodek«, plakat, »Pred objavo«, »Podvoji«): besedila iz podatkov kot besedilo, povezave samo #/dogodki/<število>, Objavi onemogočen ob rdeči oviri ali neuspelem pregledu, POST /events v centih.
  * Odsek 7 (#326, 23. 10. 2026): nova modula admin/danes.js (nadzorna plosca »Danes«) in admin/opozorila.js (zavihek »Opozorila«): brez innerHTML/onclick="..." nizov,
  * zlonamerni naslov dogodka / ime kluba / zadnja_napaka / besedilo opozorila konca kot besedilo, povezave samo #/dogodki/<stevilo>, osvezevanje samo ko je zavihek viden, premor 60 s ob 503.
@@ -170,7 +172,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
   assert(trsS.map(t => gumbov(t.children[t.children.length - 1])).join() === "1,1,0,0,0", "spori: gumb samo pri povrnitvi ni_uspelo/rocno", trsS.map(t => gumbov(t)));
 
   // --- 5. moduli panela (faza 1, 21. 10. 2026: admin/dialog.js, admin/dogodki.js) in brez window.confirm ---
-  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js", "agent.js", "predlogi.js", "nujno.js"]) {
+  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js", "agent.js", "predlogi.js", "nujno.js", "mnozicno.js"]) {
     const kod = fs.readFileSync(path.join(__dirname, "..", "admin", ime), "utf8");
     const k5 = [];
     for (const m of kod.matchAll(NEVARNO)) {
@@ -183,8 +185,9 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     assert(!/\bon[a-z]+\s*=\s*["'`]/i.test(kod.replace(/\bon[a-z]+\s*=\s*\(/g, "")), `admin/${ime}: brez onclick="..." / onchange="..." nizov`);
   }
   assert(!/\bconfirm\s*\(/.test(skripta), "admin/index.html: brez window.confirm (vse potrditve prek potrdi() iz dialog.js)");
-  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script src="agent\.js"><\/script>\s*<script src="predlogi\.js"><\/script>\s*<script src="nujno\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
+  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script src="agent\.js"><\/script>\s*<script src="predlogi\.js"><\/script>\s*<script src="nujno\.js"><\/script>\s*<script src="mnozicno\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
   assert(/<link rel="stylesheet" href="danes\.css">/.test(html), "danes.css je vezan v index.html");
+  assert(/<link rel="stylesheet" href="mnozicno\.css">/.test(html), "mnozicno.css je vezan v index.html");
   assert(!/<link[^>]+(?:https?:)?\/\//.test(html) && !/<script[^>]+src="(?:https?:)?\/\//.test(html), "panel ne nalaga tujih skript ali stilov");
   // dialog.js: vsebina iz podatkov gre v DOM kot besedilo (izvajalno, lažni DOM)
   {
@@ -871,6 +874,112 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     // parametri podpisa (pogodba z backendom/spletom): camelCase -> snake_case, nepodpisano izpuščeno
     const pod = nv.parametriPodpisa({ timestamp: 1, signature: "s", apiKey: "k", cloudName: "c", folder: "outly", publicId: "outly/u1/x", allowedFormats: ["jpg", "png"], nic: null });
     assert(JSON.stringify(pod) === JSON.stringify({ timestamp: "1", folder: "outly", public_id: "outly/u1/x", allowed_formats: "jpg,png" }), "nov-dogodek.js: parametriPodpisa: vsa podpisana polja, snake_case, brez signature/apiKey/cloudName", pod);
+  }
+
+  // --- 9. mnozicno.js (#329, 23. 10. 2026): mnozicna dejanja nad dogodki v lazni strani ---
+  {
+    class El9 extends El { get classList() { return { add() {}, remove() {}, toggle() {}, contains: () => false }; } }
+    const doc9 = { createElement: (t) => new El9(t), createTextNode: (t) => new Besedilo(t) };
+    const h9 = new Function("document", `${mh[0]}\nreturn h;`)(doc9);
+    const klici9 = [], obv9 = [];
+    let odg9 = null, potrdi9 = [];
+    const klic9 = async (metoda, pot, telo) => { klici9.push([metoda, pot, telo]); mora(odg9, "nepričakovan klic API-ja iz mnozicno.js: " + metoda + " " + pot); if (odg9.napaka) throw new Error(odg9.napaka); return JSON.parse(JSON.stringify(odg9.telo)); };
+    const okno9 = {};
+    new Function("window", "h", "klic", "varno", "obvesti", "potrdi", fs.readFileSync(path.join(__dirname, "..", "admin", "mnozicno.js"), "utf8"))(
+      okno9, h9, klic9, async (fn) => { try { await fn(); } catch (e) { obv9.push([e.message, "slabo"]); } }, (b, v) => obv9.push([b, v]),
+      async (o) => { const f = potrdi9.shift(); mora(f, "nepričakovano potrditveno okno: " + o.naslov); return f(o); });
+    const mn = okno9.mnozicno;
+    mora(mn && ["zaSeznam", "zamikIzDni", "izvedi"].every(k => typeof mn[k] === "function"), "mnozicno.js ne izvozi window.mnozicno");
+    const DOV9 = new Set(["div", "span", "b", "p", "ul", "li", "button", "input", "label", "table", "thead", "tbody", "tr", "th", "td"]);
+    const najdi9 = (koren, f) => { const r = []; sprehod(koren, (e) => { if (e.nodeType === 1 && f(e)) r.push(e); }); return r; };
+    const ZLO9 = ['<img src=x onerror=alert("a")>', "<script>alert('b')</script>", '"><svg onload=alert(1)>'];
+
+    // zamik: dnevi -> minute
+    const zam = { "7": 10080, "-1": -1440, "0,5": 720, "0.5": 720, " 30 ": 43200, "-30": -43200 };
+    assert(Object.entries(zam).every(([v, m]) => mn.zamikIzDni(v) === m), "mnozicno.js: premik v dneh -> minute (7, -1, 0,5, 30)", Object.entries(zam).map(([v]) => [v, mn.zamikIzDni(v)]));
+    assert(["", "0", "abc", "31", "-30,5", "1e3", "7 dni", null, undefined, "0,0001", "1000"].every(v => mn.zamikIzDni(v) === null), "mnozicno.js: neveljaven premik (0, nad 30 dni, nestevilo) = null");
+
+    // tabela kot jo narise dogodki.js
+    const dogodki9 = [{ id: 11, title: ZLO9[0], status: "published" }, { id: 12, title: ZLO9[1], status: "draft" }, { id: "13<x", title: ZLO9[2], status: "published" }];
+    const odprta9 = [];
+    const vrstice9 = dogodki9.map((x) => { const tr = h9("tr", { class: "dg-vrstica" }, h9("td", {}, String(x.title))); tr.onclick = () => odprta9.push(x.id); return tr; });
+    const vsebnik9 = new El9("div");
+    let osvezeno9 = 0;
+    const narisi9 = () => { vsebnik9.replaceChildren(h9("table", { class: "dg-tabela" }, h9("thead", {}, h9("tr", {}, h9("th", {}, "#"))), h9("tbody", {}, vrstice9))); };
+    narisi9();
+    mn.zaSeznam({ vsebnik: vsebnik9, dogodki: dogodki9, osvezi: () => { osvezeno9++; } });
+    const p9 = pregled(vsebnik9);
+    assert(p9.elementi.every(t => DOV9.has(t)) && !p9.elementi.some(t => t.startsWith("atribut:")), "mnozicno.js: seznam s kljukicami nima elementov iz podatkov in on* atributov", [...new Set(p9.elementi)]);
+    const kljukice9 = najdi9(vsebnik9, e => e.tagName === "input" && e.attrs.type === "checkbox");
+    assert(kljukice9.length === 4, "mnozicno.js: kljukica v glavi (izberi vse) + ena na vrstico", kljukice9.length);
+    assert(najdi9(vsebnik9, e => e.tagName === "tr").slice(1).every(tr => tr.children[0].tagName === "td" && tr.children[0].children[0].tagName === "input"), "mnozicno.js: kljukica je prvi stolpec vsake vrstice");
+    assert(najdi9(vsebnik9, e => e.tagName === "div" && e.attrs.id === "mn_trak").length === 1 && vsebnik9.children[0].attrs.id === "mn_trak", "mnozicno.js: vrstica dejanj je pred tabelo, brez izbire prazna", vsebnik9.children[0].children.length);
+    const td1 = vsebnik9.children[1].children[1].children[0].children[0];
+    let ustavljeno = 0;
+    td1.onclick({ stopPropagation() { ustavljeno++; } }); td1.onkeydown({ stopPropagation() { ustavljeno++; } });
+    assert(ustavljeno === 2 && odprta9.length === 0, "mnozicno.js: klik in tipka na kljukici ne odpreta urejevalnika (stopPropagation)");
+
+    // izbira dveh dogodkov -> vrstica dejanj
+    const vrsta9 = () => vsebnik9.children[0];
+    const polje9 = (i) => najdi9(vsebnik9, e => e.tagName === "tr").slice(1)[i].children[0].children[0];
+    polje9(0).checked = true; polje9(0).onchange(); polje9(1).checked = true; polje9(1).onchange();
+    const trakP = pregled(vrsta9());
+    assert(trakP.besedila.join(" ").includes("Izbranih: 2") && najdi9(vrsta9(), e => e.tagName === "button").map(b => b.textContent).join("|") === "Ustavi prodajo|Zaženi prodajo|Med osnutke|Prestavi|Počisti izbiro",
+      "mnozicno.js: vrstica dejanj: Izbranih 2 in gumbi Ustavi/Zaženi/Med osnutke/Prestavi/Počisti", trakP.besedila);
+    const gumb9 = (ime) => najdi9(vrsta9(), e => e.tagName === "button" && e.textContent === ime)[0];
+
+    // preklic potrditve: brez klica
+    let ponudba = null;
+    potrdi9 = [async (o) => { ponudba = o; return null; }];
+    await gumb9("Ustavi prodajo").onclick();
+    const vsebinaP = pregled({ children: [].concat(ponudba.vsebina).filter(y => y && y.nodeType), nodeType: 1, tagName: "x", attrs: {} });
+    assert(ponudba.razlog === "obvezen" && ponudba.nevarno === true && vsebinaP.besedila.join("\n").includes(ZLO9[0]) && vsebinaP.besedila.join("\n").includes(ZLO9[1]) && vsebinaP.elementi.every(t => DOV9.has(t) || t === "x") &&
+      !vsebinaP.elementi.some(t => t.startsWith("atribut:")), "mnozicno.js: potrdi() ima obvezen razlog in seznam izbranih naslovov kot besedilo", { razlog: ponudba.razlog, nevarno: ponudba.nevarno });
+    assert(klici9.length === 0, "mnozicno.js: preklic potrditve ne klice API-ja");
+
+    // izvedba: pravo telo; rezultat po dogodkih; uspeli dogodki iz izbire, neuspeli ostanejo
+    odg9 = { telo: { dejanje: "pause", results: [{ id: 11, ok: true, spremenjeno: true }, { id: 12, ok: false, napaka: "<b onclick=1>neznana</b>", status: 409, message: ZLO9[2] }] } };
+    potrdi9 = [async () => ({ razlog: "Razlog: <i>plakat</i>" })];
+    await gumb9("Ustavi prodajo").onclick();
+    assert(klici9.length === 1 && klici9[0][0] === "POST" && klici9[0][1] === "/admin/api/events/bulk" && JSON.stringify(klici9[0][2]) === JSON.stringify({ ids: [11, 12], dejanje: "pause", razlog: "Razlog: <i>plakat</i>" }),
+      "mnozicno.js: POST /admin/api/events/bulk { ids, dejanje, razlog } (brez zamik_min)", klici9[0]);
+    const rP = pregled(vsebnik9.children[0]), rBes = rP.besedila.join("\n");
+    assert(rP.elementi.every(t => DOV9.has(t)) && !rP.elementi.some(t => t.startsWith("atribut:")), "mnozicno.js: rezultat po dogodkih nima elementov iz podatkov", [...new Set(rP.elementi)]);
+    assert(rBes.includes("uspelo 1, napak 1") && rBes.includes(ZLO9[0]) && rBes.includes(ZLO9[1]) && rBes.includes(ZLO9[2]), "mnozicno.js: rezultat: povzetek, naslovi in sporočilo API-ja (neznana koda) kot BESEDILO", rBes);
+    assert(osvezeno9 === 1 && najdi9(vsebnik9, e => e.tagName === "button" && e.textContent === "Počisti izbiro").length === 1 && rBes.includes("Izbranih: 1"), "mnozicno.js: seznam se osveži, v izbiri ostane samo neuspeli dogodek");
+
+    // Prestavi: neveljaven premik ponovno odpre okno z ohranjenim vnosom, veljaven gre v minutah
+    const vnosPrestavi = (v) => async (o) => { const vnos = najdi9({ children: [].concat(o.vsebina).filter(y => y && y.nodeType), nodeType: 1, tagName: "x", attrs: {} }, e => e.attrs.id === "mn_zamik")[0]; mora(vnos, "polje premika v oknu Prestavi"); vnos.value = v; return { razlog: "Gostitelj je prestavil" }; };
+    odg9 = { telo: { dejanje: "reschedule", results: [{ id: 12, ok: false, napaka: "has_sales", status: 409, message: "x" }] } };
+    potrdi9 = [vnosPrestavi("abc"), vnosPrestavi("0"), vnosPrestavi("0,5")];
+    klici9.length = 0; obv9.length = 0;
+    await gumb9("Prestavi").onclick();
+    assert(obv9.filter(o => o[1] === "slabo" && /Premik/.test(o[0])).length === 2 && potrdi9.length === 0, "mnozicno.js: dvakrat neveljaven premik: dve opozorili, okno se znova odpre", obv9);
+    assert(klici9.length === 1 && klici9[0][2].dejanje === "reschedule" && klici9[0][2].zamik_min === 720 && klici9[0][2].razlog === "Gostitelj je prestavil" && JSON.stringify(klici9[0][2].ids) === "[12]", "mnozicno.js: Prestavi: zamik_min v minutah (0,5 dneva = 720)", klici9[0]);
+    assert(vsebnik9.children[0].textContent.includes("ima prodane vstopnice") && vsebnik9.children[0].textContent.includes("Izbranih: 1"), "mnozicno.js: 409 has_sales ima slovensko razlago in dogodek ostane izbran");
+
+    // napaka klica (npr. 429): opozorilo, izbira ostane
+    odg9 = { napaka: "Too many requests. Please try again later." };
+    potrdi9 = [async () => ({ razlog: "Spet" })];
+    obv9.length = 0;
+    await gumb9("Zaženi prodajo").onclick();
+    assert(obv9.some(o => o[1] === "slabo" && /Too many/.test(o[0])) && vsebnik9.children[0].textContent.includes("Izbranih: 1"), "mnozicno.js: napaka API-ja (429): opozorilo, izbira ostane");
+
+    // izberi vse: največ 50
+    const veliko = Array.from({ length: 60 }, (_, i) => ({ id: 100 + i, title: "D" + i, status: "draft" }));
+    vrstice9.length = 0;
+    for (const x of veliko) { const tr = h9("tr", {}, h9("td", {}, x.title)); vrstice9.push(tr); }
+    narisi9();
+    obv9.length = 0;
+    mn.zaSeznam({ vsebnik: vsebnik9, dogodki: veliko, osvezi: () => {} });
+    const glavna9 = najdi9(vsebnik9, e => e.tagName === "th")[0].children[0];
+    glavna9.checked = true; glavna9.onchange();
+    assert(vsebnik9.children[0].textContent.includes("Izbranih: 50") && obv9.some(o => /50/.test(o[0])), "mnozicno.js: »izberi vse« izbere največ 50 in to pove");
+    polje9(55).checked = true; polje9(55).onchange();
+    assert(polje9(55).checked === false && obv9.filter(o => /največ 50/.test(o[0])).length >= 1 && vsebnik9.children[0].textContent.includes("Izbranih: 50"), "mnozicno.js: 51. kljukica ni mogoča");
+    // po novem izrisu (filter) izbira velja samo za vidne dogodke
+    narisi9(); mn.zaSeznam({ vsebnik: vsebnik9, dogodki: veliko.slice(0, 5), osvezi: () => {} });
+    assert(vsebnik9.children[0].textContent.includes("Izbranih: 5"), "mnozicno.js: po zoženju filtra ostanejo izbrani samo vidni dogodki", vsebnik9.children[0].textContent);
   }
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
