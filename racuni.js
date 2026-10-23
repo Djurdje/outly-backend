@@ -371,6 +371,9 @@ function eracuniPonudnik(env) {
   const prostor = String(env.ERACUNI_POSLOVNA_ENOTA || "").trim() || PROSTOR, naprava = String(env.ERACUNI_BLAGAJNA || "").trim() || NAPRAVA;
   const nacinPlacila = String(env.ERACUNI_NACIN_PLACILA || "").trim() || "Stripe";
   const vrstaProdaje = celo(env, "ERACUNI_VRSTA_PRODAJE", 7, 0, 200);   // 7 = »Neobdavcen promet - ne gre v DDV evidence« (NEXT DIMENSIONS ni zavezanec za DDV), preveri v e-racuni
+  // Sifra artikla v e-racuni: polje `productCode` je pri postavki OBVEZNO (zivo preverjeno 23. 10. 2026: »Error nr: 1 #Item1_productCode - This field is required«). Artikel mora v e-racuni
+  // obstajati (VSTOPNICA, enota kos, brez DDV; sprememba cene in opisa dovoljena, ker poslemo lastna price in description).
+  const artikel = String(env.ERACUNI_ARTIKEL || "").trim().slice(0, 60) || "VSTOPNICA";
   const kupec = String(env.ERACUNI_KUPEC || "").trim();                  // neobvezna oznaka kupca na poenostavljenem racunu (NI ime osebe); privzeto brez
   const razmak = celo(env, "ERACUNI_RAZMAK_MS", 1000, 0, 60000);        // najmanj toliko med zacetkoma dveh zahtevkov (meja 1/s)
   // Pomen SalesInvoiceList (po katerem datumu filtrira, velikost strani, ali elementi vsebujejo orderReference in cashRegisterCode) NI preverjen z zivim klicem. Dokler
@@ -419,6 +422,13 @@ function eracuniPonudnik(env) {
       const opisSeznama = jeObjekt(tel) ? iskaniKljuc(tel, ["description", "errorDescription"]) : undefined;
       if (typeof opisSeznama === "string" && /#noDocumentsFound\b/.test(opisSeznama)) return metoda === "CreditNoteList" ? { CreditNotes: [] } : { SalesInvoices: [] };
     }
+    // Manjkajoce OBVEZNO polje zahtevka (»Error nr: 1 #Item1_productCode - This field is required«): napaka nastavitve/kode, ne prehodna. Prepoznano STROGO po vzorcu `#<polje> - This field is required` v `description` (ne po golem 500). Izid ostane »neznan« (dokumenta NE trdimo, da ni: ena sama zivo preverjena tocka, podvojen fiskalni dokument pa se ne da preklicati;
+    // iskanje po referenci ga ob ERACUNI_SEZNAM_PREVERJEN=1 varno razresi), a je to NASTAVITEV: POZOR + pocasen premor + zaustavitev izdaje za cel proces, ne hitro ponavljanje.
+    if (res.status >= 400) {
+      let tel = null; try { tel = JSON.parse(besedilo); } catch (_) { tel = null; }
+      const opisPolja = jeObjekt(tel) ? iskaniKljuc(tel, ["description", "errorDescription"]) : undefined;
+      if (typeof opisPolja === "string" && /#\w+ - This field is required/.test(opisPolja)) throw napaka(`${metoda}: HTTP ${res.status}${podrobnost()}`, { neznan: true, konfiguracija: true });
+    }
     if (res.status === 408 || res.status >= 500) throw napaka(`${metoda}: HTTP ${res.status}${podrobnost()}`, { neznan: true });
     if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 405) throw napaka(`${metoda}: HTTP ${res.status} (poverilnice, pravice ali naslov)${podrobnost()}`, { konfiguracija: true, neznan: false });
     let j = null;
@@ -461,7 +471,7 @@ function eracuniPonudnik(env) {
         documentLanguage: "Slovene", remarks: p.ddv_klavzula,
         ...(kupec ? { buyerName: kupec } : {}),   // BREZ e-naslova, imena, naslova in davcne stevilke kupca (poenostavljen racun potrosniku, pravna analiza 4.1/12)
         // Cene so KONCNE (Retail, z morebitnimi davki): cele centi / 100 (najblizje decimalno stevilo; dobropis ima v e-racuni pozitivne zneske).
-        Items: p.postavke.map((x) => ({ description: x.opis, quantity: x.kolicina, unit: "kos", price: Math.abs(Math.trunc(Number(x.cena_cents))) / 100, vatTransactionType: vrstaProdaje })),
+        Items: p.postavke.map((x) => ({ description: x.opis, quantity: x.kolicina, unit: "kos", productCode: artikel, price: Math.abs(Math.trunc(Number(x.cena_cents))) / 100, vatTransactionType: vrstaProdaje })),
       };
       if (dobropis) {
         // Sklic je STEVILKA izvirnega dokumenta pri ponudniku (salesInvoiceRef: »2022-00005«); oznaka dokumenta (documentID) ni sklic.
