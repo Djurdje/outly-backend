@@ -11,7 +11,7 @@
     title: "Naslov", description: "Opis", poster_url: "Plakat", start_at: "Začetek", end_at: "Konec", min_age: "Starost", genres: "Žanri",
     status: "Stanje", ticket_price_cents: "Cena vstopnice", currency: "Valuta", ticket_url: "Zunanja prodaja", capacity: "Kapaciteta",
     recap_video_url: "Posnetek", sales_paused: "Prodaja", venue_club_id: "Gostitelj", venue_name: "Prizorišče", venue_address: "Naslov prizorišča",
-    venue_city: "Mesto prizorišča", venue_lat: "Lat", venue_lng: "Lng",
+    venue_city: "Mesto prizorišča", venue_lat: "Lat", venue_lng: "Lng", sales_open_at: "Prodaja od", sales_close_at: "Prodaja do",
   };
   let vsi = [], zanri = null, trenutni = null;
 
@@ -47,6 +47,9 @@
     if (x.ticket_price_cents === null || x.ticket_price_cents === undefined) return h("span", { class: "dg-prodaja ne" }, x.ticket_url ? "zunanja prodaja" : "brez vstopnic");
     if (x.capacity && cele(x.sold_count) >= cele(x.capacity)) return h("span", { class: "dg-prodaja ne" }, "razprodano");
     if (new Date(x.start_at).getTime() < Date.now()) return h("span", { class: "dg-prodaja ne" }, "začel se je");
+    // Okno prodaje (#327): izven okna kupec dobi 409 (napakaProdaje); zaprtje ima prednost, ker velja tudi, ce je bilo odprtje v preteklosti.
+    if (x.sales_close_at && new Date(x.sales_close_at).getTime() < Date.now()) return h("span", { class: "dg-prodaja ne" }, "zaprta");
+    if (x.sales_open_at && new Date(x.sales_open_at).getTime() > Date.now()) return h("span", { class: "dg-prodaja ne" }, "se odpre " + datum(x.sales_open_at));
     return h("span", { class: "dg-prodaja" }, "teče");
   }
   function vrednostZaPrikaz(k, v) {
@@ -54,7 +57,7 @@
     if (k === "ticket_price_cents") return cena(v);
     if (k === "sales_paused") return v ? "ustavljena" : "teče";
     if (k === "status") return (STANJA[v] || [String(v)])[0];
-    if (k === "start_at" || k === "end_at") return datum(v);
+    if (k === "start_at" || k === "end_at" || k === "sales_open_at" || k === "sales_close_at") return datum(v);
     if (Array.isArray(v)) return v.join(", ") || "—";
     const s = String(v);
     return s.length > 80 ? s.slice(0, 77) + "…" : s;
@@ -157,16 +160,17 @@
       ticketPriceCents: centi(v("dge_price")), currency: v("dge_currency").trim().toUpperCase(), ticketUrl: v("dge_ticketUrl").trim(),
       capacity: v("dge_capacity").trim() === "" ? null : Number(v("dge_capacity")),
       recapVideoUrl: v("dge_recap").trim(),
+      salesOpenAt: izLokalnega(v("dge_salesOpen")), salesCloseAt: izLokalnega(v("dge_salesClose")),
       venueName: v("dge_venueName").trim(), venueAddress: v("dge_venueAddress").trim(), venueCity: v("dge_venueCity").trim(),
     };
   }
   const KLJUCI = [   // camel -> snake (dogodek iz GET /admin/api/events/:id)
     ["title", "title"], ["description", "description"], ["posterUrl", "poster_url"], ["startAt", "start_at"], ["endAt", "end_at"], ["minAge", "min_age"],
     ["genres", "genres"], ["ticketPriceCents", "ticket_price_cents"], ["currency", "currency"], ["ticketUrl", "ticket_url"], ["capacity", "capacity"],
-    ["recapVideoUrl", "recap_video_url"], ["venueName", "venue_name"], ["venueAddress", "venue_address"], ["venueCity", "venue_city"],
+    ["recapVideoUrl", "recap_video_url"], ["salesOpenAt", "sales_open_at"], ["salesCloseAt", "sales_close_at"], ["venueName", "venue_name"], ["venueAddress", "venue_address"], ["venueCity", "venue_city"],
   ];
   const enako = (k, a, b) => {
-    if (k === "start_at" || k === "end_at") return (a ? Math.floor(new Date(a).getTime() / 60000) : null) === (b ? Math.floor(new Date(b).getTime() / 60000) : null);
+    if (k === "start_at" || k === "end_at" || k === "sales_open_at" || k === "sales_close_at") return (a ? Math.floor(new Date(a).getTime() / 60000) : null) === (b ? Math.floor(new Date(b).getTime() / 60000) : null);
     if (k === "genres") return JSON.stringify([...(a || [])].sort()) === JSON.stringify([...(b || [])].sort());
     if (k === "currency") return String(a || "").trim().toUpperCase() === String(b || "").trim().toUpperCase();
     return JSON.stringify(a ?? null) === JSON.stringify(b ?? null) || ((a ?? "") === "" && (b ?? "") === "");
@@ -188,7 +192,7 @@
     for (const [c, s] of KLJUCI) {
       const id = { title: "dge_title", description: "dge_description", posterUrl: "dge_poster", startAt: "dge_start", endAt: "dge_end", minAge: "dge_minAge", genres: "dge_genres",
         ticketPriceCents: "dge_price", currency: "dge_currency", ticketUrl: "dge_ticketUrl", capacity: "dge_capacity", recapVideoUrl: "dge_recap",
-        venueName: "dge_venueName", venueAddress: "dge_venueAddress", venueCity: "dge_venueCity" }[c];
+        salesOpenAt: "dge_salesOpen", salesCloseAt: "dge_salesClose", venueName: "dge_venueName", venueAddress: "dge_venueAddress", venueCity: "dge_venueCity" }[c];
       const ovoj = $(id) && $(id).parentElement;
       if (ovoj) ovoj.classList.toggle("spremenjeno", sprem.has(s));
     }
@@ -257,6 +261,19 @@
     await odpri(cele(e.id));
   }
 
+  // Opozorila (ne zavrnitev) za okno prodaje glede na zacetek dogodka: prodaja se ob zacetku vedno zapre (napakaProdaje).
+  function opozorilaOkna(seznamS) {
+    const ima = (k) => seznamS.some(([x]) => x === k);
+    const zac = izLokalnega($("dge_start").value), t0 = zac ? new Date(zac).getTime() : NaN;
+    const od = izLokalnega($("dge_salesOpen").value), doo = izLokalnega($("dge_salesClose").value);
+    const o = [];
+    if (ima("sales_open_at") && od && Number.isFinite(t0) && new Date(od).getTime() >= t0)
+      o.push(h("p", { class: "opozorilo" }, "Pozor: »Prodaja od« je po začetku dogodka. Prodaja se ob začetku zapre, zato se nikoli ne bo odprla."));
+    if (ima("sales_close_at") && doo && Number.isFinite(t0) && new Date(doo).getTime() > t0)
+      o.push(h("p", { class: "opozorilo" }, "Opozorilo: »Prodaja do« je po začetku dogodka. To nima učinka, prodaja se ob začetku zapre sama."));
+    return o;
+  }
+
   async function shrani() {
     const { telo, seznamS } = spremembe();
     if (!seznamS.length) return;
@@ -264,12 +281,18 @@
     if ("minAge" in telo && !(Number.isInteger(telo.minAge) && telo.minAge >= 0 && telo.minAge <= 99)) return obvesti("Starost: celo število 0–99.", "slabo");
     if ("capacity" in telo && telo.capacity !== null && !(Number.isInteger(telo.capacity) && telo.capacity >= 1)) return obvesti("Kapaciteta: celo število od 1 naprej (prazno = brez omejitve).", "slabo");
     if (!telo.startAt && "startAt" in telo) return obvesti("Začetek je obvezen.", "slabo");
+    // Okno prodaje: pregled v brskalniku samo za hitro sporocilo; odloca streznik (400 invalid_sales_window), ki vidi tudi neposlano polje.
+    {
+      const od = izLokalnega($("dge_salesOpen").value), do_ = izLokalnega($("dge_salesClose").value);
+      if (od && do_ && new Date(do_).getTime() <= new Date(od).getTime()) return obvesti("Prodaja do mora biti po Prodaja od.", "slabo");
+    }
     // Raven 2 (načrt 3.2): cena, kapaciteta, datum, valuta potrebujejo potrditev s »prej → potem«; besedilo, plakat, žanri ne.
-    const obcutljivo = seznamS.filter(([k]) => ["ticket_price_cents", "capacity", "start_at", "end_at", "currency", "ticket_url"].includes(k));
+    const obcutljivo = seznamS.filter(([k]) => ["ticket_price_cents", "capacity", "start_at", "end_at", "currency", "ticket_url", "sales_open_at", "sales_close_at"].includes(k));
     if (obcutljivo.length) {
       const brezCene = "ticketPriceCents" in telo && telo.ticketPriceCents === null;
       const ok = await potrdi({ naslov: "Shranim spremembe?", potrdiBesedilo: "Shrani", nevarno: brezCene,
         vsebina: [prejPotem(seznamS),
+          ...opozorilaOkna(seznamS),
           brezCene ? h("p", {}, "Prazna cena pomeni, da dogodek nima več vstopnic na Outlyju. Za začasno ustavitev raje uporabi stikalo »Ustavi prodajo«.") : null,
           seznamS.some(([k]) => k === "ticket_price_cents") && !brezCene ? h("p", {}, "Nova cena velja za nove nakupe. Kdor ima odprto plačilo, plača ceno, ki jo je videl.") : null] });
       if (!ok) return;
@@ -282,6 +305,7 @@
         uspelo = true;
         obvesti("Shranjeno.", "ok");
       } catch (err) {
+        if (/invalid_sales_window|^400: Sales close time/i.test(err.message)) throw new Error("Prodaja do mora biti po Prodaja od.");
         if (/capacity_below_sold|^400: Capacity can't be lower/i.test(err.message)) throw new Error(`Kapaciteta ne sme biti pod številom prodanih vstopnic (${cele(trenutni.event.sold_count)}).`);
         throw err;
       }
@@ -339,6 +363,8 @@
       const valuta = vnos({ maxlength: "3", style: "text-transform:uppercase" }); valuta.value = e.currency || "EUR";
       const zun = vnos({ placeholder: "https://", inputmode: "url" }); zun.value = e.ticket_url || "";
       const kap = vnos({ inputmode: "numeric", placeholder: "brez omejitve" }); kap.value = e.capacity === null || e.capacity === undefined ? "" : String(e.capacity);
+      const prodajaOd = vnos({ type: "datetime-local" }); prodajaOd.value = lokalno(e.sales_open_at);
+      const prodajaDo = vnos({ type: "datetime-local" }); prodajaDo.value = lokalno(e.sales_close_at);
       const posnetek = vnos({ placeholder: "https://", inputmode: "url" }); posnetek.value = e.recap_video_url || "";
       const vIme = vnos(); vIme.value = e.venue_name || "";
       const vNaslov = vnos(); vNaslov.value = e.venue_address || "";
@@ -353,7 +379,7 @@
           h("div", { class: "dg-glava" },
             h("div", { style: "flex:1 1 260px;min-width:0" }, nazaj,
               h("h2", {}, e.title, h("span", { class: "drobno" }, `#${cele(e.id)} – ${e.club_name}${e.club_hidden ? " (klub skrit)" : ""} – ${datum(e.start_at)}`))),
-            h("div", { class: "vrsta" }, znacka(e.status), gumbi)),
+            h("div", { class: "vrsta" }, znacka(e.status), e.status === "published" ? prodaja(e) : null, gumbi)),
           h("div", { class: "telo" }, e.status === "published" ? stikalo(e)
             : h("p", { style: "margin:0;font-size:13px;color:var(--muted)" }, e.status === "cancelled" ? "Dogodek je odpovedan, prodaje ni." : "Osnutek ni viden v aplikaciji, prodaje ni.",
               e.sales_paused ? " Ob objavi bo prodaja ustavljena (stikalo)." : "")),
@@ -370,6 +396,8 @@
               polje("dge_start", "Začetek", zac), polje("dge_end", "Konec", kon, "Večdnevni dogodek mora imeti konec."),
               polje("dge_price", "Cena vstopnice (€)", cenaV, "Za začasno ustavitev uporabi stikalo, ne briši cene."),
               polje("dge_capacity", "Kapaciteta", kap, `Najmanj ${cele(e.sold_count)} (že prodano).`),
+              polje("dge_salesOpen", "Prodaja od", prodajaOd, "Prazno = odprta takoj. Lokalni čas tvojega brskalnika."),
+              polje("dge_salesClose", "Prodaja do", prodajaDo, "Prodaja se sama zapre ob začetku dogodka in ob razprodaji; tu nastaviš prej/pozneje."),
               polje("dge_currency", "Valuta", valuta), polje("dge_minAge", "Najnižja starost", starost),
               polje("dge_ticketUrl", "Zunanja prodaja (URL)", zun, "Samo, če vstopnic ne prodaja Outly.", true),
               h("div", { class: "siroko" }, h("label", { for: "dge_poster" }, "Plakat (URL)"), h("div", { class: "vrsta", style: "align-items:flex-start;flex-wrap:nowrap" }, img, plakat)),
@@ -381,7 +409,7 @@
           h("div", { class: "dg-shrani" }, shraniG, zavrzi, h("span", { id: "dge_stanje", class: "stanje", "aria-live": "polite" }))),
         h("div", { class: "skupina" }, h("h2", {}, "Zgodovina sprememb"), zgodovina(d.audit || [])));
       for (const [vn, idp] of [[naslov, "dge_title"], [opis, "dge_description"], [plakat, "dge_poster"], [zac, "dge_start"], [kon, "dge_end"], [starost, "dge_minAge"],
-        [cenaV, "dge_price"], [valuta, "dge_currency"], [zun, "dge_ticketUrl"], [kap, "dge_capacity"], [posnetek, "dge_recap"], [vIme, "dge_venueName"], [vNaslov, "dge_venueAddress"], [vMesto, "dge_venueCity"]]) {
+        [cenaV, "dge_price"], [valuta, "dge_currency"], [zun, "dge_ticketUrl"], [kap, "dge_capacity"], [prodajaOd, "dge_salesOpen"], [prodajaDo, "dge_salesClose"], [posnetek, "dge_recap"], [vIme, "dge_venueName"], [vNaslov, "dge_venueAddress"], [vMesto, "dge_venueCity"]]) {
         vn.id = idp; vn.oninput = oznaciSpremenjeno;
       }
       zanriPolje.onchange = oznaciSpremenjeno;
