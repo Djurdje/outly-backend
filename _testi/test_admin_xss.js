@@ -11,6 +11,8 @@
  * Izvajalni del: odsek zaženemo v minimalnem lažnem DOM-u (ustvarjeni elementi, `innerHTML` setter beleži), v API odgovore
  * vstavimo `<img src=x onerror=...>` in preverimo, da vsebina konča kot besedilo (text node), ne kot element.
  * Vsak korak, ki ga ne najde, PADE (ne preskoči).
+ * Odsek 7 (#326, 23. 10. 2026): nova modula admin/danes.js (nadzorna plosca »Danes«) in admin/opozorila.js (zavihek »Opozorila«): brez innerHTML/onclick="..." nizov,
+ * zlonamerni naslov dogodka / ime kluba / zadnja_napaka / besedilo opozorila konca kot besedilo, povezave samo #/dogodki/<stevilo>, osvezevanje samo ko je zavihek viden, premor 60 s ob 503.
  * Odsek 6 (U3, 23. 10. 2026): zavihek Uporabniki. Vrstica prek h(), brez onclick/onchange nizov; izbira vloge ne kliče API-ja, PATCH šele po potrdi()
  * (vpis e-naslova + obvezen razlog za admin/backup in odvzem vloge admin); preklic vrne izbiro.
  */
@@ -167,7 +169,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
   assert(trsS.map(t => gumbov(t.children[t.children.length - 1])).join() === "1,1,0,0,0", "spori: gumb samo pri povrnitvi ni_uspelo/rocno", trsS.map(t => gumbov(t)));
 
   // --- 5. moduli panela (faza 1, 21. 10. 2026: admin/dialog.js, admin/dogodki.js) in brez window.confirm ---
-  for (const ime of ["dialog.js", "dogodki.js"]) {
+  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js"]) {
     const kod = fs.readFileSync(path.join(__dirname, "..", "admin", ime), "utf8");
     const k5 = [];
     for (const m of kod.matchAll(NEVARNO)) {
@@ -177,9 +179,12 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     }
     assert(k5.length === 0, `admin/${ime}: brez innerHTML/outerHTML/insertAdjacentHTML/eval s podatki`, k5);
     assert(!/\bconfirm\s*\(/.test(kod), `admin/${ime}: brez window.confirm (blokirajo ga orodja; panel ima svoje okno)`);
+    assert(!/\bon[a-z]+\s*=\s*["'`]/i.test(kod.replace(/\bon[a-z]+\s*=\s*\(/g, "")), `admin/${ime}: brez onclick="..." / onchange="..." nizov`);
   }
   assert(!/\bconfirm\s*\(/.test(skripta), "admin/index.html: brez window.confirm (vse potrditve prek potrdi() iz dialog.js)");
-  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
+  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
+  assert(/<link rel="stylesheet" href="danes\.css">/.test(html), "danes.css je vezan v index.html");
+  assert(!/<link[^>]+(?:https?:)?\/\//.test(html) && !/<script[^>]+src="(?:https?:)?\/\//.test(html), "panel ne nalaga tujih skript ali stilov");
   // dialog.js: vsebina iz podatkov gre v DOM kot besedilo (izvajalno, lažni DOM)
   {
     const kod = fs.readFileSync(path.join(__dirname, "..", "admin", "dialog.js"), "utf8");
@@ -303,6 +308,167 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
       assert(o && (o.vpis === "u9@outly.si") === stroga && o.razlog === (stroga ? "obvezen" : "neobvezen"), `${prej} → ${potem}: ${stroga ? "vpis e-naslova + obvezen razlog" : "brez vpisa, neobvezen razlog"}`, o && { vpis: o.vpis, razlog: o.razlog });
     };
     for (const [a, b2, st] of [["user", "business", false], ["business", "user", false], ["user", "admin", true], ["user", "backup", true], ["business", "admin", true], ["admin", "user", true], ["admin", "business", true], ["admin", "backup", true], ["backup", "user", false], ["backup", "business", false]]) await preveri(a, b2, st);
+  }
+
+  // --- 7. nova modula (#326): admin/danes.js (»Danes«) in admin/opozorila.js (zavihek »Opozorila«) v lazni strani ---
+  {
+    const koda = (ime) => fs.readFileSync(path.join(__dirname, "..", "admin", ime), "utf8");
+    class El2 extends El { get classList() { return { add() {}, remove() {}, toggle() {}, contains: () => false }; } }
+    const elementi7 = {};
+    const $7 = (id) => (elementi7[id] = elementi7[id] || new El2("div"));
+    const doc7 = { createElement: (t) => new El2(t), createTextNode: (t) => new Besedilo(t), visibilityState: "visible", addEventListener() {} };
+    const casovniki = [], zgodovina = [], zavihki = [], klici7 = [];
+    const setTimeout7 = (f, ms) => { casovniki.push({ f, ms }); return casovniki.length; };
+    const history7 = { pushState: (...a) => zgodovina.push(a) };
+    let odgovor7 = {}, napaka7 = null;
+    let visi7 = false;   // klic obvisi, dokler ga ne prekine AbortSignal (polodprta povezava)
+    const klic7 = async (metoda, pot, telo, ponovno, signal) => {
+      klici7.push(pot);
+      if (visi7) {
+        mora(signal, "danes.js: klic brez AbortSignala (rok klica manjka)");
+        return new Promise((_, zavrni) => signal.addEventListener("abort", () => zavrni(Object.assign(new Error("The operation was aborted."), { name: "TimeoutError" }))));
+      }
+      if (napaka7) throw napaka7;
+      const k = Object.keys(odgovor7).find(x => pot.startsWith(x));
+      mora(k, "nepričakovan klic API-ja iz novega modula: " + pot);
+      return JSON.parse(JSON.stringify(odgovor7[k]));
+    };
+    const naloziModul = (ime) => {
+      const okno = {};
+      new Function("window", "document", "$", "h", "klic", "datum", "varno", "obvesti", "pokaziZavihek", "history", "setTimeout", "clearTimeout", koda(ime))(
+        okno, doc7, $7, new Function("document", `${mh[0]}\nreturn h;`)(doc7), klic7, new Function(`${md[0]}\nreturn datum;`)(), varno, obvesti, (z) => zavihki.push(z), history7, setTimeout7, () => {});
+      return okno;
+    };
+    const DOV7 = new Set(["div", "span", "b", "a", "h2", "h3", "button", "select", "option", "small", "table"]);
+    const oznake = (el) => { const r = pregled(el); return r; };
+    const brezOn = (p) => !p.elementi.some(t => t.startsWith("atribut:"));
+    const ZLO7 = ['<img src=x onerror=alert("a")>', "<script>alert('b')</script>", '"><svg onload=alert(1)>', "</div><iframe src=javascript:alert(1)>"];
+
+    // --- danes.js ---
+    const danesOkno = naloziModul("danes.js");
+    mora(typeof danesOkno.danesOsvezi === "function", "danes.js ne izvozi window.danesOsvezi");
+    assert(casovniki.length === 1 && casovniki[0].ms === 20000, "danes.js: ob zagonu casovnik 20 s", casovniki.map(c => c.ms));
+    odgovor7 = { "/admin/api/danes": {
+      cas: "2026-10-23T20:00:00.000Z",
+      prodaja: { danes: { narocila: 3, bruto_cents: 123456, vstopnice: 5 }, dni7: { narocila: 9, bruto_cents: 5, vstopnice: 12 }, testno_danes: { narocila: 1, bruto_cents: 1500, vstopnice: 1 } },
+      nocoj: [
+        { id: 7, naslov: ZLO7[0], klub: ZLO7[1], start_at: "2026-10-23T21:00:00.000Z", prodano: 10, kapaciteta: 100, vstopi: 4, vstopi_15min: 2, prodaja: "tece" },
+        { id: "1<img src=x onerror=1>", naslov: ZLO7[2], klub: ZLO7[3], start_at: "2026-10-23T22:00:00.000Z", prodano: 1, kapaciteta: null, vstopi: 0, vstopi_15min: 0, prodaja: ZLO7[0] },
+      ],
+      racuni: { izdani_danes: 2, caka: 1, napaka: 1 }, opozorila_rdeca: 2 } };
+    await danesOkno.danesOsvezi(true);
+    const pD = oznake($7("dn_koren"));
+    assert(pD.elementi.length > 10 && pD.elementi.every(t => DOV7.has(t)), "danes.js: nobenega elementa iz podatkov (img/script/svg/iframe)", [...new Set(pD.elementi)]);
+    assert(brezOn(pD) === true && pD.elementi.filter(t => t === "atribut:onclick").length === 0, "danes.js: brez on* atributov (le lastnosti-funkcije)");
+    const bes = pD.besedila.join("\n");
+    for (const z of ZLO7) assert(bes.includes(z), "danes.js: niz iz podatkov konča kot besedilo: " + z.slice(0, 30));
+    assert(bes.includes("1.234,56 €") && bes.includes("0,05 €"), "danes.js: zneski v centih brez plavajoče vejice (123456 c = 1.234,56 €, 5 c = 0,05 €)");
+    const povezave = [];
+    sprehod($7("dn_koren"), (e) => { if (e.nodeType === 1 && e.tagName === "a") povezave.push(e); });
+    assert(povezave.length === 2 && povezave[0].attrs.href === "#/dogodki/7" && povezave[1].attrs.href === "#/dogodki/0", "danes.js: povezava na dogodek je samo #/dogodki/<celo število> (id iz podatkov, ki ni število, postane 0)", povezave.map(p => p.attrs.href));
+    povezave[0].onclick({ preventDefault() {} });
+    assert(zgodovina.length === 1 && zgodovina[0][2] === "#/dogodki/7" && zavihki[zavihki.length - 1] === "dogodki", "danes.js: klik na nocojsnji dogodek odpre #/dogodki/7");
+    povezave[1].onclick({ preventDefault() {} });
+    assert(zgodovina.length === 1, "danes.js: neveljaven id ne spremeni naslova");
+    assert(innerHTMLZapisi.every(v => v === ""), "danes.js: innerHTML ni bil uporabljen za podatke");
+    const gumbRdeca = [];
+    sprehod($7("dn_koren"), (e) => { if (e.nodeType === 1 && e.tagName === "button" && e.className.includes("dn-klik")) gumbRdeca.push(e); });
+    gumbRdeca[0].onclick();
+    assert(gumbRdeca.length === 1 && zavihki[zavihki.length - 1] === "opozorila", "danes.js: kartica rdečih opozoril odpre zavihek Opozorila");
+    assert($7("nOpozorila").textContent === "2", "danes.js: značka v meniju kaže rdeča opozorila (textContent)");
+    // osvezevanje: samo ko je zavihek viden; 503 -> premor 60 s + »podatki zastareli«
+    const pred = klici7.length, tikPred = casovniki.length;
+    doc7.visibilityState = "hidden";
+    await danesOkno.danesOsvezi(true);
+    casovniki[casovniki.length - 1].f();
+    await new Promise(r => setImmediate(r));
+    assert(klici7.length === pred, "danes.js: zavihek brskalnika skrit -> nobenega klica (ne izrecno ne casovnik)", klici7.length - pred);
+    assert(casovniki.length > tikPred && casovniki[casovniki.length - 1].ms === 20000, "danes.js: casovnik se kljub temu prestavi (20 s)");
+    doc7.visibilityState = "visible";
+    casovniki[casovniki.length - 1].f();
+    await new Promise(r => setImmediate(r));
+    assert(klici7.length === pred + 1, "danes.js: zavihek spet viden -> casovnik klice streznik", klici7.length - pred);
+    assert(casovniki[casovniki.length - 1].ms === 20000, "danes.js: uspeh -> naslednji klic cez 20 s");
+    napaka7 = Object.assign(new Error("503: Service temporarily unavailable"), { status: 503 });
+    await danesOkno.danesOsvezi(true);
+    assert(casovniki[casovniki.length - 1].ms === 60000, "danes.js: 503 -> premor 60 s", casovniki[casovniki.length - 1].ms);
+    assert(pregled($7("dn_koren")).besedila.join("\n").includes("podatki zastareli"), "danes.js: ob 503 napis »podatki zastareli« (zadnji podatki ostanejo)");
+    const predPremor = klici7.length;
+    await danesOkno.danesOsvezi(false);
+    assert(klici7.length === predPremor, "danes.js: med premorom naloziPregled (brez sile) ne kliče streznika", klici7.length - predPremor);
+    napaka7 = null;
+    await danesOkno.danesOsvezi(true);
+    assert(!pregled($7("dn_koren")).besedila.join("\n").includes("podatki zastareli") && casovniki[casovniki.length - 1].ms === 20000, "danes.js: izrecno osvezevanje po 503 obnovi stanje in 20 s");
+    napaka7 = new Error("500: Server error."); napaka7.status = 500;
+    await danesOkno.danesOsvezi(true);
+    assert(casovniki[casovniki.length - 1].ms === 20000 && pregled($7("dn_koren")).besedila.join("\n").includes("podatki zastareli"), "danes.js: druga napaka: zastarelo, a brez 60 s premora");
+    napaka7 = null;
+    // obvisel zahtevek: rok klica 15 s (AbortSignal) -> vTeku se ponastavi, »podatki zastareli« + sporocilo, osvezevanje tece naprej
+    {
+      const ctrl7 = new AbortController(), izvirnik = AbortSignal.timeout, roki = [];
+      AbortSignal.timeout = (ms) => { roki.push(ms); return ctrl7.signal; };
+      try {
+        visi7 = true;
+        const tikVisi = casovniki.length, klVisi = klici7.length;
+        const visece = danesOkno.danesOsvezi(true);
+        await new Promise(r => setImmediate(r));
+        const drugi = danesOkno.danesOsvezi(true);   // vTeku: drugi klic ne sproži vzporednega
+        await new Promise(r => setImmediate(r));
+        assert(klici7.length === klVisi + 1 && roki.length === 1 && roki[0] === 15000, "danes.js: klic ima AbortSignal z rokom 15 s, vzporednega klica ni", { klici: klici7.length - klVisi, roki });
+        ctrl7.abort();
+        await visece; await drugi;
+        const besVisi = pregled($7("dn_koren")).besedila.join("\n");
+        assert(besVisi.includes("podatki zastareli") && besVisi.includes("ni odgovoril v 15 s"), "danes.js: po izteku roka napis »podatki zastareli« in sporocilo (osvezevanje se ne ustavi tiho)");
+        assert(casovniki.length > tikVisi && casovniki[casovniki.length - 1].ms === 20000, "danes.js: po izteku roka casovnik tece naprej (20 s)");
+        visi7 = false;
+        const ctrl8 = new AbortController(); AbortSignal.timeout = () => ctrl8.signal;
+        const klPo = klici7.length;
+        await danesOkno.danesOsvezi(true);
+        assert(klici7.length === klPo + 1 && !pregled($7("dn_koren")).besedila.join("\n").includes("podatki zastareli"), "danes.js: po izteku roka vTeku ni obstal: naslednji klic uspe in obnovi stanje");
+      } finally { AbortSignal.timeout = izvirnik; visi7 = false; }
+    }
+
+    // --- opozorila.js ---
+    const opOkno = naloziModul("opozorila.js");
+    mora(typeof opOkno.naloziOpozorila === "function", "opozorila.js ne izvozi window.naloziOpozorila");
+    odgovor7 = {
+      "/admin/api/opozorila": { items: [
+        { vrsta: "prodajalec_nepopoln", resnost: "rdece", cilj_tip: "dogodek", cilj_id: 12, besedilo: ZLO7[0] + " " + ZLO7[1], cas: "2026-10-25T10:00:00.000Z" },
+        { vrsta: "racun_napaka", resnost: "rdece", cilj_tip: "racun", cilj_id: 5, besedilo: ZLO7[2] },
+        { vrsta: "x", resnost: "oranzno", cilj_tip: "dogodek", cilj_id: "3<script>", besedilo: ZLO7[3] },
+        { vrsta: "vracila_pozornost", resnost: ZLO7[0], cilj_tip: "vracila", cilj_id: null, besedilo: "1 vračilo" },
+        { vrsta: "potrdila_neposlana", resnost: "rumeno", cilj_tip: "narocila", cilj_id: null, besedilo: "2 potrdili" },
+      ], stevci: { rdece: 2, oranzno: 1, rumeno: 1 } },
+      "/admin/api/racuni": { stevci: { caka: 1, izdan: 0, potrjen: 0, napaka: 1, preklican: 0 }, limit: 100, items: [
+        { id: 5, order_id: 9, vrsta: "racun", stanje: "napaka", znesek_cents: 1500, valuta: "EUR", stevilka: null, ponudnik_stevilka: ZLO7[0], izdan_at: null, potrjen_at: null, poskusi: 3,
+          zadnja_napaka: ZLO7[1] + " [e-naslov] " + ZLO7[2], created_at: "2026-10-23T10:00:00.000Z" },
+        { id: 6, order_id: 10, vrsta: ZLO7[3], stanje: ZLO7[0], znesek_cents: -250, valuta: "EUR", stevilka: 77, ponudnik_stevilka: null, izdan_at: "2026-10-23T10:00:00.000Z", potrjen_at: null, poskusi: 0, zadnja_napaka: null, created_at: "2026-10-23T10:00:00.000Z" },
+      ] },
+    };
+    await opOkno.naloziOpozorila();
+    const pO = oznake($7("op_opozorila")), pR = oznake($7("op_racuni"));
+    for (const [ime, p] of [["opozorila", pO], ["računi", pR]]) {
+      assert(p.elementi.length > 5 && p.elementi.every(t => DOV7.has(t)), `opozorila.js: ${ime}: nobenega elementa iz podatkov (img/script/svg/iframe)`, [...new Set(p.elementi)]);
+      assert(brezOn(p), `opozorila.js: ${ime}: brez on* atributov`);
+    }
+    const bes2 = [...pO.besedila, ...pR.besedila].join("\n");
+    for (const z of ZLO7) assert(bes2.includes(z), "opozorila.js: niz iz podatkov konča kot besedilo: " + z.slice(0, 30));
+    assert(bes2.includes("[e-naslov]") && bes2.includes("−2,50 €") && bes2.includes("15,00 €"), "opozorila.js: zadnja_napaka kot besedilo; zneski v centih (−2,50 €, 15,00 €)");
+    const povezave2 = [];
+    sprehod($7("op_opozorila"), (e) => { if (e.nodeType === 1 && e.tagName === "a") povezave2.push(e.attrs.href); });
+    assert(JSON.stringify(povezave2) === JSON.stringify(["#/dogodki/12", "#racuni", "#vracila"]), "opozorila.js: povezave samo #/dogodki/<število>, #racuni, #vracila (id '3<script>' in narocila brez povezave)", povezave2);
+    assert($7("nOpozorila").textContent === "2", "opozorila.js: značka v meniju = rdeča opozorila (textContent)");
+    const vrstice2 = [];
+    sprehod($7("op_opozorila"), (e) => { if (e.nodeType === 1 && e.tagName === "a") vrstice2.push(e); });
+    vrstice2[0].onclick({ preventDefault() {} });
+    assert(zgodovina[zgodovina.length - 1][2] === "#/dogodki/12" && zavihki[zavihki.length - 1] === "dogodki", "opozorila.js: klik na opozorilo dogodka odpre #/dogodki/12");
+    const klPred = klici7.length;
+    vrstice2[1].onclick({ preventDefault() {} });
+    await new Promise(r => setImmediate(r));
+    assert(klici7.slice(klPred).some(p => p.includes("stanje=napaka")), "opozorila.js: klik na račun v napaki naloži seznam računov s filtrom napaka", klici7.slice(klPred));
+    const izbire = [];
+    sprehod($7("op_racuni"), (e) => { if (e.nodeType === 1 && e.tagName === "select") izbire.push(e); });
+    assert(izbire.length === 1 && typeof izbire[0].onchange === "function", "opozorila.js: filter stanja računov");
   }
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
