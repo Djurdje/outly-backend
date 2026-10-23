@@ -58,6 +58,7 @@ const F = {
   zamudaEor: 0,         // koliko Get klicev pred pojavom EOR
   listOblika: "ok",     // 'ok' | 'neznana' | 'prazno' ({status:ok}) | 'prazenNiz' (SalesInvoices: "") | 'prazenSeznam' ([]) | 'brezRef' | 'okrnjenRef' | 'dvojnik' | 'manjkaZnan'
   opisAvt: "Access denied. Invalid credentials",   // pravo besedilo napake avtentikacije pri e-racuni NI znano
+  oblikaGet: "zivo", casLok: null, fiskalnaStevilka: null,   // oblika Get: glej zivJSON
   zahtevajArtikel: true, obveznoPolje: 0,   // postavka mora imeti productCode (sicer 500 »#Item1_productCode - This field is required«)
   listStatus: null,   // npr. 503: seznam (tudi bralni preizkus) ne dela
   listZamik: 0, casIzdaje: null, poverilnice: true, vrniBlagajno: null,
@@ -65,6 +66,13 @@ const F = {
 const dan = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Ljubljana", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const dokJSON = (d, vrsta) => ({ documentID: d.id, number: d.number, date: d.date, businessUnit: d.businessUnit, cashRegisterCode: F.vrniBlagajno || d.cashRegisterCode, orderReference: d.orderReference,
   fiscalNumber: d.fiscalNumber, status: "issuedInvoice", ...(d.getov >= F.zamudaEorDo ? { eor: d.eor, zoi: d.zoi } : {}), ...(F.casIzdaje ? { dateTimeOfIssue: F.casIzdaje } : {}), vrsta });
+// PRAVA oblika SalesInvoiceGet/CreditNoteGet (zivo, Render Shell 23. 10. 2026 ~14:55 UTC, racun 2026-00001): {"response":{"status":"ok","result":[{...}]}}, VSE vrednosti nizi, fiscalNumber je
+// niz »A001-1-1« (poslovna enota-blagajna-zaporedna), issuedTimestamp je ljubljanski lokalni cas BREZ casovnega pasu (»2026-10-23 16:45:06«), status »IssuedInvoice«.
+// F.oblikaGet = "staro" vrne prejsnjo (izmisljeno) obliko: stevilo v fiscalNumber, objekt brez `result`.
+const zivJSON = (d) => ({ documentID: d.id, number: d.number, status: d.vrsta === "dobropis" ? "IssuedCreditNote" : "IssuedInvoice", businessYear: String(d.date).slice(0, 4), businessUnit: d.businessUnit,
+  cashRegisterCode: F.vrniBlagajno || d.cashRegisterCode, date: d.date, type: "Retail", orderReference: d.orderReference,
+  ...(F.casLok ? { issuedTimestamp: F.casLok } : {}), ...(F.casIzdaje ? { dateTimeOfIssue: F.casIzdaje } : {}),
+  ...(d.getov >= F.zamudaEorDo ? { eor: d.eor, zoi: d.zoi } : {}), fiscalNumber: F.fiskalnaStevilka !== undefined && F.fiskalnaStevilka !== null ? F.fiskalnaStevilka(d) : `${d.businessUnit}-${d.cashRegisterCode}-${d.fiscalNumber}` });
 const streznik = http.createServer((req, res) => {
   let tel = ""; req.on("data", (x) => tel += x);
   req.on("end", async () => {
@@ -110,6 +118,7 @@ const streznik = http.createServer((req, res) => {
       const d = F.docs.find((x) => (p.documentID && x.id === p.documentID) || (p.number && x.number === p.number));
       if (!d) return konec(200, { status: "error", error: { description: "document could not be found" } });
       d.getov++;
+      if (F.oblikaGet === "zivo") return konec(200, { response: { status: "ok", result: [zivJSON(d)] } });
       return konec(200, { status: "ok", [z.method === "SalesInvoiceGet" ? "SalesInvoice" : "CreditNote"]: { ...dokJSON(d, d.vrsta) } });
     }
     if (z.method === "SalesInvoiceGetPDF" || z.method === "CreditNoteGetPDF") {
@@ -1275,6 +1284,64 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() WHERE id = $1", [Ro.id]);   // 5 minut je minilo
       await Promise.all([tek(w1, 3, 30), tek(w2, 3, 30)]);   // dve instanci hkrati (najem + zeton)
       assert(klicov("SalesInvoiceCreate") - co === 1 && (await vrstica(Ro.id)).stanje === "potrjen" && F.docs.length === 1, "dve instanci hkrati: natanko 1 Create", [klicov("SalesInvoiceCreate") - co, F.docs.length]);
+    }
+
+    // ================================================================
+    console.log("\n# 34. SalesInvoiceGet/CreditNoteGet v PRAVI obliki (fiscalNumber »A001-1-1« kot niz, result je seznam, issuedTimestamp brez pasu = ljubljanski cas)");
+    {
+      const w = deloven();
+      const parkiraj = (id) => pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() + INTERVAL '10 days' WHERE id = $1", [id]);   // vrstica, ki ostane v caka, ne moti naslednjih korakov
+      // (a) celoten tok na pravi obliki: stevilka -> potrjen, izdan_at pravilno (poletni cas UTC+2: 16:45:06 -> 14:45:06Z)
+      F.casLok = "2026-10-23 16:45:06";
+      const R = await nov(1, 3000); await tek(w, 3, 40, true);
+      const r = await vrstica(R.id);
+      assert(r.stanje === "potrjen" && Number(r.stevilka) === F.docs[F.docs.length - 1].fiscalNumber && r.prostor === "A001" && r.naprava === "1" && r.eor && r.stevilka_vir === "ponudnik",
+        "racun: fiscalNumber »A001-1-N« -> stevilka N, potrjen (stara koda: davcna stevilka se ni dodeljena v nedogled)", r);
+      assert(new Date(r.izdan_at).toISOString() === "2026-10-23T14:45:06.000Z", "issuedTimestamp brez pasu je ljubljanski cas (poletni: 16:45:06 -> 14:45:06Z), ne UTC", r.izdan_at);
+      // (b) zimski cas
+      F.casLok = "2026-12-15 10:00:00";
+      const Z = await nov(1, 3010); await tek(w, 3, 40, true);
+      assert(new Date((await vrstica(Z.id)).izdan_at).toISOString() === "2026-12-15T09:00:00.000Z", "zimski cas: 10:00:00 -> 09:00:00Z");
+      // (c) neveljaven / nejasen cas: izdan_at ostane NULL (nikoli izmisljen), racun vseeno potrjen
+      F.casLok = "danes zvecer";
+      const N = await nov(1, 3020); await tek(w, 3, 40, true);
+      const rn = await vrstica(N.id);
+      assert(rn.stanje === "potrjen" && rn.izdan_at === null, "neprepoznan cas: izdan_at NULL, racun potrjen", [rn.stanje, rn.izdan_at]);
+      F.casLok = null;
+      // (d) dobropis: CreditNoteGet gre skozi isto funkcijo
+      F.casLok = "2026-10-23 16:50:00";
+      const dop = await pool.query(`INSERT INTO racuni (order_id, vrsta, ref_racun_id, vir, znesek_cents, valuta) VALUES ($1, 'dobropis', $2, 'test-fn-1', -300, 'EUR') RETURNING id`, [R.oid, R.id]);
+      await pool.query("UPDATE racuni SET vracilo_uspelo = TRUE WHERE id = $1", [dop.rows[0].id]);
+      await tek(w, 6, 40, true);
+      const rd = await vrstica(dop.rows[0].id);
+      assert(rd.stanje === "potrjen" && Number(rd.stevilka) === F.docs[F.docs.length - 1].fiscalNumber && new Date(rd.izdan_at).toISOString() === "2026-10-23T14:50:00.000Z", "dobropis (CreditNoteGet): stevilka iz »A001-1-N«, cas ljubljanski", [rd.stanje, rd.stevilka, rd.izdan_at]);
+      F.casLok = null;
+      // (e) stevilka drugega prostora/blagajne -> konfiguracijska napaka, stevilka ni zapisana
+      F.fiskalnaStevilka = (d) => `B002-1-${d.fiscalNumber}`;
+      const l0 = LOG.length;
+      const P = await nov(1, 3030); await tek(w, 3, 40, true);
+      const rp = await vrstica(P.id);
+      assert(rp.stevilka === null && rp.stanje === "caka" && /POZOR: nastavitev pri ponudniku/.test(logOd(l0).join("\n")), "fiscalNumber drugega prostora (B002-1-N): konfiguracijska napaka + POZOR, stevilka NI zapisana", [rp.stanje, rp.stevilka]);
+      await parkiraj(P.id);
+      F.fiskalnaStevilka = (d) => `A001-2-${d.fiscalNumber}`;
+      const P2 = await nov(1, 3040); await tek(w, 3, 40, true);
+      assert((await vrstica(P2.id)).stevilka === null, "fiscalNumber druge blagajne (A001-2-N): stevilka NI zapisana");
+      await parkiraj(P2.id);
+      // (f) drugo besedilo: stevilka null, brez ugibanja
+      for (const [ime, f] of [["brez zaporedne", () => "A001-1-"], ["nenumericna zaporedna", () => "A001-1-x"], ["samo besedilo", () => "ni stevilke"], ["0", () => "A001-1-0"], ["decimalno", () => "1.5"]]) {
+        F.fiskalnaStevilka = f;
+        const Q = await nov(1, 3050); await tek(w, 2, 40, true);
+        assert((await vrstica(Q.id)).stevilka === null, `fiscalNumber »${ime}«: stevilka ostane NULL (brez ugibanja)`);
+        await parkiraj(Q.id);
+      }
+      // (g) celo stevilo kot doslej (JSON stevilo in niz s stevkami)
+      for (const [ime, f] of [["JSON stevilo", (d) => d.fiscalNumber], ["niz s stevkami", (d) => String(d.fiscalNumber)]]) {
+        F.fiskalnaStevilka = f;
+        const Q = await nov(1, 3060); await tek(w, 3, 40, true);
+        const rq = await vrstica(Q.id);
+        assert(rq.stanje === "potrjen" && Number(rq.stevilka) === F.docs[F.docs.length - 1].fiscalNumber, `fiscalNumber kot celo stevilo (${ime}): kot doslej`, [rq.stanje, rq.stevilka]);
+      }
+      F.fiskalnaStevilka = null;
     }
 
   } catch (e) {
