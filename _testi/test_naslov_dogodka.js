@@ -14,6 +14,9 @@
  *  N4  PATCH /events/:id kot admin (urejevalnik panela): 201 -> 400
  *  N5  POST /admin/api/events/:id/duplicate: 200-znakovni naslov se kopira nespremenjen; star 300-znakovni (emojiji) se v kopiji obreze na 200 znakov
  *      brez razpolovljenega emojija; izvor ostane
+ *  N6  title, ki ni niz (objekt, tabela, stevilo) na POST /events, POST /admin/api/events in PATCH -> 400 »Title must be a string.«, nic v bazi (#339 S1)
+ *  N7  PATCH: primerjava s shranjenim po trim(); shranjen 300 + presledek, poslan obrezan + nova cena -> 200, naslov v bazi ostane dobesedno (#339 N1)
+ *  N8  PATCH title null / "" / samo presledki -> 400 (prej 500 ali shranjen »prazen« naslov) (#339 N3)
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -146,6 +149,41 @@ const EMOJI = "\u{1F600}";   // 2 enoti UTF-16, 1 znak
       }
     }
     assert((await naslovV(iz300)) === dolgEmoji, "izvor obdrzi 300-znakovni naslov");
+
+    console.log("N6 title, ki ni niz (pregled #339 S1: pg bi objekt zapisal kot JSON mimo meje)");
+    const neNizi = [["objekt", { a: "x".repeat(5000) }], ["tabela", ["x".repeat(5000)]], ["stevilo", 12345]];
+    for (const [ime, v] of neNizi) {
+      pred = await steviloDogodkov();
+      x = await api("POST", "/events", T.lastnik, { clubId: K, title: v, startAt: zac, status: "draft" });
+      assert(x.status === 400 && /Title must be a string/.test(x.text), `POST /events title ${ime}: 400 golo besedilo`, { s: x.status, t: x.text.slice(0, 120) });
+      x = await api("POST", "/admin/api/events", T.admin, { clubId: K, title: v, startAt: zac });
+      assert(x.status === 400 && /Title must be a string/.test(x.text), `POST /admin/api/events title ${ime}: 400`, { s: x.status, t: x.text.slice(0, 120) });
+      assert((await steviloDogodkov()) === pred, `title ${ime}: nic ustvarjeno`);
+      const prejN = await naslovV(staro);
+      x = await api("PATCH", `/events/${staro}`, T.lastnik, { title: v, description: "ne sme " + ime });
+      assert(x.status === 400 && /Title must be a string/.test(x.text), `PATCH title ${ime}: 400`, { s: x.status, t: x.text.slice(0, 120) });
+      assert((await naslovV(staro)) === prejN, `PATCH title ${ime}: naslov nespremenjen`);
+      assert((await pool.query("SELECT description FROM events WHERE id = $1", [staro])).rows[0].description !== "ne sme " + ime, `PATCH title ${ime}: opis nespremenjen`);
+    }
+
+    console.log("N7 PATCH: primerjava s shranjenim po trim() (panel poslje obrezan naslov)");
+    const dolgPresledek = "P".repeat(300) + " ";
+    const sPresl = (await pool.query("INSERT INTO events (club_id, title, start_at, status, ticket_price_cents) VALUES ($1, $2, $3, 'draft', 1000) RETURNING id", [K, dolgPresledek, zac])).rows[0].id;
+    x = await api("PATCH", `/events/${sPresl}`, T.lastnik, { title: dolgPresledek.trim(), ticketPriceCents: 1500 });
+    assert(x.status === 200, "shranjen 300 + presledek, PATCH z obrezanim istim naslovom + cena: 200", { s: x.status, t: x.text.slice(0, 120) });
+    const poN7 = (await pool.query("SELECT title, ticket_price_cents FROM events WHERE id = $1", [sPresl])).rows[0];
+    assert(poN7.title === dolgPresledek, "naslov v bazi ostane DOBESEDNO (s presledkom), ker ga uporabnik ni spremenil");
+    assert(Number(poN7.ticket_price_cents) === 1500, "cena spremenjena");
+    x = await api("PATCH", `/events/${sPresl}`, T.lastnik, { title: "  " + dolgPresledek + "  " });
+    assert(x.status === 200, "isti naslov z dodatnimi presledki okrog: 200 (po trim enak)", x.status);
+    assert((await naslovV(sPresl)) === dolgPresledek, "naslov nespremenjen");
+
+    console.log("N8 PATCH: null, prazen niz, samo presledki -> 400 (prej 500)");
+    for (const [ime, v, re] of [["null", null, /Title must be a string/], ["prazen niz", "", /Title is required/], ["samo presledki", "   \t ", /Title is required/]]) {
+      x = await api("PATCH", `/events/${sPresl}`, T.lastnik, { title: v });
+      assert(x.status === 400 && re.test(x.text), `PATCH title ${ime}: 400`, { s: x.status, t: x.text.slice(0, 120) });
+      assert((await naslovV(sPresl)) === dolgPresledek, `PATCH title ${ime}: naslov nespremenjen`);
+    }
   } catch (e) {
     fail++; console.log("  ✗ izjema", e && e.stack);
   } finally {

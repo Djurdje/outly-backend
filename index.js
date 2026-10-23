@@ -2902,6 +2902,8 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
 // Brez CHECK v bazi: obstojeci daljsi naslovi ostanejo, GET jih vrne nespremenjene, PATCH brez spremembe naslova jih ne zavrne.
 const NASLOV_NAJVEC = 200;
 const NASLOV_PREDOLG = `Title is too long (max ${NASLOV_NAJVEC} characters).`;
+// Naslov mora biti niz (#339 S1): objekt/tabelo bi pg zapisal kot JSON mimo meje (String(objekt) = "[object Object]").
+const NASLOV_NI_NIZ = "Title must be a string.";
 const naslovPredolg = (v) => [...String(v).trim()].length > NASLOV_NAJVEC;
 // Za kopije (podvajanje): obrezan naslov z najvec NASLOV_NAJVEC znaki (po znakih, emoji ostane cel).
 const naslovObrezan = (v) => { const t = String(v ?? "").trim(); return [...t].length > NASLOV_NAJVEC ? [...t].slice(0, NASLOV_NAJVEC).join("") : t; };
@@ -2930,6 +2932,7 @@ async function ustvariDogodek(req, res, opcije = {}) {
       if (!Number.isInteger(c) || c < 1 || c > 100000) return res.status(400).send("capacity must be a positive integer.");
     }
 
+    if (title !== undefined && title !== null && typeof title !== "string") return res.status(400).send(NASLOV_NI_NIZ);
     if (!clubId || !title || !startAt) return res.status(400).send("Missing clubId, title or startAt.");
     if (!/^\d+$/.test(String(clubId))) return res.status(400).send("Invalid clubId.");
     // URL polja (#269): samo http(s), 400 invalid_url; brez polja ali null = "".
@@ -3191,9 +3194,14 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
     if (urlD.napaka) return res.status(400).json(urlD.napaka);
     Object.assign(dovoljeno, urlD.vrednosti);
 
-    // Naslov (NASLOV_NAJVEC): preverja se samo, ce je v telesu IN se razlikuje od shranjenega (star daljsi naslov, poslan nespremenjen z ostalimi polji obrazca, ne pade).
-    if (dovoljeno.title !== undefined && dovoljeno.title !== null && dovoljeno.title !== d.title && naslovPredolg(dovoljeno.title)) {
-      return res.status(400).send(NASLOV_PREDOLG);
+    // Naslov (samo ce je kljuc v telesu): niz (#339 S1; null je prej dal 500 zaradi NOT NULL), ne prazen po trim (prej 500 iz events_title_chk),
+    // najvec NASLOV_NAJVEC znakov. Ce je po trim() enak shranjenemu (obrazec poslje vsa polja, panel naslov obreze), ostane shranjena vrednost in meja se ne
+    // preverja: star daljsi naslov ostane dobesedno, kot je (uporabnik ga ni spremenil).
+    if (dovoljeno.title !== undefined) {
+      if (typeof dovoljeno.title !== "string") return res.status(400).send(NASLOV_NI_NIZ);
+      if (dovoljeno.title.trim().length === 0) return res.status(400).send("Title is required.");
+      if (dovoljeno.title.trim() === String(d.title ?? "").trim()) dovoljeno.title = d.title;   // shranjena vrednost dobesedno (PATCH samo z naslovom ni »Nothing to update«; dnevnik je po razliki)
+      else if (naslovPredolg(dovoljeno.title)) return res.status(400).send(NASLOV_PREDOLG);
     }
 
     // Posnetek sme dobiti SAMO koncan dogodek, ki je med tremi najbolj popularnimi

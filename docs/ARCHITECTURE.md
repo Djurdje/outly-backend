@@ -531,8 +531,9 @@ Agent (Claude) bere panel brez klikanja v Martinovem brskalniku in brez poveriln
 
 - Meja `NASLOV_NAJVEC = 200` (`index.js`) se šteje po `trim()` v **znakih Unicode** (`[...s].length`: emoji = 1 znak, ne 2 enoti UTF-16). Shranjen naslov ostane, kot je bil poslan (trim samo za štetje).
 - `POST /events` in `POST /admin/api/events` (`ustvariDogodek`): daljši → **400, golo besedilo** `Title is too long (max 200 characters).` (enaka oblika kot ostale napake teh poti).
-- `PATCH /events/:id` (lastnik/manager in admin iz urejevalnika panela): preverja se samo, če je `title` v telesu **in se razlikuje od shranjenega** (obrazca iOS/splet pošljeta vsa polja; star daljši naslov, poslan nespremenjen, ne pade). Sicer isto 400.
-- `POST /admin/api/events/:id/duplicate`: naslov do 200 znakov se kopira nespremenjen; star daljši se v kopiji obreže na 200 znakov (po znakih, emoji ostane cel), izvor ostane. `PATCH /admin/api/events/:id` naslova ne spreminja.
+- `title`, ki ni niz (objekt, tabela, število; v PATCH tudi `null`), → **400** `Title must be a string.` na vseh treh poteh (pg bi objekt zapisal kot JSON mimo meje).
+- `PATCH /events/:id` (lastnik/manager in admin iz urejevalnika panela), samo če je `title` v telesu: prazen po `trim()` → 400 `Title is required.` (prej 500); če je po `trim()` **enak shranjenemu**, ostane shranjena vrednost dobesedno in meja se ne preverja (obrazca iOS/splet pošljeta vsa polja, panel naslov obreže; star daljši naslov ne pade). Sicer > 200 → isto 400.
+- `POST /admin/api/events/:id/duplicate`: naslov do 200 znakov se kopira nespremenjen; star daljši se v kopiji obreže na 200 znakov (po kodnih točkah: emoji ostane cel, grafem iz več točk — zastava, ZWJ — se lahko razreže), izvor ostane. `PATCH /admin/api/events/:id` naslova ne spreminja.
 - **Brez CHECK v bazi in brez migracije:** obstoječi daljši naslovi ostanejo, `GET` jih vrne nespremenjene. Admin panel ima `maxlength="200"` (samo pomoč). Test: `_testi/test_naslov_dogodka.js`.
 
 ## Poslovne invariante
