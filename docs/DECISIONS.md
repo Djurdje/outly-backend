@@ -240,6 +240,15 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   *vir/dokaz*: Martinovo sporocilo v seji menedzerja 4. 10. 2026 (samo: »rezervacija po telefonu kot plus, brez potrditve kluba«),
   `_testi/test_rezervacija_telefon.js`, I13 · *velja dokler*: Martin ali pravnik ne rece drugace (pravni pregled hrambe se ni opravljen) ·
   *nadomescena z*: —
+- 2026-10-23: **»Skip for later« pri dokončanju računa: država, telefon in žanri so neobvezni, datum rojstva ostane obvezen.** Ob prvi prijavi
+  uporabnik vpiše datum rojstva (obvezno, 18+), državo, telefon in izbere žanre; zadnje tri sme preskočiti in dopolniti pozneje v profilu.
+  Strežnik: `PATCH /me` sprejme neobvezno boolean `complete_onboarding` (tudi `completeOnboarding`): `true` nastavi `onboarded_at`, če ga še ni
+  (nastavljen se ne spremeni), samo če ima uporabnik po posodobitvi datum rojstva, sicer 400 `{ error: "date_of_birth_required",
+  message: "Date of birth is required." }` in se nič ne zapiše; ne-boolean 400; telo samo z `{ complete_onboarding: true }` je veljavno.
+  Samodejno pravilo (datum rojstva + vsaj en žanr) ostane za stare odjemalce. Starost 18+ (odločitev 19. 10.) je nespremenjena.
+  *vir/dokaz*: Martinovo sporočilo v seji menedžerja 23. 10. 2026 (https://claude.ai/code/session_0154rkztqwEKF8LfguXDxGWN): »Pri completanju profila takrat ko se
+  uporabnik prvic prijavi. Sepravi lokacija, zanri, telefonska itd naj bo opcija skip for later«; na vprašanje o datumu rojstva: »Ne, ostane obvezen«;
+  `_testi/test_onboarding_preskok.js` · *velja dokler*: Martin ne reče drugače · *nadomeščena z*: —
 
 ## Oblikovanje
 
