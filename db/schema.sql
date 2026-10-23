@@ -1467,7 +1467,7 @@ CREATE TABLE public.racuni_pdf (
     pdf bytea NOT NULL,
     sha256 text NOT NULL,
     prejeto_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT racuni_pdf_pdf_check CHECK (((octet_length(pdf) >= 100) AND (octet_length(pdf) <= 15728640))),
+    CONSTRAINT racuni_pdf_pdf_check CHECK (((octet_length(pdf) >= 100) AND (octet_length(pdf) <= 2097152))),
     CONSTRAINT racuni_pdf_sha256_check CHECK ((sha256 ~ '^[0-9a-f]{64}$'::text))
 );
 

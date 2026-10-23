@@ -211,6 +211,29 @@ async function izvozKosi(token) {
     assert(Object.keys(izvoz.tables).length === tabele, `izvoz vsebuje vseh ${tabele} tabel`, Object.keys(izvoz.tables).length);
   }
 
+  console.log("\n# Najvecji PDF-ji (10 x tik pod mejo 2 MB): izvoz ne podre procesa s skenom");
+  {
+    const seed = await pool.connect();
+    try {
+      await seed.query("SET session_replication_role = replica");
+      await seed.query(`INSERT INTO racuni (order_id, vrsta, znesek_cents) SELECT id, 'racun', 3000 FROM orders WHERE id > $1 AND id <= $2 ORDER BY id`, [ST_PDF, ST_PDF + 10]);
+      const ids = (await seed.query("SELECT id FROM racuni WHERE id > (SELECT MAX(racun_id) FROM racuni_pdf) ORDER BY id")).rows.map((x) => x.id);
+      for (const id of ids) {
+        const pdf = Buffer.concat([Buffer.from(`%PDF-1.4\n% velik ${id}\n`), crypto.randomBytes(2 * 1024 * 1024 - 2048), Buffer.from("\n%%EOF\n")]);
+        await seed.query("INSERT INTO racuni_pdf (racun_id, pdf, sha256) VALUES ($1, $2, $3)", [id, pdf, crypto.createHash("sha256").update(pdf).digest("hex")]);
+      }
+    } finally { seed.release(); }
+    const h0 = vrhRssMB(srv.pid);
+    const velik = await izvozKosi(T.admin);
+    const h1 = vrhRssMB(srv.pid);
+    console.log(`    izvoz ${(velik.telo.length / 1048576).toFixed(1)} MB, vrh RSS ${h0.toFixed(0)} -> ${h1.toFixed(0)} MB (+${(h1 - h0).toFixed(0)})`);
+    assert(velik.status === 200 && velik.telo.subarray(-2).toString() === "]}" && streznikZivOdslej(), "izvoz z 10 PDF tik pod mejo 2 MB: 200, poln JSON, proces ziv", velik.status);
+    assert(h1 - h0 < 100, `izvoz 10 najvecjih PDF doda manj kot 100 MB vrha RSS (+${(h1 - h0).toFixed(0)} MB)`, h1 - h0);
+    const iz = JSON.parse(velik.telo.toString("utf8"));
+    assert(iz.tables.racuni_pdf.count === ST_PDF + 10 && iz.tables.racuni_pdf.rows.length === ST_PDF + 10, "racuni_pdf: vsi PDF-ji v izvozu", iz.tables.racuni_pdf.count);
+  }
+  function streznikZivOdslej() { return srv.exitCode === null && srv.signalCode === null; }
+
   console.log("\n# Poraba pomnilnika (baza zraste ~35x)");
   // Vrh RSS (VmHWM) le narasca, zato merimo, koliko vrha doda sele veliki izvoz povrh vrha malega (proces je ogret).
   // Tokovna koda doda nekaj deset MB (GC), ne-tokovna ~5x velikost odgovora.

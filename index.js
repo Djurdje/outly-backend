@@ -4332,9 +4332,11 @@ admin.get("/finance", async (req, res) => {
 // db/obnovi_izvoz.js jo berejo: {exported_at, postgres, tables:{ime:{count,columns,rows}}, sequences}.
 // Test: _testi/test_export_tok.js (primerja z referenčno stari izvedbo, meri RSS, prekinitev odjemalca).
 const IZVOZ_VRSTIC = 500;
-// Tabele z bytea (racuni_pdf, migracija 057: PDF racunov, do 15 MB na vrstico) se berejo v majhnih paketih, vrednost pa gre v izvoz kot {"$bytea_b64":"<base64>"}
+// Tabele z bytea (racuni_pdf, migracija 057: PDF racunov, do 2 MB na vrstico) se berejo v majhnih paketih, vrednost pa gre v izvoz kot {"$bytea_b64":"<base64>"}
 // (JSON.stringify(Buffer) bi dal {"type":"Buffer","data":[...]}: ~3,6x vec; 500 PDF-jev po 60 KB = RSS 321 MB v procesu, ki skenira, I16). db/obnovi_izvoz.js oznako prebere.
 const IZVOZ_VRSTIC_BYTEA = 10;
+// ... in omejeno po skupni velikosti: paket = IZVOZ_BYTEA_PRORACUN_B / najvecja vrednost bytea v tabeli (v istem posnetku), 1..10 vrstic (10 PDF po 15 MB je dalo RSS 765 MB).
+const IZVOZ_BYTEA_PRORACUN_B = 4 * 1024 * 1024;
 // Varovalki pred bralcem, ki neha brati ali pred bazo, ki prekine povezavo (izvoz drži transakcijo z
 // AccessShareLock na vseh prebranih tabelah: migracija ob deployu bi čakala nanjo, za njo pa vsa navadna branja):
 //  - IZVOZ_DRAIN_TIMEOUT_MS: koliko čakamo, da odjemalec sprazni medpomnilnik ('drain'); nato res.destroy() + ROLLBACK;
@@ -4414,7 +4416,11 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
     // odgovori API-ja se ne spremenijo.
     const byteaPrivzeto = pgTipi.getTypeParser(17, "text");
     const tipiIzvoza = { getTypeParser: (oid, fmt) => (oid === 1082 ? (v) => v : oid === 17 ? (v) => ({ $bytea_b64: byteaPrivzeto(v).toString("base64") }) : pgTipi.getTypeParser(oid, fmt)) };
-    const tabeleZBytea = new Set((await c.query("SELECT DISTINCT table_name FROM information_schema.columns WHERE table_schema='public' AND data_type='bytea'")).rows.map((x) => x.table_name));
+    const stolpciBytea = new Map();   // tabela -> stolpci tipa bytea
+    for (const x of (await c.query("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema='public' AND data_type='bytea'")).rows) {
+      if (!stolpciBytea.has(x.table_name)) stolpciBytea.set(x.table_name, []);
+      stolpciBytea.get(x.table_name).push(x.column_name);
+    }
     // Od tu naprej so glave poslane: napaka ne more več postati 500 (glej catch).
     res.status(200);
     res.set("Content-Type", "application/json; charset=utf-8");
@@ -4428,7 +4434,11 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
       const n = (await c.query(`SELECT COUNT(*)::int AS n FROM ${ime}`)).rows[0].n;
       await c.query(`DECLARE izvoz_kurzor NO SCROLL CURSOR FOR SELECT * FROM ${ime}`);
       let prva = true, bilaVrstica = false;
-      const paket = tabeleZBytea.has(table_name) ? IZVOZ_VRSTIC_BYTEA : IZVOZ_VRSTIC;
+      let paket = IZVOZ_VRSTIC;
+      if (stolpciBytea.has(table_name)) {
+        const najvecja = (await c.query(`SELECT COALESCE(MAX(GREATEST(${stolpciBytea.get(table_name).map((k) => `octet_length("${k.replace(/"/g, '""')}")`).join(", ")})), 0)::bigint AS n FROM ${ime}`)).rows[0].n;
+        paket = Math.max(1, Math.min(IZVOZ_VRSTIC_BYTEA, Math.floor(IZVOZ_BYTEA_PRORACUN_B / Math.max(1, Number(najvecja)))));
+      }
       for (;;) {
         const r = await c.query({ text: `FETCH ${paket} FROM izvoz_kurzor`, types: tipiIzvoza });
         let kos = "";

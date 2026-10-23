@@ -308,20 +308,30 @@ const vrhnji = (o, ime) => { if (!jeObjekt(o) || Array.isArray(o)) return undefi
 
 // PDF iz odgovora ponudnika po VSEBINI (ime polja ni znano): vsi nizi do globine 5, ki so base64 in se razkodirajo v PDF (%PDF- ... %%EOF v zadnjem kilobajtu).
 // Natanko en razlicen PDF = uspeh; nic ali vec razlicnih = napaka (ne ugibamo).
-const PDF_NAJVEC_BAJTOV = 15 * 1024 * 1024;
+// Meja 2 MB (racun s QR je nekaj deset KB): izvoz baze (GET /admin/api/export) bere racuni_pdf v istem procesu, ki skenira (512 MB, I16); 10 PDF po 15 MB je dalo RSS 765 MB.
+// Enaka meja je CHECK v migraciji 057. Prevelik PDF = napaka + POZOR, mail ne gre.
+const PDF_NAJVEC_BAJTOV = 2 * 1024 * 1024;
 function izlusciPdf(odg) {
   const najdeni = new Map();
+  let prevelik = 0;
   const sprehod = (x, globina) => {
     if (globina > 5 || x === null || x === undefined) return;
     if (typeof x === "string") {
-      if (x.length < 100 || x.length > Math.ceil(PDF_NAJVEC_BAJTOV * 4 / 3) + 64 || !/^[A-Za-z0-9+/=\s]+$/.test(x)) return;
+      if (x.length < 100) return;
+      if (x.length > Math.ceil(PDF_NAJVEC_BAJTOV * 4 / 3) + 64) {   // predolg niz: ni PDF-ja, ki bi ga shranili; samo ugotovimo, ali je to PDF (za jasno sporocilo)
+        if (/^[A-Za-z0-9+/=\s]+$/.test(x.slice(0, 64)) && Buffer.from(x.slice(0, 16), "base64").subarray(0, 5).toString("latin1") === "%PDF-") prevelik++;
+        return;
+      }
+      if (!/^[A-Za-z0-9+/=\s]+$/.test(x)) return;
       const b = Buffer.from(x.replace(/\s+/g, ""), "base64");
       if (b.length < 100 || b.subarray(0, 5).toString("latin1") !== "%PDF-" || !b.subarray(Math.max(0, b.length - 1024)).toString("latin1").includes("%%EOF")) return;
+      if (b.length > PDF_NAJVEC_BAJTOV) { prevelik++; return; }
       najdeni.set(crypto.createHash("sha256").update(b).digest("hex"), b);
     } else if (Array.isArray(x)) x.forEach((y) => sprehod(y, globina + 1));
     else if (typeof x === "object") Object.values(x).forEach((y) => sprehod(y, globina + 1));
   };
   sprehod(odg, 0);
+  if (najdeni.size === 0 && prevelik > 0) throw new NapakaPonudnika(`PDF presega mejo ${Math.round(PDF_NAJVEC_BAJTOV / 1048576)} MB (shranjevanje in izvoz baze): racun ostane brez PDF, mail ne gre`, { neznan: false });
   if (najdeni.size !== 1) throw new NapakaPonudnika(najdeni.size === 0 ? "odgovor PDF ni prepoznan (pricakovan base64 PDF z glavo %PDF- in koncem %%EOF)" : `odgovor vsebuje ${najdeni.size} razlicnih PDF-jev, ne ugibam`, { neznan: false });
   return [...najdeni.values()][0];
 }

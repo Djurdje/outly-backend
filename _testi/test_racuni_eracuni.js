@@ -114,6 +114,10 @@ const streznik = http.createServer((req, res) => {
       if (F.pdfOblika === "prazno") return konec(200, { status: "ok" });
       if (F.pdfOblika === "dva") return konec(200, { status: "ok", PDF: pdf.toString("base64"), kopija: Buffer.from(pdf.toString() + " drugi").toString("base64") });
       if (F.pdfOblika === "okrnjen") return konec(200, { status: "ok", PDF: pdf.subarray(0, pdf.length - 20).toString("base64") });
+      const MEJA = 2 * 1024 * 1024;   // = PDF_NAJVEC_BAJTOV v racuni.js
+      const velikPdf = (n) => Buffer.concat([Buffer.from("%PDF-1.4\n% velik "), Buffer.alloc(n - 40, 65), Buffer.from("\n%%EOF\n")]);
+      if (F.pdfOblika === "prevelik") return konec(200, { status: "ok", PDF: velikPdf(MEJA + 1024).toString("base64") });
+      if (F.pdfOblika === "velik") return konec(200, { status: "ok", PDF: velikPdf(MEJA - 1024).toString("base64") });
       if (F.pdfOblika === "gnezdeno") return konec(200, { status: "ok", Document: { file: { content: pdf.toString("base64") } } });
       return konec(200, { status: "ok", PDF: pdf.toString("base64") });
     }
@@ -879,7 +883,7 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       const kd = F.pdfKlici.filter((x) => x.method === "CreditNoteGetPDF" && x.parameters.number === d.ponudnik_stevilka);
       assert(d.stanje === "potrjen" && d.pdf_prejet === true && kd.length === 1 && kd[0].parameters.number === d.ponudnik_stevilka && kd[0].parameters.documentID === undefined, "dobropis: PDF prek CreditNoteGetPDF po stevilki dokumenta", [d.stanje, d.pdf_prejet, kd.map((x) => x.parameters)]);
       // neveljavni odgovori: PDF se NE shrani, vrstica ostane brez PDF, POZOR po N neuspehih
-      for (const oblika of ["brezPdf", "prazno", "dva", "okrnjen", "503"]) {
+      for (const oblika of ["brezPdf", "prazno", "dva", "okrnjen", "503", "prevelik"]) {
         const Rn = await nov(1, 2210); const wn = deloven({ RACUNI_PDF_POZOR_PO: "3" }); const ln = LOG.length;
         F.pdfOblika = oblika;
         for (let i = 0; i < 5; i++) { await pool.query("UPDATE racuni SET pdf_naslednji_at = NULL WHERE id = $1", [Rn.id]); await tek(wn, 1, 0, true); }
@@ -891,6 +895,17 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
         await pool.query("UPDATE racuni SET pdf_naslednji_at = NULL WHERE id = $1", [Rn.id]);
         await tek(wn, 3, 30, true);
         assert((await vrstica(Rn.id)).pdf_prejet === true, `[${oblika}] ko ponudnik spet vrne PDF, se shrani`);
+      }
+      // meja velikosti 2 MB (izvoz baze in pomnilnik procesa s skenom, I16): tik pod mejo se shrani, nad mejo napaka z jasnim sporocilom
+      {
+        const Rv = await nov(1, 2225); const wv = deloven(); F.pdfOblika = "velik";
+        await tek(wv, 4, 30, true);
+        assert((await vrstica(Rv.id)).pdf_prejet === true, "PDF tik pod mejo 2 MB se shrani");
+        const Rb = await nov(1, 2226); const wb = deloven(); F.pdfOblika = "prevelik";
+        await tek(wb, 2, 0, true);
+        const rb = await vrstica(Rb.id);
+        assert(!rb.pdf_prejet && rb.pdf_poskusi >= 1 && /presega|meja|2 MB/i.test(rb.pdf_napaka || ""), "PDF nad mejo 2 MB: ni shranjen, napaka pove, da presega mejo", [rb.pdf_prejet, rb.pdf_napaka]);
+        F.pdfOblika = "ok";
       }
       // PDF v gnezdenem odgovoru (ime polja ni znano): strogo po vsebini
       const Rg = await nov(1, 2220); const wg = deloven();
