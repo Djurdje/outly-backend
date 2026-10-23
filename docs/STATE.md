@@ -58,9 +58,8 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte nal
 
 ## Spletna aplikacija (outly.si/app; podrobnosti v `outly_webpage/CLAUDE.md`)
 
-- **Ni javna** (Martin 29. 9.: »da lahko jaz prvo vse preverim«): dosegljiva samo z neposrednim URL-jem, `noindex`.
-  **Gumba na outly.si ne dodajaj, dokler Martin ne reče** — to je hkrati javna objava.
-- **Osnutek politike zasebnosti** za spletno aplikacijo (`docs/osnutki/zasebnost-spletna-aplikacija.md`, tudi kamera) NI objavljen, čaka Martinov DA; popravi netočno alinejo §11.
+- **Javna od 23. 10. 2026: koren `outly.si` odpre aplikacijo, landing/waitlista je na `/about`** (DECISIONS 2026-10-23; outly_webpage #90). Koren `index.html` je samo preusmeritev (`webapp/vstop.js` prvi, nato `webapp/koren.js`: `?ref`/`#hash` -> `/about`, sicer `/app/`); `/app` brez `noindex`.
+- Politika zasebnosti spletno aplikacijo pokriva (privacy 2.4.2+, nakup brez racuna 2.4.4; pogoji 1.1.2). Nakup brez racuna: `GOST_NAKUP_LIVE=1` na Renderju od 23. 10. (Martin), splet `GOST_NAKUP_JAVNO` po Martinovem testnem nakupu.
 - `GET /business/events/:id/tickets` vrne podpisan `qr` vseh vstopnic vsem vlogam v klubu (iOS enako); splet ga hrani samo v pomnilniku. **#277 N1 (18. 10.):** brez parametrov še vedno golo polje ≤ 1000; z `limit`/`offset`/`q` ovojnica s `counts` (pogodba: ARCHITECTURE »Seznam vstopnic dogodka za vrata«, I45). **web-dev (odprto; iOS narejeno (poročilo iOS agenta 23. 10.), splet odprto):** pošiljaj `?limit=200` (+ `offset`), »sold/checked in/expected« beri iz `counts` (ne `tickets.count`), iskanje in »Load more« prek `q`/`has_more`/`next_offset`.
 - **Past (backend, obstojeca):** `klubUporabnika(uid, zeljeni)` za lastnika z VEC klubi vrne samo prvega (`ORDER BY id LIMIT 1`);
   lastnik z drugim klubom v glavi `X-Outly-Club` dobi 404. Danes ima vsak lastnik en klub - ob drugem klubu to popraviti.
