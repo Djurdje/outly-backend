@@ -178,8 +178,8 @@ function ustvari(dep) {
 
       // 2. dogodki (skriti klubi izpuščeni); stolpci in izracun placilnega nacina so isti kot v javnem GET /events (razlogNerazpolozljivosti)
       const dogodki = (await c.query(
-        `SELECT events.id, events.title, events.status, events.start_at, events.end_at, events.poster_url, events.ticket_price_cents, events.ticket_url,
-                events.capacity, events.sales_paused, c.name AS club_name, c.is_demo AS club_is_demo,
+        `SELECT events.id, left(events.title, 80) AS title, events.status, events.start_at, events.end_at, left(events.poster_url, 1) AS poster_url, events.ticket_price_cents, left(events.ticket_url, 1) AS ticket_url,
+                events.capacity, events.sales_paused, left(c.name, 60) AS club_name, c.is_demo AS club_is_demo,
                 ${VIP_OD_CENTOV} AS vip_from_cents, ${sqlKlubStripePripravljen()}
            FROM events JOIN clubs c ON c.id = events.club_id
           WHERE NOT c.hidden AND events.status IN ('published', 'draft')
@@ -332,7 +332,7 @@ function ustvari(dep) {
 
       // nocoj = objavljeni dogodki, katerih okno skena je danes: zacetek med zdaj-12 h in zdaj+24 h ali v teku (konec ali zacetek + 12 h, kot sken_okno.js)
       const ev = (await c.query(
-        `SELECT events.id, events.title, cl.name AS club_name, events.start_at, events.end_at, events.sold_count, events.capacity, events.sales_paused,
+        `SELECT events.id, left(events.title, 200) AS title, left(cl.name, 200) AS club_name, events.start_at, events.end_at, events.sold_count, events.capacity, events.sales_paused,
                 events.ticket_price_cents, events.sales_open_at, events.sales_close_at, ${VIP_OD_CENTOV} AS vip_from_cents
            FROM events JOIN clubs cl ON cl.id = events.club_id
           WHERE events.status = 'published' AND NOT cl.hidden

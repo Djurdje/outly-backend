@@ -344,6 +344,19 @@ async function api(method, path, token) {
       }
     }
 
+    console.log("\n# Dolg naslov (#330 K1): besedila se odrezejo ze v SQL");
+    {
+      const dolg = await dogodek(K_OK, "D".repeat(95000), { poster: "", start: "2 hours", end: "8 hours" });   // brez plakata + nocoj: naslov je v opozorilih in v »danes«
+      const [op2, dn2] = [await dobi(), await dobi("/admin/api/danes")];
+      assert(op2.status === 200 && dn2.status === 200, "dogodek z naslovom 95 000 znakov: /opozorila in /danes 200", [op2.status, dn2.status]);
+      const o2 = op2.body.items.find((x) => x.cilj_tip === "dogodek" && x.cilj_id === dolg && x.vrsta === "brez_plakata");
+      assert(o2 && o2.besedilo.length <= 200 && o2.besedilo.includes("D".repeat(80)) && !o2.besedilo.includes("D".repeat(81)), "opozorilo: naslov odrezan na 80 znakov", o2 && o2.besedilo.length);
+      const n2 = dn2.body.nocoj.find((x) => x.id === dolg);
+      assert(n2 && n2.naslov === "D".repeat(200), "danes: naslov odrezan na 200 znakov", n2 && n2.naslov.length);
+      assert(op2.text.length < 100000 && dn2.text.length < 100000, "odgovora nista veliko daljsa od ostalih (ni prenosa 95 000 znakov v odgovor)", [op2.text.length, dn2.text.length]);
+      await pool.query("DELETE FROM events WHERE id = $1", [dolg]);
+    }
+
     console.log("\n# Samo branje");
     const pred = JSON.stringify((await pool.query("SELECT (SELECT COUNT(*) FROM events) e, (SELECT COUNT(*) FROM orders) o, (SELECT COUNT(*) FROM admin_dejanja) a, (SELECT COUNT(*) FROM racuni) r")).rows[0]);
     for (let i = 0; i < 3; i++) { await dobi(); await dobi("/admin/api/racuni"); }
