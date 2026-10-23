@@ -35,6 +35,26 @@ const SPREMEMBE_NAJVEC = 20000;      // znakov JSON (naslov z 95 000 znaki ne pr
 const PREJ_NAJVEC = 200000;          // znakov JSON posnetka (opis v bazi nima omejitve)
 const RAZLOG_NAJVEC = 1000;
 const ZAKLEP_RAZRED = 73120;         // advisory (razred, id zetona): stetje cakajocih in vstavljanje zaporedno tudi cez instance; 73110/73112 sta nakup/pavza
+// Besedila, ki morajo biti niz (obstojeca PATCH pot sprejme npr. opis null/stevilo; predlog je strozji, pot ostane nespremenjena za iOS/splet).
+const BESEDILNA = new Set(["title", "description", "venueName", "venueAddress", "venueCity", "posterUrl"]);
+// Bidi kontrolni znaki in znaki nicelne sirine: z njimi bi agent besedilo v panelu prikazal drugace, kot je shranjeno (prevara pri »prej -> potem«).
+// (pregled #340 N2/N2b: tudi U+061C arabska oznaka smeri, U+00AD mehki vezaj, U+034F, locila vrstice/odstavka U+2028/U+2029, U+2060-U+2064)
+const NEVIDNI = /[\u00AD\u034F\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
+const imaNevidne = (v, g = 0) => (typeof v === "string" ? NEVIDNI.test(v) : v && typeof v === "object" && g < 5 ? Object.entries(v).some(([k, x]) => NEVIDNI.test(k) || imaNevidne(x, g + 1)) : false);
+// Plakat v predlogu samo iz NASEGA Cloudinaryja (kot avatar, PUT /me/avatar): agent ne more podtakniti slike s tujega gostitelja (sledenje, vsebina).
+// Obstojeca pot (PATCH /events/:id, iOS/splet) sprejme vsak http(s) in ostane, kot je.
+// Pregled #340 S1b: predpona na surovem nizu ni dovolj (`/<oblak>/../drugi/`, `%2e%2e`, `image/fetch/https://tuj`): razclenjen URL, tocen gostitelj, brez
+// vrat/uporabnika/query/hash, brez `..` in kodiranih `.`/`/`/`\` (surovo in v poti), samo dostava `/<oblak>/image/upload/`.
+const NEVARNA_POT = /\.\.|%2e|%2f|%5c|\\/i;
+function plakatDovoljen(url) {
+  if (url === undefined || url === null || url === "") return true;
+  const oblak = process.env.CLOUDINARY_CLOUD_NAME;
+  if (!oblak || !/^[A-Za-z0-9_-]{1,100}$/.test(oblak) || typeof url !== "string" || NEVARNA_POT.test(url)) return false;
+  let u;
+  try { u = new URL(url); } catch (_) { return false; }
+  return u.protocol === "https:" && u.hostname === "res.cloudinary.com" && !u.port && !u.username && !u.password && !u.search && !u.hash && !url.includes("?") && !url.includes("#")
+    && !NEVARNA_POT.test(u.pathname) && u.pathname.startsWith("/" + oblak + "/image/upload/") && url === u.href;
+}
 const NUJNO_ZAKLEP_RAZRED = 73121;   // advisory (razred, 0): GLOBALNO zaporedje nujnih izvedb (stetje meje 3/24 h in zapis nujno_at v isti transakciji, tudi cez instance)
 const NUJNO_STAROST_MIN = 60;        // nujno se izvede samo predlog, mlajsi od 1 h (nacrt 3.3 tocka 3): potrditev se nanasa na predlog, ki ga je Martin pravkar videl
 const POTRDITEV_MIN = 3, POTRDITEV_NAJVEC = 1000, SEJA_NAJVEC = 500;
@@ -112,6 +132,8 @@ function ustvari(dep) {
     if (opis.pot === "uredi") {
       await dejanja.uredi(zahtevaZa(ciljId, telo, { role: "admin" }), lazen, { samoPreveri: (dovoljeno, d) => { izid = { dovoljeno, d }; } });
     } else if (opis.pot === "ustvari") {
+      const klub = (await pool.query("SELECT id FROM clubs WHERE id = $1", [ciljId])).rows[0];
+      if (!klub) throw odgovor(404, "cilj_ni_najden", "Target not found.");
       await dejanja.ustvari(zahtevaZa(ciljId, { ...telo, clubId: ciljId }, { role: "admin" }), lazen, { admin: true, samoPreveri: () => { izid = {}; } });
     } else {
       const obstaja = (await pool.query("SELECT id FROM events WHERE id = $1", [ciljId])).rows[0];
@@ -119,6 +141,7 @@ function ustvari(dep) {
       await dejanja.podvoji(zahtevaZa(ciljId, telo, { role: "admin" }), lazen, { samoPreveri: () => { izid = {}; } });
     }
     if (!izid) {
+      if (lazen.statusCode === 404 && opis.pot === "ustvari") throw odgovor(400, "invalid_changes", "Venue club not found.", { koda: "venue_club_not_found" });   // cilj (klub) obstaja, manjka gostitelj
       if (lazen.statusCode === 404) throw odgovor(404, "cilj_ni_najden", "Target not found.");
       if (lazen.statusCode >= 500) throw new Error("validacija predloga: pot je vrnila " + lazen.statusCode);
       const n = opisNapake(lazen.telo);
@@ -176,7 +199,7 @@ function ustvari(dep) {
       const ciljId = typeof cilj.id === "number" || typeof cilj.id === "string" ? celoId4(cilj.id) : null;
       if (cilj.tip !== opis.cilj || !ciljId) return napaka(400, "invalid_cilj", `cilj must be { tip: "${opis.cilj}", id: <id> }.`);
       const razlog = b.razlog;
-      if (typeof razlog !== "string" || razlog.trim().length < 3 || razlog.length > RAZLOG_NAJVEC || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(razlog)) {
+      if (typeof razlog !== "string" || razlog.trim().length < 3 || razlog.length > RAZLOG_NAJVEC || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(razlog) || NEVIDNI.test(razlog)) {
         return napaka(400, "invalid_reason", `razlog must be a text of 3-${RAZLOG_NAJVEC} characters without control characters.`);
       }
       const spr = b.spremembe === undefined ? {} : b.spremembe;
@@ -184,9 +207,17 @@ function ustvari(dep) {
       if (JSON.stringify(spr).length > SPREMEMBE_NAJVEC) return napaka(400, "spremembe_prevelike", `spremembe must be at most ${SPREMEMBE_NAJVEC} characters of JSON.`);
       const tuje = Object.keys(spr).filter((k) => !opis.polja.includes(k));
       if (tuje.length) return napaka(400, "sprememba_ni_dovoljena", "These fields can't be changed by an agent proposal.", { polja: tuje.slice(0, 10).map((k) => k.slice(0, 40)) });
+      // N8: opis null = »pocisti opis« (stolpec je NOT NULL DEFAULT ''; obstojeca pot bi z null padla v bazi)
+      if (spr.description === null) spr.description = "";
+      const napacenTip = Object.keys(spr).filter((k) => BESEDILNA.has(k) && typeof spr[k] !== "string" && !(k === "posterUrl" && spr[k] === null));
+      if (napacenTip.length) return napaka(400, "neveljaven_tip", "These fields must be text.", { polja: napacenTip });
+      if (imaNevidne(spr)) return napaka(400, "nevidni_znaki", "Invisible or bidirectional control characters are not allowed in a proposal.");
       if (opis.pot === "uredi" && !opis.fiksno && !Object.keys(spr).length) return napaka(400, "brez_spremembe", "Nothing to change.");
       try {
         const pr = await delo(req, () => pripravi(b.dejanje, opis, ciljId, spr));
+        if (!plakatDovoljen(opis.pot === "uredi" ? pr.spremembe.poster_url : spr.posterUrl)) {
+          return napaka(400, "plakat_ni_dovoljen", "A proposed poster must be an https image uploaded to Outly's Cloudinary (res.cloudinary.com).");
+        }
         const vrstica = await delo(req, async () => {
           const c = await pool.connect();
           try {
@@ -243,6 +274,13 @@ function ustvari(dep) {
           return napaka(403, "nujno_izkljuceno", `Never in emergency mode (${izkljuceno}): only Martin, by clicking in the panel.`);
         }
         if (!DEJANJA.has(p.dejanje)) return napaka(400, "dejanje_ni_dovoljeno", "This action can't be run by an agent.");
+        // Iste varovalke predloga kot ob POST /predlogi (#340: nevidni znaki, plakat samo iz nasega Cloudinaryja) se enkrat nad SHRANJENIMI spremembami
+        // (vrstica bi lahko nastala mimo poti ali pred spremembo okolja); validacijo obstojece poti (naslov, URL, okno) ponovi izvedba sama.
+        const sprN = p.spremembe && typeof p.spremembe === "object" && !Array.isArray(p.spremembe) ? p.spremembe : {};
+        if (imaNevidne(sprN)) return napaka(400, "nevidni_znaki", "Invisible or bidirectional control characters are not allowed in a proposal.");
+        if (!plakatDovoljen(sprN.poster_url !== undefined ? sprN.poster_url : sprN.posterUrl)) {
+          return napaka(400, "plakat_ni_dovoljen", "A proposed poster must be an https image uploaded to Outly's Cloudinary (res.cloudinary.com).");
+        }
         if (p.stanje !== "caka") return napaka(409, "predlog_ne_caka", "This proposal is no longer waiting for approval.", { stanje: p.stanje });
         if (!p.velja) return napaka(409, "predlog_potekel", "This proposal has expired (24 h).");
         if (!p.mlad) return napaka(409, "predlog_prestar", `Emergency mode only runs proposals younger than ${NUJNO_STAROST_MIN} minutes. Make a new proposal and show it to Martin.`);

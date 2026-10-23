@@ -303,6 +303,14 @@ function nicOsebnega(ime, tekst) {
       await pool.query("DELETE FROM predlogi_dejanj WHERE razlog = 'simulacija'");
       await pool.query(`ALTER TABLE predlogi_dejanj ADD CONSTRAINT predlogi_dejanj_dejanje_check ${chk}`);
     }
+    // #340 varovalke tudi ob nujni izvedbi: shranjene spremembe (vrstica mimo poti) z nevidnimi znaki ali tujim plakatom -> 400, nic se ne izvede
+    for (const [spr, koda] of [[{ poster_url: "https://evil.example/p.jpg" }, "plakat_ni_dovoljen"], [{ title: "Dogodek \u202Eizkl" }, "nevidni_znaki"]]) {
+      const id = (await pool.query("INSERT INTO predlogi_dejanj (agent_zeton_id, dejanje, cilj_tip, cilj_id, spremembe, razlog) VALUES ($1, 'event.uredi', 'event', $2, $3::jsonb, 'mimo poti') RETURNING id",
+        [NUJNO_ID, E.izkl, JSON.stringify(spr)])).rows[0].id;
+      const x = await izvedi(id, { potrditev: "potrjujem: uredi Dogodek izkl", seja: SEJA });
+      assert(x.status === 400 && x.body.error === koda, `nujna izvedba znova preveri shranjene spremembe: ${koda}`, [x.status, x.body]);
+      assert((await predlogVBazi(id)).stanje === "caka" && (await vrstica(E.izkl)).title === "Dogodek izkl" && (await vrstica(E.izkl)).poster_url === "https://x.test/p.jpg", `${koda}: nic se ne izvede`);
+    }
     // enota: izkljucitev je neodvisna od belega seznama (tudi ce bi kdo dodal dejanje v DEJANJA)
     const ap = require(path.join(__dirname, "..", "agent_predlogi.js"));
     ap.DEJANJA.set("db.export", { cilj: "event", pot: "uredi", polja: [] });

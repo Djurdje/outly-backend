@@ -645,6 +645,42 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
       klici9.length = 0;
       await izbira9[0].onchange({ currentTarget: { value: "vse" } });
       assert(klici9.some((k) => k.pot === "/admin/api/predlogi?stanje=vse"), "predlogi.js: filter stanja");
+
+      // S1 (#340): dolgo besedilo in plakat. Kartica skrajša, a ima »Pokaži vse«; potrditveno okno kaže CELO vrednost; plakat: gostitelj izrazito, predogled samo https.
+      const SKRITO = "https://evil.test/skrita-povezava";
+      const dolgOpis = "Lep opis. ".repeat(100) + SKRITO;
+      seznam9 = { stanje: "caka", caka: 3, items: [
+        predlog(11, { spremembe: { description: dolgOpis }, prej: { description: "kratek" } }),
+        predlog(12, { spremembe: { poster_url: "https://evil.test/plakat.jpg" }, prej: { poster_url: "javascript:alert(1)" } }),
+        predlog(13, { dejanje: "event.nov_osnutek", cilj_tip: "club", spremembe: { posterUrl: "http://plain.test/x.jpg", title: "x" }, prej: null }),
+      ] };
+      filter9: {
+        await okno9.naloziPredloge();
+        let pk = oznake($9("pr_koren"));
+        const DOV9i = new Set([...DOV9, "img"]);
+        assert(pk.elementi.every((t) => DOV9i.has(t)) && brezOn(pk), "predlogi.js S1: samo dovoljeni elementi (img samo za predogled plakata)", [...new Set(pk.elementi)]);
+        assert(!pk.besedila.join("\n").includes(SKRITO), "kartica: dolg opis je skrajšan (povezava na koncu ni vidna brez »Pokaži vse«)");
+        const slike = []; sprehod($9("pr_koren"), (e) => { if (e.nodeType === 1 && e.tagName === "img") slike.push(e); });
+        assert(slike.length === 1 && slike[0].attrs.src === "https://evil.test/plakat.jpg" && slike[0].attrs.referrerpolicy === "no-referrer" && Object.keys(slike[0].attrs).every((k) => ["class", "src", "alt", "loading", "referrerpolicy"].includes(k)),
+          "plakat: predogled samo za https (ne javascript:, ne http), src kot atribut", slike.map((x) => x.attrs));
+        const bk = pk.besedila.join("\n");
+        assert(bk.includes("gostitelj: evil.test") && bk.includes("gostitelj: http: plain.test"), "plakat: gostitelj izrazito (tudi ne-https)", bk.slice(0, 300));
+        const vse = tipke9("Pokaži vse");
+        assert(vse.length === 1, "»Pokaži vse« samo pri predlogu z dolgim besedilom", vse.length);
+        vse[0].onclick();
+        pk = oznake($9("pr_koren"));
+        assert(pk.besedila.join("\n").includes(dolgOpis) && pk.besedila.join("\n").includes(`(${dolgOpis.length} znakov)`), "»Pokaži vse«: celo besedilo z dolžino");
+        potrdiOdgovor9 = null; potrdiKlici9.length = 0;
+        await tipke9("Potrdi")[0].onclick();
+        const ok9 = new El2("div"); ok9.append(...potrdiKlici9[0].vsebina.filter(Boolean));
+        const pok = oznake(ok9);
+        assert(pok.besedila.join("\n").includes(dolgOpis) && pok.besedila.join("\n").includes("znakov"), "potrditveno okno: CEL opis (tudi skrita povezava na koncu) in dolžina", pok.besedila.join(" ").slice(-200));
+        potrdiKlici9.length = 0;
+        await tipke9("Potrdi")[1].onclick();
+        const ok9b = new El2("div"); ok9b.append(...potrdiKlici9[0].vsebina.filter(Boolean));
+        const slikeO = []; sprehod(ok9b, (e) => { if (e.nodeType === 1 && e.tagName === "img") slikeO.push(e); });
+        assert(oznake(ok9b).besedila.join("\n").includes("gostitelj: evil.test") && slikeO.length === 1, "potrditveno okno: plakat z gostiteljem in predogledom");
+      }
     }
 
     // --- nujno.js (#330, 3. del): rdec pas nujnih dejanj agenta in »Pregledal sem« ---
