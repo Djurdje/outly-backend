@@ -166,6 +166,7 @@ function ustvari(dep) {
       const dodatno = { rdece: 0, oranzno: 0, rumeno: 0 };   // vrstice, ki jih meja odgovora ne pokaze posamicno, a so v stevcih
 
       // 1. racuni (ne glede na skritost kluba: davcna obveznost je Outlyjeva)
+      if (dogodekId === null) {   // pregled enega dogodka (#328) preskoci splosne razdelke 1 in 3 (brez poizvedb); notranjost ni zamaknjena, da diff ostane majhen
       const napakaSt = (await c.query("SELECT COUNT(*)::int AS n FROM racuni WHERE stanje = 'napaka'")).rows[0].n;
       const napake = (await c.query("SELECT id, order_id, created_at FROM racuni WHERE stanje = 'napaka' ORDER BY id DESC LIMIT $1", [NAJVEC_VRSTIC_NAPAKA])).rows;
       for (const r of napake) {
@@ -177,6 +178,7 @@ function ustvari(dep) {
       const zaostanek = (await c.query(
         `SELECT COUNT(*)::int AS n, MIN(created_at) AS najstarejsi FROM racuni WHERE stanje = 'caka' AND created_at < NOW() - INTERVAL '1 hour'`)).rows[0];
       if (zaostanek.n > 0) dodaj("racun_zaostanek", "oranzno", "racuni", null, `${zaostanek.n} računov čaka na izdajo več kot 1 uro (zakonski rok: 2 delovna dneva).`, zaostanek.najstarejsi);
+      }
 
       // 2. dogodki (skriti klubi izpuščeni); stolpci in izracun placilnega nacina so isti kot v javnem GET /events (razlogNerazpolozljivosti)
       const dogodki = (await c.query(
@@ -230,6 +232,7 @@ function ustvari(dep) {
       }
 
       // 3. obstojeci stevci (kot v /summary) + neposlana potrdila kupcem (I32)
+      if (dogodekId === null) {
       const s = (await c.query(
         `SELECT (SELECT COUNT(*)::int FROM vracila WHERE stanje IN ('ni_uspelo','rocno')) AS vracila,
                 (SELECT COUNT(*)::int FROM spori WHERE zaprt_at IS NULL) AS spori,
@@ -242,6 +245,7 @@ function ustvari(dep) {
           WHERE receipt_mail_attempts IS NOT NULL AND receipt_mail_sent_at IS NULL AND status = 'paid' AND user_id IS NOT NULL
             AND buyer_email !~* '@outly\\.invalid$' AND paid_at < NOW() - INTERVAL '1 hour' AND paid_at > NOW() - INTERVAL '30 days'`)).rows[0];
       if (potrdila.n > 0) dodaj("potrdila_neposlana", "oranzno", "narocila", null, `${potrdila.n} potrdil o nakupu kupcem ni poslanih več kot 1 uro (zadnjih 30 dni).`, potrdila.najstarejse);
+      }
 
       if (dogodekId !== null) {   // samo opozorila tega dogodka (racuni, vracila ... so splosna); stevci stejejo samo ta opozorila
         const moja = items.filter((o) => o.cilj_tip === "dogodek" && o.cilj_id === dogodekId);

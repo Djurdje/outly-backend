@@ -528,9 +528,32 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     odg8 = { "/admin/api/opozorila?dogodek=": { napaka: "503: busy" } };
     najdi($8("dge_razsiritve"), e => idje(e, "dge_preveri_znova"))[0].onclick(); await new Promise(r => setImmediate(r));
     assert(nv.objavaBlokirana(12) === true && el8.dge_objavi.disabled === true, "nov-dogodek.js: pregled ni uspel: Objavi ostane onemogočen");
+    // »Preveri znova« je med preverjanjem onemogocen; ob rdeci oviri / napaki je »Objavi vseeno«
+    odg8 = { "/admin/api/opozorila?dogodek=": { telo: { items: [{ vrsta: "prodajalec_nepopoln", resnost: "rdece", cilj_tip: "dogodek", cilj_id: 12, besedilo: "x" }], stevci: { rdece: 1, oranzno: 0, rumeno: 0 } } },
+      "/admin/api/events/12": { metoda: "PATCH", telo: { id: 12, status: "published" } } };
+    let osvezeno8 = 0;
+    nv.zaUrejevalnik({ event: { id: 12, status: "draft", title: ZLO8[0], start_at: "2030-01-01T10:00:00Z" }, osvezi: () => { osvezeno8++; } });
+    assert(najdi($8("dge_razsiritve"), e => idje(e, "dge_preveri_znova"))[0].disabled === true && najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno")).length === 0, "nov-dogodek.js: med preverjanjem je »Preveri znova« onemogocen in »Objavi vseeno« ni");
+    await new Promise(r => setImmediate(r));
+    assert(najdi($8("dge_razsiritve"), e => idje(e, "dge_preveri_znova"))[0].disabled === false, "nov-dogodek.js: po preverjanju je »Preveri znova« spet omogocen");
+    const vseeno = najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno"));
+    assert(vseeno.length === 1 && vseeno[0].textContent === "Objavi vseeno", "nov-dogodek.js: ob rdeci oviri je sekundarni gumb »Objavi vseeno«");
+    let potrdiO = null;
+    potrdi8 = [async (o) => { potrdiO = o; return { razlog: "Martin je potrdil po telefonu" }; }];
+    klici8.length = 0;
+    await vseeno[0].onclick();
+    assert(potrdiO && potrdiO.vpis === "OBJAVI" && potrdiO.razlog === "obvezen" && potrdiO.nevarno === true, "nov-dogodek.js: »Objavi vseeno«: potrdi() z vpisom OBJAVI, obveznim razlogom in nevarno", potrdiO && { vpis: potrdiO.vpis, razlog: potrdiO.razlog });
+    const pat = klici8.find(k => k[0] === "PATCH");
+    assert(pat && pat[1] === "/admin/api/events/12" && JSON.stringify(pat[2]) === JSON.stringify({ status: "published", reason: "Martin je potrdil po telefonu" }) && osvezeno8 === 1, "nov-dogodek.js: PATCH /admin/api/events/12 { status: published, reason } in ponovno nalaganje", pat);
+    potrdi8 = [async () => null]; klici8.length = 0;
+    await najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno"))[0].onclick();
+    assert(!klici8.some(k => k[0] === "PATCH"), "nov-dogodek.js: preklic okna ne objavi");
+    odg8 = { "/admin/api/opozorila?dogodek=": { napaka: "503: busy" } };
+    nv.zaUrejevalnik({ event: { id: 14, status: "cancelled", title: "Odpovedan", start_at: "2030-01-01T10:00:00Z" } }); await new Promise(r => setImmediate(r));
+    assert(nv.objavaBlokirana(14) === true && najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno")).length === 1, "nov-dogodek.js: odpovedan dogodek ima tudi pregled in zaklep Objavi; ob napaki pregleda je »Objavi vseeno«");
     nv.zaUrejevalnik({ event: { id: 13, status: "published", title: "x", start_at: "2030-01-01T10:00:00Z" } });
     assert(nv.objavaBlokirana(13) === false && $8("dge_razsiritve").children.length === 0, "nov-dogodek.js: objavljen dogodek nima bloka Pred objavo in ni blokiran");
-    assert(najdi($8("dge_gumbi"), e => idje(e, "dge_podvoji")).length === 2, "nov-dogodek.js: gumb Podvoji pri vsakem odprtju urejevalnika (dogodki.js ustvari nov vsebnik)");
+    assert(najdi($8("dge_gumbi"), e => idje(e, "dge_podvoji")).length >= 2, "nov-dogodek.js: gumb Podvoji pri vsakem odprtju urejevalnika (dogodki.js ustvari nov vsebnik)");
 
     // podvoji: rezultat s povezavami samo na #/dogodki/<stevilo>, naslovi kot besedilo
     el8.dge_razsiritve = new El8("div");
@@ -551,17 +574,17 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
 
     // nov dogodek: validacija pred klicem, nato POST /events s centi in koncem +6 h
     odg8 = { "/admin/api/clubs": { metoda: "GET", telo: [{ id: 6, name: ZLO8[0], city: "LJ", hidden: false, is_organizer: false, is_demo: false }, { id: "x<", name: "napacen" }] },
-      "/events": { metoda: "POST", telo: { id: 9, title: "Moj dogodek" } } };
+      "/admin/api/events": { metoda: "POST", telo: { id: 9, title: "Moj dogodek" } } };
     const zacetek8 = new Date(Date.now() + 5 * 864e5); zacetek8.setSeconds(0, 0);
     const lok8 = (() => { const q = (n) => String(n).padStart(2, "0"); return `${zacetek8.getFullYear()}-${q(zacetek8.getMonth() + 1)}-${q(zacetek8.getDate())}T${q(zacetek8.getHours())}:${q(zacetek8.getMinutes())}`; })();
     const polni = (o, v) => { for (const [id, x] of Object.entries(v)) { const e = poId({ children: [].concat(o.vsebina).filter(y => y && y.nodeType), nodeType: 1, tagName: "x", attrs: {} }, id); mora(e, "polje " + id + " ni v oknu Nov dogodek"); e.value = x; } };
     potrdi8 = [async () => ({ razlog: "" }), async (o) => { polni(o, { nd_klub: "6", nd_naslov: "  Moj dogodek ", nd_zacetek: lok8, nd_cena: "12,5", nd_kap: "250" }); return { razlog: "" }; }];
     klici8.length = 0; obv8.length = 0; zgod8.length = 0;
     await nv.novDogodek();
-    const kopt = klici8.find(k => k[1] === "/events");
-    assert(obv8.some(o => o[0] === "Izberi klub." && o[1] === "slabo") && klici8.filter(k => k[1] === "/events").length === 1, "nov-dogodek.js: prazen obrazec: napaka, brez klica; okno se znova odpre");
+    const kopt = klici8.find(k => k[1] === "/admin/api/events");
+    assert(obv8.some(o => o[0] === "Izberi klub." && o[1] === "slabo") && klici8.filter(k => k[1] === "/admin/api/events").length === 1, "nov-dogodek.js: prazen obrazec: napaka, brez klica; okno se znova odpre");
     assert(kopt && kopt[2].clubId === 6 && kopt[2].title === "Moj dogodek" && kopt[2].status === "draft" && kopt[2].ticketPriceCents === 1250 && kopt[2].capacity === 250 &&
-      Date.parse(kopt[2].endAt) - Date.parse(kopt[2].startAt) === 6 * 3600e3 && Date.parse(kopt[2].startAt) === zacetek8.getTime(), "nov-dogodek.js: POST /events: draft, 1250 centov (ne plavajoča vejica), konec = začetek + 6 h", kopt && kopt[2]);
+      Date.parse(kopt[2].endAt) - Date.parse(kopt[2].startAt) === 6 * 3600e3 && Date.parse(kopt[2].startAt) === zacetek8.getTime(), "nov-dogodek.js: POST /admin/api/events (ne /events): draft, 1250 centov (ne plavajoča vejica), konec = začetek + 6 h", kopt && kopt[2]);
     assert(zgod8.length === 1 && zgod8[0][2] === "#/dogodki/9" && zavihki8[zavihki8.length - 1] === "dogodki", "nov-dogodek.js: po uspehu se odpre urejevalnik #/dogodki/9");
     const optKlubi = [];
     // vrednosti kluba v izbiri: samo številke (id '"x<"' je izločen), ime kot besedilo

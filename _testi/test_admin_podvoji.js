@@ -16,7 +16,10 @@
  *  P6  dnevnik: natanko ena vrstica `event.duplicate` na osnutek (cilj_tip event, cilj_id = nov id, prej null, potem { iz, start_at }), admin kot avtor, brez e-naslovov; vidna v GET /admin/api/events/:id
  *  P7  brez zaklepanja: dokler druga seja drzi FOR UPDATE na izvoru, podvajanje uspe takoj; izvor se ne spremeni (sold_count, status, vip_enabled, mize)
  *  P8  admin ustvari osnutek v tujem klubu prek POST /events (clubId): 201 draft (korak 1 panela »Nov dogodek«); organizator brez prizorisca 400
- *  P9  GET /admin/api/opozorila?dogodek=ID: osnutek z nepopolnimi podatki prodajalca / klubom brez placil -> rdece; brezhiben osnutek brez opozoril; samo opozorila tega dogodka;
+ *  P10 POST /admin/api/events (korak 1 panela): admin, ki je SAM lastnik kluba A, ustvari osnutek za klub B -> 201 (POST /events bi mu odpovedal); status v telesu ne povozi drafta;
+ *      ista validacija kot POST /events (neveljaven URL, neznan klub, organizator brez prizorisca); vrstica admin_dejanja event.create; ne-admin 403, brez zetona 401
+ *  P11 kopija ne prenese neveljavnih URL-jev (javascript:, ftp: -> '') in zanrov izven ZANRI; veljavni ostanejo; startAt najvec 2 leti vnaprej (start_too_far); kršitev omejitve baze -> 400 duplicate_invalid in nic ustvarjeno
+ *  P9  GET /admin/api/opozorila?dogodek=ID (samo opozorila tega dogodka, splosni razdelki racuni/vracila/spori/potrdila preskoceni): osnutek z nepopolnimi podatki prodajalca / klubom brez placil -> rdece; brezhiben osnutek brez opozoril; samo opozorila tega dogodka;
  *      globalni seznam osnutka se vedno NE steje (stara pogodba); neveljaven id 400; neobstojec 200 prazno; skrit klub vseeno; ne-admin 403, brez zetona 401
  */
 const crypto = require("crypto");
@@ -382,6 +385,81 @@ function zacetekCezPrehod() {
     await pregled(D.nepopoln); await pregled(D.ok);
     const stPo = (await pool.query("SELECT (SELECT COUNT(*) FROM events) AS e, (SELECT COUNT(*) FROM admin_dejanja) AS a")).rows[0];
     assert(JSON.stringify(stPred) === JSON.stringify(stPo), "pregled je samo branje");
+
+    // ============ P9b: ?dogodek ne dela splosnih poizvedb ============
+    console.log("\n# P9b ?dogodek preskoci splosne razdelke");
+    // racun v stanju napaka in neposlano potrdilo bi bila v globalnem seznamu; v ?dogodek ju NI, tudi ce tabele obstajajo (preskok = brez poizvedb, ne samo filter)
+    const ordR = (await pool.query(
+      `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, status, buyer_email, created_at, paid_at, receipt_mail_attempts)
+       VALUES ('OUT-PODV-1', (SELECT id FROM users WHERE email='navaden@outly.si'), $1, $2, 1, 1500, 1500, 'paid', 'kupec@primer.si', NOW() - INTERVAL '3 hours', NOW() - INTERVAL '3 hours', 0) RETURNING id`, [D.objavljen, K_NEPOPOLN])).rows[0].id;
+    const glob2 = await api("GET", "/admin/api/opozorila", T.admin);
+    assert(glob2.body.items.some((i) => i.vrsta === "potrdila_neposlana"), "kontrola: globalni seznam ima potrdila_neposlana");
+    r = await pregled(D.objavljen);
+    assert(r.status === 200 && r.body.items.every((i) => i.cilj_tip === "dogodek" && i.cilj_id === D.objavljen) && !r.body.items.some((i) => ["potrdila_neposlana", "racun_zaostanek", "racun_napaka", "vracila_pozornost", "spori_odprti"].includes(i.vrsta)),
+      "?dogodek: brez splosnih opozoril (potrdila, racuni, vracila, spori)", r.body);
+    await pool.query("DELETE FROM orders WHERE id = $1", [ordR]);
+
+    // ============ P10: POST /admin/api/events ============
+    console.log("\n# P10 POST /admin/api/events");
+    await pool.query("UPDATE clubs SET owner_user_id = $1 WHERE id = $2", [adminId, K_A]);   // admin je SAM lastnik kluba A
+    const zac10 = new Date(Date.now() + 15 * 864e5).toISOString();
+    x = await api("POST", "/events", T.admin, { clubId: K_B, title: "Prek stare poti", startAt: zac10, status: "draft" });
+    assert(x.status === 403 || x.status === 404, "kontrola: admin, ki je lastnik kluba A, na POST /events za klub B NE uspe (zato admin pot)", x.status);
+    const pred10 = await dogodkov();
+    x = await api("POST", "/admin/api/events", T.admin, { clubId: K_B, title: "Osnutek za klub B", startAt: zac10, endAt: new Date(Date.parse(zac10) + 6 * 3600e3).toISOString(), ticketPriceCents: 1200, capacity: 300, status: "published" });
+    assert(x.status === 201 && x.body.status === "draft" && x.body.club_id === K_B && x.body.ticket_price_cents === 1200 && x.body.capacity === 300 && x.body.title === "Osnutek za klub B",
+      "admin (lastnik kluba A) ustvari osnutek za klub B -> 201 draft; status published v telesu je prezrt", x);
+    const novId10 = x.body.id;
+    const dn10 = (await pool.query("SELECT * FROM admin_dejanja WHERE dejanje = 'event.create' AND cilj_id = $1", [String(novId10)])).rows;
+    assert(dn10.length === 1 && dn10[0].cilj_tip === "event" && dn10[0].admin_user_id === adminId && dn10[0].prej === null && dn10[0].potem.club_id === K_B && dn10[0].potem.status === "draft" && !/@/.test(JSON.stringify(dn10[0])),
+      "admin_dejanja event.create (cilj event, avtor admin, potem { club_id, title, start_at, status }, brez e-naslovov)", dn10);
+    assert((await api("GET", "/events", null)).body.every((e) => e.id !== novId10), "osnutek ni javen");
+    x = await api("POST", "/admin/api/events", T.admin, { clubId: K_B, title: "Slab URL", startAt: zac10, posterUrl: "javascript:alert(1)" });
+    assert(x.status === 400 && x.body.error === "invalid_url", "ista validacija: javascript: plakat -> 400 invalid_url", x);
+    x = await api("POST", "/admin/api/events", T.admin, { clubId: 987654, title: "Neznan klub", startAt: zac10 });
+    assert(x.status === 404, "neznan klub -> 404", x.status);
+    x = await api("POST", "/admin/api/events", T.admin, { clubId: K_ORG, title: "Organizator brez prizorisca", startAt: zac10 });
+    assert(x.status === 400, "klub organizator brez prizorisca -> 400", x.status);
+    x = await api("POST", "/admin/api/events", T.admin, { clubId: K_B, startAt: zac10 });
+    assert(x.status === 400, "brez naslova -> 400", x.status);
+    const pred10b = await dogodkov();
+    assert(pred10b === pred10 + 1, "po zavrnitvah ni novih dogodkov (samo en uspesen)", [pred10, pred10b]);
+    for (const [ime, tok] of [["navaden uporabnik", T.navaden], ["business", T.lastnik], ["backup", T.kopija]]) {
+      x = await api("POST", "/admin/api/events", tok, { clubId: K_B, title: "X", startAt: zac10 });
+      assert(x.status === 403, `POST /admin/api/events: ${ime} -> 403`, x.status);
+    }
+    assert((await api("POST", "/admin/api/events", null, { clubId: K_B, title: "X", startAt: zac10 })).status === 401, "POST /admin/api/events brez zetona -> 401");
+    assert(await dogodkov() === pred10b, "zavrnjeni klici niso ustvarili dogodka");
+    // transakcija: zavrnjen vpis v dnevnik -> dogodka ni
+    await pool.query("CREATE OR REPLACE FUNCTION test_ustvari_zavrni() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN IF NEW.dejanje = 'event.create' THEN RAISE EXCEPTION 'test: zavrnjen vpis'; END IF; RETURN NEW; END $f$");
+    await pool.query("CREATE TRIGGER test_ustvari_zavrni BEFORE INSERT ON admin_dejanja FOR EACH ROW EXECUTE FUNCTION test_ustvari_zavrni()");
+    x = await api("POST", "/admin/api/events", T.admin, { clubId: K_B, title: "Ne sme ostati", startAt: zac10 });
+    await pool.query("DROP TRIGGER test_ustvari_zavrni ON admin_dejanja"); await pool.query("DROP FUNCTION test_ustvari_zavrni()");
+    assert(x.status === 500 && await dogodkov() === pred10b, "vrstica dnevnika zavrnjena -> 500 in dogodek NI ostal (ena transakcija)", [x.status, await dogodkov()]);
+    await pool.query("UPDATE clubs SET owner_user_id = (SELECT id FROM users WHERE email = 'lastnik100@primer.si') WHERE id = $1", [K_A]);
+
+    // ============ P11: kopija ne prenese neveljavnega, omejitve ============
+    console.log("\n# P11 neveljavni URL-ji, zanri, startAt predaleč, omejitev baze");
+    const S3 = await dogodek(K_A, "Izvor z umazanimi polji", { status: "published" });
+    await pool.query("UPDATE events SET poster_url = 'javascript:alert(1)', ticket_url = 'ftp://x.si/vstopnice', genres = ARRAY['house','<img src=x onerror=1>','neznan']::text[] WHERE id = $1", [S3]);
+    r = await duplikat(S3, { startAt: new Date(Date.now() + 30 * 864e5).toISOString() });
+    let kk = r.status === 201 && (await pool.query("SELECT poster_url, ticket_url, genres FROM events WHERE id = $1", [r.body.events[0].id])).rows[0];
+    assert(kk && kk.poster_url === "" && kk.ticket_url === "" && JSON.stringify(kk.genres) === JSON.stringify(["house"]), "javascript: plakat in ftp: zunanja prodaja postaneta '', neznani zanri izpuscni", kk);
+    await pool.query("UPDATE events SET poster_url = 'https://slike.test/ok.jpg', ticket_url = 'https://vstopnice.test/e', genres = ARRAY['house','techno']::text[] WHERE id = $1", [S3]);
+    r = await duplikat(S3, { startAt: new Date(Date.now() + 31 * 864e5).toISOString() });
+    kk = r.status === 201 && (await pool.query("SELECT poster_url, ticket_url, genres FROM events WHERE id = $1", [r.body.events[0].id])).rows[0];
+    assert(kk && kk.poster_url === "https://slike.test/ok.jpg" && kk.ticket_url === "https://vstopnice.test/e" && kk.genres.length === 2, "veljavni URL-ji in zanri se kopirajo", kk);
+    const pred11 = await dogodkov();
+    x = await duplikat(S3, { startAt: new Date(Date.now() + 3 * 365 * 864e5).toISOString() });
+    assert(x.status === 400 && x.body.error === "start_too_far", "startAt cez 2 leti vnaprej -> 400 start_too_far", x);
+    x = await duplikat(S3, { startAt: new Date(Date.now() + 700 * 864e5).toISOString() });
+    assert(x.status === 201, "startAt ~23 mesecev vnaprej se sprejme", x.status);
+    await pool.query("ALTER TABLE events ADD CONSTRAINT test_podvoji_chk CHECK (status <> 'draft' OR title NOT LIKE 'ZAPRET%')");
+    const SZ = await dogodek(K_A, "ZAPRET kopije", { status: "published" });
+    const predZ = await dogodkov();
+    x = await duplikat(SZ, { startAt: new Date(Date.now() + 30 * 864e5).toISOString(), ponovi: "weekly", n: 3 });
+    await pool.query("ALTER TABLE events DROP CONSTRAINT test_podvoji_chk");
+    assert(x.status === 400 && x.body.error === "duplicate_invalid" && await dogodkov() === predZ, "kršitev CHECK omejitve baze (23514) -> 400 duplicate_invalid in nic ustvarjeno", x);
   } catch (e) {
     fail++; console.error("NEPRICAKOVANA NAPAKA", e);
   } finally {

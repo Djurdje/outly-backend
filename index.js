@@ -2886,6 +2886,12 @@ async function dopolniPrizorisce(vrstica) {
 
 // POST /events (updated: accepts camelCase + snake_case, includes ticket fields)
 app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  return ustvariDogodek(req, res);
+});
+
+// Skupno telo za POST /events (lastnik/manager/admin kluba) in POST /admin/api/events (#328, admin za vsak klub): ista validacija in isti INSERT.
+// `opcije.admin`: klub ni vezan na clanstvo klicatelja, status je VEDNO draft (telo ga ne more povoziti), INSERT in vrstica admin_dejanja `event.create` gresta v isti transakciji.
+async function ustvariDogodek(req, res, opcije = {}) {
   try {
     // accept both formats
     const clubId = req.body.clubId ?? req.body.club_id;
@@ -2896,7 +2902,7 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
     const endAt = req.body.endAt ?? req.body.end_at ?? null;
     const minAge = req.body.minAge ?? req.body.min_age;
     const genres = req.body.genres;
-    const status = req.body.status ?? "published";
+    const status = opcije.admin ? "draft" : (req.body.status ?? "published");
 
     const ticketPriceCents = req.body.ticketPriceCents ?? req.body.ticket_price_cents ?? null;
     const currency = (req.body.currency ?? "EUR").toString();
@@ -2939,7 +2945,7 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
 
     const club = clubR.rows[0];
 
-    if (req.klub.role !== "admin" && Number(club.id) !== Number(req.klub.clubId)) {
+    if (!opcije.admin && req.klub.role !== "admin" && Number(club.id) !== Number(req.klub.clubId)) {
       return res.status(403).send("You can only create events for your own club.");
     }
 
@@ -2951,7 +2957,7 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
     // Podedovani zanri kluba so lahko stari zapisi izven ZANRI: ociscimo (brez 400, neznane izpustimo), da se umazanija ne siri na nove dogodke.
     const finalGenres = zanriDogodka ?? ociscenoZanre(club.genres);
 
-    const r = await pool.query(
+    const sqlVstavi =
       `INSERT INTO events
       (
         club_id, title, description, poster_url, start_at, end_at,
@@ -2961,8 +2967,8 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
       )
       VALUES
       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-      RETURNING *`,
-      [
+      RETURNING *`;
+    const parametri = [
         clubId,
         title,
         description,
@@ -2982,8 +2988,19 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
         prizorisce.venue_city,
         prizorisce.venue_lat,
         prizorisce.venue_lng
-      ]
-    );
+      ];
+    let r;
+    if (opcije.admin) {
+      const c = await pool.connect();
+      try {
+        await c.query("BEGIN");
+        r = await c.query(sqlVstavi, parametri);
+        const n = r.rows[0];
+        await zapisiAdminDejanje(c, req, "event.create", "event", n.id, null, { club_id: n.club_id, title: n.title, start_at: new Date(n.start_at).toISOString(), status: n.status });
+        await c.query("COMMIT");
+      } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
+      finally { c.release(); }
+    } else r = await pool.query(sqlVstavi, parametri);
 
     // Sledilci kluba dobijo obvestilo (migracija 019). Samo objavljeni dogodki:
     // osnutka in odpovedanega ni smisla oznanjati. Napaka pri obvescanju NE sme
@@ -2998,7 +3015,7 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
     console.error(e);
     res.status(500).send("Server error.");
   }
-});
+}
 
 // Vsakemu sledilcu kluba vstavi obvestilo o dogodku. UNIQUE (user_id, event_id) poskrbi,
 // da ponovna objava (draft -> published -> draft -> published) ne podvoji zvonca.
@@ -4112,12 +4129,17 @@ admin.patch("/events/:id", async (req, res) => {
 
 // POST /admin/api/events/:id/duplicate (#328): podvoji dogodek v OSNUTEK/OSNUTKE. Telo: { startAt } (ISO z obmocjem) ali { startAt, ponovi: "weekly", n } (1 <= n <= 12;
 // n je SKUPNO stevilo osnutkov, prvi je na startAt, vsak naslednji 7 koledarskih dni pozneje po ljubljanskem casu, zato ura po spremembi poletnega casa ostane).
-// Kopira: naslov, opis, plakat, starost, zanre, ceno, valuto, zunanjo prodajo, kapaciteto, DDV stopnjo, prizorisce (tudi gostiteljski klub in koordinate).
+// Kopira: naslov, opis, plakat, starost, zanre, ceno, valuto, zunanjo prodajo (plakat/URL, ki ne ustreza I48, in neznani zanri se NE prenesejo), kapaciteto, DDV stopnjo, prizorisce (tudi gostiteljski klub in koordinate).
 // end_at ohrani trajanje; okno prodaje (sales_open_at/sales_close_at) ohrani zamik od zacetka (po ljubljanski uri), sicer null.
 // NE kopira: VIP razporeda dogodka (club_tables.event_id, I28: vip_enabled = false, vip_layout_source = 'club', brez tlorisa), prodanih vstopnic (sold_count 0),
 // pavze prodaje (false), posnetka po dogodku (''). Vse v ENI kratki transakciji (vse ali nic), brez zaklepa izvornega ali tujih dogodkov (en INSERT ... SELECT),
 // nic na skenPool. Za vsak nov dogodek vrstica admin_dejanja `event.duplicate` (cilj = nov id, potem = { iz, start_at }), brez osebnih podatkov.
+// POST /admin/api/events (#328): admin ustvari OSNUTEK za kateri koli klub (korak 1 »Nov dogodek« v panelu). Ista validacija in INSERT kot POST /events (ustvariDogodek),
+// a brez vezave na clanstvo admina v klubu (admin, ki je sam lastnik nekega kluba, bi na POST /events za tuj klub dobil 403/404), status vedno draft, vrstica `event.create`.
+admin.post("/events", async (req, res) => ustvariDogodek(req, res, { admin: true }));
+
 const DUPLIKATOV_NAJVEC = 12;
+const DUPLIKAT_NAJVEC_VNAPREJ_MS = 2 * 366 * 864e5;   // startAt najvec 2 leti v prihodnost (tipkarska napaka v letu bi ustvarila osnutke, ki jih nihce ne najde)
 admin.post("/events/:id/duplicate", async (req, res) => {
   const napaka = (status, error, message) => res.status(status).json({ error, message });
   const id = celoId4(req.params.id);
@@ -4132,6 +4154,7 @@ admin.post("/events/:id/duplicate", async (req, res) => {
     return napaka(400, "invalid_start", "startAt must be an ISO date-time with a time zone, e.g. 2026-11-06T22:00:00+01:00.");
   }
   if (Date.parse(zacetekSurov) <= Date.now()) return napaka(400, "start_in_past", "startAt must be in the future.");
+  if (Date.parse(zacetekSurov) > Date.now() + DUPLIKAT_NAJVEC_VNAPREJ_MS) return napaka(400, "start_too_far", "startAt must be at most 2 years ahead.");
   let n = 1;
   if (b.ponovi !== undefined && b.ponovi !== null) {
     if (b.ponovi !== "weekly") return napaka(400, "invalid_repeat", 'ponovi must be "weekly".');
@@ -4146,13 +4169,19 @@ admin.post("/events/:id/duplicate", async (req, res) => {
   try {
     await c.query("BEGIN");
     await c.query("SET LOCAL statement_timeout = 5000");
+    // Kopija ne prenese neveljavnih URL-jev (I48: stari zapis iz casov pred #269 bi se sicer razmnozil) in zanrov izven ZANRI: neveljavno postane '' / se izpusti.
+    const izvor = (await c.query("SELECT poster_url, ticket_url, genres FROM events WHERE id = $1", [id])).rows[0];
+    if (!izvor) { await c.query("ROLLBACK"); return napaka(404, "event_not_found", "Event not found."); }
+    const urlAliPrazno = (v, polje) => { const x = preveriUrlPolja([[polje, v]]); return x.napaka ? "" : (x.vrednosti[polje] || ""); };
+    const posterKopija = urlAliPrazno(izvor.poster_url, "poster_url"), ticketKopija = urlAliPrazno(izvor.ticket_url, "ticket_url");
+    const zanriKopija = ociscenoZanre(izvor.genres);
     const r = await c.query(
       `INSERT INTO events (club_id, title, description, poster_url, start_at, end_at, min_age, genres, status, ticket_price_cents, currency, ticket_url,
                            capacity, vat_rate, sales_open_at, sales_close_at, venue_club_id, venue_name, venue_address, venue_city, venue_lat, venue_lng)
-       SELECT e.club_id, e.title, e.description, e.poster_url, s.nov_start,
+       SELECT e.club_id, e.title, e.description, $4::text, s.nov_start,
               CASE WHEN e.end_at IS NULL THEN NULL
                    ELSE s.nov_start + make_interval(secs => (EXTRACT(EPOCH FROM e.end_at) - EXTRACT(EPOCH FROM e.start_at))::float8) END,
-              e.min_age, e.genres, 'draft', e.ticket_price_cents, e.currency, e.ticket_url,
+              e.min_age, $6::text[], 'draft', e.ticket_price_cents, e.currency, $5::text,
               e.capacity, e.vat_rate,
               CASE WHEN e.sales_open_at IS NULL THEN NULL ELSE ((e.sales_open_at AT TIME ZONE 'Europe/Ljubljana') + s.zamik) AT TIME ZONE 'Europe/Ljubljana' END,
               CASE WHEN e.sales_close_at IS NULL THEN NULL ELSE ((e.sales_close_at AT TIME ZONE 'Europe/Ljubljana') + s.zamik) AT TIME ZONE 'Europe/Ljubljana' END,
@@ -4162,7 +4191,7 @@ admin.post("/events/:id/duplicate", async (req, res) => {
                                    (($2::timestamptz AT TIME ZONE 'Europe/Ljubljana') + g * INTERVAL '7 days') - (e.start_at AT TIME ZONE 'Europe/Ljubljana') AS zamik
                               FROM generate_series(0, $3::int - 1) AS g) s
         WHERE e.id = $1
-       RETURNING id, title, start_at, status`, [id, zacetekIso, n]);
+       RETURNING id, title, start_at, status`, [id, zacetekIso, n, posterKopija, ticketKopija, zanriKopija]);
     if (r.rows.length === 0) { await c.query("ROLLBACK"); return napaka(404, "event_not_found", "Event not found."); }
     nove = r.rows.sort((a, z) => a.start_at - z.start_at || a.id - z.id);
     for (const nov of nove) {

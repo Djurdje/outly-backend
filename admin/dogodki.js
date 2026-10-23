@@ -418,7 +418,7 @@
       zanriPolje.onchange = oznaciSpremenjeno;
       oznaciSpremenjeno();
       // nov-dogodek.js (#328): nalaganje plakata, »Podvoji«, pregled pred objavo; ce modula ni, urejevalnik dela kot prej.
-      if (window.novDogodek) window.novDogodek.zaUrejevalnik({ event: e });
+      if (window.novDogodek) window.novDogodek.zaUrejevalnik({ event: e, osvezi: () => odpri(id) });
     });
   }
 })();

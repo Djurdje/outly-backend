@@ -1,5 +1,5 @@
 // Admin panel, zavihek »Dogodki«: tok »ustvari → dopolni → preveri → objavi«, nalaganje plakata in podvajanje (#328, 23. 10. 2026; nacrt outly-hq
-// docs/ideje/2026-10-23-admin-panel-nadgradnja.md 2.2). Kos 1: gumb »Nov dogodek« (5 polj → osnutek prek POST /events). Kos 2: v urejevalniku »Naloži sliko« (podpis
+// docs/ideje/2026-10-23-admin-panel-nadgradnja.md 2.2). Kos 1: gumb »Nov dogodek« (5 polj → osnutek prek POST /admin/api/events). Kos 2: v urejevalniku »Naloži sliko« (podpis
 // POST /uploads/cloudinary-signature, nalaganje neposredno na Cloudinary). Kos 3: »Pred objavo« (GET /admin/api/opozorila?dogodek=ID); rdeča ovira onemogoči »Objavi«.
 // Kos 4: »Podvoji« (POST /admin/api/events/:id/duplicate, enkratno ali tedensko do 12 osnutkov).
 // Brez ogrodja in brez gradnje (DECISIONS 21. 10. 2026). Uporablja globalne funkcije iz index.html in dialog.js: klic, obvesti, h, datum, $, potrdi, pokaziZavihek.
@@ -101,7 +101,7 @@
       const v = f.preberi();
       if (v.napaka) { obvesti(v.napaka, "slabo"); continue; }   // okno se ponovno odpre z vpisanimi vrednostmi
       try {
-        const e = await klic("POST", "/events", v.telo);
+        const e = await klic("POST", "/admin/api/events", v.telo);   // admin pot: deluje za vsak klub, tudi ce je admin sam lastnik drugega kluba; vedno osnutek
         obvesti(`Osnutek »${e.title}« je ustvarjen. Dopolni ga in objavi.`, "ok");
         naDogodek(e.id);
         return e;
@@ -223,6 +223,7 @@
     const p = preveri;
     const gumb = h("button", { type: "button", class: "tih mali", id: "dge_preveri_znova" }, "Preveri znova");
     gumb.onclick = () => naloziPreveri(p.id);
+    if (p.stanje === "caka") gumb.disabled = true;   // med preverjanjem ne zaganjaj novega
     const telo = [];
     if (p.stanje === "caka") telo.push(h("div", { class: "prazno" }, "Preverjam …"));
     else if (p.stanje === "napaka") telo.push(h("div", { class: "opozorilo" }, "Pregleda ni bilo mogoče opraviti (" + p.napaka + "). Objava je onemogočena, dokler pregled ne uspe."));
@@ -234,6 +235,11 @@
       if (rdeca.length) telo.push(h("p", { class: "pr-opomba" }, "Gumb »Objavi« je onemogočen, dokler obstaja rdeča ovira. Oranžna in rumena opozorila objave ne ustavijo."));
       else if (p.items.length) telo.push(h("p", { class: "pr-opomba" }, "Opozorila objave ne ustavijo."));
       telo.push(h("p", { class: "pr-opomba" }, "Pregled velja za shranjene podatke; neshranjenih sprememb ne vidi."));
+    }
+    if (p.stanje === "rdece" || p.stanje === "napaka") {   // izredna pot: objava kljub oviri, z vpisom in razlogom (dnevnik)
+      const vseeno = h("button", { type: "button", class: "nevarno mali", id: "dge_objavi_vseeno" }, "Objavi vseeno");
+      vseeno.onclick = () => objaviVseeno(p.id);
+      telo.push(h("div", { class: "vrsta", style: "margin-top:8px" }, vseeno));
     }
     return h("div", { class: "skupina", id: "dge_preveri" }, h("h2", {}, "Pred objavo", h("span", { class: "desno" }, gumb)), h("div", { class: "telo" }, telo));
   }
@@ -252,6 +258,21 @@
     }
     narisiRazsiritve();
   }
+  let osveziUrejevalnik = null;   // dogodki.js: ponovno nalozi urejevalnik
+  async function objaviVseeno(id) {
+    const e = trenutniDogodek;
+    if (!e || cele(e.id) !== id) return;
+    const ok = await potrdi({ naslov: "Objavim kljub oviri?", nevarno: true, potrdiBesedilo: "Objavi vseeno", vpis: "OBJAVI", razlog: "obvezen",
+      vsebina: [h("p", {}, `»${e.title}« bo viden v aplikaciji, čeprav pregled pred objavo ni čist (rdeča ovira ali pregled ni uspel). Nakup bo morda zavrnjen. Sledilci kluba dobijo obvestilo.`),
+        h("p", {}, "Razlog se zapiše v dnevnik dejanj.")] });
+    if (!ok) return;
+    try {
+      await klic("PATCH", "/admin/api/events/" + id, { status: "published", reason: ok.razlog });
+      obvesti(`»${e.title}« objavljen kljub oviri.`, "ok");
+      if (osveziUrejevalnik) await osveziUrejevalnik(); else naDogodek(id);
+    } catch (err) { obvesti(err.message, "slabo"); }
+  }
+  let trenutniDogodek = null;
   // true: Objavi mora ostati onemogocen (osnutek, katerega pregled se ni koncal ali ima rdeco oviro)
   function objavaBlokirana(id) {
     return preveri.id === id && preveri.stanje !== "ni" && preveri.stanje !== "ok";
@@ -272,11 +293,11 @@
         h("p", { class: "pr-opomba" }, "Osnutki niso objavljeni. Odpri vsakega, preveri in objavi.")));
   }
   function privzetiZacetek(startAt) {   // izvorni zacetek + 7 dni; ce je ze mimo, prvi tedenski termin v prihodnosti
-    const dan7 = 7 * 864e5;
+    const teden = (ms) => { const d = new Date(ms); d.setDate(d.getDate() + 7); return d.getTime(); };   // 7 KOLEDARSKIH dni v lokalnem casu (ura ostane cez prehod casa)
     let t = new Date(startAt).getTime();
     if (Number.isNaN(t)) t = Date.now();
-    t += dan7;
-    while (t <= Date.now() + 36e5) t += dan7;
+    t = teden(t);
+    while (t <= Date.now() + 36e5) t = teden(t);
     return t;
   }
   async function podvoji(e) {
@@ -316,6 +337,7 @@
     const e = (ctx && ctx.event) || {};
     const id = cele(e.id);
     if (id <= 0) return;
+    trenutniDogodek = e; osveziUrejevalnik = ctx.osvezi || null;
     orodjaPlakata();
     const kje = $("dge_gumbi");
     if (kje) {
@@ -323,7 +345,7 @@
       g.onclick = () => podvoji(e);
       kje.append(g);
     }
-    if (e.status === "draft") { preveri = { id, stanje: "caka", items: [] }; narisiRazsiritve(); naloziPreveri(id); }
+    if (e.status !== "published") { preveri = { id, stanje: "caka", items: [] }; narisiRazsiritve(); naloziPreveri(id); }
     else { preveri = { id, stanje: "ni", items: [] }; narisiRazsiritve(); }
   }
   function vstaviGumb() {
