@@ -4599,6 +4599,209 @@ admin.get("/finance", async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
+// --- promo kode (065, I61): SAMO STATISTIKA ---
+// Admin (admin.use zgoraj: requireRole("admin"); agent je ne vidi, /agent/api ima svoj beli seznam). Koda ne spremeni cene, provizije, Stripa ali zaloge pri nakupu
+// (glej promoKodaZaDogodek); tu je samo upravljanje kod in stevci. Brisanja ni (narocila se sklicujejo): samo deaktivacija. Vsaka sprememba = vrstica admin_dejanja
+// (`promo.create`, `promo.update`; cilj `promo_code`) v ISTI transakciji, brez osebnih podatkov kupcev.
+// Statistika: ISTA definicija kot GET /admin/api/finance: placana narocila (paid, partially_refunded) in v celoti vrnjena (refunded), brez guest liste; `tickets_sold` NE steje
+// v celoti vrnjenih (#310: vstopnice ne veljajo); `orders` in `gross_cents` jih steje. Pravi promet (SQL_PRAVO_NAROCILO); testni (lazni nacin, Stripe sandbox) locen v
+// `test_tickets_sold` / `test_orders` (dodatek k dogovoru: ob sandboxu bi bile sicer vse stevilke 0).
+const PROMO_STANJA = `o.status IN ('paid','partially_refunded','refunded') AND o.guest_list_id IS NULL`;
+const PROMO_SESTEVEK = `COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL AND o.status <> 'refunded' AND ${SQL_PRAVO_NAROCILO}),0)::int AS tickets_sold,
+       COUNT(o.id) FILTER (WHERE ${SQL_PRAVO_NAROCILO})::int AS orders,
+       COALESCE(SUM(o.total_cents) FILTER (WHERE ${SQL_PRAVO_NAROCILO}),0)::int AS gross_cents,
+       COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL AND o.status <> 'refunded' AND ${SQL_TESTNO_NAROCILO}),0)::int AS test_tickets_sold,
+       COUNT(o.id) FILTER (WHERE ${SQL_TESTNO_NAROCILO})::int AS test_orders`;
+const PROMO_NAJVEC_DOGODKOV = 200;
+const PROMO_KONTROLNI = /[\u0000-\u001F\u007F-\u009F​-‏‪-‮⁦-⁩﻿]/;
+
+// { vrednost } | { napaka } za besedilo kode (samo pri ustvarjanju) in oznako.
+function promoKodaAdmin(v) {
+  if (typeof v !== "string" || !PROMO_KODA_VNOS.test(v.trim())) return { napaka: "code must be 3-32 characters: letters, digits, - and _." };
+  return { vrednost: v.trim().toUpperCase() };
+}
+function promoOznaka(v) {
+  if (typeof v !== "string") return { napaka: "label must be a string of 1-80 characters." };
+  const t = v.trim();
+  if (t.length < 1 || t.length > 80 || PROMO_KONTROLNI.test(t)) return { napaka: "label must be a string of 1-80 characters without control characters." };
+  return { vrednost: t };
+}
+// event_ids: seznam celih stevil (brez podvojitev, najvec PROMO_NAJVEC_DOGODKOV); vrne { ids } | { napaka }.
+function promoDogodkiIds(v) {
+  if (!Array.isArray(v) || v.length > PROMO_NAJVEC_DOGODKOV) return { napaka: `event_ids must be an array of at most ${PROMO_NAJVEC_DOGODKOV} event ids.` };
+  const ids = [];
+  for (const x of v) {
+    const n = typeof x === "number" && Number.isInteger(x) ? x : (typeof x === "string" ? celoId4(x) : null);
+    if (!Number.isInteger(n) || n <= 0 || n > 2147483647) return { napaka: "event_ids must contain only positive integer event ids." };
+    if (!ids.includes(n)) ids.push(n);
+  }
+  return { ids: ids.sort((a, b) => a - b) };
+}
+// Neobvezen `reason` (niz, do 500 znakov; kot PATCH /admin/api/users/:id) gre v stolpec `razlog` vrstice admin_dejanja. Vrne { razlog } | { napaka }.
+function promoRazlog(b) {
+  if (b.reason === undefined || b.reason === null) return { razlog: null };
+  if (typeof b.reason !== "string" || b.reason.length > 500) return { napaka: "reason must be a string of at most 500 characters." };
+  return { razlog: b.reason.trim() || null };
+}
+// Odgovor ene ali vseh kod: seznam z zbirnimi stevci (en poizvedbi + dogodki).
+async function promoSeznam(db, id = null) {
+  const p = [];
+  const kje = id === null ? "" : "WHERE pc.id = $1";
+  if (id !== null) p.push(id);
+  const r = await db.query(
+    `SELECT pc.id, pc.code, pc.label, pc.active, pc.created_at, pc.club_id, cl.name AS club_name,
+            s.tickets_sold, s.orders, s.gross_cents, s.test_tickets_sold, s.test_orders
+     FROM promo_codes pc
+     LEFT JOIN clubs cl ON cl.id = pc.club_id
+     LEFT JOIN LATERAL (SELECT ${PROMO_SESTEVEK} FROM orders o WHERE o.promo_code_id = pc.id AND ${PROMO_STANJA}) s ON TRUE
+     ${kje} ORDER BY pc.created_at DESC, pc.id DESC LIMIT 500`, p);
+  if (!r.rows.length) return [];
+  const ev = await db.query(
+    `SELECT pe.promo_code_id, e.id, e.title, e.start_at FROM promo_code_events pe JOIN events e ON e.id = pe.event_id
+     WHERE pe.promo_code_id = ANY($1::int[]) ORDER BY e.start_at, e.id`, [r.rows.map((x) => x.id)]);
+  const poKodi = {};
+  for (const e of ev.rows) (poKodi[e.promo_code_id] ||= []).push({ id: e.id, title: e.title, start_at: e.start_at });
+  return r.rows.map((x) => ({
+    id: x.id, code: x.code, label: x.label, active: x.active,
+    club: x.club_id === null ? null : { id: x.club_id, name: x.club_name },
+    events: poKodi[x.id] || [],
+    tickets_sold: x.tickets_sold, orders: x.orders, gross_cents: x.gross_cents,
+    test_tickets_sold: x.test_tickets_sold, test_orders: x.test_orders,
+    created_at: x.created_at,
+  }));
+}
+// Preveri, da klub in dogodki obstajajo (v transakciji c). Vrne napako (besedilo) ali null.
+async function promoPreveriObseg(c, clubId, eventIds) {
+  if (clubId !== null && clubId !== undefined) {
+    const k = await c.query("SELECT 1 FROM clubs WHERE id = $1", [clubId]);
+    if (!k.rows.length) return "Club not found.";
+  }
+  if (eventIds && eventIds.length) {
+    const e = await c.query("SELECT COUNT(*)::int AS n FROM events WHERE id = ANY($1::int[])", [eventIds]);
+    if (e.rows[0].n !== eventIds.length) return "One or more events were not found.";
+  }
+  return null;
+}
+
+// GET /admin/api/promo-codes — seznam kod s skupnimi stevci.
+admin.get("/promo-codes", async (req, res) => {
+  try { return res.json(await promoSeznam(pool)); }
+  catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// POST /admin/api/promo-codes { code, label, club_id?, event_ids?, reason? } (vsaj eno od obeh) -> 201 vrstica kot v seznamu; 409 promo_code_exists.
+admin.post("/promo-codes", async (req, res) => {
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  const koda = promoKodaAdmin(b.code);
+  if (koda.napaka) return res.status(400).send(koda.napaka);
+  const oznaka = promoOznaka(b.label);
+  if (oznaka.napaka) return res.status(400).send(oznaka.napaka);
+  let clubId = null;
+  if (b.club_id !== undefined && b.club_id !== null) {
+    clubId = celoId4(b.club_id);
+    if (!clubId) return res.status(400).send("Invalid club_id.");
+  }
+  let eventIds = [];
+  if (b.event_ids !== undefined && b.event_ids !== null) {
+    const d = promoDogodkiIds(b.event_ids);
+    if (d.napaka) return res.status(400).send(d.napaka);
+    eventIds = d.ids;
+  }
+  if (clubId === null && eventIds.length === 0) return res.status(400).send("Choose a club or at least one event (club_id or event_ids).");
+  const rz = promoRazlog(b);
+  if (rz.napaka) return res.status(400).send(rz.napaka);
+  let c;
+  try {
+    c = await pool.connect();
+    await c.query("BEGIN");
+    const napaka = await promoPreveriObseg(c, clubId, eventIds);
+    if (napaka) { await c.query("ROLLBACK"); return res.status(400).send(napaka); }
+    const ins = await c.query(
+      `INSERT INTO promo_codes (code, label, club_id, created_by) VALUES ($1, $2, $3, $4) RETURNING id`, [koda.vrednost, oznaka.vrednost, clubId, req.user.userId]);
+    const id = ins.rows[0].id;
+    if (eventIds.length) await c.query("INSERT INTO promo_code_events (promo_code_id, event_id) SELECT $1, UNNEST($2::int[])", [id, eventIds]);
+    await zapisiAdminDejanje(c, req, "promo.create", "promo_code", id, null, { code: koda.vrednost, label: oznaka.vrednost, club_id: clubId, event_ids: eventIds }, rz.razlog);
+    await c.query("COMMIT");
+    console.log(`Admin ${req.user.userId} je ustvaril promo kodo ${id} (${koda.vrednost})`);
+    return res.status(201).json((await promoSeznam(c, id))[0]);
+  } catch (e) {
+    if (c) await c.query("ROLLBACK").catch(() => {});
+    if (e && e.code === "23505" && e.constraint === "promo_codes_code_key") return res.status(409).json({ error: "promo_code_exists", message: "A promo code with this text already exists." });
+    console.error(e); return res.status(500).send("Server error.");
+  } finally { if (c) c.release(); }
+});
+
+// PATCH /admin/api/promo-codes/:id { label?, active?, club_id?, event_ids?, reason? } — besedila kode se ne da spremeniti. club_id null odstrani klub, event_ids zamenja seznam;
+// PATCH, ki SPREMINJA obseg (club_id ali event_ids), mora kodo pustiti vezano na klub ali vsaj en dogodek; preverba obsega se NE izvaja pri label/active: koda, ki je ostala brez
+// dogodkov (lastnik je izbrisal dogodek -> CASCADE na promo_code_events), se mora se vedno dati izklopiti in preimenovati. Enake vrednosti (brez spremembe) vrstice dnevnika ne pustijo.
+// `reason` (neobvezno, do 500 znakov) gre v dnevnik. Vrstico kode zaklene FOR NO KEY UPDATE (ne FOR UPDATE): preverba tujega kljuca ob INSERT INTO orders s promo_code_id vzame
+// FOR KEY SHARE, ki se z NO KEY UPDATE ne spopade, zato PATCH nakupov s kodo ne ustavi.
+admin.patch("/promo-codes/:id", async (req, res) => {
+  const id = celoId4(req.params.id);
+  if (!id) return res.status(400).send("Invalid promo code id.");
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  if (b.code !== undefined) return res.status(400).send("The text of a promo code cannot be changed; create a new code.");
+  const nov = {};
+  if (b.label !== undefined) { const o = promoOznaka(b.label); if (o.napaka) return res.status(400).send(o.napaka); nov.label = o.vrednost; }
+  if (b.active !== undefined) { if (typeof b.active !== "boolean") return res.status(400).send("active must be true or false."); nov.active = b.active; }
+  if (b.club_id !== undefined) {
+    if (b.club_id === null) nov.club_id = null;
+    else { const k = celoId4(b.club_id); if (!k) return res.status(400).send("Invalid club_id."); nov.club_id = k; }
+  }
+  if (b.event_ids !== undefined) { const d = promoDogodkiIds(b.event_ids); if (d.napaka) return res.status(400).send(d.napaka); nov.event_ids = d.ids; }
+  if (Object.keys(nov).length === 0) return res.status(400).send("Nothing to update.");
+  const rz = promoRazlog(b);
+  if (rz.napaka) return res.status(400).send(rz.napaka);
+  let c;
+  try {
+    c = await pool.connect();
+    await c.query("BEGIN");
+    const st = await c.query("SELECT label, active, club_id FROM promo_codes WHERE id = $1 FOR NO KEY UPDATE", [id]);
+    if (!st.rows.length) { await c.query("ROLLBACK"); return res.status(404).send("Promo code not found."); }
+    const stDog = (await c.query("SELECT event_id FROM promo_code_events WHERE promo_code_id = $1 ORDER BY event_id", [id])).rows.map((x) => x.event_id);
+    const star = { ...st.rows[0], event_ids: stDog };
+    const koncno = { ...star, ...nov };
+    if ((nov.club_id !== undefined || nov.event_ids !== undefined) && koncno.club_id === null && koncno.event_ids.length === 0) { await c.query("ROLLBACK"); return res.status(400).send("A promo code needs a club or at least one event."); }
+    const napaka = await promoPreveriObseg(c, nov.club_id, nov.event_ids ? nov.event_ids.filter((x) => !stDog.includes(x)) : null);
+    if (napaka) { await c.query("ROLLBACK"); return res.status(400).send(napaka); }
+    const razlika = razlikaPolj(["label", "active", "club_id", "event_ids"], star, koncno);
+    if (razlika) {
+      await c.query("UPDATE promo_codes SET label = $2, active = $3, club_id = $4 WHERE id = $1", [id, koncno.label, koncno.active, koncno.club_id]);
+      if (nov.event_ids) {
+        await c.query("DELETE FROM promo_code_events WHERE promo_code_id = $1 AND NOT (event_id = ANY($2::int[]))", [id, nov.event_ids]);
+        await c.query("INSERT INTO promo_code_events (promo_code_id, event_id) SELECT $1, UNNEST($2::int[]) ON CONFLICT DO NOTHING", [id, nov.event_ids]);
+      }
+      await zapisiAdminDejanje(c, req, "promo.update", "promo_code", id, razlika.prej, razlika.potem, rz.razlog);
+    }
+    await c.query("COMMIT");
+    if (razlika) console.log(`Admin ${req.user.userId} je spremenil promo kodo ${id}:`, JSON.stringify(Object.keys(razlika.potem)));
+    return res.json((await promoSeznam(c, id))[0]);
+  } catch (e) {
+    if (c) await c.query("ROLLBACK").catch(() => {});
+    console.error(e); return res.status(500).send("Server error.");
+  } finally { if (c) c.release(); }
+});
+
+// GET /admin/api/promo-codes/:id/stats — po dogodkih (izbrani dogodki kode in vsak dogodek z vsaj enim narocilom s to kodo) + skupaj.
+admin.get("/promo-codes/:id/stats", async (req, res) => {
+  try {
+    const id = celoId4(req.params.id);
+    if (!id) return res.status(400).send("Invalid promo code id.");
+    const k = await pool.query("SELECT id, code, label, active FROM promo_codes WHERE id = $1", [id]);
+    if (!k.rows.length) return res.status(404).send("Promo code not found.");
+    const [poDogodkih, skupaj] = await Promise.all([
+      pool.query(
+        `SELECT e.id AS event_id, e.title, e.start_at, c.name AS club_name, s.tickets_sold, s.orders, s.gross_cents, s.test_tickets_sold, s.test_orders
+         FROM (SELECT event_id FROM promo_code_events WHERE promo_code_id = $1 UNION SELECT event_id FROM orders WHERE promo_code_id = $1) ev
+         JOIN events e ON e.id = ev.event_id JOIN clubs c ON c.id = e.club_id
+         LEFT JOIN LATERAL (SELECT ${PROMO_SESTEVEK} FROM orders o WHERE o.promo_code_id = $1 AND o.event_id = e.id AND ${PROMO_STANJA}) s ON TRUE
+         ORDER BY e.start_at DESC, e.id DESC`, [id]),
+      pool.query(`SELECT ${PROMO_SESTEVEK} FROM orders o WHERE o.promo_code_id = $1 AND ${PROMO_STANJA}`, [id]),
+    ]);
+    return res.json({ code: k.rows[0], events: poDogodkih.rows, total: skupaj.rows[0] });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
 // --- varnostna kopija ---
 // GET /admin/api/export — logični izvoz VSEH tabel v shemi public kot JSON
 // (vrstice + trenutne vrednosti zaporedij), v enem posnetku (REPEATABLE READ),
@@ -5345,6 +5548,40 @@ function pricakovanaCenaIzTela(b) {
   if (!Number.isInteger(v) || v < 0) return { napaka: "expected_price_cents must be a non-negative integer (cents)." };
   return { cena: v };
 }
+
+// --- Promo kode (065, I61): SAMO STATISTIKA. Koda ne spremeni cene, provizije, Stripa, zaloge ali karkoli drugega pri nakupu; shrani se samo orders.promo_code_id. ---
+// Neobvezno polje telesa `promo_code` (niz): manjka / null / prazen niz po trim = brez kode (vedenje kot pred 065). Vnos se obreze in pretvori v velike crke
+// (»max12« == »MAX12«). Napacen format, neznana, neaktivna ali za ta dogodek neveljavna koda -> 400 promo_code_invalid, narocilo NE nastane (zaloga ni rezervirana,
+// idempotentni kljuc ni zapisan: 400 pride pred INSERT-om, kljuc v pomnilniku se sprosti ob odgovoru kot pri vsakem drugem 400). Koda NI del identitete idempotentnega kljuca
+// (kot expected_price_cents): ponovitev z istim kljucem vrne prvo narocilo ze v idempotenca() / gostIdemPreveri, PRED preverbo kode. VIP poti polja ne berejo (ignorirajo ga, ne zavrnejo).
+const PROMO_KODA_VNOS = /^[A-Za-z0-9_-]{3,32}$/;   // pred toUpperCase: Unicode velike crke (ß, ı, ſ) ne smejo postati ASCII
+const NAPAKA_PROMO_KODA = { error: "promo_code_invalid", message: "This promo code is not valid for this event." };
+// Vrne { koda: null } (brez kode) | { koda: "MAX12" } | { napaka: true }.
+function promoKodaIzTela(b) {
+  const v = b && typeof b === "object" ? b.promo_code : undefined;
+  if (v === undefined || v === null) return { koda: null };
+  if (typeof v !== "string") return { napaka: true };
+  const t = v.trim();
+  if (t === "") return { koda: null };
+  if (!PROMO_KODA_VNOS.test(t)) return { napaka: true };
+  return { koda: t.toUpperCase() };
+}
+// Middleware za oba nakupa vstopnic (prijavljen, gost): PO idempotenci (ponovitev s kljucem vrne prvo narocilo ne glede na kodo), PRED omejevalnikom in bazo.
+function promoKodaTelo(req, res, next) {
+  const pk = promoKodaIzTela(req.body);
+  if (pk.napaka) return res.status(400).json(NAPAKA_PROMO_KODA);
+  req.promoKoda = pk.koda;
+  next();
+}
+// V transakciji nakupa (odjemalec c): id kode, ce velja za dogodek (aktivna IN klub dogodka ALI dogodek med izbranimi), sicer null. Vrstica promo_codes se ne zaklepa
+// (hkratna deaktivacija ne ustavi nakupa, ki je kodo ze prebral).
+async function promoKodaZaDogodek(c, koda, eventId, clubId) {
+  const r = await c.query(
+    `SELECT pc.id FROM promo_codes pc
+      WHERE pc.code = $1 AND pc.active
+        AND (pc.club_id = $2 OR EXISTS (SELECT 1 FROM promo_code_events pe WHERE pe.promo_code_id = pc.id AND pe.event_id = $3))`, [koda, clubId, eventId]);
+  return r.rows.length ? r.rows[0].id : null;
+}
 const SPREMENJENA_CENA_VSTOPNICE = "The ticket price has changed.";
 // Razlicica pogojev ob nakupu Z RACUNOM (044, #215): neobvezno polje telesa `terms_version`. Ni del vsebine nakupa (odtis idempotence se ne spremeni).
 // Vrne { verzija: string|null } ali { napaka }. Manjka ali null = NULL v bazi (star odjemalec); isti regex kot pri gostu in v CHECK-u migracije 044.
@@ -5544,8 +5781,8 @@ function idempotenca(vsebinaIzZahteve) {
   };
 }
 
-// POST /events/:id/orders — nakup. Telo: { quantity }.
-app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), zavrniRazprodano, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+// POST /events/:id/orders — nakup. Telo: { quantity, promo_code? } (promo_code: samo statistika, I61).
+app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), promoKodaTelo, zavrniRazprodano, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const id = celoId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const q = Number((req.body || {}).quantity ?? 1);
@@ -5585,6 +5822,12 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
     // Potrditev cene (#277 N2): cena vstopnice se je med ogledom in nakupom spremenila -> 409, nic ni zaracunano ali rezervirano.
     if (pricakovana.cena !== null && pricakovana.cena !== e.ticket_price_cents) { await c.query("ROLLBACK"); return res.status(409).send(SPREMENJENA_CENA_VSTOPNICE); }
+    // Promo koda (065, I61): preverba v ISTI transakciji kot vpis narocila; samo statistika, nic drugega se ne spremeni.
+    let promoId = null;
+    if (req.promoKoda) {
+      promoId = await promoKodaZaDogodek(c, req.promoKoda, e.id, e.club_id);
+      if (promoId === null) { await c.query("ROLLBACK"); return res.status(400).json(NAPAKA_PROMO_KODA); }
+    }
     if (e.capacity !== null && e.sold_count + q > e.capacity) {
       if (e.capacity - e.sold_count <= 0) razprodanoOznaci("v:" + id);
       await c.query("ROLLBACK"); return res.status(409).send(`Only ${Math.max(0, e.capacity - e.sold_count)} tickets left.`);
@@ -5626,10 +5869,10 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     const or = await c.query(
       `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency,
                            application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at, idempotency_key,
-                           stripe_account_id, receipt_mail_attempts, terms_version, terms_accepted_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $11 = 'paid' THEN NOW() END,$14,$15,CASE WHEN $11 = 'paid' THEN 0 END,$16::text,CASE WHEN $16::text IS NOT NULL THEN NOW() END) RETURNING id`,
+                           stripe_account_id, receipt_mail_attempts, terms_version, terms_accepted_at, promo_code_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $11 = 'paid' THEN NOW() END,$14,$15,CASE WHEN $11 = 'paid' THEN 0 END,$16::text,CASE WHEN $16::text IS NOT NULL THEN NOW() END,$17) RETURNING id`,
       [ref, req.user.userId, e.id, e.club_id, q, e.ticket_price_cents, skupaj, e.currency, provizija, e.vat_rate,
-       placanoTakoj ? "paid" : "pending", pi, u.email, req.idemKljuc || null, placilaStripe.racunNarocila(placanoTakoj, platformno, e.stripe_account_id), pogoji.verzija]
+       placanoTakoj ? "paid" : "pending", pi, u.email, req.idemKljuc || null, placilaStripe.racunNarocila(placanoTakoj, platformno, e.stripe_account_id), pogoji.verzija, promoId]
     );
     const oid = or.rows[0].id;
     if (placanoTakoj) {
@@ -5988,9 +6231,9 @@ async function idempotencaGost(req, res, next) {
 }
 
 // POST /guest/events/:id/orders — nakup vstopnic brez racuna. Brez zetona.
-// Telo: { email, quantity?, date_of_birth? (obvezen pri min_age > 0), accept_terms: true, terms_version }.
+// Telo: { email, quantity?, date_of_birth? (obvezen pri min_age > 0), accept_terms: true, terms_version, promo_code? (samo statistika, I61) }.
 // 201 { mode, order, tickets, checkout_url?, guest_token }; napake kot besedilo (400, 403, 409, 429, 503) ali { error, message } (idempotenca).
-app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zavrniRazprodano,
+app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, promoKodaTelo, zavrniRazprodano,
   omeji({ kljuc: "nakup-gost", najvec: GOST_NAKUP_NA_URO, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const g = req.gost;
   if (!(await nakupDovoljenje(req, res))) return;
@@ -6020,6 +6263,12 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     const np = napakaProdaje(e, { zahtevajCeno: true });
     if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
     if (g.pricakovanaCena !== null && g.pricakovanaCena !== e.ticket_price_cents) { await c.query("ROLLBACK"); return res.status(409).send(SPREMENJENA_CENA_VSTOPNICE); }   // #277 N2
+    // Promo koda (065, I61): glej POST /events/:id/orders; samo statistika.
+    let promoId = null;
+    if (req.promoKoda) {
+      promoId = await promoKodaZaDogodek(c, req.promoKoda, e.id, e.club_id);
+      if (promoId === null) { await c.query("ROLLBACK"); return res.status(400).json(NAPAKA_PROMO_KODA); }
+    }
     if (e.capacity !== null && e.sold_count + g.quantity > e.capacity) {
       if (e.capacity - e.sold_count <= 0) razprodanoOznaci("v:" + e.id);
       await c.query("ROLLBACK"); return res.status(409).send(`Only ${Math.max(0, e.capacity - e.sold_count)} tickets left.`);
@@ -6068,10 +6317,10 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, zav
     const or = await c.query(
       `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency,
                            application_fee_cents, vat_rate, status, stripe_payment_intent_id, buyer_email, paid_at, idempotency_key,
-                           stripe_account_id, guest_email, guest_terms_version, guest_terms_accepted_at, guest_age_min)
-       VALUES ($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,CASE WHEN $10 = 'paid' THEN NOW() END,$13,$14,$12,$15,NOW(),$16) RETURNING id`,
+                           stripe_account_id, guest_email, guest_terms_version, guest_terms_accepted_at, guest_age_min, promo_code_id)
+       VALUES ($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,CASE WHEN $10 = 'paid' THEN NOW() END,$13,$14,$12,$15,NOW(),$16,$17) RETURNING id`,
       [ref, e.id, e.club_id, g.quantity, e.ticket_price_cents, skupaj, e.currency, provizija, e.vat_rate,
-       placanoTakoj ? "paid" : "pending", pi, g.email, req.idemKljuc || null, placilaStripe.racunNarocila(placanoTakoj, platformno, e.stripe_account_id), g.terms, g.dob ? e.min_age : null]
+       placanoTakoj ? "paid" : "pending", pi, g.email, req.idemKljuc || null, placilaStripe.racunNarocila(placanoTakoj, platformno, e.stripe_account_id), g.terms, g.dob ? e.min_age : null, promoId]
     );
     const oid = or.rows[0].id;
     if (placanoTakoj) {

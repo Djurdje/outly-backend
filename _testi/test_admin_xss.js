@@ -11,6 +11,7 @@
  * Izvajalni del: odsek zaženemo v minimalnem lažnem DOM-u (ustvarjeni elementi, `innerHTML` setter beleži), v API odgovore
  * vstavimo `<img src=x onerror=...>` in preverimo, da vsebina konča kot besedilo (text node), ne kot element.
  * Vsak korak, ki ga ne najde, PADE (ne preskoči).
+ * Odsek 10 (065, 23. 10. 2026): admin/promo.js (zavihek »Promo kode«): imena, klubi in dogodki iz podatkov kot besedilo, statistika po dogodkih, ustvarjanje (validacija, POST), izklop prek potrdi(), urejanje.
  * Odsek 9 (#329, 23. 10. 2026): admin/mnozicno.js (mnozicna dejanja nad dogodki): kljukice in naslovi iz podatkov kot besedilo, klik na kljukico ne odpre urejevalnika, potrdi() z obveznim razlogom
  * in seznamom izbranih, POST /admin/api/events/bulk s pravimi polji, premik v dneh -> minute, rezultat po dogodkih (sporocila API-ja kot besedilo), najvec 50 izbranih.
  * Odsek 8 (#328, 23. 10. 2026): admin/nov-dogodek.js (»Nov dogodek«, plakat, »Pred objavo«, »Podvoji«): besedila iz podatkov kot besedilo, povezave samo #/dogodki/<število>, Objavi onemogočen ob rdeči oviri ali neuspelem pregledu, POST /events v centih.
@@ -172,7 +173,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
   assert(trsS.map(t => gumbov(t.children[t.children.length - 1])).join() === "1,1,0,0,0", "spori: gumb samo pri povrnitvi ni_uspelo/rocno", trsS.map(t => gumbov(t)));
 
   // --- 5. moduli panela (faza 1, 21. 10. 2026: admin/dialog.js, admin/dogodki.js) in brez window.confirm ---
-  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js", "agent.js", "predlogi.js", "nujno.js", "navigacija.js", "mnozicno.js"]) {
+  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js", "agent.js", "predlogi.js", "nujno.js", "promo.js", "navigacija.js", "mnozicno.js"]) {
     const kod = fs.readFileSync(path.join(__dirname, "..", "admin", ime), "utf8");
     const k5 = [];
     for (const m of kod.matchAll(NEVARNO)) {
@@ -185,7 +186,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     assert(!/\bon[a-z]+\s*=\s*["'`]/i.test(kod.replace(/\bon[a-z]+\s*=\s*\(/g, "")), `admin/${ime}: brez onclick="..." / onchange="..." nizov`);
   }
   assert(!/\bconfirm\s*\(/.test(skripta), "admin/index.html: brez window.confirm (vse potrditve prek potrdi() iz dialog.js)");
-  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script src="agent\.js"><\/script>\s*<script src="predlogi\.js"><\/script>\s*<script src="nujno\.js"><\/script>\s*<script src="navigacija\.js"><\/script>\s*<script src="mnozicno\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
+  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script src="agent\.js"><\/script>\s*<script src="predlogi\.js"><\/script>\s*<script src="nujno\.js"><\/script>\s*<script src="promo\.js"><\/script>\s*<script src="navigacija\.js"><\/script>\s*<script src="mnozicno\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
   assert(/<link rel="stylesheet" href="danes\.css">/.test(html), "danes.css je vezan v index.html");
   assert(/<link rel="stylesheet" href="mnozicno\.css">/.test(html), "mnozicno.css je vezan v index.html");
   assert(!/<link[^>]+(?:https?:)?\/\//.test(html) && !/<script[^>]+src="(?:https?:)?\/\//.test(html), "panel ne nalaga tujih skript ali stilov");
@@ -998,6 +999,97 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     // po novem izrisu (filter) izbira velja samo za vidne dogodke
     narisi9(); mn.zaSeznam({ vsebnik: vsebnik9, dogodki: veliko.slice(0, 5), osvezi: () => {} });
     assert(vsebnik9.children[0].textContent.includes("Izbranih: 5"), "mnozicno.js: po zoženju filtra ostanejo izbrani samo vidni dogodki", vsebnik9.children[0].textContent);
+  }
+
+  // --- 10. promo.js (065, 23. 10. 2026): zavihek »Promo kode« v lazni strani ---
+  {
+    class El10 extends El { get classList() { return { add() {}, remove() {}, toggle() {}, contains: () => false }; } }
+    const koren10 = new El10("div");
+    const doc10 = { createElement: (t) => new El10(t), createTextNode: (t) => new Besedilo(t), getElementById: (id) => (id === "pk_koren" ? koren10 : null) };
+    const h10 = new Function("document", `${mh[0]}\nreturn h;`)(doc10);
+    const datum10 = new Function(`${md[0]}\nreturn datum;`)();
+    const me10 = skripta.match(/function evriCelo\(c, valuta\) \{[\s\S]*?\n\}\n/);
+    mora(me10, "funkcija evriCelo() ni najdena");
+    const evriCelo10 = new Function(`${me10[0]}\nreturn evriCelo;`)();
+    const ZLO10 = ['<img src=x onerror=alert("a")>', "<script>alert('b')</script>", '"><svg onload=alert(1)>', "</td><img src=x onerror=1>"];
+    const klici10 = [], obv10 = [];
+    let potrdi10 = [];
+    const kode10 = () => [{ id: 1, code: "MAX12", label: ZLO10[0], active: true, club: { id: 1, name: ZLO10[1] }, events: [{ id: 7, title: ZLO10[2], start_at: "2026-11-01T20:00:00Z" }], tickets_sold: 5, orders: 4, gross_cents: 8000, test_tickets_sold: 1, test_orders: 1, created_at: "2026-10-23T10:00:00Z" }];
+    const stats10 = () => ({ code: { id: 1, code: "MAX12", label: "x", active: true },
+      events: [{ event_id: 7, title: ZLO10[2], start_at: "2026-11-01T20:00:00Z", club_name: ZLO10[3], tickets_sold: 5, orders: 4, gross_cents: 8000, test_tickets_sold: 1, test_orders: 1 }],
+      total: { tickets_sold: 5, orders: 4, gross_cents: 8000, test_tickets_sold: 1, test_orders: 1 } });
+    const klic10 = async (metoda, pot, telo) => {
+      klici10.push([metoda, pot, telo]);
+      if (metoda === "GET" && pot === "/admin/api/clubs") return [{ id: 1, name: ZLO10[1], city: ZLO10[0] }];
+      if (metoda === "GET" && pot === "/admin/api/events") return [{ id: 7, title: ZLO10[2], club_name: ZLO10[1], start_at: "2026-11-01T20:00:00Z", status: "published" }, { id: 8, title: "Odpovedan", club_name: "K", start_at: "2026-11-02T20:00:00Z", status: "cancelled" }];
+      if (metoda === "GET" && pot === "/admin/api/promo-codes") return kode10();
+      if (metoda === "GET" && pot === "/admin/api/promo-codes/1/stats") return stats10();
+      if (metoda === "POST" && pot === "/admin/api/promo-codes") return { id: 2, code: String(telo.code).toUpperCase() };
+      if (metoda === "PATCH" && pot === "/admin/api/promo-codes/1") return {};
+      throw new Error("nepričakovan klic API-ja iz promo.js: " + metoda + " " + pot);
+    };
+    const okno10 = {};
+    new Function("window", "document", "h", "klic", "varno", "obvesti", "potrdi", "datum", "evriCelo", fs.readFileSync(path.join(__dirname, "..", "admin", "promo.js"), "utf8"))(
+      okno10, doc10, h10, klic10, async (fn) => { try { await fn(); } catch (e) { obv10.push([e.message, "slabo"]); } }, (b, v) => obv10.push([b, v]),
+      async (o) => { const f = potrdi10.shift(); mora(f, "nepričakovano potrditveno okno: " + o.naslov); return f(o); }, datum10, evriCelo10);
+    mora(typeof okno10.naloziPromo === "function", "promo.js ne izvozi window.naloziPromo");
+    const DOV10 = new Set(["div", "span", "b", "p", "small", "h2", "button", "input", "label", "select", "option", "table", "thead", "tbody", "tr", "th", "td"]);
+    const najdi10 = (f) => { const r = []; sprehod(koren10, (e) => { if (e.nodeType === 1 && f(e)) r.push(e); }); return r; };
+    const gumb10 = (ime) => najdi10((e) => e.tagName === "button" && e.textContent === ime)[0];
+    const polje10 = (oznaka) => najdi10((e) => e.attrs["aria-label"] === oznaka)[0];
+    const vnesi10 = (el, v) => { el.value = v; el.oninput({ currentTarget: el }); };
+
+    await okno10.naloziPromo();
+    let p10 = pregled(koren10), bes10 = p10.besedila.join("\n");
+    assert(p10.elementi.every((t) => DOV10.has(t)) && !p10.elementi.some((t) => t.startsWith("atribut:")), "promo.js: seznam nima elementov iz podatkov in on* atributov", [...new Set(p10.elementi)]);
+    assert([ZLO10[0], ZLO10[1], ZLO10[2]].every((z) => bes10.includes(z)) && bes10.includes("MAX12") && bes10.includes("Skupaj prodanih kart prek kod: 5"), "promo.js: ime, klub in dogodek iz podatkov so BESEDILO; vsota kart", bes10);
+    assert(innerHTMLZapisi.every((v) => v === ""), "promo.js: innerHTML ni uporabljen");
+    assert(klici10.filter((k) => k[0] !== "GET").length === 0, "promo.js: samo branje ob odprtju zavihka");
+
+    // statistika po dogodkih
+    await gumb10("Statistika").onclick();
+    p10 = pregled(koren10); bes10 = p10.besedila.join("\n");
+    assert(klici10.some((k) => k[1] === "/admin/api/promo-codes/1/stats") && p10.elementi.every((t) => DOV10.has(t)) && !p10.elementi.some((t) => t.startsWith("atribut:")), "promo.js: statistika: GET .../stats, brez elementov iz podatkov");
+    assert(bes10.includes(ZLO10[2]) && bes10.includes(ZLO10[3]) && bes10.includes("Skupaj") && bes10.includes("80,00 €") && bes10.includes("testni nakupi") && bes10.includes("1 kart v 1 naročilih"), "promo.js: tabela po dogodkih (besedilo iz podatkov), skupaj, bruto v evrih, testni loceno", bes10);
+    await gumb10("Statistika").onclick();
+    assert(!pregled(koren10).besedila.join("\n").includes("Skupaj\n"), "promo.js: drugi klik zapre statistiko");
+
+    // nova koda: validacija, izbira dogodkov (odpovedan ni na seznamu), POST
+    obv10.length = 0; klici10.length = 0;
+    vnesi10(polje10("Koda"), "ab"); vnesi10(polje10("Ime ali opis lastnika kode"), "Max");
+    await gumb10("Ustvari kodo").onclick();
+    assert(obv10.some((o) => o[1] === "slabo" && /3–32/.test(o[0])) && klici10.length === 0, "promo.js: prekratka koda = opozorilo, brez POST-a");
+    vnesi10(polje10("Koda"), "  max12 ");
+    await gumb10("Ustvari kodo").onclick();
+    assert(obv10.some((o) => /Izberi klub/.test(o[0])) && klici10.length === 0, "promo.js: brez kluba = opozorilo, brez POST-a");
+    const nacin = polje10("Za kaj velja koda"); nacin.value = "dogodki"; nacin.onchange({ currentTarget: nacin });
+    const kljukice = najdi10((e) => e.tagName === "input" && e.attrs.type === "checkbox");
+    assert(kljukice.length === 1 && polje10("Koda").value === "  max12 ", "promo.js: odpovedan dogodek ni na seznamu; vnos kode ostane po ponovnem izrisu", kljukice.length);
+    kljukice[0].checked = true; kljukice[0].onchange();
+    klici10.length = 0;
+    await gumb10("Ustvari kodo").onclick();
+    const post = klici10.find((k) => k[0] === "POST");
+    assert(post && post[1] === "/admin/api/promo-codes" && JSON.stringify(post[2]) === JSON.stringify({ code: "max12", label: "Max", event_ids: [7] }), "promo.js: POST { code, label, event_ids } (koda obrezana)", post);
+    assert(obv10.some((o) => o[1] === "ok" && /MAX12/.test(o[0])), "promo.js: potrditev po ustvarjanju");
+
+    // vklop/izklop prek potrdi()
+    potrdi10 = [async () => null];
+    klici10.length = 0;
+    await gumb10("Izklopi").onclick();
+    assert(klici10.filter((k) => k[0] !== "GET").length === 0, "promo.js: preklic potrditve izklopa ne kliče API-ja");
+    potrdi10 = [async () => ({ razlog: "" })];
+    await gumb10("Izklopi").onclick();
+    const patch = klici10.find((k) => k[0] === "PATCH");
+    assert(patch && patch[1] === "/admin/api/promo-codes/1" && JSON.stringify(patch[2]) === '{"active":false}', "promo.js: PATCH { active: false } po potrditvi", patch);
+
+    // uredi: oznaka in obseg iz podatkov kot besedilo/vrednost; shrani poslje club_id in event_ids
+    await gumb10("Uredi").onclick();
+    p10 = pregled(koren10);
+    assert(p10.elementi.every((t) => DOV10.has(t)) && !p10.elementi.some((t) => t.startsWith("atribut:")) && polje10("Ime ali opis").value === ZLO10[0], "promo.js: urejanje: ime v polju kot vrednost, brez elementov iz podatkov");
+    klici10.length = 0;
+    await gumb10("Shrani").onclick();
+    const patch2 = klici10.find((k) => k[0] === "PATCH");
+    assert(patch2 && JSON.stringify(patch2[2]) === JSON.stringify({ label: ZLO10[0], club_id: 1, event_ids: [7] }), "promo.js: PATCH { label, club_id, event_ids }", patch2);
   }
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
