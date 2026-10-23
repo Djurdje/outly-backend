@@ -217,19 +217,21 @@ function zacetekCezPrehod() {
     r = await duplikat(S2, { startAt: new Date(Date.now() + 6 * 864e5).toISOString() });
     assert(r.status === 201 && r.body.events[0].status === "draft", "odpovedan dogodek se podvoji v osnutek");
 
-    // prvi osnutek natanko na zahtevanem trenutku tudi v dvoumni uri prehoda casa (25. 10. 2026 02:30 +02:00 = 00:30Z; po AT TIME ZONE bi postal 02:30 +01:00 = 01:30Z)
+    // prvi osnutek natanko na zahtevanem trenutku tudi v dvoumni uri prehoda casa: najblizji prihodnji zadnji oktobrski nedeljski prehod, 02:30 +02:00 = 00:30Z
+    // (po AT TIME ZONE bi postal 02:30 +01:00 = 01:30Z). Vedno v naslednjih ~12 mesecih, torej znotraj 2-letne meje.
     {
-      const nocPrehoda = "2026-10-25T02:30:00+02:00";
+      let nocPrehoda = null, pricakovano = null;
+      for (let leto = new Date().getUTCFullYear(); !nocPrehoda; leto++) {
+        const d = new Date(Date.UTC(leto, 9, 31)); d.setUTCDate(31 - d.getUTCDay());   // zadnja nedelja oktobra
+        const p = `${leto}-10-${String(d.getUTCDate()).padStart(2, "0")}`;
+        if (Date.parse(`${p}T00:30:00Z`) > Date.now() + 36e5) { nocPrehoda = `${p}T02:30:00+02:00`; pricakovano = `${p}T00:30:00.000Z`; }
+      }
       const SD = await dogodek(K_B, "Izvor za dvoumno uro", { status: "published" });
-      await pool.query("UPDATE events SET start_at = '2026-10-18T02:30:00+02:00' WHERE id = $1", [SD]);
-      // izvor je v preteklosti, a to je v redu; startAt mora biti v prihodnosti: pogoj preskocimo samo, ce je danes ze po tem datumu (CI v prihodnosti)
-      if (Date.parse(nocPrehoda) > Date.now()) {
-        const q = await duplikat(SD, { startAt: nocPrehoda, ponovi: "weekly", n: 2 });
-        const zs = q.status === 201 ? q.body.events.map((e) => new Date(e.start_at).toISOString()) : q.body;
-        assert(q.status === 201 && zs[0] === "2026-10-25T00:30:00.000Z", "startAt 2026-10-25T02:30:00+02:00: prvi osnutek natanko ta trenutek (00:30Z), ne 01:30Z", zs);
-        const dbs = (await pool.query("SELECT start_at FROM events WHERE id = ANY($1) ORDER BY start_at", [q.body.events.map((e) => e.id)])).rows;
-        assert(dbs[0].start_at.toISOString() === "2026-10-25T00:30:00.000Z", "tudi v bazi", dbs[0]);
-      } else console.log("  (preskoceno: 25. 10. 2026 je ze mimo)");
+      const q = await duplikat(SD, { startAt: nocPrehoda, ponovi: "weekly", n: 2 });
+      const zs = q.status === 201 ? q.body.events.map((e) => new Date(e.start_at).toISOString()) : q.body;
+      assert(q.status === 201 && zs[0] === pricakovano, `startAt ${nocPrehoda}: prvi osnutek natanko ta trenutek (${pricakovano}), ne +1 h`, zs);
+      const dbs = (await pool.query("SELECT start_at FROM events WHERE id = ANY($1) ORDER BY start_at", [q.body.events.map((e) => e.id)])).rows;
+      assert(dbs[0].start_at.toISOString() === pricakovano, "tudi v bazi", dbs[0]);
     }
 
     // ============ P3: neveljavno ============
