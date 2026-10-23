@@ -2886,6 +2886,12 @@ async function dopolniPrizorisce(vrstica) {
 
 // POST /events (updated: accepts camelCase + snake_case, includes ticket fields)
 app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, res) => {
+  return ustvariDogodek(req, res);
+});
+
+// Skupno telo za POST /events (lastnik/manager/admin kluba) in POST /admin/api/events (#328, admin za vsak klub): ista validacija in isti INSERT.
+// `opcije.admin`: klub ni vezan na clanstvo klicatelja, status je VEDNO draft (telo ga ne more povoziti), INSERT in vrstica admin_dejanja `event.create` gresta v isti transakciji.
+async function ustvariDogodek(req, res, opcije = {}) {
   try {
     // accept both formats
     const clubId = req.body.clubId ?? req.body.club_id;
@@ -2896,7 +2902,7 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
     const endAt = req.body.endAt ?? req.body.end_at ?? null;
     const minAge = req.body.minAge ?? req.body.min_age;
     const genres = req.body.genres;
-    const status = req.body.status ?? "published";
+    const status = opcije.admin ? "draft" : (req.body.status ?? "published");
 
     const ticketPriceCents = req.body.ticketPriceCents ?? req.body.ticket_price_cents ?? null;
     const currency = (req.body.currency ?? "EUR").toString();
@@ -2939,7 +2945,7 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
 
     const club = clubR.rows[0];
 
-    if (req.klub.role !== "admin" && Number(club.id) !== Number(req.klub.clubId)) {
+    if (!opcije.admin && req.klub.role !== "admin" && Number(club.id) !== Number(req.klub.clubId)) {
       return res.status(403).send("You can only create events for your own club.");
     }
 
@@ -2951,7 +2957,7 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
     // Podedovani zanri kluba so lahko stari zapisi izven ZANRI: ociscimo (brez 400, neznane izpustimo), da se umazanija ne siri na nove dogodke.
     const finalGenres = zanriDogodka ?? ociscenoZanre(club.genres);
 
-    const r = await pool.query(
+    const sqlVstavi =
       `INSERT INTO events
       (
         club_id, title, description, poster_url, start_at, end_at,
@@ -2961,8 +2967,8 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
       )
       VALUES
       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-      RETURNING *`,
-      [
+      RETURNING *`;
+    const parametri = [
         clubId,
         title,
         description,
@@ -2982,8 +2988,19 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
         prizorisce.venue_city,
         prizorisce.venue_lat,
         prizorisce.venue_lng
-      ]
-    );
+      ];
+    let r;
+    if (opcije.admin) {
+      const c = await pool.connect();
+      try {
+        await c.query("BEGIN");
+        r = await c.query(sqlVstavi, parametri);
+        const n = r.rows[0];
+        await zapisiAdminDejanje(c, req, "event.create", "event", n.id, null, { club_id: n.club_id, title: n.title, start_at: new Date(n.start_at).toISOString(), status: n.status });
+        await c.query("COMMIT");
+      } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
+      finally { c.release(); }
+    } else r = await pool.query(sqlVstavi, parametri);
 
     // Sledilci kluba dobijo obvestilo (migracija 019). Samo objavljeni dogodki:
     // osnutka in odpovedanega ni smisla oznanjati. Napaka pri obvescanju NE sme
@@ -2998,7 +3015,7 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
     console.error(e);
     res.status(500).send("Server error.");
   }
-});
+}
 
 // Vsakemu sledilcu kluba vstavi obvestilo o dogodku. UNIQUE (user_id, event_id) poskrbi,
 // da ponovna objava (draft -> published -> draft -> published) ne podvoji zvonca.
@@ -3213,6 +3230,22 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
       dovoljeno.sales_paused = pavzaV;
     }
 
+    // Okno prodaje (#327; stolpca in omejitev events_sales_window_chk od migracije 002): ISO cas z obmocjem (Z ali +hh:mm) ali null (brez omejitve).
+    // Izpuscen kljuc = brez spremembe. Krsitev omejitve (zapre <= odpre, tudi ko je podano samo eno polje) ujame catch spodaj -> 400 invalid_sales_window.
+    for (const [stolpec, camel] of [["sales_open_at", "salesOpenAt"], ["sales_close_at", "salesCloseAt"]]) {
+      const oknoV = b[camel] !== undefined ? b[camel] : b[stolpec];
+      if (oknoV === undefined) continue;
+      if (oknoV !== null) {
+        // Komponente morajo biti prave (V8 bi 31. 2. tiho premaknil v marec); leto 2000-2100 (leto 0000/0001 je za Postgres napaka 22008 -> bi bilo 500).
+        const m = typeof oknoV === "string" ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})$/i.exec(oknoV) : null;
+        const [ll, me, dn, ur, mi, se] = m ? [m[1], m[2], m[3], m[4], m[5], m[6] || "0"].map(Number) : [];
+        const prav = !!m && ll >= 2000 && ll <= 2100 && me >= 1 && me <= 12 && dn >= 1 && dn <= new Date(Date.UTC(ll, me, 0)).getUTCDate() && ur <= 23 && mi <= 59 && se <= 59;
+        const cas = prav ? new Date(oknoV) : null;
+        if (!cas || !Number.isFinite(cas.getTime())) return res.status(400).send(`${camel} must be an ISO date-time with a time zone, or null.`);
+        dovoljeno[stolpec] = cas.toISOString();
+      } else dovoljeno[stolpec] = null;
+    }
+
     const sets = [], vrednosti = [];
     for (const [k, v] of Object.entries(dovoljeno)) {
       if (v === undefined) continue;
@@ -3270,6 +3303,9 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
       if (e && e.code === "23514" && e.constraint === "events_sold_chk") {
         const sold = (await c.query("SELECT sold_count FROM events WHERE id = $1", [d.id]).catch(() => ({ rows: [] }))).rows[0];   // M8: ze drzimo c (I16, #274)
         return res.status(400).json({ error: "capacity_below_sold", message: `Capacity can't be lower than the number of tickets already sold${sold ? ` (${sold.sold_count})` : ""}.`, sold: sold ? sold.sold_count : null });
+      }
+      if (e && e.code === "23514" && e.constraint === "events_sales_window_chk") {
+        return res.status(400).json({ error: "invalid_sales_window", message: "Sales close time must be after the sales open time." });
       }
       // Preklic cakajocih narocil ob pavzi (zaklep dogodek -> narocila) se lahko redko zaklene s hkratnim webhookom (narocilo -> dogodek prek sprozilca):
       // Postgres eno od transakcij prekine; tu nic ni spremenjeno, odjemalec ponovi.
@@ -3590,6 +3626,7 @@ function celoId4(v) { const n = celoId(v); return n !== null && n <= 2147483647 
 // --- pregled ---
 admin.get("/summary", async (req, res) => {
   try {
+    // warnings_red (DODANO, #326): zadnje izracunano stevilo rdecih opozoril (admin_nadzor.js, najvec 60 s staro) ali null; summary NE sprozi izracuna in ne caka.
     const r = await pool.query(`
       SELECT
         (SELECT COUNT(*)::int FROM creator_applications WHERE status='new') AS new_applications,
@@ -3603,8 +3640,9 @@ admin.get("/summary", async (req, res) => {
         (SELECT COUNT(*)::int FROM reports WHERE status='open')              AS open_reports,
         (SELECT COUNT(*)::int FROM vracila WHERE stanje IN ('ni_uspelo','rocno')) AS refunds_attention,
         (SELECT COUNT(*)::int FROM spori WHERE zaprt_at IS NULL)             AS open_disputes,
-        (SELECT COUNT(*)::int FROM spori WHERE povrnitev_stanje IN ('ni_uspelo','rocno')) AS dispute_recovery_attention`);
-    return res.json(r.rows[0]);
+        (SELECT COUNT(*)::int FROM spori WHERE povrnitev_stanje IN ('ni_uspelo','rocno')) AS dispute_recovery_attention,
+        (SELECT COUNT(*)::int FROM racuni WHERE stanje='napaka')             AS racuni_napaka`);
+    return res.json({ ...r.rows[0], warnings_red: adminNadzor.rdeceStevilo() });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
@@ -3948,22 +3986,29 @@ admin.get("/users", async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
-// PATCH /admin/api/users/:id — { role } | { unlock: true } | { emailVerified: true }
+// PATCH /admin/api/users/:id — { role, reason? } | { unlock: true } | { emailVerified: true }
+// Sprememba vloge (U3, 23. 10. 2026): neobvezen `reason` (niz, do 500 znakov) gre v dnevnik; ob SPREMEMBI vloge se v ISTI transakciji kot UPDATE
+// zapise vrstica admin_dejanja (dejanje `user.role`, cilj `user`, prej/potem `{ role }`). Brez e-naslovov v dnevniku. Enaka vloga (brez spremembe) vrstice ne pusti.
+// Sprememba v `admin`/`backup` ali odvzem `admin` zahteva `reason` (vsaj 3 znaki) -> sicer 400 `reason_required`.
 admin.patch("/users/:id", async (req, res) => {
+  let c = null;
   try {
     const id = celoId(req.params.id);
     if (!id) return res.status(400).send("Invalid user id.");
     const b = req.body || {};
     const sets = [], vrednosti = [];
     const dodaj = (k, v) => { vrednosti.push(v); sets.push(`${k} = $${vrednosti.length}`); };
-    let prekliciZetone = false;
+    let razlog = null;
+    if (b.reason !== undefined && b.reason !== null) {
+      if (typeof b.reason !== "string" || b.reason.length > 500) return res.status(400).send("reason must be a string of at most 500 characters.");
+      razlog = b.reason.trim() || null;
+    }
 
     if (b.role !== undefined) {
       if (!["user", "business", "admin", "backup"].includes(b.role)) return res.status(400).send("role must be user, business, admin or backup.");
       // Admin si sam ne more vzeti vloge: sicer bi lahko ostal panel brez admina.
       if (id === req.user.userId && b.role !== "admin") return res.status(400).send("You cannot remove your own admin role.");
       dodaj("role", b.role);
-      prekliciZetone = true;
     }
     if (b.unlock !== undefined) {
       if (b.unlock !== true) return res.status(400).send("unlock must be true.");
@@ -3979,15 +4024,35 @@ admin.patch("/users/:id", async (req, res) => {
     if (sets.length === 0) return res.status(400).send("Nothing to update.");
 
     vrednosti.push(id);
-    const r = await pool.query(
+    c = await pool.connect();
+    await c.query("BEGIN");
+    let staraVloga = null;
+    if (b.role !== undefined) {
+      const star = await c.query("SELECT role FROM users WHERE id = $1 FOR NO KEY UPDATE", [id]);
+      if (star.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("User not found."); }
+      staraVloga = star.rows[0].role;
+      // Nova vloga admin/backup ali odvzem vloge admin: razlog (vsaj 3 znaki) je obvezen (panel ga zahteva v oknu, streznik ga uveljavi sam).
+      if (staraVloga !== b.role && (b.role === "admin" || b.role === "backup" || staraVloga === "admin") && (razlog || "").length < 3) {
+        await c.query("ROLLBACK");
+        return res.status(400).json({ error: "reason_required", message: "A reason (at least 3 characters) is required to grant admin or backup, or to remove admin." });
+      }
+    }
+    const r = await c.query(
       `UPDATE users SET ${sets.join(", ")} WHERE id = $${vrednosti.length}
        RETURNING ${ADMIN_POLJA_UPORABNIKA}`, vrednosti
     );
-    if (r.rows.length === 0) return res.status(404).send("User not found.");
+    if (r.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("User not found."); }
+    if (b.role !== undefined && staraVloga !== b.role) {
+      await zapisiAdminDejanje(c, req, "user.role", "user", id, { role: staraVloga }, { role: b.role }, razlog);
+    }
+    await c.query("COMMIT");
     // Vloga pride iz baze ob vsakem klicu (Supabase Auth), preklic žetonov ni več potreben.
-    console.log(`Admin ${req.user.userId} spremenil uporabnika ${id}:`, JSON.stringify(b));
+    console.log(`Admin ${req.user.userId} spremenil uporabnika ${id}:`, JSON.stringify({ ...b, reason: undefined }));
     return res.status(200).json(r.rows[0]);
-  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+  } catch (e) {
+    if (c) await c.query("ROLLBACK").catch(() => {});
+    console.error(e); return res.status(500).send("Server error.");
+  } finally { if (c) c.release(); }
 });
 
 // Testno naročilo (alias `o`), glej komentar »TESTNI PROMET (#230)« pri GET /admin/api/finance. Uporabljajo: /finance, /admin/api/events (#236), GET /business/sales (#236).
@@ -4060,6 +4125,87 @@ admin.patch("/events/:id", async (req, res) => {
     catch (e) { console.error("Obvescanje sledilcev ni uspelo:", e.message); }
   }
   return res.status(200).json(r.rows[0]);
+});
+
+// POST /admin/api/events/:id/duplicate (#328): podvoji dogodek v OSNUTEK/OSNUTKE. Telo: { startAt } (ISO z obmocjem) ali { startAt, ponovi: "weekly", n } (1 <= n <= 12;
+// n je SKUPNO stevilo osnutkov, prvi je na startAt, vsak naslednji 7 koledarskih dni pozneje po ljubljanskem casu, zato ura po spremembi poletnega casa ostane).
+// Kopira: naslov, opis, plakat, starost, zanre, ceno, valuto, zunanjo prodajo (plakat/URL, ki ne ustreza I48, in neznani zanri se NE prenesejo), kapaciteto, DDV stopnjo, prizorisce (tudi gostiteljski klub in koordinate).
+// end_at ohrani trajanje; okno prodaje (sales_open_at/sales_close_at) ohrani zamik od zacetka (po ljubljanski uri), sicer null.
+// NE kopira: VIP razporeda dogodka (club_tables.event_id, I28: vip_enabled = false, vip_layout_source = 'club', brez tlorisa), prodanih vstopnic (sold_count 0),
+// pavze prodaje (false), posnetka po dogodku (''). Vse v ENI kratki transakciji (vse ali nic), brez zaklepa izvornega ali tujih dogodkov (en INSERT ... SELECT),
+// nic na skenPool. Za vsak nov dogodek vrstica admin_dejanja `event.duplicate` (cilj = nov id, potem = { iz, start_at }), brez osebnih podatkov.
+// POST /admin/api/events (#328): admin ustvari OSNUTEK za kateri koli klub (korak 1 »Nov dogodek« v panelu). Ista validacija in INSERT kot POST /events (ustvariDogodek),
+// a brez vezave na clanstvo admina v klubu (admin, ki je sam lastnik nekega kluba, bi na POST /events za tuj klub dobil 403/404), status vedno draft, vrstica `event.create`.
+admin.post("/events", async (req, res) => ustvariDogodek(req, res, { admin: true }));
+
+const DUPLIKATOV_NAJVEC = 12;
+const DUPLIKAT_NAJVEC_VNAPREJ_MS = 2 * 366 * 864e5;   // startAt najvec 2 leti v prihodnost (tipkarska napaka v letu bi ustvarila osnutke, ki jih nihce ne najde)
+admin.post("/events/:id/duplicate", async (req, res) => {
+  const napaka = (status, error, message) => res.status(status).json({ error, message });
+  const id = celoId4(req.params.id);
+  if (!id) return napaka(400, "invalid_event_id", "Invalid event id.");
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  const zacetekSurov = b.startAt;
+  // Date.parse sprejme 31. februar (prestavi ga v marec): koledarski dan, uro in minuto preverimo sami.
+  const zm = typeof zacetekSurov === "string" ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:?\d{2})$/.exec(zacetekSurov) : null;
+  const koledarskoVeljavno = !!zm && Number(zm[2]) >= 1 && Number(zm[2]) <= 12 && Number(zm[3]) >= 1 && Number(zm[3]) <= new Date(Date.UTC(Number(zm[1]), Number(zm[2]), 0)).getUTCDate()
+    && Number(zm[4]) <= 23 && Number(zm[5]) <= 59 && (zm[6] === undefined || Number(zm[6]) <= 59);
+  if (!koledarskoVeljavno || Number.isNaN(Date.parse(zacetekSurov))) {
+    return napaka(400, "invalid_start", "startAt must be an ISO date-time with a time zone, e.g. 2026-11-06T22:00:00+01:00.");
+  }
+  if (Date.parse(zacetekSurov) <= Date.now()) return napaka(400, "start_in_past", "startAt must be in the future.");
+  if (Date.parse(zacetekSurov) > Date.now() + DUPLIKAT_NAJVEC_VNAPREJ_MS) return napaka(400, "start_too_far", "startAt must be at most 2 years ahead.");
+  let n = 1;
+  if (b.ponovi !== undefined && b.ponovi !== null) {
+    if (b.ponovi !== "weekly") return napaka(400, "invalid_repeat", 'ponovi must be "weekly".');
+    if (!Number.isInteger(b.n) || b.n < 1 || b.n > DUPLIKATOV_NAJVEC) return napaka(400, "invalid_count", `n must be an integer from 1 to ${DUPLIKATOV_NAJVEC}.`);
+    n = b.n;
+  } else if (b.n !== undefined && b.n !== null) {
+    return napaka(400, "invalid_count", 'n is allowed only together with ponovi: "weekly".');
+  }
+  const zacetekIso = new Date(zacetekSurov).toISOString();
+  const c = await pool.connect();
+  let nove;
+  try {
+    await c.query("BEGIN");
+    await c.query("SET LOCAL statement_timeout = 5000");
+    // Kopija ne prenese neveljavnih URL-jev (I48: stari zapis iz casov pred #269 bi se sicer razmnozil) in zanrov izven ZANRI: neveljavno postane '' / se izpusti.
+    const izvor = (await c.query("SELECT poster_url, ticket_url, genres FROM events WHERE id = $1", [id])).rows[0];
+    if (!izvor) { await c.query("ROLLBACK"); return napaka(404, "event_not_found", "Event not found."); }
+    const urlAliPrazno = (v, polje) => { const x = preveriUrlPolja([[polje, v]]); return x.napaka ? "" : (x.vrednosti[polje] || ""); };
+    const posterKopija = urlAliPrazno(izvor.poster_url, "poster_url"), ticketKopija = urlAliPrazno(izvor.ticket_url, "ticket_url");
+    const zanriKopija = ociscenoZanre(izvor.genres);
+    const r = await c.query(
+      `INSERT INTO events (club_id, title, description, poster_url, start_at, end_at, min_age, genres, status, ticket_price_cents, currency, ticket_url,
+                           capacity, vat_rate, sales_open_at, sales_close_at, venue_club_id, venue_name, venue_address, venue_city, venue_lat, venue_lng)
+       SELECT e.club_id, e.title, e.description, $4::text, s.nov_start,
+              CASE WHEN e.end_at IS NULL THEN NULL
+                   ELSE s.nov_start + make_interval(secs => (EXTRACT(EPOCH FROM e.end_at) - EXTRACT(EPOCH FROM e.start_at))::float8) END,
+              e.min_age, $6::text[], 'draft', e.ticket_price_cents, e.currency, $5::text,
+              e.capacity, e.vat_rate,
+              CASE WHEN e.sales_open_at IS NULL THEN NULL ELSE ((e.sales_open_at AT TIME ZONE 'Europe/Ljubljana') + s.zamik) AT TIME ZONE 'Europe/Ljubljana' END,
+              CASE WHEN e.sales_close_at IS NULL THEN NULL ELSE ((e.sales_close_at AT TIME ZONE 'Europe/Ljubljana') + s.zamik) AT TIME ZONE 'Europe/Ljubljana' END,
+              e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng
+         FROM events e
+        CROSS JOIN LATERAL (SELECT CASE WHEN g = 0 THEN $2::timestamptz   -- prvi osnutek natanko na zahtevanem trenutku (ura v dvoumni uri prehoda casa bi se prek AT TIME ZONE premaknila)
+                                    ELSE ((($2::timestamptz AT TIME ZONE 'Europe/Ljubljana') + g * INTERVAL '7 days') AT TIME ZONE 'Europe/Ljubljana') END AS nov_start,
+                                   (($2::timestamptz AT TIME ZONE 'Europe/Ljubljana') + g * INTERVAL '7 days') - (e.start_at AT TIME ZONE 'Europe/Ljubljana') AS zamik
+                              FROM generate_series(0, $3::int - 1) AS g) s
+        WHERE e.id = $1
+       RETURNING id, title, start_at, status`, [id, zacetekIso, n, posterKopija, ticketKopija, zanriKopija]);
+    if (r.rows.length === 0) { await c.query("ROLLBACK"); return napaka(404, "event_not_found", "Event not found."); }
+    nove = r.rows.sort((a, z) => a.start_at - z.start_at || a.id - z.id);
+    for (const nov of nove) {
+      await zapisiAdminDejanje(c, req, "event.duplicate", "event", nov.id, null, { iz: id, start_at: new Date(nov.start_at).toISOString() });
+    }
+    await c.query("COMMIT");
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (["22007", "22008", "23514"].includes(e && e.code)) return napaka(400, "duplicate_invalid", "The copy would break an event constraint (dates or sales window).");
+    console.error(e); return res.status(500).send("Server error.");
+  } finally { c.release(); }
+  console.log(`Admin ${req.user.userId} podvojil dogodek ${id} -> ${nove.length} osnutkov`);
+  return res.status(201).json({ events: nove.map((x) => ({ id: x.id, title: x.title, start_at: new Date(x.start_at).toISOString(), status: x.status })) });
 });
 
 // GET /admin/api/events/:id — vsa urejljiva polja dogodka (za urejevalnik v panelu) + stevci + zadnjih 30 vrstic dnevnika (055, I53).
@@ -4483,6 +4629,10 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
   }
 });
 
+// Opozorila, seznam racunov in nadzorna plosca »Danes« (23. 10. 2026, #326): GET /admin/api/opozorila, /racuni, /danes (admin_nadzor.js; samo branje, glavni pool, nikoli skenPool).
+const adminNadzor = require("./admin_nadzor").ustvari({
+  pool, router: admin, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
+});
 app.use("/admin/api", admin);
 
 // ---------------------------

@@ -64,7 +64,7 @@
   .skupina{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-bottom:16px}
   .skupina>h2{margin:0;font-size:12px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;
     padding:11px 15px;border-bottom:1px solid var(--line);color:var(--muted);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .skupina>h2 .desno{margin-left:auto;display:flex;gap:8px;align-items:center}
+  .skupina>h2 .desno{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .telo{padding:14px 15px}
   .polja{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:12px}
   .polja .siroko{grid-column:1/-1}
@@ -105,6 +105,7 @@
   img.mini{width:34px;height:34px;border-radius:6px;object-fit:cover;background:var(--panel2);vertical-align:middle}
 </style>
 <link rel="stylesheet" href="dogodki.css">
+<link rel="stylesheet" href="danes.css">
 </head>
 <body>
 <div class="wrap">
@@ -129,6 +130,7 @@
   <div id="panel" class="skrito">
     <nav>
       <button data-z="pregled" class="aktiven">Pregled</button>
+      <button data-z="opozorila">Opozorila <span class="n skrito" id="nOpozorila"></span></button>
       <button data-z="prosnje">Prošnje <span class="n skrito" id="nProsenj"></span></button>
       <button data-z="klubi">Klubi</button>
       <button data-z="uporabniki">Uporabniki</button>
@@ -142,7 +144,9 @@
 
     <!-- PREGLED -->
     <section id="z-pregled">
-      <div class="skupina"><h2>Stanje <span class="desno"><button class="tih mali" onclick="naloziPregled()">Osveži</button></span></h2>
+      <!-- »Danes« (admin/danes.js, #326): prodaja, racuni, nocojsnji dogodki, rdeca opozorila; osvezevanje vsakih 20 s samo ko je zavihek viden -->
+      <div id="dn_koren"></div>
+      <div class="skupina"><h2>Števci <span class="desno"><button class="tih mali" onclick="naloziPregled()">Osveži</button></span></h2>
         <div class="telo"><div class="stevilke" id="stevilke"></div></div>
       </div>
       <div class="skupina"><h2>Varnostna kopija <span class="desno"><button class="tih mali" id="bkGumb" onclick="varnostnaKopija()">Prenesi izvoz baze (JSON)</button></span></h2>
@@ -150,6 +154,12 @@
       </div>
     </section>
 
+
+    <!-- OPOZORILA (admin/opozorila.js, #326): seznam po resnosti + davcno potrjeni racuni po stanju -->
+    <section id="z-opozorila" class="skrito">
+      <div id="op_opozorila"></div>
+      <div id="op_racuni"></div>
+    </section>
 
     <!-- REPORTS (prijave zlorabe, migracija 041) -->
     <section id="z-prijave" class="skrito">
@@ -230,6 +240,11 @@
     <!-- KLUBI -->
     <section id="z-klubi" class="skrito">
       <div class="skupina">
+        <h2>Klubi <span class="desno"><button id="kNov" class="mali" onclick="kNov()">Nov klub</button><input id="kIsci" placeholder="ime, mesto ali e-naslov lastnika" style="width:260px;max-width:100%" onkeydown="if(event.key==='Enter')naloziKlube()"><button class="tih mali" onclick="naloziKlube()">Išči</button></span></h2>
+        <div class="tabela" id="kTabela"></div>
+      </div>
+      <!-- Obrazec je skrit, dokler ga ne odpreta »Nov klub« ali »Uredi«; zapre ga »Počisti« ali uspešno shranjevanje. -->
+      <div class="skupina skrito" id="kObrazec">
         <h2 id="kNaslov">Nov klub <span class="desno"><button class="tih mali" id="kPrekini" onclick="kPocisti()">Počisti</button></span></h2>
         <div class="telo">
           <input type="hidden" id="k_id">
@@ -267,10 +282,6 @@
           </div>
           <div class="vrsta"><button id="kShrani" onclick="kShrani()">Ustvari klub</button><span id="kSporocilo" style="font-size:12.5px;color:var(--faint)"></span></div>
         </div>
-      </div>
-      <div class="skupina">
-        <h2>Klubi <span class="desno"><input id="kIsci" placeholder="ime, mesto ali e-naslov lastnika" style="width:260px" onkeydown="if(event.key==='Enter')naloziKlube()"><button class="tih mali" onclick="naloziKlube()">Išči</button></span></h2>
-        <div class="tabela" id="kTabela"></div>
       </div>
     </section>
 
@@ -332,6 +343,9 @@
 <!-- Moduli panela (DECISIONS 21. 10. 2026: vec datotek, brez ogrodja in gradnje). Nalozita se PRED glavno skripto: ta jih uporabi ob zagonu. -->
 <script src="dialog.js"></script>
 <script src="dogodki.js"></script>
+<script src="danes.js"></script>
+<script src="opozorila.js"></script>
+<script src="nov-dogodek.js"></script>
 <script>
 // Panel teče na istem naslovu kot backend (Express streže /admin), zato je
 // osnova kar location.origin. Za lokalni test: ?api=http://localhost:3000
@@ -420,10 +434,10 @@ function ubezi(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&am
 function datum(s) { if (!s) return "—"; const d = new Date(s); return d.toLocaleString("sl-SI", { dateStyle: "short", timeStyle: "short" }); }
 function evri(c) { return c === null || c === undefined ? "—" : (c / 100).toFixed(2).replace(".", ",") + " €"; }
 
-async function klic(metoda, pot, telo, ponovno = true) {
+async function klic(metoda, pot, telo, ponovno = true, signal) {   // signal: neobvezen AbortSignal (rok klica; danes.js)
   const glave = { "Content-Type": "application/json" };
   if (seja.token) glave.Authorization = "Bearer " + seja.token;
-  const r = await fetch(API + pot, { method: metoda, headers: glave, body: telo === undefined ? undefined : JSON.stringify(telo) });
+  const r = await fetch(API + pot, { method: metoda, headers: glave, body: telo === undefined ? undefined : JSON.stringify(telo), signal });
   if (r.status === 401 && ponovno && seja.refresh) {
     const bil = seja.refresh;
     try { await osveziSejo(); }
@@ -431,17 +445,17 @@ async function klic(metoda, pot, telo, ponovno = true) {
       // drug zavihek je morda že osvežil (osveževalni žeton se je zamenjal): poskusi z njegovim.
       // Ob zavrnitvi mu damo 400 ms, da nov žeton res zapiše v hrambo (tekma dveh zavihkov).
       if (zavrnjenaOsvezitev(e)) await new Promise(r => setTimeout(r, 400));
-      if (seja.refresh && seja.refresh !== bil) return klic(metoda, pot, telo, false);
+      if (seja.refresh && seja.refresh !== bil) return klic(metoda, pot, telo, false, signal);
       if (!zavrnjenaOsvezitev(e)) throw new Error(`Osvežitev seje ni uspela (${e.status ? "strežnik: " + e.status : "omrežje"}). Poskusi znova.`);
       odjava("Seja je potekla. Prijavi se znova."); throw new Error("Seja je potekla.");
     }
-    return klic(metoda, pot, telo, false);
+    return klic(metoda, pot, telo, false, signal);
   }
   const bes = await r.text();
   let podatki = bes; try { podatki = JSON.parse(bes); } catch (_) {}
   if (!r.ok) {
     const sporocilo = typeof podatki === "string" ? podatki : (podatki.message || podatki.error || bes);
-    throw new Error(`${r.status}: ${sporocilo}`);
+    throw Object.assign(new Error(`${r.status}: ${sporocilo}`), { status: r.status });   // status: panel ob 503 podaljsa premor (danes.js)
   }
   return podatki;
 }
@@ -494,7 +508,7 @@ function pokaziPanel() {
 
 // ---------- zavihki ----------
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => pokaziZavihek(b.dataset.z));
-const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: () => (window.naloziDogodke ? window.naloziDogodke() : obvesti("Zavihek Dogodki se ni naložil (dogodki.js). Osveži stran.", "slabo")), guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila, pomoc: naloziPomoc };
+const nalozi = { pregled: naloziPregled, opozorila: () => (window.naloziOpozorila ? window.naloziOpozorila() : obvesti("Zavihek Opozorila se ni naložil (opozorila.js). Osveži stran.", "slabo")), prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: () => (window.naloziDogodke ? window.naloziDogodke() : obvesti("Zavihek Dogodki se ni naložil (dogodki.js). Osveži stran.", "slabo")), guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila, pomoc: naloziPomoc };
 function pokaziZavihek(z) {
   // Povezava na dogodek (#/dogodki/35) velja samo v zavihku Dogodki; drug zavihek jo pobriše.
   if (z !== "dogodki" && /^#\/dogodki/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search);
@@ -510,6 +524,7 @@ async function varno(fn) { try { await fn(); } catch (e) { obvesti(e.message, "s
 
 // ---------- pregled ----------
 async function naloziPregled() {
+  if (window.danesOsvezi) window.danesOsvezi(false);   // »Danes« (danes.js): lasten klic in lasten casovnik, ne ovira stevcev spodaj
   await varno(async () => {
     const s = await klic("GET", "/admin/api/summary");
     const kos = (n, ime) => `<div class="stevilka"><b>${ubezi(n)}</b><span>${ubezi(ime)}</span></div>`;
@@ -523,6 +538,9 @@ async function naloziPregled() {
       kosPozor(s.dispute_recovery_attention, "povrnitev sporov za pozornost", "pozor");
     const nV = (Number(s.refunds_attention) || 0) + (Number(s.dispute_recovery_attention) || 0);
     $("nVracil").textContent = nV; $("nVracil").classList.toggle("skrito", !nV);
+    if (typeof s.warnings_red === "number") {   // DODANO polje (#326); null = se ni izracunano (znacko postavi »Danes« ali zavihek Opozorila), star backend ga nima
+      $("nOpozorila").textContent = s.warnings_red; $("nOpozorila").classList.toggle("skrito", !s.warnings_red);
+    }
     $("nProsenj").textContent = s.new_applications; $("nProsenj").classList.toggle("skrito", !s.new_applications);
     $("nPrijav").textContent = s.open_reports || 0; $("nPrijav").classList.toggle("skrito", !s.open_reports);
   });
@@ -638,7 +656,10 @@ function kPocisti() {
   $("k_city").value = "Ljubljana"; $("k_country").value = "Slovenija"; $("k_minAge").value = "18";
   $("k_isOrganizer").checked = false; $("k_isOfficial").checked = false; $("k_isDemo").checked = false; $("k_vatPayer").value = "";
   $("kNaslov").firstChild.textContent = "Nov klub "; $("kShrani").textContent = "Ustvari klub"; $("kSporocilo").textContent = "";
+  kObrazec(false);
 }
+function kObrazec(pokazi) { $("kObrazec").classList.toggle("skrito", !pokazi); }
+function kNov() { kPocisti(); kObrazec(true); $("kObrazec").scrollIntoView({ behavior: "smooth", block: "start" }); $("k_ownerEmail").focus({ preventScroll: true }); }
 function kTelo() {
   const t = {};
   for (const p of kPolja) {
@@ -686,7 +707,8 @@ function kUredi(id) {
   $("k_isOrganizer").checked = !!k.is_organizer; $("k_isOfficial").checked = !!k.is_official; $("k_isDemo").checked = !!k.is_demo;
   $("kNaslov").firstChild.textContent = `Uredi klub #${k.id} `; $("kShrani").textContent = "Shrani spremembe";
   $("kSporocilo").textContent = "Sprememba e-naslova lastnika prenese klub na drug račun.";
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  kObrazec(true);
+  $("kObrazec").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 async function kDemo(id, isDemo) {
   await varno(async () => { const r = await klic("PATCH", "/admin/api/clubs/" + id, { isDemo }); obvesti(`${r.name}: ${r.is_demo ? "demo klub (nakup vstopnic zavrnjen, razen admin)" : "navaden klub (nakup mogoč)"}.`, "ok"); naloziKlube(); naloziPregled(); });
@@ -708,41 +730,78 @@ async function naloziKlube() {
         <td class="mono">${ubezi(k.event_count)}</td>
         <td>${k.hidden ? '<span class="znacka slabo">skrit</span>' : '<span class="znacka ok">viden</span>'}${k.is_demo ? ' <span class="znacka opoz">demo</span>' : ""}${k.stripe_charges_enabled ? ' <span class="znacka">stripe</span>' : ""}</td>
         <td><div class="vrsta"><button class="tih mali" onclick="kUredi(${cel(k.id)})">Uredi</button><button class="tih mali" onclick="kDemo(${cel(k.id)},${k.is_demo ? "false" : "true"})">${k.is_demo ? "Ni demo" : "Demo"}</button>${k.hidden ? `<button class="dobro mali" onclick="kSkrij(${cel(k.id)},false)">Pokaži</button>` : `<button class="nevarno mali" onclick="kSkrij(${cel(k.id)},true)">Skrij</button>`}</div></td>
-      </tr>`), "Ni klubov. Ustvari prvega zgoraj.");
+      </tr>`), "Ni klubov. Ustvari prvega z gumbom »Nov klub«.");
   });
 }
 
 // ---------- uporabniki ----------
-async function naloziUporabnike() {
-  await varno(async () => {
-    const u = await klic("GET", "/admin/api/users?q=" + encodeURIComponent($("uIsci").value.trim()));
-    const zaklenjen = (x) => x.locked_until && new Date(x.locked_until) > new Date();
-    tabela($("uTabela"), ["#", "E-naslov", "Ime", "Vloga", "E-pošta", "Zaklep", "Klubi", "Registriran", ""], u.map(x => `
-      <tr>
-        <td class="mono">${ubezi(x.id)}</td>
-        <td>${ubezi(x.email)}${x.phone ? `<span class="drobno">${ubezi(x.phone)}</span>` : ""}</td>
-        <td>${ubezi(x.username)}${x.country ? `<span class="drobno">${ubezi(x.country)}</span>` : ""}</td>
-        <td><select id="uVloga${cel(x.id)}" style="width:auto" onchange="uVloga(${cel(x.id)})">${["user", "business", "admin", "backup"].map(r => `<option ${r === x.role ? "selected" : ""}>${r}</option>`).join("")}</select></td>
-        <td>${x.email_verified ? '<span class="znacka ok">potrjen</span>' : `<span class="znacka opoz">nepotrjen</span> <button class="tih mali" onclick="uPotrdi(${cel(x.id)})">Potrdi e-naslov</button>`}</td>
-        <td>${zaklenjen(x) ? `<span class="znacka slabo">do ${datum(x.locked_until)}</span> <button class="tih mali" onclick="uOdkleni(${cel(x.id)})">Odkleni</button>` : (x.failed_login_count ? `${ubezi(x.failed_login_count)} nap. poskusov` : "—")}</td>
-        <td class="mono">${ubezi(x.club_count)}</td>
-        <td class="mono">${datum(x.created_at)}${x.onboarded_at ? "" : '<span class="drobno">račun ni dokončan</span>'}</td>
-        <td></td>
-      </tr>`), "Ni zadetkov.");
+// U3 (23. 10. 2026): vrstica se zgradi prek h() (e-naslov, ime, telefon in država so tuji vnosi: brez innerHTML in brez onclick/onchange
+// atributov z nizi). Izbira vloge NE kliče API-ja: gumb »Spremeni vlogo« odpre potrdi() s »prej → potem«; za novo vlogo admin/backup in za
+// odvzem vloge admin je obvezen vpis e-naslova uporabnika in razlog (gre v dnevnik admin dejanj). Preklic vrne izbiro na prejšnjo vrednost.
+const VLOGE = ["user", "business", "admin", "backup"];
+const uZaklenjen = (x) => x.locked_until && new Date(x.locked_until) > new Date();
+const uStrogaSprememba = (prej, potem) => potem === "admin" || potem === "backup" || prej === "admin";
+async function uSpremeniVlogo(x, izbira, gumb) {
+  const prej = x.role, potem = izbira.value;
+  if (potem === prej) { gumb.disabled = true; return; }
+  const stroga = uStrogaSprememba(prej, potem);
+  gumb.disabled = true;
+  const izid = await potrdi({
+    naslov: "Spremenim vlogo?", nevarno: stroga, potrdiBesedilo: "Spremeni vlogo",
+    vpis: stroga ? (x.email || String(cel(x.id))) : undefined, razlog: stroga ? "obvezen" : "neobvezen",
+    vsebina: [h("div", {}, h("b", {}, x.email), ` (#${cel(x.id)}, ${x.username})`),
+      h("div", {}, "Vloga: ", h("s", {}, prej), " → ", h("b", {}, potem)),
+      stroga ? h("div", {}, potem === "admin" ? "Vloga admin dovoli vse v tem panelu, tudi vračila." : potem === "backup" ? "Vloga backup sme samo prenesti izvoz baze." : "Uporabniku se odvzame vloga admin.") : null,
+      h("div", {}, "Nova vloga velja po ponovni prijavi v aplikaciji (najpozneje čez 1 h).")],
   });
-}
-async function uVloga(id) {
-  await varno(async () => { const r = await klic("PATCH", "/admin/api/users/" + id, { role: $("uVloga" + id).value }); obvesti(`${r.email} → ${r.role}. Nova vloga velja po ponovni prijavi v aplikaciji (najpozneje čez 1 h).`, "ok"); naloziUporabnike(); naloziPregled(); });
+  if (!izid) { izbira.value = prej; return; }   // preklic: nazaj na prejšnjo vrednost, API ni poklican
+  await varno(async () => {
+    const telo = { role: potem };
+    if (izid.razlog) telo.reason = izid.razlog;
+    const r = await klic("PATCH", "/admin/api/users/" + cel(x.id), telo);
+    obvesti(`${r.email} → ${r.role}. Nova vloga velja po ponovni prijavi v aplikaciji (najpozneje čez 1 h).`, "ok");
+    naloziPregled();
+  });
+  naloziUporabnike();   // ob uspehu in napaki: seznam iz baze, izbira pokaže dejansko vlogo
 }
 async function uOdkleni(id) { await varno(async () => { const r = await klic("PATCH", "/admin/api/users/" + id, { unlock: true }); obvesti(`${r.email} odklenjen.`, "ok"); naloziUporabnike(); }); }
 async function uPotrdi(id) { await varno(async () => { const r = await klic("PATCH", "/admin/api/users/" + id, { emailVerified: true }); obvesti(`${r.email}: e-naslov potrjen.`, "ok"); naloziUporabnike(); }); }
+function uVrstica(x) {
+  const id = cel(x.id);
+  const izbira = h("select", { style: "width:auto", "aria-label": "Vloga" }, VLOGE.map(r => h("option", { value: r }, r)));
+  izbira.value = x.role;
+  const gumbVloga = h("button", { class: "tih mali", type: "button" }, "Spremeni vlogo");
+  gumbVloga.disabled = true;
+  izbira.onchange = () => { gumbVloga.disabled = izbira.value === x.role; };
+  gumbVloga.onclick = () => uSpremeniVlogo(x, izbira, gumbVloga);
+  return h("tr", {},
+    h("td", { class: "mono" }, String(id)),
+    h("td", {}, x.email, x.phone ? h("span", { class: "drobno" }, x.phone) : null),
+    h("td", {}, x.username, x.country ? h("span", { class: "drobno" }, x.country) : null),
+    h("td", {}, h("div", { class: "vrsta" }, izbira, gumbVloga)),
+    h("td", {}, x.email_verified ? h("span", { class: "znacka ok" }, "potrjen")
+      : [h("span", { class: "znacka opoz" }, "nepotrjen"), " ", h("button", { class: "tih mali", type: "button", onclick: () => uPotrdi(id) }, "Potrdi e-naslov")]),
+    h("td", {}, uZaklenjen(x) ? [h("span", { class: "znacka slabo" }, "do " + datum(x.locked_until)), " ", h("button", { class: "tih mali", type: "button", onclick: () => uOdkleni(id) }, "Odkleni")]
+      : (x.failed_login_count ? `${x.failed_login_count} nap. poskusov` : "—")),
+    h("td", { class: "mono" }, String(cel(x.club_count))),
+    h("td", { class: "mono" }, datum(x.created_at), x.onboarded_at ? null : h("span", { class: "drobno" }, "račun ni dokončan")));
+}
+async function naloziUporabnike() {
+  await varno(async () => {
+    const u = await klic("GET", "/admin/api/users?q=" + encodeURIComponent($("uIsci").value.trim()));
+    $("uTabela").replaceChildren(u.length
+      ? h("table", {}, h("thead", {}, h("tr", {}, ["#", "E-naslov", "Ime", "Vloga", "E-pošta", "Zaklep", "Klubi", "Registriran"].map(g => h("th", {}, g)))), h("tbody", {}, u.map(uVrstica)))
+      : h("div", { class: "prazno" }, "Ni zadetkov."));
+  });
+}
 
 // ---------- guest lists ----------
 // Brez nastavljanja HTML-ja iz podatkov: vsi podatki (imena, e-naslovi, opombe) gredo v DOM samo prek textContent / createTextNode / setAttribute (XSS).
 function h(tag, lastnosti, ...otroci) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(lastnosti || {})) {
-    if (k === "onclick") e.onclick = v; else if (k === "class") e.className = v; else e.setAttribute(k, v);
+    if (/^on/i.test(k)) { if (typeof v === "function") e[k.toLowerCase()] = v; continue; }   // on* samo kot funkcija; nikoli setAttribute("on...", niz)
+    if (k === "class") e.className = v; else e.setAttribute(k, v);
   }
   for (const o of otroci.flat()) if (o !== null && o !== undefined && o !== false) e.append(o.nodeType ? o : document.createTextNode(String(o)));
   return e;

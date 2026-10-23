@@ -11,6 +11,11 @@
  * Izvajalni del: odsek zaženemo v minimalnem lažnem DOM-u (ustvarjeni elementi, `innerHTML` setter beleži), v API odgovore
  * vstavimo `<img src=x onerror=...>` in preverimo, da vsebina konča kot besedilo (text node), ne kot element.
  * Vsak korak, ki ga ne najde, PADE (ne preskoči).
+ * Odsek 8 (#328, 23. 10. 2026): admin/nov-dogodek.js (»Nov dogodek«, plakat, »Pred objavo«, »Podvoji«): besedila iz podatkov kot besedilo, povezave samo #/dogodki/<število>, Objavi onemogočen ob rdeči oviri ali neuspelem pregledu, POST /events v centih.
+ * Odsek 7 (#326, 23. 10. 2026): nova modula admin/danes.js (nadzorna plosca »Danes«) in admin/opozorila.js (zavihek »Opozorila«): brez innerHTML/onclick="..." nizov,
+ * zlonamerni naslov dogodka / ime kluba / zadnja_napaka / besedilo opozorila konca kot besedilo, povezave samo #/dogodki/<stevilo>, osvezevanje samo ko je zavihek viden, premor 60 s ob 503.
+ * Odsek 6 (U3, 23. 10. 2026): zavihek Uporabniki. Vrstica prek h(), brez onclick/onchange nizov; izbira vloge ne kliče API-ja, PATCH šele po potrdi()
+ * (vpis e-naslova + obvezen razlog za admin/backup in odvzem vloge admin); preklic vrne izbiro.
  */
 const fs = require("fs");
 const path = require("path");
@@ -165,7 +170,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
   assert(trsS.map(t => gumbov(t.children[t.children.length - 1])).join() === "1,1,0,0,0", "spori: gumb samo pri povrnitvi ni_uspelo/rocno", trsS.map(t => gumbov(t)));
 
   // --- 5. moduli panela (faza 1, 21. 10. 2026: admin/dialog.js, admin/dogodki.js) in brez window.confirm ---
-  for (const ime of ["dialog.js", "dogodki.js"]) {
+  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js"]) {
     const kod = fs.readFileSync(path.join(__dirname, "..", "admin", ime), "utf8");
     const k5 = [];
     for (const m of kod.matchAll(NEVARNO)) {
@@ -175,9 +180,12 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     }
     assert(k5.length === 0, `admin/${ime}: brez innerHTML/outerHTML/insertAdjacentHTML/eval s podatki`, k5);
     assert(!/\bconfirm\s*\(/.test(kod), `admin/${ime}: brez window.confirm (blokirajo ga orodja; panel ima svoje okno)`);
+    assert(!/\bon[a-z]+\s*=\s*["'`]/i.test(kod.replace(/\bon[a-z]+\s*=\s*\(/g, "")), `admin/${ime}: brez onclick="..." / onchange="..." nizov`);
   }
   assert(!/\bconfirm\s*\(/.test(skripta), "admin/index.html: brez window.confirm (vse potrditve prek potrdi() iz dialog.js)");
-  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
+  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
+  assert(/<link rel="stylesheet" href="danes\.css">/.test(html), "danes.css je vezan v index.html");
+  assert(!/<link[^>]+(?:https?:)?\/\//.test(html) && !/<script[^>]+src="(?:https?:)?\/\//.test(html), "panel ne nalaga tujih skript ali stilov");
   // dialog.js: vsebina iz podatkov gre v DOM kot besedilo (izvajalno, lažni DOM)
   {
     const kod = fs.readFileSync(path.join(__dirname, "..", "admin", "dialog.js"), "utf8");
@@ -192,6 +200,409 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     const p5 = pregled(body);
     assert(p5.elementi.every(t => new Set(["body", "div", "h3", "label", "input", "textarea", "button"]).has(t)), "dialog.js: nizi iz podatkov ne postanejo elementi", [...new Set(p5.elementi)]);
     for (const z of [ZLO[0], ZLO[1], ZLO[2]]) assert(p5.besedila.includes(z), "dialog.js: niz konča kot besedilo: " + z);
+    // N5: vpisno polje z e-naslovom (vsebuje @): tipkovnica za e-naslove in brez samodejnih velikih črk; sicer kot prej (velike črke)
+    const vpisnaPolja = () => { const r = []; sprehod(body, (e) => { if (e.nodeType === 1 && e.tagName === "input") r.push(e); }); return r; };
+    let polja = vpisnaPolja();
+    assert(polja.length === 1 && polja[0].attrs.autocapitalize === "characters" && polja[0].attrs.inputmode === undefined, "dialog.js: vpis ODPOVEJ: autocapitalize=characters, brez inputmode", polja.map(x => x.attrs));
+    okno.potrdi({ naslov: "x", vsebina: "y", vpis: "ana@primer.si" });
+    polja = vpisnaPolja();
+    const zadnje = polja[polja.length - 1];
+    assert(zadnje && zadnje.attrs.inputmode === "email" && zadnje.attrs.autocapitalize === "off" && zadnje.attrs.autocomplete === "off", "dialog.js: vpis e-naslova: inputmode=email, autocapitalize=off", zadnje && zadnje.attrs);
+  }
+
+  // N3: h() nikoli ne nastavi on* atributa iz niza (setAttribute("onclick", "...")); funkcija gre kot lastnost
+  {
+    const hh = new Function("document", mh[0] + "\nreturn h;")(dok);
+    const gumb = hh("button", { onclick: "alert(1)", onmouseover: "alert(2)", onChange: "alert(3)", "data-x": "ok" }, "t");
+    assert(!Object.keys(gumb.attrs).some(k => /^on/i.test(k)) && gumb.onclick === null && gumb.attrs["data-x"] === "ok", "h(): on* z nizom ne postane atribut ne lastnost", gumb.attrs);
+    const f = () => 1;
+    const gumb2 = hh("button", { onclick: f, class: "a" }, "t");
+    assert(gumb2.onclick === f && gumb2.className === "a" && !Object.keys(gumb2.attrs).some(k => /^on/i.test(k)), "h(): on* s funkcijo je lastnost");
+  }
+
+  // --- 6. zavihek Uporabniki (U3, 23. 10. 2026): vrstica prek h(), sprememba vloge samo prek potrdi(), brez onclick/onchange nizov ---
+  {
+    const U0 = "// ---------- uporabniki", U1 = "// ---------- guest lists";
+    const iu = skripta.indexOf(U0), ik2 = skripta.indexOf(U1);
+    mora(iu >= 0 && ik2 > iu, `odsek »${U0}« … »${U1}« ni najden (preimenovan komentar? popravi test, ne preskoči)`);
+    const odsekU = skripta.slice(iu, ik2);
+    for (const f of ["naloziUporabnike", "uVrstica", "uSpremeniVlogo", "uOdkleni", "uPotrdi"]) mora(new RegExp(`function ${f}\\(`).test(odsekU), `funkcija ${f} ni v odseku Uporabniki`);
+    const kU = [];
+    for (const m of odsekU.matchAll(NEVARNO)) { const rep = odsekU.slice(m.index, m.index + 60); if (/^\.innerHTML\s*=\s*(""|'')\s*[;,)}]/.test(rep)) continue; kU.push(rep.split("\n")[0]); }
+    assert(kU.length === 0, "odsek Uporabniki: brez innerHTML/outerHTML/insertAdjacentHTML/eval s podatki", kU);
+    assert(!/\bon(click|change|input|keydown)\s*=\s*["'`]/i.test(odsekU), "odsek Uporabniki: brez onclick=\"...\" / onchange=\"...\" atributov v nizih");
+    assert(!/\btabela\(/.test(odsekU), "odsek Uporabniki: ne rabi tabela() (ta piše innerHTML iz nizov)");
+    assert(!html.includes('onchange="uVloga') && !/\buVloga\(/.test(html), "nikjer v panelu ni več takojšnje spremembe vloge (onchange=\"uVloga...\")");
+    const fnSprememba = odsekU.slice(odsekU.indexOf("async function uSpremeniVlogo("), odsekU.indexOf("async function uOdkleni("));
+    assert(fnSprememba.includes("await potrdi(") && fnSprememba.indexOf("await potrdi(") < fnSprememba.indexOf('klic("PATCH"'), "uSpremeniVlogo: PATCH šele po potrdi()");
+    assert((odsekU.match(/role:/g) || []).length === 1 && fnSprememba.includes("role: potem"), "vloga se pošlje samo iz uSpremeniVlogo (za potrdi())");
+    assert(/vpis:\s*stroga\s*\?\s*\(?x\.email/.test(fnSprememba) && /razlog:\s*stroga\s*\?\s*"obvezen"\s*:\s*"neobvezen"/.test(fnSprememba), "stroga sprememba: vpis e-naslova + obvezen razlog; sicer neobvezen razlog");
+
+    const mc = skripta.match(/function cel\(n\) \{[^\n]*\}/);
+    mora(mc, "funkcija cel() ni najdena");
+    const potrdiKlici = [], apiKlici = [];
+    let potrdiOdgovor = null;
+    const potrdiStub = async (o) => { potrdiKlici.push(o); return potrdiOdgovor; };
+    const klicU = async (metoda, pot, telo) => {
+      apiKlici.push([metoda, pot, telo]);
+      if (metoda === "GET") return JSON.parse(JSON.stringify(odgovoriU));
+      return { email: "a@b.si", role: telo && telo.role };
+    };
+    const innerPred = innerHTMLZapisi.length;
+    let odgovoriU = [];
+    const zU = new Function("document", "$", "klic", "varno", "obvesti", "naloziPregled", "potrdi",
+      `${md[0]}\n${mh[0]}\n${mc[0]}\n${odsekU}\nreturn { naloziUporabnike };`);
+    const { naloziUporabnike } = zU(dok, $, klicU, varno, obvesti, naloziPregled, potrdiStub);
+    const uporabnik = (id, vloga, polja) => ({ id, email: ZLO[0], username: ZLO[1], role: vloga, email_verified: false, phone: ZLO[2], country: ZLO[3], locked_until: "2099-01-01T00:00:00Z",
+      failed_login_count: 3, club_count: 1, created_at: "2026-10-12T10:00:00Z", onboarded_at: null, ...polja });
+    odgovoriU = [uporabnik(1, "user"), uporabnik(2, "admin", { email_verified: true, locked_until: null }), uporabnik(3, "business", { email: "poste@outly.si", username: "poste" })];
+    $("uIsci").value = "";
+    await naloziUporabnike();
+    const pU = pregled($("uTabela"));
+    assert(pU.elementi.length > 0, `izvajalno: Uporabniki narisani (${pU.elementi.length} elementov)`);
+    assert(pU.elementi.every(t => new Set(["table", "thead", "tbody", "tr", "th", "td", "div", "span", "select", "option", "button"]).has(t)), "izvajalno: Uporabniki: nobenega elementa iz podatkov (img/script/svg), atributov on*", [...new Set(pU.elementi)]);
+    for (const z of ZLO) assert(pU.besedila.includes(z), "izvajalno: Uporabniki: niz iz podatkov konča kot besedilo: " + z);
+    assert(innerHTMLZapisi.length === innerPred || innerHTMLZapisi.slice(innerPred).every(v => v === ""), "izvajalno: Uporabniki: innerHTML ni bil uporabljen za podatke");
+    assert(apiKlici.length === 1 && apiKlici[0][0] === "GET", "izvajalno: izris samo bere (en GET)", apiKlici);
+
+    const vrstice = [];
+    sprehod($("uTabela"), (e) => { if (e.nodeType === 1 && e.tagName === "tr" && e.children.some(c => c.tagName === "td")) vrstice.push(e); });
+    assert(vrstice.length === 3, "izvajalno: Uporabniki: tri vrstice", vrstice.length);
+    const iz = (vrstica, tag, besedilo) => { let r = null; sprehod(vrstica, (e) => { if (!r && e.nodeType === 1 && e.tagName === tag && (!besedilo || e.textContent === besedilo)) r = e; }); return r; };
+    const izbira = (v) => iz(v, "select"), gumbVloga = (v) => iz(v, "button", "Spremeni vlogo");
+    assert(vrstice.every(v => izbira(v) && gumbVloga(v) && gumbVloga(v).disabled === true), "izvajalno: gumb »Spremeni vlogo« je onemogočen, dokler izbira ni drugačna od trenutne vloge");
+    assert(vrstice.map(v => izbira(v).value).join() === "user,admin,business", "izvajalno: izbira kaže trenutno vlogo", vrstice.map(v => izbira(v).value));
+    assert(vrstice.every(v => !Object.keys(izbira(v).attrs).some(k => /^on/i.test(k)) && !Object.keys(gumbVloga(v).attrs).some(k => /^on/i.test(k))), "izvajalno: select in gumb brez on* atributov (le lastnosti-funkcije)");
+
+    // izbira vloge sama ne kliče API-ja ne okna
+    apiKlici.length = 0;
+    const v1 = vrstice[0];
+    izbira(v1).value = "admin"; izbira(v1).onchange();
+    assert(apiKlici.length === 0 && potrdiKlici.length === 0, "izbira v seznamu NE pokliče API-ja in ne odpre okna");
+    assert(gumbVloga(v1).disabled === false, "izbira druge vloge odklene gumb");
+
+    // preklic: nazaj na prejšnjo vrednost, brez PATCH
+    potrdiOdgovor = null;
+    await gumbVloga(v1).onclick();
+    assert(potrdiKlici.length === 1 && apiKlici.length === 0, "preklic: okno odprto, API ni poklican", { potrdi: potrdiKlici.length, api: apiKlici });
+    assert(izbira(v1).value === "user", "preklic vrne izbiro na prejšnjo vrednost", izbira(v1).value);
+    const o1 = potrdiKlici[0];
+    assert(o1.vpis === ZLO[0] && o1.razlog === "obvezen" && o1.nevarno === true, "user → admin: vpis = e-naslov uporabnika, razlog obvezen, nevarno", { vpis: o1.vpis, razlog: o1.razlog });
+    const okoli = new El("div"); okoli.append(...[].concat(o1.vsebina).filter(Boolean));
+    const pV = pregled(okoli);
+    assert(pV.elementi.every(t => new Set(["div", "b", "s"]).has(t)), "vsebina okna: samo div/b/s (podatki kot besedilo)", [...new Set(pV.elementi)]);
+    assert(pV.besedila.join("").includes("user") && pV.besedila.join("").includes("admin") && pV.besedila.join("").includes(ZLO[0]), "vsebina okna kaže »prej → potem«", pV.besedila);
+
+    // potrditev: PATCH z vlogo in razlogom
+    izbira(v1).value = "admin"; potrdiOdgovor = { razlog: "nov vodja" }; apiKlici.length = 0;
+    await gumbVloga(v1).onclick();
+    const patch = apiKlici.find(k => k[0] === "PATCH");
+    assert(patch && patch[1] === "/admin/api/users/1" && JSON.stringify(patch[2]) === JSON.stringify({ role: "admin", reason: "nov vodja" }), "potrditev: PATCH { role, reason }", apiKlici);
+
+    // stroge in nestroge spremembe
+    const preveri = async (prej, potem, stroga) => {
+      potrdiKlici.length = 0; potrdiOdgovor = null;
+      odgovoriU = [uporabnik(9, prej, { email: "u9@outly.si" })]; await naloziUporabnike();
+      const r = []; sprehod($("uTabela"), (e) => { if (e.nodeType === 1 && e.tagName === "tr" && e.children.some(c => c.tagName === "td")) r.push(e); });
+      izbira(r[0]).value = potem; izbira(r[0]).onchange(); await gumbVloga(r[0]).onclick();
+      const o = potrdiKlici[0];
+      assert(o && (o.vpis === "u9@outly.si") === stroga && o.razlog === (stroga ? "obvezen" : "neobvezen"), `${prej} → ${potem}: ${stroga ? "vpis e-naslova + obvezen razlog" : "brez vpisa, neobvezen razlog"}`, o && { vpis: o.vpis, razlog: o.razlog });
+    };
+    for (const [a, b2, st] of [["user", "business", false], ["business", "user", false], ["user", "admin", true], ["user", "backup", true], ["business", "admin", true], ["admin", "user", true], ["admin", "business", true], ["admin", "backup", true], ["backup", "user", false], ["backup", "business", false]]) await preveri(a, b2, st);
+  }
+
+  // --- 7. nova modula (#326): admin/danes.js (»Danes«) in admin/opozorila.js (zavihek »Opozorila«) v lazni strani ---
+  {
+    const koda = (ime) => fs.readFileSync(path.join(__dirname, "..", "admin", ime), "utf8");
+    class El2 extends El { get classList() { return { add() {}, remove() {}, toggle() {}, contains: () => false }; } }
+    const elementi7 = {};
+    const $7 = (id) => (elementi7[id] = elementi7[id] || new El2("div"));
+    const doc7 = { createElement: (t) => new El2(t), createTextNode: (t) => new Besedilo(t), visibilityState: "visible", addEventListener() {} };
+    const casovniki = [], zgodovina = [], zavihki = [], klici7 = [];
+    const setTimeout7 = (f, ms) => { casovniki.push({ f, ms }); return casovniki.length; };
+    const history7 = { pushState: (...a) => zgodovina.push(a) };
+    let odgovor7 = {}, napaka7 = null;
+    let visi7 = false;   // klic obvisi, dokler ga ne prekine AbortSignal (polodprta povezava)
+    const klic7 = async (metoda, pot, telo, ponovno, signal) => {
+      klici7.push(pot);
+      if (visi7) {
+        mora(signal, "danes.js: klic brez AbortSignala (rok klica manjka)");
+        return new Promise((_, zavrni) => signal.addEventListener("abort", () => zavrni(Object.assign(new Error("The operation was aborted."), { name: "TimeoutError" }))));
+      }
+      if (napaka7) throw napaka7;
+      const k = Object.keys(odgovor7).find(x => pot.startsWith(x));
+      mora(k, "nepričakovan klic API-ja iz novega modula: " + pot);
+      return JSON.parse(JSON.stringify(odgovor7[k]));
+    };
+    const naloziModul = (ime) => {
+      const okno = {};
+      new Function("window", "document", "$", "h", "klic", "datum", "varno", "obvesti", "pokaziZavihek", "history", "setTimeout", "clearTimeout", koda(ime))(
+        okno, doc7, $7, new Function("document", `${mh[0]}\nreturn h;`)(doc7), klic7, new Function(`${md[0]}\nreturn datum;`)(), varno, obvesti, (z) => zavihki.push(z), history7, setTimeout7, () => {});
+      return okno;
+    };
+    const DOV7 = new Set(["div", "span", "b", "a", "h2", "h3", "button", "select", "option", "small", "table"]);
+    const oznake = (el) => { const r = pregled(el); return r; };
+    const brezOn = (p) => !p.elementi.some(t => t.startsWith("atribut:"));
+    const ZLO7 = ['<img src=x onerror=alert("a")>', "<script>alert('b')</script>", '"><svg onload=alert(1)>', "</div><iframe src=javascript:alert(1)>"];
+
+    // --- danes.js ---
+    const danesOkno = naloziModul("danes.js");
+    mora(typeof danesOkno.danesOsvezi === "function", "danes.js ne izvozi window.danesOsvezi");
+    assert(casovniki.length === 1 && casovniki[0].ms === 20000, "danes.js: ob zagonu casovnik 20 s", casovniki.map(c => c.ms));
+    odgovor7 = { "/admin/api/danes": {
+      cas: "2026-10-23T20:00:00.000Z",
+      prodaja: { danes: { narocila: 3, bruto_cents: 123456, vstopnice: 5 }, dni7: { narocila: 9, bruto_cents: 5, vstopnice: 12 }, testno_danes: { narocila: 1, bruto_cents: 1500, vstopnice: 1 } },
+      nocoj: [
+        { id: 7, naslov: ZLO7[0], klub: ZLO7[1], start_at: "2026-10-23T21:00:00.000Z", prodano: 10, kapaciteta: 100, vstopi: 4, vstopi_15min: 2, prodaja: "tece" },
+        { id: "1<img src=x onerror=1>", naslov: ZLO7[2], klub: ZLO7[3], start_at: "2026-10-23T22:00:00.000Z", prodano: 1, kapaciteta: null, vstopi: 0, vstopi_15min: 0, prodaja: ZLO7[0] },
+      ],
+      racuni: { izdani_danes: 2, caka: 1, napaka: 1 }, opozorila_rdeca: 2 } };
+    await danesOkno.danesOsvezi(true);
+    const pD = oznake($7("dn_koren"));
+    assert(pD.elementi.length > 10 && pD.elementi.every(t => DOV7.has(t)), "danes.js: nobenega elementa iz podatkov (img/script/svg/iframe)", [...new Set(pD.elementi)]);
+    assert(brezOn(pD) === true && pD.elementi.filter(t => t === "atribut:onclick").length === 0, "danes.js: brez on* atributov (le lastnosti-funkcije)");
+    const bes = pD.besedila.join("\n");
+    for (const z of ZLO7) assert(bes.includes(z), "danes.js: niz iz podatkov konča kot besedilo: " + z.slice(0, 30));
+    assert(bes.includes("1.234,56 €") && bes.includes("0,05 €"), "danes.js: zneski v centih brez plavajoče vejice (123456 c = 1.234,56 €, 5 c = 0,05 €)");
+    const povezave = [];
+    sprehod($7("dn_koren"), (e) => { if (e.nodeType === 1 && e.tagName === "a") povezave.push(e); });
+    assert(povezave.length === 2 && povezave[0].attrs.href === "#/dogodki/7" && povezave[1].attrs.href === "#/dogodki/0", "danes.js: povezava na dogodek je samo #/dogodki/<celo število> (id iz podatkov, ki ni število, postane 0)", povezave.map(p => p.attrs.href));
+    povezave[0].onclick({ preventDefault() {} });
+    assert(zgodovina.length === 1 && zgodovina[0][2] === "#/dogodki/7" && zavihki[zavihki.length - 1] === "dogodki", "danes.js: klik na nocojsnji dogodek odpre #/dogodki/7");
+    povezave[1].onclick({ preventDefault() {} });
+    assert(zgodovina.length === 1, "danes.js: neveljaven id ne spremeni naslova");
+    assert(innerHTMLZapisi.every(v => v === ""), "danes.js: innerHTML ni bil uporabljen za podatke");
+    const gumbRdeca = [];
+    sprehod($7("dn_koren"), (e) => { if (e.nodeType === 1 && e.tagName === "button" && e.className.includes("dn-klik")) gumbRdeca.push(e); });
+    gumbRdeca[0].onclick();
+    assert(gumbRdeca.length === 1 && zavihki[zavihki.length - 1] === "opozorila", "danes.js: kartica rdečih opozoril odpre zavihek Opozorila");
+    assert($7("nOpozorila").textContent === "2", "danes.js: značka v meniju kaže rdeča opozorila (textContent)");
+    // osvezevanje: samo ko je zavihek viden; 503 -> premor 60 s + »podatki zastareli«
+    const pred = klici7.length, tikPred = casovniki.length;
+    doc7.visibilityState = "hidden";
+    await danesOkno.danesOsvezi(true);
+    casovniki[casovniki.length - 1].f();
+    await new Promise(r => setImmediate(r));
+    assert(klici7.length === pred, "danes.js: zavihek brskalnika skrit -> nobenega klica (ne izrecno ne casovnik)", klici7.length - pred);
+    assert(casovniki.length > tikPred && casovniki[casovniki.length - 1].ms === 20000, "danes.js: casovnik se kljub temu prestavi (20 s)");
+    doc7.visibilityState = "visible";
+    casovniki[casovniki.length - 1].f();
+    await new Promise(r => setImmediate(r));
+    assert(klici7.length === pred + 1, "danes.js: zavihek spet viden -> casovnik klice streznik", klici7.length - pred);
+    assert(casovniki[casovniki.length - 1].ms === 20000, "danes.js: uspeh -> naslednji klic cez 20 s");
+    napaka7 = Object.assign(new Error("503: Service temporarily unavailable"), { status: 503 });
+    await danesOkno.danesOsvezi(true);
+    assert(casovniki[casovniki.length - 1].ms === 60000, "danes.js: 503 -> premor 60 s", casovniki[casovniki.length - 1].ms);
+    assert(pregled($7("dn_koren")).besedila.join("\n").includes("podatki zastareli"), "danes.js: ob 503 napis »podatki zastareli« (zadnji podatki ostanejo)");
+    const predPremor = klici7.length;
+    await danesOkno.danesOsvezi(false);
+    assert(klici7.length === predPremor, "danes.js: med premorom naloziPregled (brez sile) ne kliče streznika", klici7.length - predPremor);
+    napaka7 = null;
+    await danesOkno.danesOsvezi(true);
+    assert(!pregled($7("dn_koren")).besedila.join("\n").includes("podatki zastareli") && casovniki[casovniki.length - 1].ms === 20000, "danes.js: izrecno osvezevanje po 503 obnovi stanje in 20 s");
+    napaka7 = new Error("500: Server error."); napaka7.status = 500;
+    await danesOkno.danesOsvezi(true);
+    assert(casovniki[casovniki.length - 1].ms === 20000 && pregled($7("dn_koren")).besedila.join("\n").includes("podatki zastareli"), "danes.js: druga napaka: zastarelo, a brez 60 s premora");
+    napaka7 = null;
+    // obvisel zahtevek: rok klica 15 s (AbortSignal) -> vTeku se ponastavi, »podatki zastareli« + sporocilo, osvezevanje tece naprej
+    {
+      const ctrl7 = new AbortController(), izvirnik = AbortSignal.timeout, roki = [];
+      AbortSignal.timeout = (ms) => { roki.push(ms); return ctrl7.signal; };
+      try {
+        visi7 = true;
+        const tikVisi = casovniki.length, klVisi = klici7.length;
+        const visece = danesOkno.danesOsvezi(true);
+        await new Promise(r => setImmediate(r));
+        const drugi = danesOkno.danesOsvezi(true);   // vTeku: drugi klic ne sproži vzporednega
+        await new Promise(r => setImmediate(r));
+        assert(klici7.length === klVisi + 1 && roki.length === 1 && roki[0] === 15000, "danes.js: klic ima AbortSignal z rokom 15 s, vzporednega klica ni", { klici: klici7.length - klVisi, roki });
+        ctrl7.abort();
+        await visece; await drugi;
+        const besVisi = pregled($7("dn_koren")).besedila.join("\n");
+        assert(besVisi.includes("podatki zastareli") && besVisi.includes("ni odgovoril v 15 s"), "danes.js: po izteku roka napis »podatki zastareli« in sporocilo (osvezevanje se ne ustavi tiho)");
+        assert(casovniki.length > tikVisi && casovniki[casovniki.length - 1].ms === 20000, "danes.js: po izteku roka casovnik tece naprej (20 s)");
+        visi7 = false;
+        const ctrl8 = new AbortController(); AbortSignal.timeout = () => ctrl8.signal;
+        const klPo = klici7.length;
+        await danesOkno.danesOsvezi(true);
+        assert(klici7.length === klPo + 1 && !pregled($7("dn_koren")).besedila.join("\n").includes("podatki zastareli"), "danes.js: po izteku roka vTeku ni obstal: naslednji klic uspe in obnovi stanje");
+      } finally { AbortSignal.timeout = izvirnik; visi7 = false; }
+    }
+
+    // --- opozorila.js ---
+    const opOkno = naloziModul("opozorila.js");
+    mora(typeof opOkno.naloziOpozorila === "function", "opozorila.js ne izvozi window.naloziOpozorila");
+    odgovor7 = {
+      "/admin/api/opozorila": { items: [
+        { vrsta: "prodajalec_nepopoln", resnost: "rdece", cilj_tip: "dogodek", cilj_id: 12, besedilo: ZLO7[0] + " " + ZLO7[1], cas: "2026-10-25T10:00:00.000Z" },
+        { vrsta: "racun_napaka", resnost: "rdece", cilj_tip: "racun", cilj_id: 5, besedilo: ZLO7[2] },
+        { vrsta: "x", resnost: "oranzno", cilj_tip: "dogodek", cilj_id: "3<script>", besedilo: ZLO7[3] },
+        { vrsta: "vracila_pozornost", resnost: ZLO7[0], cilj_tip: "vracila", cilj_id: null, besedilo: "1 vračilo" },
+        { vrsta: "potrdila_neposlana", resnost: "rumeno", cilj_tip: "narocila", cilj_id: null, besedilo: "2 potrdili" },
+      ], stevci: { rdece: 2, oranzno: 1, rumeno: 1 } },
+      "/admin/api/racuni": { stevci: { caka: 1, izdan: 0, potrjen: 0, napaka: 1, preklican: 0 }, limit: 100, items: [
+        { id: 5, order_id: 9, vrsta: "racun", stanje: "napaka", znesek_cents: 1500, valuta: "EUR", stevilka: null, ponudnik_stevilka: ZLO7[0], izdan_at: null, potrjen_at: null, poskusi: 3,
+          zadnja_napaka: ZLO7[1] + " [e-naslov] " + ZLO7[2], created_at: "2026-10-23T10:00:00.000Z" },
+        { id: 6, order_id: 10, vrsta: ZLO7[3], stanje: ZLO7[0], znesek_cents: -250, valuta: "EUR", stevilka: 77, ponudnik_stevilka: null, izdan_at: "2026-10-23T10:00:00.000Z", potrjen_at: null, poskusi: 0, zadnja_napaka: null, created_at: "2026-10-23T10:00:00.000Z" },
+      ] },
+    };
+    await opOkno.naloziOpozorila();
+    const pO = oznake($7("op_opozorila")), pR = oznake($7("op_racuni"));
+    for (const [ime, p] of [["opozorila", pO], ["računi", pR]]) {
+      assert(p.elementi.length > 5 && p.elementi.every(t => DOV7.has(t)), `opozorila.js: ${ime}: nobenega elementa iz podatkov (img/script/svg/iframe)`, [...new Set(p.elementi)]);
+      assert(brezOn(p), `opozorila.js: ${ime}: brez on* atributov`);
+    }
+    const bes2 = [...pO.besedila, ...pR.besedila].join("\n");
+    for (const z of ZLO7) assert(bes2.includes(z), "opozorila.js: niz iz podatkov konča kot besedilo: " + z.slice(0, 30));
+    assert(bes2.includes("[e-naslov]") && bes2.includes("−2,50 €") && bes2.includes("15,00 €"), "opozorila.js: zadnja_napaka kot besedilo; zneski v centih (−2,50 €, 15,00 €)");
+    const povezave2 = [];
+    sprehod($7("op_opozorila"), (e) => { if (e.nodeType === 1 && e.tagName === "a") povezave2.push(e.attrs.href); });
+    assert(JSON.stringify(povezave2) === JSON.stringify(["#/dogodki/12", "#racuni", "#vracila"]), "opozorila.js: povezave samo #/dogodki/<število>, #racuni, #vracila (id '3<script>' in narocila brez povezave)", povezave2);
+    assert($7("nOpozorila").textContent === "2", "opozorila.js: značka v meniju = rdeča opozorila (textContent)");
+    const vrstice2 = [];
+    sprehod($7("op_opozorila"), (e) => { if (e.nodeType === 1 && e.tagName === "a") vrstice2.push(e); });
+    vrstice2[0].onclick({ preventDefault() {} });
+    assert(zgodovina[zgodovina.length - 1][2] === "#/dogodki/12" && zavihki[zavihki.length - 1] === "dogodki", "opozorila.js: klik na opozorilo dogodka odpre #/dogodki/12");
+    const klPred = klici7.length;
+    vrstice2[1].onclick({ preventDefault() {} });
+    await new Promise(r => setImmediate(r));
+    assert(klici7.slice(klPred).some(p => p.includes("stanje=napaka")), "opozorila.js: klik na račun v napaki naloži seznam računov s filtrom napaka", klici7.slice(klPred));
+    const izbire = [];
+    sprehod($7("op_racuni"), (e) => { if (e.nodeType === 1 && e.tagName === "select") izbire.push(e); });
+    assert(izbire.length === 1 && typeof izbire[0].onchange === "function", "opozorila.js: filter stanja računov");
+  }
+
+
+  // --- 8. nov-dogodek.js (#328, 23. 10. 2026): »Nov dogodek«, nalaganje plakata, »Pred objavo«, »Podvoji« v lazni strani ---
+  {
+    class El8 extends El { get classList() { return { add() {}, remove() {}, toggle() {}, contains: () => false }; } removeAttribute(k) { delete this.attrs[k]; } click() {} }
+    const el8 = {};
+    const $8 = (id) => (id === "dg_nov" ? null : (el8[id] = el8[id] || new El8("div")));   // kot document.getElementById: gumba »Nov dogodek« se ni
+    const brezOn = (p) => !p.elementi.some(t => t.startsWith("atribut:"));
+    const doc8 = { createElement: (t) => new El8(t), createTextNode: (t) => new Besedilo(t), readyState: "complete", addEventListener() {} };
+    const klici8 = [], zgod8 = [], zavihki8 = [], obv8 = [];
+    let odg8 = {}, potrdi8 = [];
+    const klic8 = async (metoda, pot, telo) => {
+      klici8.push([metoda, pot, telo]);
+      const k = Object.keys(odg8).find(x => pot.startsWith(x) && (odg8[x].metoda || metoda) === metoda);
+      mora(k, "nepričakovan klic API-ja iz nov-dogodek.js: " + metoda + " " + pot);
+      if (odg8[k].napaka) throw new Error(odg8[k].napaka);
+      return JSON.parse(JSON.stringify(odg8[k].telo));
+    };
+    const okno8 = {};
+    new Function("window", "document", "$", "h", "klic", "datum", "obvesti", "potrdi", "pokaziZavihek", "history", "createImageBitmap", "FormData", "fetch", fs.readFileSync(path.join(__dirname, "..", "admin", "nov-dogodek.js"), "utf8"))(
+      okno8, doc8, $8, new Function("document", `${mh[0]}\nreturn h;`)(doc8), klic8, new Function(`${md[0]}\nreturn datum;`)(), (b, v) => obv8.push([b, v]),
+      async (o) => { const f = potrdi8.shift(); mora(f, "nepričakovano potrditveno okno: " + o.naslov); return f(o); }, (z) => zavihki8.push(z), { pushState: (...a) => zgod8.push(a) }, undefined, undefined, undefined);
+    const nv = okno8.novDogodek;
+    mora(nv && ["zaUrejevalnik", "objavaBlokirana", "vstaviGumb", "novDogodek", "podvoji"].every(k => typeof nv[k] === "function"), "nov-dogodek.js ne izvozi window.novDogodek");
+    const DOV8 = new Set(["div", "span", "b", "a", "h2", "p", "button", "input", "select", "option", "label"]);
+    const idje = (e, id) => e.id === id || (e.attrs && e.attrs.id === id);
+    const najdi = (koren, f) => { const r = []; sprehod(koren, (e) => { if (e.nodeType === 1 && f(e)) r.push(e); }); return r; };
+    const poId = (koren, id) => najdi(koren, (e) => idje(e, id))[0];
+
+    // gumb »Nov dogodek« v glavi seznama
+    const starsi = new El8("span"); let vstavljen = null;
+    starsi.insertBefore = (n) => { vstavljen = n; };
+    const osvezi8 = new El8("button"); osvezi8.parentNode = starsi; el8.dg_osvezi = osvezi8;
+    nv.vstaviGumb();
+    assert(vstavljen && vstavljen.tagName === "button" && vstavljen.textContent === "Nov dogodek" && typeof vstavljen.onclick === "function", "nov-dogodek.js: gumb »Nov dogodek« se vstavi v glavo seznama");
+
+    // urejevalnik osnutka: pregled pred objavo
+    const ZLO8 = ['<img src=x onerror=alert("a")>', "<script>alert('b')</script>", "</div><iframe src=javascript:alert(1)>"];
+    el8.dge_objavi = new El8("button"); el8.dge_gumbi = new El8("div"); el8.dge_razsiritve = new El8("div"); el8.dge_plakat_orodja = new El8("div");
+    odg8 = { "/admin/api/opozorila?dogodek=": { telo: { items: [
+      { vrsta: "prodajalec_nepopoln", resnost: "rdece", cilj_tip: "dogodek", cilj_id: 12, besedilo: ZLO8[0] },
+      { vrsta: "neznana_vrsta", resnost: "oranzno", cilj_tip: "dogodek", cilj_id: 12, besedilo: ZLO8[1] + " " + ZLO8[2] },
+      { vrsta: "brez_konca", resnost: ZLO8[0], cilj_tip: "dogodek", cilj_id: 12, besedilo: "x" }], stevci: { rdece: 1, oranzno: 1, rumeno: 0 } } } };
+    nv.zaUrejevalnik({ event: { id: 12, status: "draft", title: ZLO8[0], start_at: "2030-01-01T10:00:00Z" } });
+    assert(el8.dge_objavi.disabled === true && nv.objavaBlokirana(12) === true, "nov-dogodek.js: med preverjanjem je Objavi onemogočen (fail-safe)");
+    await new Promise(r => setImmediate(r));
+    const pr = pregled($8("dge_razsiritve")), pbes = pr.besedila.join("\n");
+    assert(pr.elementi.every(t => DOV8.has(t)) && brezOn(pr), "nov-dogodek.js: pregled pred objavo nima elementov iz podatkov in on* atributov", [...new Set(pr.elementi)]);
+    assert(pbes.includes(ZLO8[1]) && pbes.includes("Podatki prodajalca kluba niso popolni") && pbes.includes("Ovira:"), "nov-dogodek.js: besedilo neznane vrste iz podatkov konča kot besedilo, znana vrsta ima slovensko besedilo");
+    assert(el8.dge_objavi.disabled === true && nv.objavaBlokirana(12) === true, "nov-dogodek.js: rdeča ovira: Objavi onemogočen");
+    assert(klici8.some(k => k[1] === "/admin/api/opozorila?dogodek=12"), "nov-dogodek.js: klic ?dogodek=12");
+    odg8 = { "/admin/api/opozorila?dogodek=": { telo: { items: [], stevci: { rdece: 0, oranzno: 0, rumeno: 0 } } } };
+    najdi($8("dge_razsiritve"), e => idje(e, "dge_preveri_znova"))[0].onclick(); await new Promise(r => setImmediate(r));
+    assert(el8.dge_objavi.disabled === false && nv.objavaBlokirana(12) === false && pregled($8("dge_razsiritve")).besedila.join("\n").includes("Vse je v redu"), "nov-dogodek.js: brez opozoril: Objavi omogočen");
+    odg8 = { "/admin/api/opozorila?dogodek=": { napaka: "503: busy" } };
+    najdi($8("dge_razsiritve"), e => idje(e, "dge_preveri_znova"))[0].onclick(); await new Promise(r => setImmediate(r));
+    assert(nv.objavaBlokirana(12) === true && el8.dge_objavi.disabled === true, "nov-dogodek.js: pregled ni uspel: Objavi ostane onemogočen");
+    // »Preveri znova« je med preverjanjem onemogocen; ob rdeci oviri / napaki je »Objavi vseeno«
+    odg8 = { "/admin/api/opozorila?dogodek=": { telo: { items: [{ vrsta: "prodajalec_nepopoln", resnost: "rdece", cilj_tip: "dogodek", cilj_id: 12, besedilo: "x" }], stevci: { rdece: 1, oranzno: 0, rumeno: 0 } } },
+      "/admin/api/events/12": { metoda: "PATCH", telo: { id: 12, status: "published" } } };
+    let osvezeno8 = 0;
+    nv.zaUrejevalnik({ event: { id: 12, status: "draft", title: ZLO8[0], start_at: "2030-01-01T10:00:00Z" }, osvezi: () => { osvezeno8++; } });
+    assert(najdi($8("dge_razsiritve"), e => idje(e, "dge_preveri_znova"))[0].disabled === true && najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno")).length === 0, "nov-dogodek.js: med preverjanjem je »Preveri znova« onemogocen in »Objavi vseeno« ni");
+    await new Promise(r => setImmediate(r));
+    assert(najdi($8("dge_razsiritve"), e => idje(e, "dge_preveri_znova"))[0].disabled === false, "nov-dogodek.js: po preverjanju je »Preveri znova« spet omogocen");
+    const vseeno = najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno"));
+    assert(vseeno.length === 1 && vseeno[0].textContent === "Objavi vseeno", "nov-dogodek.js: ob rdeci oviri je sekundarni gumb »Objavi vseeno«");
+    let potrdiO = null;
+    potrdi8 = [async (o) => { potrdiO = o; return { razlog: "Martin je potrdil po telefonu" }; }];
+    klici8.length = 0;
+    await vseeno[0].onclick();
+    assert(potrdiO && potrdiO.vpis === "OBJAVI" && potrdiO.razlog === "obvezen" && potrdiO.nevarno === true, "nov-dogodek.js: »Objavi vseeno«: potrdi() z vpisom OBJAVI, obveznim razlogom in nevarno", potrdiO && { vpis: potrdiO.vpis, razlog: potrdiO.razlog });
+    const pat = klici8.find(k => k[0] === "PATCH");
+    assert(pat && pat[1] === "/admin/api/events/12" && JSON.stringify(pat[2]) === JSON.stringify({ status: "published", reason: "Martin je potrdil po telefonu" }) && osvezeno8 === 1, "nov-dogodek.js: PATCH /admin/api/events/12 { status: published, reason } in ponovno nalaganje", pat);
+    potrdi8 = [async () => null]; klici8.length = 0;
+    await najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno"))[0].onclick();
+    assert(!klici8.some(k => k[0] === "PATCH"), "nov-dogodek.js: preklic okna ne objavi");
+    odg8 = { "/admin/api/opozorila?dogodek=": { napaka: "503: busy" } };
+    nv.zaUrejevalnik({ event: { id: 14, status: "cancelled", title: "Odpovedan", start_at: "2030-01-01T10:00:00Z" } }); await new Promise(r => setImmediate(r));
+    assert(nv.objavaBlokirana(14) === true && najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno")).length === 1, "nov-dogodek.js: odpovedan dogodek ima tudi pregled in zaklep Objavi; ob napaki pregleda je »Objavi vseeno«");
+    let potrdiC = null; potrdi8 = [async (o) => { potrdiC = o; return null; }];
+    await najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno"))[0].onclick();
+    assert(potrdiC && potrdiC.nevarno === true && pregled({ children: [].concat(potrdiC.vsebina).filter(y => y && y.nodeType), nodeType: 1, tagName: "x", attrs: {} }).besedila.join(" ").includes("Dogodek je bil odpovedan; kupci so morda že dobili vračila. Ponovna objava obvesti sledilce."),
+      "nov-dogodek.js: »Objavi vseeno« pri odpovedanem dogodku: jasno opozorilo o vracilih in sledilcih");
+    potrdiC = null; potrdi8 = [async (o) => { potrdiC = o; return null; }];
+    nv.zaUrejevalnik({ event: { id: 15, status: "draft", title: "Osnutek", start_at: "2030-01-01T10:00:00Z" } }); await new Promise(r => setImmediate(r));
+    await najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno"))[0].onclick();
+    assert(potrdiC && !pregled({ children: [].concat(potrdiC.vsebina).filter(y => y && y.nodeType), nodeType: 1, tagName: "x", attrs: {} }).besedila.join(" ").includes("odpovedan"), "nov-dogodek.js: pri osnutku opozorila o odpovedi ni");
+    nv.zaUrejevalnik({ event: { id: 13, status: "published", title: "x", start_at: "2030-01-01T10:00:00Z" } });
+    assert(nv.objavaBlokirana(13) === false && $8("dge_razsiritve").children.length === 0, "nov-dogodek.js: objavljen dogodek nima bloka Pred objavo in ni blokiran");
+    assert(najdi($8("dge_gumbi"), e => idje(e, "dge_podvoji")).length >= 2, "nov-dogodek.js: gumb Podvoji pri vsakem odprtju urejevalnika (dogodki.js ustvari nov vsebnik)");
+
+    // podvoji: rezultat s povezavami samo na #/dogodki/<stevilo>, naslovi kot besedilo
+    el8.dge_razsiritve = new El8("div");
+    odg8 = { "/admin/api/events/12/duplicate": { metoda: "POST", telo: { events: [{ id: 41, title: ZLO8[0], start_at: "2030-02-01T10:00:00Z", status: "draft" }, { id: "3<script>", title: ZLO8[1], start_at: "2030-02-08T10:00:00Z", status: "draft" }] } } };
+    potrdi8 = [async (o) => { const sel = najdi(o.vsebina.flat ? { children: [].concat(o.vsebina).filter(x => x && x.nodeType), nodeType: 1, tagName: "x", attrs: {} } : o.vsebina, e => e.tagName === "select")[0]; sel.value = "1"; return { razlog: "" }; }];
+    nv.zaUrejevalnik({ event: { id: 12, status: "published", title: "Izvor", start_at: "2030-01-01T10:00:00Z" } });
+    klici8.length = 0;
+    await nv.podvoji({ id: 12, status: "published", title: "Izvor", start_at: "2030-01-01T10:00:00Z" });
+    const dup = klici8.find(k => /duplicate$/.test(k[1]));
+    assert(dup && dup[2].ponovi === "weekly" && dup[2].n === 2 && typeof dup[2].startAt === "string" && Object.keys(dup[2]).sort().join() === "n,ponovi,startAt", "nov-dogodek.js: podvoji pošlje { startAt, ponovi: weekly, n = dodatni + 1 }", dup && dup[2]);
+    const pp = pregled($8("dge_razsiritve")), ppbes = pp.besedila.join("\n");
+    assert(pp.elementi.every(t => DOV8.has(t)) && brezOn(pp), "nov-dogodek.js: rezultat podvajanja nima elementov iz podatkov", [...new Set(pp.elementi)]);
+    assert(ppbes.includes(ZLO8[0]) && ppbes.includes(ZLO8[1]), "nov-dogodek.js: naslovi podvojenih osnutkov so besedilo");
+    const hrefi = najdi($8("dge_razsiritve"), e => e.tagName === "a").map(a => a.attrs.href);
+    assert(JSON.stringify(hrefi) === JSON.stringify(["#/dogodki/41", "#/dogodki/0"]), "nov-dogodek.js: povezave samo #/dogodki/<celo število> (id iz podatkov, ki ni število, postane 0)", hrefi);
+    najdi($8("dge_razsiritve"), e => e.tagName === "a")[0].onclick({ preventDefault() {} });
+    assert(zgod8[zgod8.length - 1][2] === "#/dogodki/41" && zavihki8[zavihki8.length - 1] === "dogodki", "nov-dogodek.js: klik na povezavo odpre osnutek");
+
+    // nov dogodek: validacija pred klicem, nato POST /events s centi in koncem +6 h
+    odg8 = { "/admin/api/clubs": { metoda: "GET", telo: [{ id: 6, name: ZLO8[0], city: "LJ", hidden: false, is_organizer: false, is_demo: false }, { id: "x<", name: "napacen" }] },
+      "/admin/api/events": { metoda: "POST", telo: { id: 9, title: "Moj dogodek" } } };
+    const zacetek8 = new Date(Date.now() + 5 * 864e5); zacetek8.setSeconds(0, 0);
+    const lok8 = (() => { const q = (n) => String(n).padStart(2, "0"); return `${zacetek8.getFullYear()}-${q(zacetek8.getMonth() + 1)}-${q(zacetek8.getDate())}T${q(zacetek8.getHours())}:${q(zacetek8.getMinutes())}`; })();
+    const polni = (o, v) => { for (const [id, x] of Object.entries(v)) { const e = poId({ children: [].concat(o.vsebina).filter(y => y && y.nodeType), nodeType: 1, tagName: "x", attrs: {} }, id); mora(e, "polje " + id + " ni v oknu Nov dogodek"); e.value = x; } };
+    potrdi8 = [async () => ({ razlog: "" }), async (o) => { polni(o, { nd_klub: "6", nd_naslov: "  Moj dogodek ", nd_zacetek: lok8, nd_cena: "12,5", nd_kap: "250" }); return { razlog: "" }; }];
+    klici8.length = 0; obv8.length = 0; zgod8.length = 0;
+    await nv.novDogodek();
+    const kopt = klici8.find(k => k[1] === "/admin/api/events");
+    assert(obv8.some(o => o[0] === "Izberi klub." && o[1] === "slabo") && klici8.filter(k => k[1] === "/admin/api/events").length === 1, "nov-dogodek.js: prazen obrazec: napaka, brez klica; okno se znova odpre");
+    assert(kopt && kopt[2].clubId === 6 && kopt[2].title === "Moj dogodek" && kopt[2].status === "draft" && kopt[2].ticketPriceCents === 1250 && kopt[2].capacity === 250 &&
+      Date.parse(kopt[2].endAt) - Date.parse(kopt[2].startAt) === 6 * 3600e3 && Date.parse(kopt[2].startAt) === zacetek8.getTime(), "nov-dogodek.js: POST /admin/api/events (ne /events): draft, 1250 centov (ne plavajoča vejica), konec = začetek + 6 h", kopt && kopt[2]);
+    assert(zgod8.length === 1 && zgod8[0][2] === "#/dogodki/9" && zavihki8[zavihki8.length - 1] === "dogodki", "nov-dogodek.js: po uspehu se odpre urejevalnik #/dogodki/9");
+    const optKlubi = [];
+    // vrednosti kluba v izbiri: samo številke (id '"x<"' je izločen), ime kot besedilo
+    potrdi8 = [async (o) => { sprehod({ children: [].concat(o.vsebina).filter(y => y && y.nodeType), nodeType: 1, tagName: "x", attrs: {} }, e => { if (e.nodeType === 1 && e.tagName === "option") optKlubi.push([e.attrs.value, e.textContent]); }); return null; }];
+    await nv.novDogodek();
+    assert(optKlubi.length === 2 && optKlubi[1][0] === "6" && optKlubi[1][1].includes(ZLO8[0]), "nov-dogodek.js: izbira kluba: id kot število, ime kot besedilo, neveljaven id izločen", optKlubi);
+
+    // parametri podpisa (pogodba z backendom/spletom): camelCase -> snake_case, nepodpisano izpuščeno
+    const pod = nv.parametriPodpisa({ timestamp: 1, signature: "s", apiKey: "k", cloudName: "c", folder: "outly", publicId: "outly/u1/x", allowedFormats: ["jpg", "png"], nic: null });
+    assert(JSON.stringify(pod) === JSON.stringify({ timestamp: "1", folder: "outly", public_id: "outly/u1/x", allowed_formats: "jpg,png" }), "nov-dogodek.js: parametriPodpisa: vsa podpisana polja, snake_case, brez signature/apiKey/cloudName", pod);
   }
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
