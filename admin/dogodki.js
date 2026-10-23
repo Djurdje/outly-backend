@@ -12,6 +12,7 @@
     status: "Stanje", ticket_price_cents: "Cena vstopnice", currency: "Valuta", ticket_url: "Zunanja prodaja", capacity: "Kapaciteta",
     recap_video_url: "Posnetek", sales_paused: "Prodaja", venue_club_id: "Gostitelj", venue_name: "Prizorišče", venue_address: "Naslov prizorišča",
     venue_city: "Mesto prizorišča", venue_lat: "Lat", venue_lng: "Lng", sales_open_at: "Prodaja od", sales_close_at: "Prodaja do",
+    iz: "Podvojeno iz dogodka",
   };
   let vsi = [], zanri = null, trenutni = null;
 
@@ -238,6 +239,7 @@
   async function spremeniStanje(novo) {
     const e = trenutni.event, s = trenutni.stats;
     let ok;
+    if (novo === "published" && window.novDogodek && window.novDogodek.objavaBlokirana(cele(e.id))) return obvesti("Objava je onemogočena: preveri seznam »Pred objavo«.", "slabo");
     if (novo === "cancelled") {
       const n = cele(s.paid_orders), nt = cele(s.test_paid_orders);
       ok = await potrdi({
@@ -252,7 +254,9 @@
     } else {
       ok = await potrdi({
         naslov: novo === "published" ? "Objavim dogodek?" : "Premaknem med osnutke?", potrdiBesedilo: novo === "published" ? "Objavi" : "Premakni med osnutke",
-        vsebina: novo === "published" ? [h("p", {}, `»${e.title}« bo viden v aplikaciji. Sledilci kluba dobijo obvestilo.`)]
+        nevarno: novo === "published" && e.status === "cancelled",
+        vsebina: novo === "published" ? [h("p", {}, `»${e.title}« bo viden v aplikaciji. Sledilci kluba dobijo obvestilo.`),
+          e.status === "cancelled" ? h("p", {}, "Dogodek je bil odpovedan; kupci so morda že dobili vračila. Ponovna objava obvesti sledilce.") : null]
           : [h("p", {}, `»${e.title}« ne bo več viden v aplikaciji. Plačane vstopnice ostanejo veljavne.`)],
       });
       if (!ok) return;
@@ -317,7 +321,7 @@
   function zgodovina(vrstice) {
     if (!vrstice.length) return h("div", { class: "prazno" }, "Admin tega dogodka še ni spreminjal.");
     const IME = { "event.update": "Urejeno", "event.publish": "Objavljeno", "event.unpublish": "Med osnutke", "event.cancel": "Odpovedano", "event.delete": "Izbrisano",
-      "event.sales_pause": "Prodaja ustavljena", "event.sales_resume": "Prodaja spet teče" };
+      "event.sales_pause": "Prodaja ustavljena", "event.sales_resume": "Prodaja spet teče", "event.duplicate": "Podvojeno" };
     return h("ul", { class: "dg-zgodovina" }, vrstice.map((a) => {
       const prej = a.prej || {}, potem = a.potem || {};
       const kljuci = [...new Set([...Object.keys(prej), ...Object.keys(potem)])];
@@ -344,7 +348,7 @@
       const e = d.event, s = d.stats;
       const nazaj = h("button", { type: "button", class: "dg-nazaj" }, "‹ Vsi dogodki"); nazaj.onclick = () => pojdi(null);
       const gumbi = [];
-      if (e.status !== "published") { const g = h("button", { type: "button", class: "dobro mali" }, "Objavi"); g.onclick = () => spremeniStanje("published"); gumbi.push(g); }
+      if (e.status !== "published") { const g = h("button", { type: "button", id: "dge_objavi", class: "dobro mali" }, "Objavi"); g.onclick = () => spremeniStanje("published"); gumbi.push(g); }
       if (e.status === "published") { const g = h("button", { type: "button", class: "tih mali" }, "Med osnutke"); g.onclick = () => spremeniStanje("draft"); gumbi.push(g); }
       if (e.status !== "cancelled") { const g = h("button", { type: "button", class: "nevarno mali" }, "Odpovej dogodek"); g.onclick = () => spremeniStanje("cancelled"); gumbi.push(g); }
 
@@ -379,7 +383,7 @@
           h("div", { class: "dg-glava" },
             h("div", { style: "flex:1 1 260px;min-width:0" }, nazaj,
               h("h2", {}, e.title, h("span", { class: "drobno" }, `#${cele(e.id)} – ${e.club_name}${e.club_hidden ? " (klub skrit)" : ""} – ${datum(e.start_at)}`))),
-            h("div", { class: "vrsta" }, znacka(e.status), e.status === "published" ? prodaja(e) : null, gumbi)),
+            h("div", { class: "vrsta", id: "dge_gumbi" }, znacka(e.status), e.status === "published" ? prodaja(e) : null, gumbi)),
           h("div", { class: "telo" }, e.status === "published" ? stikalo(e)
             : h("p", { style: "margin:0;font-size:13px;color:var(--muted)" }, e.status === "cancelled" ? "Dogodek je odpovedan, prodaje ni." : "Osnutek ni viden v aplikaciji, prodaje ni.",
               e.sales_paused ? " Ob objavi bo prodaja ustavljena (stikalo)." : "")),
@@ -389,6 +393,7 @@
             h("div", {}, h("b", {}, cena(s.paid_cents)), h("span", {}, `${cele(s.paid_orders)} plačanih naročil`)),
             h("div", {}, h("b", {}, String(cele(s.pending_orders))), h("span", {}, "odprtih plačil")),
             cele(s.test_paid_orders) ? h("div", {}, h("b", {}, cena(s.test_paid_cents)), h("span", {}, `${cele(s.test_paid_orders)} testnih (ni pravi denar)`)) : null)),
+        h("div", { id: "dge_razsiritve" }),   // pregled pred objavo, seznam podvojenih osnutkov (nov-dogodek.js)
         h("div", { class: "skupina dg-obrazec" }, h("h2", {}, "Podatki dogodka"),
           h("div", { class: "telo" },
             h("div", { class: "polja" },
@@ -400,7 +405,7 @@
               polje("dge_salesClose", "Prodaja do", prodajaDo, "Prodaja se sama zapre ob začetku dogodka in ob razprodaji; tu nastaviš prej/pozneje."),
               polje("dge_currency", "Valuta", valuta), polje("dge_minAge", "Najnižja starost", starost),
               polje("dge_ticketUrl", "Zunanja prodaja (URL)", zun, "Samo, če vstopnic ne prodaja Outly.", true),
-              h("div", { class: "siroko" }, h("label", { for: "dge_poster" }, "Plakat (URL)"), h("div", { class: "vrsta", style: "align-items:flex-start;flex-wrap:nowrap" }, img, plakat)),
+              h("div", { class: "siroko" }, h("label", { for: "dge_poster" }, "Plakat (URL)"), h("div", { class: "vrsta", style: "align-items:flex-start;flex-wrap:nowrap" }, img, plakat), h("div", { class: "vrsta", id: "dge_plakat_orodja", style: "margin-top:6px" })),
               polje("dge_description", "Opis", opis, null, true),
               h("div", { class: "siroko" }, h("label", {}, "Žanri"), zanriPolje),
               polje("dge_venueName", "Prizorišče (prosto vpisano)", vIme, e.venue_club_id ? "Dogodek gostuje pri klubu na Outlyju; vpis prizorišča to zamenja." : null),
@@ -414,6 +419,8 @@
       }
       zanriPolje.onchange = oznaciSpremenjeno;
       oznaciSpremenjeno();
+      // nov-dogodek.js (#328): nalaganje plakata, »Podvoji«, pregled pred objavo; ce modula ni, urejevalnik dela kot prej.
+      if (window.novDogodek) window.novDogodek.zaUrejevalnik({ event: e, osvezi: () => odpri(id) });
     });
   }
 })();
