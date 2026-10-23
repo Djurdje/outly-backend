@@ -2897,6 +2897,17 @@ app.post("/events", requireAuth, requireClub("owner", "manager"), async (req, re
   return ustvariDogodek(req, res);
 });
 
+// Naslov dogodka: najvec NASLOV_NAJVEC znakov (Martin 23. 10. 2026; #330 K1: 95 000-znakovni naslov). Steje se po trim() v Unicode znakih
+// ([...s].length: emoji = 1 znak, ne 2 enoti UTF-16). Shranjen naslov ostane, kot je bil poslan (trim samo za stetje, kot doslej).
+// Brez CHECK v bazi: obstojeci daljsi naslovi ostanejo, GET jih vrne nespremenjene, PATCH brez spremembe naslova jih ne zavrne.
+const NASLOV_NAJVEC = 200;
+const NASLOV_PREDOLG = `Title is too long (max ${NASLOV_NAJVEC} characters).`;
+// Naslov mora biti niz (#339 S1): objekt/tabelo bi pg zapisal kot JSON mimo meje (String(objekt) = "[object Object]").
+const NASLOV_NI_NIZ = "Title must be a string.";
+const naslovPredolg = (v) => [...String(v).trim()].length > NASLOV_NAJVEC;
+// Za kopije (podvajanje): obrezan naslov z najvec NASLOV_NAJVEC znaki (po znakih, emoji ostane cel).
+const naslovObrezan = (v) => { const t = String(v ?? "").trim(); return [...t].length > NASLOV_NAJVEC ? [...t].slice(0, NASLOV_NAJVEC).join("") : t; };
+
 // Skupno telo za POST /events (lastnik/manager/admin kluba) in POST /admin/api/events (#328, admin za vsak klub): ista validacija in isti INSERT.
 // `opcije.admin`: klub ni vezan na clanstvo klicatelja, status je VEDNO draft (telo ga ne more povoziti), INSERT in vrstica admin_dejanja `event.create` gresta v isti transakciji.
 async function ustvariDogodek(req, res, opcije = {}) {
@@ -2921,6 +2932,7 @@ async function ustvariDogodek(req, res, opcije = {}) {
       if (!Number.isInteger(c) || c < 1 || c > 100000) return res.status(400).send("capacity must be a positive integer.");
     }
 
+    if (title !== undefined && title !== null && typeof title !== "string") return res.status(400).send(NASLOV_NI_NIZ);
     if (!clubId || !title || !startAt) return res.status(400).send("Missing clubId, title or startAt.");
     if (!/^\d+$/.test(String(clubId))) return res.status(400).send("Invalid clubId.");
     // URL polja (#269): samo http(s), 400 invalid_url; brez polja ali null = "".
@@ -2929,6 +2941,7 @@ async function ustvariDogodek(req, res, opcije = {}) {
     const posterUrl = urlD.vrednosti.poster_url || "";
     const ticketUrl = urlD.vrednosti.ticket_url || "";
     if (String(title).trim().length === 0) return res.status(400).send("Title is required.");
+    if (naslovPredolg(title)) return res.status(400).send(NASLOV_PREDOLG);
     if (Number.isNaN(new Date(startAt).getTime())) return res.status(400).send("startAt must be a valid date.");
     if (endAt !== null && Number.isNaN(new Date(endAt).getTime())) return res.status(400).send("endAt must be a valid date.");
     if (!["draft", "published", "cancelled"].includes(status)) {
@@ -3062,7 +3075,7 @@ async function dogodekZaUrejanje(req, res) {
   if (!/^\d+$/.test(req.params.id)) { res.status(400).send("Invalid event id."); return null; }
 
   const r = await pool.query(
-    `SELECT e.id, e.club_id, e.status, c.owner_user_id, c.is_organizer, e.poster_url, e.ticket_url,
+    `SELECT e.id, e.club_id, e.status, e.title, c.owner_user_id, c.is_organizer, e.poster_url, e.ticket_url,
             e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng,
             (COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') <= NOW()) AS je_koncan
      FROM events e JOIN clubs c ON c.id = e.club_id
@@ -3180,6 +3193,16 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
     const urlD = preveriUrlPolja([["poster_url", dovoljeno.poster_url], ["ticket_url", dovoljeno.ticket_url]], d);
     if (urlD.napaka) return res.status(400).json(urlD.napaka);
     Object.assign(dovoljeno, urlD.vrednosti);
+
+    // Naslov (samo ce je kljuc v telesu): niz (#339 S1; null je prej dal 500 zaradi NOT NULL), ne prazen po trim (prej 500 iz events_title_chk),
+    // najvec NASLOV_NAJVEC znakov. Ce je po trim() enak shranjenemu (obrazec poslje vsa polja, panel naslov obreze), ostane shranjena vrednost in meja se ne
+    // preverja: star daljsi naslov ostane dobesedno, kot je (uporabnik ga ni spremenil).
+    if (dovoljeno.title !== undefined) {
+      if (typeof dovoljeno.title !== "string") return res.status(400).send(NASLOV_NI_NIZ);
+      if (dovoljeno.title.trim().length === 0) return res.status(400).send("Title is required.");
+      if (dovoljeno.title.trim() === String(d.title ?? "").trim()) dovoljeno.title = d.title;   // shranjena vrednost dobesedno (PATCH samo z naslovom ni »Nothing to update«; dnevnik je po razliki)
+      else if (naslovPredolg(dovoljeno.title)) return res.status(400).send(NASLOV_PREDOLG);
+    }
 
     // Posnetek sme dobiti SAMO koncan dogodek, ki je med tremi najbolj popularnimi
     // dogodki svojega kluba (po prodanih vstopnicah). Brez te meje bi stran kluba
@@ -4179,15 +4202,17 @@ admin.post("/events/:id/duplicate", async (req, res) => {
     await c.query("BEGIN");
     await c.query("SET LOCAL statement_timeout = 5000");
     // Kopija ne prenese neveljavnih URL-jev (I48: stari zapis iz casov pred #269 bi se sicer razmnozil) in zanrov izven ZANRI: neveljavno postane '' / se izpusti.
-    const izvor = (await c.query("SELECT poster_url, ticket_url, genres FROM events WHERE id = $1", [id])).rows[0];
+    const izvor = (await c.query("SELECT title, poster_url, ticket_url, genres FROM events WHERE id = $1", [id])).rows[0];
     if (!izvor) { await c.query("ROLLBACK"); return napaka(404, "event_not_found", "Event not found."); }
     const urlAliPrazno = (v, polje) => { const x = preveriUrlPolja([[polje, v]]); return x.napaka ? "" : (x.vrednosti[polje] || ""); };
     const posterKopija = urlAliPrazno(izvor.poster_url, "poster_url"), ticketKopija = urlAliPrazno(izvor.ticket_url, "ticket_url");
     const zanriKopija = ociscenoZanre(izvor.genres);
+    // Naslov kopije najvec NASLOV_NAJVEC znakov (star daljsi naslov se obreze, podvajanje ne pade); naslov do meje se kopira nespremenjen.
+    const naslovKopija = naslovPredolg(izvor.title) ? naslovObrezan(izvor.title) : izvor.title;
     const r = await c.query(
       `INSERT INTO events (club_id, title, description, poster_url, start_at, end_at, min_age, genres, status, ticket_price_cents, currency, ticket_url,
                            capacity, vat_rate, sales_open_at, sales_close_at, venue_club_id, venue_name, venue_address, venue_city, venue_lat, venue_lng)
-       SELECT e.club_id, e.title, e.description, $4::text, s.nov_start,
+       SELECT e.club_id, $7::text, e.description, $4::text, s.nov_start,
               CASE WHEN e.end_at IS NULL THEN NULL
                    ELSE s.nov_start + make_interval(secs => (EXTRACT(EPOCH FROM e.end_at) - EXTRACT(EPOCH FROM e.start_at))::float8) END,
               e.min_age, $6::text[], 'draft', e.ticket_price_cents, e.currency, $5::text,
@@ -4201,7 +4226,7 @@ admin.post("/events/:id/duplicate", async (req, res) => {
                                    (($2::timestamptz AT TIME ZONE 'Europe/Ljubljana') + g * INTERVAL '7 days') - (e.start_at AT TIME ZONE 'Europe/Ljubljana') AS zamik
                               FROM generate_series(0, $3::int - 1) AS g) s
         WHERE e.id = $1
-       RETURNING id, title, start_at, status`, [id, zacetekIso, n, posterKopija, ticketKopija, zanriKopija]);
+       RETURNING id, title, start_at, status`, [id, zacetekIso, n, posterKopija, ticketKopija, zanriKopija, naslovKopija]);
     if (r.rows.length === 0) { await c.query("ROLLBACK"); return napaka(404, "event_not_found", "Event not found."); }
     nove = r.rows.sort((a, z) => a.start_at - z.start_at || a.id - z.id);
     for (const nov of nove) {
