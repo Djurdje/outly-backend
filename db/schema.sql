@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–061, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–062, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict t0PNySu8kwFXmHfid1eUm8p4xms8vNcYbe3jao0TwRbDTWH3x1dqibOhwKZsgD0
+\restrict a3FemfPE4w2mMXlKYgBdLPx3TUF8KBM5FvYOW2q39j3AUgPpyKUd9UPGbjCqnrg
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -896,6 +896,7 @@ CREATE TABLE public.events (
     floor_plan jsonb,
     vip_layout_from_club_id integer,
     sales_paused boolean DEFAULT false NOT NULL,
+    publish_at timestamp with time zone,
     CONSTRAINT events_capacity_chk CHECK (((capacity IS NULL) OR (capacity > 0))),
     CONSTRAINT events_end_chk CHECK (((end_at IS NULL) OR (end_at > start_at))),
     CONSTRAINT events_floor_plan_chk CHECK (((floor_plan IS NULL) OR (jsonb_typeof(floor_plan) = 'object'::text))),
@@ -952,6 +953,13 @@ COMMENT ON COLUMN public.events.vip_layout_from_club_id IS 'Klub, iz katerega je
 --
 
 COMMENT ON COLUMN public.events.sales_paused IS 'Pavza prodaje (055): TRUE = nakup vstopnic, miz in gosta 409 »Ticket sales are paused.«, cena ostane; odprta placilna okna se zaprejo (I53).';
+
+
+--
+-- Name: COLUMN events.publish_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.events.publish_at IS 'Samodejna objava osnutka ob tem casu (062, I59); NULL = ni nacrtovano; ob vsaki spremembi stanja in ob samodejni objavi NULL. Ni v javnih odgovorih.';
 
 
 --
@@ -2944,6 +2952,13 @@ CREATE INDEX events_club_start_idx ON public.events USING btree (club_id, start_
 
 
 --
+-- Name: events_publish_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX events_publish_at_idx ON public.events USING btree (publish_at) WHERE ((status = 'draft'::text) AND (publish_at IS NOT NULL));
+
+
+--
 -- Name: events_start_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4149,5 +4164,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict t0PNySu8kwFXmHfid1eUm8p4xms8vNcYbe3jao0TwRbDTWH3x1dqibOhwKZsgD0
+\unrestrict a3FemfPE4w2mMXlKYgBdLPx3TUF8KBM5FvYOW2q39j3AUgPpyKUd9UPGbjCqnrg
 
