@@ -4332,6 +4332,9 @@ admin.get("/finance", async (req, res) => {
 // db/obnovi_izvoz.js jo berejo: {exported_at, postgres, tables:{ime:{count,columns,rows}}, sequences}.
 // Test: _testi/test_export_tok.js (primerja z referenčno stari izvedbo, meri RSS, prekinitev odjemalca).
 const IZVOZ_VRSTIC = 500;
+// Tabele z bytea (racuni_pdf, migracija 057: PDF racunov, do 15 MB na vrstico) se berejo v majhnih paketih, vrednost pa gre v izvoz kot {"$bytea_b64":"<base64>"}
+// (JSON.stringify(Buffer) bi dal {"type":"Buffer","data":[...]}: ~3,6x vec; 500 PDF-jev po 60 KB = RSS 321 MB v procesu, ki skenira, I16). db/obnovi_izvoz.js oznako prebere.
+const IZVOZ_VRSTIC_BYTEA = 10;
 // Varovalki pred bralcem, ki neha brati ali pred bazo, ki prekine povezavo (izvoz drži transakcijo z
 // AccessShareLock na vseh prebranih tabelah: migracija ob deployu bi čakala nanjo, za njo pa vsa navadna branja):
 //  - IZVOZ_DRAIN_TIMEOUT_MS: koliko čakamo, da odjemalec sprazni medpomnilnik ('drain'); nato res.destroy() + ROLLBACK;
@@ -4409,7 +4412,9 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
     // (Europe/Ljubljana) premakne za dan nazaj — date_of_birth bi po obnovi
     // pomenil drug rojstni dan (ujeto v _testi/test_obnova.js). Samo za ta klic,
     // odgovori API-ja se ne spremenijo.
-    const tipiIzvoza = { getTypeParser: (oid, fmt) => (oid === 1082 ? (v) => v : pgTipi.getTypeParser(oid, fmt)) };
+    const byteaPrivzeto = pgTipi.getTypeParser(17, "text");
+    const tipiIzvoza = { getTypeParser: (oid, fmt) => (oid === 1082 ? (v) => v : oid === 17 ? (v) => ({ $bytea_b64: byteaPrivzeto(v).toString("base64") }) : pgTipi.getTypeParser(oid, fmt)) };
+    const tabeleZBytea = new Set((await c.query("SELECT DISTINCT table_name FROM information_schema.columns WHERE table_schema='public' AND data_type='bytea'")).rows.map((x) => x.table_name));
     // Od tu naprej so glave poslane: napaka ne more več postati 500 (glej catch).
     res.status(200);
     res.set("Content-Type", "application/json; charset=utf-8");
@@ -4423,8 +4428,9 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
       const n = (await c.query(`SELECT COUNT(*)::int AS n FROM ${ime}`)).rows[0].n;
       await c.query(`DECLARE izvoz_kurzor NO SCROLL CURSOR FOR SELECT * FROM ${ime}`);
       let prva = true, bilaVrstica = false;
+      const paket = tabeleZBytea.has(table_name) ? IZVOZ_VRSTIC_BYTEA : IZVOZ_VRSTIC;
       for (;;) {
-        const r = await c.query({ text: `FETCH ${IZVOZ_VRSTIC} FROM izvoz_kurzor`, types: tipiIzvoza });
+        const r = await c.query({ text: `FETCH ${paket} FROM izvoz_kurzor`, types: tipiIzvoza });
         let kos = "";
         if (prva) {
           // columns so v odgovoru FETCH tudi pri prazni tabeli
@@ -4435,7 +4441,7 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
           kos += (bilaVrstica ? "," : "") + r.rows.map((vrstica) => JSON.stringify(vrstica)).join(",");
           bilaVrstica = true;
         }
-        if (r.rows.length < IZVOZ_VRSTIC) { await pisi(kos + "]}"); break; } // zadnji (nepolni ali prazni) kos
+        if (r.rows.length < paket) { await pisi(kos + "]}"); break; } // zadnji (nepolni ali prazni) kos
         await pisi(kos);
       }
       await c.query("CLOSE izvoz_kurzor");
@@ -6546,6 +6552,15 @@ async function posljiRacunKupcu(id) {
 // Skupni pogoj »mail dolgovan in prevzemljiv« (isti za izbiro, rezervacijo in pospravljalca); parametra = mesti $ za najvec poskusov in tabelo premorov.
 const racunMailPogoj = (mesto) => `r.stanje = 'potrjen' AND r.pdf_prejet AND r.mail_poslano_at IS NULL AND NOT r.mail_izid_neznan AND r.mail_poskusi < ${mesto[0]}
         AND (r.mail_prevzeto_at IS NULL OR r.mail_prevzeto_at < NOW() - (${mesto[1]}::bigint[])[r.mail_poskusi + 1] * INTERVAL '1 millisecond')`;
+// Resend SDK 3.x VSAKO izjemo fetcha (prekinjena povezava po poslanem zahtevku, okrnjen 200) in vsak ne-JSON odgovor (502 posrednika) vrne kot
+// { error: { name: "application_error" } } BREZ statusCode: mail je lahko ze sprejet. Zavrnitev je dokazana SAMO, ce je odgovor API-ja (JSON) prinesel
+// statusCode 4xx (validation_error, missing_required_field, invalid_*, rate_limit_exceeded 429, not_found ...): Resend takega zahtevka ne obdela. 5xx
+// (tudi internal_server_error), application_error in karkoli brez statusCode = izid neznan, brez ponovitve. 408/499 sta casovna izpad, ne zavrnitev.
+function resendDokazanaZavrnitev(err) {
+  if (!err || typeof err.name !== "string" || !err.name || err.name === "application_error") return false;
+  const sc = err.statusCode;
+  return Number.isInteger(sc) && sc >= 400 && sc <= 499 && sc !== 408 && sc !== 499;
+}
 async function racunKupcuPosljiEno(id) {
   const pre = (await pool.query(
     `SELECT r.id, r.vrsta, r.prostor, r.naprava, r.stevilka, r.znesek_cents, r.valuta, o.public_ref, o.buyer_email, p.pdf
@@ -6567,8 +6582,9 @@ async function racunKupcuPosljiEno(id) {
   const r = await gostResendPosli({ to: pre.buyer_email, subject: zadeva, html, text: besedilo,
     attachments: [{ filename: ime, content: Buffer.from(pre.pdf).toString("base64"), content_type: "application/pdf" }] });
   if (r && r.error) {
-    // Odgovor API-ja z `name` = Resend je mail zavrnil (zagotovo ni sel): ponovitev. Sicer (rok potekel, prekinjena povezava) izid ni znan: NE ponavljamo.
-    if (r.error.name) {
+    // Dokazana zavrnitev (JSON odgovor API-ja s 4xx statusCode, glej resendDokazanaZavrnitev) = mail zagotovo ni sel: ponovitev. Sicer (rok potekel, prekinjena povezava,
+    // application_error, 5xx) izid ni znan: NE ponavljamo.
+    if (resendDokazanaZavrnitev(r.error)) {
       await pool.query("UPDATE racuni SET mail_izid_neznan = FALSE WHERE id = $1 AND mail_poslano_at IS NULL", [id]);   // znan izid: mail ni sel, ponovitev je varna
       console.error(`Resend napaka (racun kupcu, ${pre.public_ref}, poskus ${poskus}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
       if (poskus >= GOST_POSTA_POSKUSOV) console.error(`[racun-kupcu] POZOR: racun ${stevilka} (narocilo ${pre.public_ref}) NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov); PDF je v racuni_pdf, posljite ga rocno`);

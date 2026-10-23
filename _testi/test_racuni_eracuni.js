@@ -898,6 +898,28 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       await tek(wg, 4, 30, true);
       F.pdfOblika = "ok";
       assert((await vrstica(Rg.id)).pdf_prejet === true, "ime polja s PDF ni pomembno: prepoznan base64 PDF (%PDF- ... %%EOF) kjerkoli v odgovoru");
+      // meja poskusov: vrstica po izcrpanju NE obvisi v zanki (pdf_poskusi bi sicer prebil CHECK 10000 in vsak tek bi padel); izcrpano = POZOR, ponovitev samo rocno
+      {
+        const Rm = await nov(1, 2230); const wm = deloven({ RACUNI_PDF_POZOR_PO: "2", RACUNI_PDF_NAJVEC_POSKUSOV: "4" }); const lm = LOG.length;
+        F.pdfOblika = "brezPdf";
+        for (let i = 0; i < 9; i++) { await pool.query("UPDATE racuni SET pdf_naslednji_at = NULL WHERE id = $1", [Rm.id]); await tek(wm, 1, 0, true); }
+        const rm = await vrstica(Rm.id);
+        const klicov = F.pdfKlici.filter((x) => x.parameters.documentID === rm.ponudnik_id).length;
+        assert(rm.stanje === "potrjen" && !rm.pdf_prejet && rm.pdf_poskusi === 4 && klicov === 4, "meja poskusov (4): po izcrpanju ni vec klicev ponudniku, stevec se ne povecuje", [rm.pdf_poskusi, klicov]);
+        assert(/izcrpan/i.test(rm.pdf_napaka || ""), "pdf_napaka pove, da so poskusi izcrpani", rm.pdf_napaka);
+        assert(logOd(lm).some((l) => /POZOR.*PDF.*izcrpan/i.test(l)), "POZOR: poskusi pridobitve PDF izcrpani (kupec racuna ne dobi)");
+        await pool.query("UPDATE racuni SET pdf_poskusi = 0, pdf_napaka = NULL, pdf_naslednji_at = NULL WHERE id = $1", [Rm.id]);   // rocna ponovitev (STATE)
+        F.pdfOblika = "ok";
+        await tek(wm, 3, 30, true);
+        assert((await vrstica(Rm.id)).pdf_prejet === true, "po rocni ponastavitvi stevca se PDF pridobi");
+        // pospravljalec javi izcrpano vrstico tudi, ko jo tek ne obdeluje vec
+        F.pdfOblika = "brezPdf";
+        const Rp = await nov(1, 2231); const wp = deloven({ RACUNI_PDF_NAJVEC_POSKUSOV: "4" }); await tek(wp, 3, 30, true); const lp = LOG.length;
+        F.pdfOblika = "ok";
+        await pool.query("UPDATE racuni SET pdf_poskusi = 4, pdf_napaka = 'IZCRPANO: test' WHERE id = $1 AND NOT pdf_prejet", [Rp.id]);
+        await wp.pospravi();
+        assert(logOd(lp).some((l) => /POZOR.*PDF.*izcrpan/i.test(l)), "pospravljalec: POZOR za potrjen racun, ki mu PDF ni mogoce pridobiti (izcrpani poskusi)");
+      }
       // ponudnik brez PDF (lazni): nobenega klica, racun ostane brez PDF
     }
 

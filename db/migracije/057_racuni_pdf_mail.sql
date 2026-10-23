@@ -11,7 +11,7 @@
 -- racuni.pdf_poskusi        stevilo neuspelih poskusov pridobitve PDF (po N neuspehih POZOR); pdf_naslednji_at = kdaj naj delavec poskusi znova; pdf_napaka = zadnja napaka (brez osebnih podatkov).
 -- racuni.mail_poskusi       rezervirani poskusi posiljanja maila; mail_prevzeto_at = rezervacija (kot I51 / potrdilo kupcu); mail_poslano_at = Resend je mail sprejel (zapise se SELE po uspehu).
 -- racuni.mail_izid_neznan   izid klica Resenda je neznan (rok potekel / napaka brez odgovora): mail se NE ponovi samodejno (bi lahko bil dvojnik = kopija brez oznake), POZOR, rocni pregled.
--- racuni_pdf                PDF racuna (BYTEA), sha256, cas prejema; samo vstavljanje (UPDATE/DELETE zavrne sprozilec: hramba 10 let).
+-- racuni_pdf                PDF racuna (BYTEA, najvec 15 MB = PDF_NAJVEC_BAJTOV v racuni.js), sha256, cas prejema; samo vstavljanje (UPDATE/DELETE zavrne sprozilec: hramba 10 let).
 --
 -- Zaklep: ALTER TABLE racuni (majhna tabela, ACCESS EXCLUSIVE kratko); stolpci s konstantnim privzetkom ne prepisujejo tabele.
 
@@ -28,7 +28,7 @@ ALTER TABLE racuni ADD COLUMN IF NOT EXISTS mail_izid_neznan BOOLEAN NOT NULL DE
 
 CREATE TABLE IF NOT EXISTS racuni_pdf (
     racun_id   BIGINT      PRIMARY KEY REFERENCES racuni(id),
-    pdf        BYTEA       NOT NULL CHECK (octet_length(pdf) BETWEEN 100 AND 20971520),
+    pdf        BYTEA       NOT NULL CHECK (octet_length(pdf) BETWEEN 100 AND 15728640),
     sha256     TEXT        NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
     prejeto_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

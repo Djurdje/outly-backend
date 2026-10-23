@@ -20,6 +20,8 @@
  *     prekinitvah, vec kot je povezav v poolu, strezniku se vedno dela, v bazi
  *     ni "idle in transaction").
  *  4. Dostop je nespremenjen: brez zetona 401, navaden uporabnik/business 403.
+ *  5. bytea (racuni_pdf, migracija 057): vrednost je v izvozu {"$bytea_b64":"<base64>"} (ne {"type":"Buffer","data":[...]}, ~3,6x vecje), tabela z bytea se bere v
+ *     majhnih paketih (10 vrstic), izvoz 200 PDF-jev (60 KB) doda vrhu RSS < 60 MB, vsak PDF je po dekodiranju enak bajtom v bazi (sha256).
  */
 process.env.TZ = "Europe/Ljubljana"; // date_of_birth mora ostati niz YYYY-MM-DD tudi v pasu z odmikom
 const crypto = require("crypto");
@@ -75,7 +77,8 @@ async function referencniIzvoz(pool, exportedAt, postgres) {
     const t = await c.query(
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema='public' AND table_type='BASE TABLE' AND table_name <> 'omejitve' ORDER BY table_name`);
-    const tipiIzvoza = { getTypeParser: (oid, fmt) => (oid === 1082 ? (v) => v : pgTipi.getTypeParser(oid, fmt)) };
+    const bytea = pgTipi.getTypeParser(17, "text");
+    const tipiIzvoza = { getTypeParser: (oid, fmt) => (oid === 1082 ? (v) => v : oid === 17 ? (v) => ({ $bytea_b64: bytea(v).toString("base64") }) : pgTipi.getTypeParser(oid, fmt)) };
     const tables = {};
     for (const { table_name } of t.rows) {
       const r = await c.query({ text: `SELECT * FROM "${table_name.replace(/"/g, '""')}"`, types: tipiIzvoza });
@@ -151,6 +154,22 @@ async function izvozKosi(token) {
   }
   const MALO = 3000; // najprej majhen posnetek (ogrevanje procesa), sele nato velik
   await dosejVstopnice(1, MALO);
+  // 200 PDF-jev racunov (racuni_pdf.pdf je bytea): racuni brez sprozilcev (replica), PDF-ji po 60 KB razlicne vsebine.
+  const ST_PDF = 200, VELIKOST_PDF = 60000, pdfSha = new Map();
+  {
+    const seed = await pool.connect();
+    try {
+      await seed.query("SET session_replication_role = replica");
+      await seed.query(`INSERT INTO racuni (order_id, vrsta, znesek_cents) SELECT id, 'racun', 3000 FROM orders WHERE id <= $1 ORDER BY id`, [ST_PDF]);
+      const ids = (await seed.query("SELECT id FROM racuni ORDER BY id")).rows.map((x) => x.id);
+      for (const id of ids) {
+        const pdf = Buffer.concat([Buffer.from(`%PDF-1.4\n% racun ${id}\n`), crypto.randomBytes(VELIKOST_PDF), Buffer.from("\n%%EOF\n")]);
+        const sha = crypto.createHash("sha256").update(pdf).digest("hex");
+        await seed.query("INSERT INTO racuni_pdf (racun_id, pdf, sha256) VALUES ($1, $2, $3)", [id, pdf, sha]);
+        pdfSha.set(String(id), sha);
+      }
+    } finally { seed.release(); }
+  }
   console.log("\n# Dostop");
   let r = await api("GET", "/admin/api/export", null);
   assert(r.status === 401, "izvoz brez zetona -> 401", r.status);
@@ -162,7 +181,9 @@ async function izvozKosi(token) {
   console.log("\n# Oblika izhoda (majhen izvoz, primerjava z staro izvedbo)");
   // MALO narocil = MALO*3 vstopnic: oba stevila sta CELOSTEVILSKI veckratnik velikosti kosa (500), kar je
   // robni primer (zadnji FETCH vrne 0 vrstic, brez odvecne vejice); users (3 vrstice) in prazne tabele so nepolni kosi.
+  const hwmPdf0 = vrhRssMB(srv.pid);
   const mali = await izvozKosi(T.admin);
+  const hwmPdf1 = vrhRssMB(srv.pid);
   assert(mali.status === 200, "admin izvoz -> 200", mali.status);
   assert(/^application\/json/.test(mali.tip || ""), "Content-Type je application/json", mali.tip);
   let izvoz; try { izvoz = JSON.parse(mali.telo.toString("utf8")); } catch (e) { izvoz = null; }
@@ -175,6 +196,14 @@ async function izvozKosi(token) {
     assert(izvoz.tables.users.rows.some((u) => u.date_of_birth === "1999-12-31"), "date_of_birth je niz YYYY-MM-DD (ne premaknjen za dan)");
     assert(izvoz.tables.users.rows.some((u) => u.username === 'ž"č\\š\'-😀'), "unicode, narekovaji in backslash prezivijo");
     assert(izvoz.tables.clubs.rows[0].floor_plan && izvoz.tables.clubs.rows[0].floor_plan.width === 10, "JSONB je objekt");
+    // bytea (racuni_pdf, 200 x 60 KB): oznaceni base64, ne {"type":"Buffer","data":[...]}; po dekodiranju enak bajtom v bazi
+    const pr = izvoz.tables.racuni_pdf;
+    assert(pr && pr.count === ST_PDF && pr.rows.length === ST_PDF, "racuni_pdf: vseh 200 vrstic", pr && pr.count);
+    assert(pr.rows.every((x) => x.pdf && typeof x.pdf.$bytea_b64 === "string" && x.pdf.type === undefined && x.pdf.data === undefined), "bytea je {\"$bytea_b64\": base64}, ne Buffer-JSON");
+    assert(pr.rows.every((x) => crypto.createHash("sha256").update(Buffer.from(x.pdf.$bytea_b64, "base64")).digest("hex") === pdfSha.get(String(x.racun_id))), "vsak PDF po dekodiranju enak bajtom v bazi (sha256)");
+    const pdfMB = (ST_PDF * VELIKOST_PDF) / 1048576;
+    console.log(`    PDF-ji ${pdfMB.toFixed(1)} MB surovo, izvoz ${(mali.telo.length / 1048576).toFixed(1)} MB; vrh RSS ${hwmPdf0.toFixed(0)} -> ${hwmPdf1.toFixed(0)} MB`);
+    assert(hwmPdf1 - hwmPdf0 < 60, `izvoz z ${ST_PDF} PDF-ji doda manj kot 60 MB vrha RSS (+${(hwmPdf1 - hwmPdf0).toFixed(0)} MB)`, hwmPdf1 - hwmPdf0);
     const refTelo = await referencniIzvoz(pool, izvoz.exported_at, izvoz.postgres);
     const enako = Buffer.compare(mali.telo, Buffer.from(refTelo, "utf8")) === 0;
     assert(enako, "odgovor je BAJT ZA BAJTOM enak izhodu stare (ne-tokovne) izvedbe", { dolzina_tok: mali.telo.length, dolzina_ref: Buffer.byteLength(refTelo) });

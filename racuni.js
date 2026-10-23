@@ -606,6 +606,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   const PREIZKUS_POZOR_RAZMAK_MS = celo(env, "RACUNI_PREIZKUS_POZOR_RAZMAK_MS", 3600000, 0, 86400000);   // isto opozorilo najvec enkrat na toliko
   const PDF_POZOR_PO = celo(env, "RACUNI_PDF_POZOR_PO", 5, 1, 1000);   // PDF racuna ni mogoce pridobiti toliko poskusov zapored -> POZOR (kupec racuna ne dobi, dokler PDF ni shranjen)
   const PDF_PAKET = 5;
+  const PDF_NAJVEC_POSKUSOV = celo(env, "RACUNI_PDF_NAJVEC_POSKUSOV", 100, 1, 9000);   // po toliko neuspehih zapored delavec PDF NEHA iskati (vrstica ostane `potrjen`, POZOR, rocna ponastavitev pdf_poskusi); CHECK stolpca je 10000
   const ISKANJE_RAZMAK_MS = celo(env, "RACUNI_ISKANJE_RAZMAK_MS", 600000, 0, 86400000);   // najmanj toliko med dvema stetima iskanjema po referenci; nova izdaja sele po 2 neuspesnih iskanjih
   const ISKANJE_NEJASNO_MAX = celo(env, "RACUNI_ISKANJE_NEJASNO_MAX", 4, 1, 100);   // toliko iskanj brez zanesljivega izida -> `napaka` (rocna obravnava), nikoli nova izdaja
   const ID_NAJEMA = crypto.randomUUID();
@@ -660,7 +661,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
     `SELECT 1 FROM racuni WHERE stanje IN ('caka', 'izdan') AND naslednji_poskus_at <= NOW() AND (vrsta = 'racun' OR vracilo_uspelo IS TRUE)
         AND (prevzeto_at IS NULL OR prevzeto_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')) LIMIT 1`, [ZASTARELO_MS])).rows.length > 0
     || (!!ponudnik.pridobiPdf && (await poizvedba(
-      `SELECT 1 FROM racuni WHERE stanje = 'potrjen' AND NOT pdf_prejet AND ponudnik IS NOT NULL AND (pdf_naslednji_at IS NULL OR pdf_naslednji_at <= NOW()) LIMIT 1`)).rows.length > 0);
+      `SELECT 1 FROM racuni WHERE stanje = 'potrjen' AND NOT pdf_prejet AND ponudnik IS NOT NULL AND pdf_poskusi < $1 AND (pdf_naslednji_at IS NULL OR pdf_naslednji_at <= NOW()) LIMIT 1`, [PDF_NAJVEC_POSKUSOV])).rows.length > 0);
 
   // Opozorila delavca se zberejo in izpisejo ENKRAT na tek (en izpis na vrsto dogodka, ne na vrstico): sicer zaostanek stotin racunov izcrpa urni proracun opozoril v sentry.js
   // in zakrije druga opozorila (placila).
@@ -677,6 +678,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
       iskanje: (n) => `${n} racunov: izid prejsnjega zahtevka ponudniku ${ponudnik.ime} je neznan, iskanje po referenci se ni zakljucilo (nova izdaja je blokirana)`,
       obdelava: (n) => `POZOR: obdelava ${n} racunov ni uspela`,
       preizkus: () => `POZOR: bralni preizkus pred izdajo pri ponudniku ${ponudnik.ime} ne uspe, racuni CAKAJO in se ne izdajo`,
+      pdf_izcrpano: (n) => `POZOR: PDF ${n} racunov/dobropisov pri ponudniku ${ponudnik.ime} ni mogoce pridobiti niti po ${PDF_NAJVEC_POSKUSOV} poskusih (izcrpano, delavec neha): kupec racuna NE dobi; preveri dokument v e-racuni in ponastavi pdf_poskusi (STATE)`,
       pdf: (n) => `POZOR: PDF ${n} racunov/dobropisov pri ponudniku ${ponudnik.ime} ni mogoce pridobiti (racun je potrjen, a kupec ga ne dobi, dokler PDF ni shranjen; mail brez PDF ne gre)`,
     };
     for (const [tip, sez] of skupine) {
@@ -1026,7 +1028,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
     for (;;) {
       const vr = (await poizvedba(
         `SELECT r.id, r.vrsta, r.ponudnik_id, r.ponudnik_stevilka, r.pdf_poskusi, r.message_id, o.public_ref FROM racuni r JOIN orders o ON o.id = r.order_id
-          WHERE r.stanje = 'potrjen' AND NOT r.pdf_prejet AND r.ponudnik IS NOT NULL AND (r.pdf_naslednji_at IS NULL OR r.pdf_naslednji_at <= NOW()) ORDER BY r.id LIMIT $1`, [PDF_PAKET])).rows;
+          WHERE r.stanje = 'potrjen' AND NOT r.pdf_prejet AND r.ponudnik IS NOT NULL AND r.pdf_poskusi < $2 AND (r.pdf_naslednji_at IS NULL OR r.pdf_naslednji_at <= NOW()) ORDER BY r.id LIMIT $1`, [PDF_PAKET, PDF_NAJVEC_POSKUSOV])).rows;
       if (!vr.length) return n;
       for (const r of vr) {
         n++;
@@ -1044,9 +1046,11 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
         } catch (e) {
           const poskusi = Number(r.pdf_poskusi) + 1;
           const sporocilo = kratko(e).slice(0, 300);
+          const izcrpano = poskusi >= PDF_NAJVEC_POSKUSOV;
           await poizvedba(`UPDATE racuni SET pdf_poskusi = pdf_poskusi + 1, pdf_napaka = $2, pdf_naslednji_at = NOW() + ($3::bigint * INTERVAL '1 millisecond') WHERE id = $1`,
-            [r.id, sporocilo, Math.max(premor(poskusi), e instanceof NapakaPonudnika && e.konfiguracija ? KONFIG_PREMOR_MS : 0)]).catch(() => {});
-          if (poskusi >= PDF_POZOR_PO) objavi("pdf", oznaka, sporocilo);
+            [r.id, (izcrpano ? "IZCRPANO: " + sporocilo : sporocilo).slice(0, 300), Math.max(premor(poskusi), e instanceof NapakaPonudnika && e.konfiguracija ? KONFIG_PREMOR_MS : 0)]).catch(() => {});
+          if (izcrpano) objavi("pdf_izcrpano", oznaka, sporocilo);
+          else if (poskusi >= PDF_POZOR_PO) objavi("pdf", oznaka, sporocilo);
         }
         if (Date.now() > pdfKonec) return n;
       }
@@ -1086,7 +1090,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
 
   // Pospravljalec: (1) placano platformno narocilo brez racuna, (2) vrnjen znesek brez dobropisa, (3) alarm za racune, ki predolgo niso potrjeni.
   // Samo narocila, placana PO uvedbi 054 (schema_migrations): racuna za nazaj ne izdajamo (pravna analiza 20. 10. 2026, razdelek 6; odloci Martin/racunovodkinja).
-  let zadnjiAlarm = 0, zadnjaLuknja = 0;
+  let zadnjiAlarm = 0, zadnjaLuknja = 0, zadnjiPdfAlarm = 0;
   async function pospravi() {
     try {
       const od = `(SELECT uporabljen FROM schema_migrations WHERE datoteka = '054_racuni.sql')`;
@@ -1116,6 +1120,14 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
         if (c.stari > 0 || c.napake > 0) {
           zadnjiAlarm = Date.now();
           console.error(`[racuni] POZOR: ${c.stari} racunov/dobropisov ni potrjenih ze vec kot ${Math.round(ALARM_PO_MS / 3600000)} h (od tega ${c.neznani} dobropisov z neznanim izidom Stripovega vracila), ${c.napake} v stanju napaka (ponudnik: ${izbira.ime}). Zakonski rok za naknadno potrditev sta 2 delovna dneva (ZDavPR 9).`);
+        }
+      }
+      // Potrjen racun, ki mu PDF ni mogoce pridobiti niti po PDF_NAJVEC_POSKUSOV poskusih: delavec ga ne obdeluje vec, zato ga javi pospravljalec (kupec racuna ne dobi).
+      if (ponudnik && ponudnik.pridobiPdf && Date.now() - zadnjiPdfAlarm > 6 * 3600000) {
+        const p = (await poizvedba(`SELECT COUNT(*)::int AS n FROM racuni WHERE stanje = 'potrjen' AND NOT pdf_prejet AND ponudnik IS NOT NULL AND pdf_poskusi >= $1`, [PDF_NAJVEC_POSKUSOV])).rows[0].n;
+        if (p > 0) {
+          zadnjiPdfAlarm = Date.now();
+          console.error(`[racuni] POZOR: ${p} potrjenih racunov/dobropisov brez PDF (poskusi pridobitve izcrpani, ponudnik ${izbira.ime}): kupec racuna ne dobi. Preveri dokument v e-racuni; ponastavitev: UPDATE racuni SET pdf_poskusi = 0, pdf_naslednji_at = NULL WHERE stanje = 'potrjen' AND NOT pdf_prejet (Martinov DA).`);
         }
       }
       // Stevilke ponudnika: luknja v zaporedju (manjka N-1, ceprav N obstaja ze dalj casa) = ponudnik je stevilko porabil za dokument, ki ga nimamo (rocni racun na isti

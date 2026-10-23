@@ -29,13 +29,22 @@ const pocakaj = (ms) => new Promise((r) => setTimeout(r, ms));
 async function cakaj(pogoj, ms = 10000) { const do_ = Date.now() + ms; while (Date.now() < do_) { if (await pogoj()) return true; await pocakaj(100); } return false; }
 
 const jwksServer = http.createServer((req, res) => { res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ keys: [] })); });
-const R = { poslano: [], napaka: 0, zamik: 0, prispelo: 0 };
+const R = { poslano: [], napaka: 0, zamik: 0, prispelo: 0, rezim: [] };   // rezim: vrsta napak PO sprejemu maila (kot jo vidi Resend SDK 3.x)
 const resendServer = http.createServer((req, res) => {
   let d = ""; req.on("data", (x) => d += x);
   req.on("end", () => {
     if (req.method === "POST" && req.url === "/emails") {
       if (R.napaka > 0) { R.napaka--; res.writeHead(422, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "validation_error", message: "stub: zavrnjeno", statusCode: 422 })); }
       const m = JSON.parse(d); R.prispelo++;
+      const rz = R.rezim.shift();
+      if (rz === "429") { res.writeHead(429, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "rate_limit_exceeded", message: "stub: prevec zahtevkov", statusCode: 429 })); }   // zavrnitev PRED obdelavo
+      if (rz) {   // Resend mail SPREJME, odjemalec pa dobi nekaj, kar ni uspeh
+        R.poslano.push(m);
+        if (rz === "reset") return req.socket.destroy();                                                                                // povezava prekinjena po sprejemu
+        if (rz === "html502") { res.writeHead(502, { "content-type": "text/html" }); return res.end("<html>502 Bad Gateway</html>"); }  // posrednik: ne-JSON odgovor
+        if (rz === "okrnjen") { res.writeHead(200, { "content-type": "application/json" }); return res.end('{"id":"mai'); }              // okrnjen 200
+        if (rz === "json500") { res.writeHead(500, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "internal_server_error", message: "stub", statusCode: 500 })); }
+      }
       const koncaj = () => { R.poslano.push(m); try { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "mail_" + R.poslano.length })); } catch (_) { /* odjemalec je odnehal */ } };
       return R.zamik ? setTimeout(koncaj, R.zamik) : koncaj();
     }
@@ -140,6 +149,23 @@ const PDF = (oznaka) => Buffer.from(`%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nen
     const r5 = await vrstica(K5.racunId);
     assert(mailiNa(K5.email).length === 1 && r5.mail_poskusi === 1 && r5.mail_poslano_at === null, "Resend je mail ob zamiku sprejel enkrat, nobene ponovitve (bi bila kopija brez oznake)", [mailiNa(K5.email).length, r5.mail_poskusi]);
     assert(/POZOR.*izid maila.*neznan/i.test(A.log) && !A.log.includes(K5.email), "POZOR brez e-naslova");
+
+    console.log("\n# 5b. Napaka PO sprejemu maila (prekinjena povezava, 502 posrednika brez JSON, okrnjen 200, 500): NI ponovitve, POZOR; 429 = zavrnitev pred obdelavo: ponovitev");
+    for (const rz of ["reset", "html502", "okrnjen", "json500"]) {
+      R.rezim = [rz];
+      const Kx = await nov();
+      assert(await cakaj(async () => (await vrstica(Kx.racunId)).mail_poskusi === 1 && mailiNa(Kx.email).length === 1, 10000), `[${rz}] Resend je mail sprejel`);
+      await pocakaj(1800);
+      const rx = await vrstica(Kx.racunId);
+      assert(mailiNa(Kx.email).length === 1 && rx.mail_poskusi === 1 && rx.mail_izid_neznan === true && rx.mail_poslano_at === null, `[${rz}] natanko en mail, izid neznan, nobene ponovitve`, [mailiNa(Kx.email).length, rx.mail_poskusi, rx.mail_izid_neznan]);
+    }
+    assert(/POZOR.*izid maila.*neznan/i.test(A.log), "POZOR za izid neznan");
+    R.rezim = ["429", "429"];
+    const K5c = await nov();
+    assert(await cakaj(async () => mailiNa(K5c.email).length === 1, 15000), "[429] po dveh zavrnitvah pred obdelavo mail vendarle gre");
+    await pocakaj(800);
+    const r5c = await vrstica(K5c.racunId);
+    assert(mailiNa(K5c.email).length === 1 && r5c.mail_poskusi === 3 && !r5c.mail_izid_neznan && r5c.mail_poslano_at !== null, "[429] natanko en mail, 3 poskusi", [mailiNa(K5c.email).length, r5c.mail_poskusi]);
 
     console.log("\n# 6. Ni potrjen / izbrisan racun");
     const K6a = await nov({ stanje: "izdan" }), K6b = await nov({ email: "izbrisan-1@outly.invalid" });
