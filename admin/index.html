@@ -108,6 +108,7 @@
 <link rel="stylesheet" href="danes.css">
 <link rel="stylesheet" href="telefon.css">
 <link rel="stylesheet" href="mnozicno.css">
+<link rel="stylesheet" href="promo.css">
 </head>
 <body>
 <div class="wrap">
@@ -145,6 +146,7 @@
       <button data-z="vracila">Vračila in spori <span class="n skrito" id="nVracil"></span></button>
       <button data-z="pomoc">Pomoč – odzivi</button>
       <button data-z="predlogi">Čaka potrditev <span class="n skrito" id="nPredlogov"></span></button>
+      <button data-z="promo">Promo kode</button>
       <button data-z="agent">Agent</button>
     </nav>
 
@@ -170,6 +172,11 @@
     <!-- CAKA POTRDITEV (admin/predlogi.js, #330 2. del): predlogi agenta; izvedejo se sele ob »Potrdi« -->
     <section id="z-predlogi" class="skrito">
       <div id="pr_koren"></div>
+    </section>
+
+    <!-- PROMO KODE (admin/promo.js, 065): samo statistika, koda ne spremeni cene -->
+    <section id="z-promo" class="skrito">
+      <div id="pk_koren"></div>
     </section>
 
     <!-- AGENT (admin/agent.js, #330): zetoni za agenta (Claude) samo za branje -->
@@ -365,6 +372,7 @@
 <script src="agent.js"></script>
 <script src="predlogi.js"></script>
 <script src="nujno.js"></script>
+<script src="promo.js"></script>
 <script src="navigacija.js"></script>
 <script src="mnozicno.js"></script>
 <script>
@@ -529,7 +537,7 @@ function pokaziPanel() {
 
 // ---------- zavihki ----------
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => pokaziZavihek(b.dataset.z));
-const nalozi = { pregled: naloziPregled, opozorila: () => (window.naloziOpozorila ? window.naloziOpozorila() : obvesti("Zavihek Opozorila se ni naložil (opozorila.js). Osveži stran.", "slabo")), prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: () => (window.naloziDogodke ? window.naloziDogodke() : obvesti("Zavihek Dogodki se ni naložil (dogodki.js). Osveži stran.", "slabo")), guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila, pomoc: naloziPomoc, predlogi: () => (window.naloziPredloge ? window.naloziPredloge() : obvesti("Zavihek Čaka potrditev se ni naložil (predlogi.js). Osveži stran.", "slabo")), agent: () => (window.naloziAgenta ? window.naloziAgenta() : obvesti("Zavihek Agent se ni naložil (agent.js). Osveži stran.", "slabo")) };
+const nalozi = { pregled: naloziPregled, opozorila: () => (window.naloziOpozorila ? window.naloziOpozorila() : obvesti("Zavihek Opozorila se ni naložil (opozorila.js). Osveži stran.", "slabo")), prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: () => (window.naloziDogodke ? window.naloziDogodke() : obvesti("Zavihek Dogodki se ni naložil (dogodki.js). Osveži stran.", "slabo")), guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila, pomoc: naloziPomoc, predlogi: () => (window.naloziPredloge ? window.naloziPredloge() : obvesti("Zavihek Čaka potrditev se ni naložil (predlogi.js). Osveži stran.", "slabo")), promo: () => (window.naloziPromo ? window.naloziPromo() : obvesti("Zavihek Promo kode se ni naložil (promo.js). Osveži stran.", "slabo")), agent: () => (window.naloziAgenta ? window.naloziAgenta() : obvesti("Zavihek Agent se ni naložil (agent.js). Osveži stran.", "slabo")) };
 function pokaziZavihek(z) {
   // Povezava na dogodek (#/dogodki/35) velja samo v zavihku Dogodki; drug zavihek jo pobriše.
   if (z !== "dogodki" && /^#\/dogodki/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search);

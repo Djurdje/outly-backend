@@ -15,7 +15,7 @@
   // Skupine: kljuc = data-z gumba v <nav>; znacka = id elementa .n v tem gumbu.
   const LJUDJE = [["prosnje", "Prošnje", ["nProsenj"]], ["klubi", "Klubi", []], ["uporabniki", "Uporabniki", []]];
   const VEC = [["predlogi", "Čaka potrditev", ["nPredlogov"]], ["agent", "Agent", []], ["prijave", "Reports", ["nPrijav"]], ["vracila", "Vračila in spori", ["nVracil"]],
-    ["finance", "Finance", []], ["guest", "Guest lists", []], ["pomoc", "Pomoč – odzivi", []]];
+    ["finance", "Finance", []], ["promo", "Promo kode", []], ["guest", "Guest lists", []], ["pomoc", "Pomoč – odzivi", []]];
   const GLAVNI = [["pregled", "Danes", "◉", ["pregled"]], ["dogodki", "Dogodki", "▦", ["dogodki"]], ["opozorila", "Opozorila", "!", ["opozorila"], ["nOpozorila"]]];
   const kljuci = (s) => s.map((x) => x[0]);
 

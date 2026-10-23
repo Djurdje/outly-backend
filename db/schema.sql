@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–064, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–065, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -1266,6 +1266,7 @@ CREATE TABLE public.orders (
     receipt_mail_sent_at timestamp with time zone,
     terms_version text,
     terms_accepted_at timestamp with time zone,
+    promo_code_id integer,
     CONSTRAINT orders_fee_chk CHECK (((application_fee_cents >= 0) AND (application_fee_cents <= total_cents))),
     CONSTRAINT orders_guest_chk CHECK (((guest_email IS NULL) OR ((guest_email = lower(guest_email)) AND (char_length(guest_email) <= 254) AND (POSITION(('@'::text) IN (guest_email)) > 1) AND (table_id IS NULL) AND (guest_terms_version IS NOT NULL) AND (guest_terms_accepted_at IS NOT NULL)))),
     CONSTRAINT orders_guest_lista_chk CHECK (((guest_list_id IS NULL) OR ((status = 'paid'::text) AND (quantity = 1) AND (unit_price_cents = 0) AND (total_cents = 0) AND (application_fee_cents = 0) AND (refunded_cents = 0) AND (table_id IS NULL) AND (package_id IS NULL) AND (guest_email IS NULL) AND (stripe_payment_intent_id IS NULL) AND (stripe_charge_id IS NULL) AND (stripe_checkout_session_id IS NULL) AND (stripe_account_id IS NULL)))),
@@ -1356,6 +1357,13 @@ COMMENT ON COLUMN public.orders.terms_version IS 'Razlicica pogojev uporabe, spr
 --
 
 COMMENT ON COLUMN public.orders.terms_accepted_at IS 'Cas sprejema pogojev ob nakupu z racunom (044, #215): NOT NULL natanko takrat, ko je terms_version NOT NULL.';
+
+
+--
+-- Name: COLUMN orders.promo_code_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.orders.promo_code_id IS 'Promo koda, vpisana ob nakupu vstopnic (065, I61); NULL = brez kode. Ne vpliva na ceno, provizijo, Stripe ali zalogo.';
 
 
 --
@@ -1457,6 +1465,67 @@ CREATE SEQUENCE public.predlogi_dejanj_id_seq
 --
 
 ALTER SEQUENCE public.predlogi_dejanj_id_seq OWNED BY public.predlogi_dejanj.id;
+
+
+--
+-- Name: promo_code_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.promo_code_events (
+    promo_code_id integer NOT NULL,
+    event_id integer NOT NULL
+);
+
+
+--
+-- Name: TABLE promo_code_events; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.promo_code_events IS 'Dogodki, za katere velja promo koda brez kluba (065).';
+
+
+--
+-- Name: promo_codes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.promo_codes (
+    id integer NOT NULL,
+    code text NOT NULL,
+    label text NOT NULL,
+    club_id integer,
+    active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by integer,
+    CONSTRAINT promo_codes_code_chk CHECK ((code ~ '^[A-Z0-9_-]{3,32}$'::text)),
+    CONSTRAINT promo_codes_label_chk CHECK (((char_length(label) >= 1) AND (char_length(label) <= 80)))
+);
+
+
+--
+-- Name: TABLE promo_codes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.promo_codes IS 'Promo kode (065, I61): SAMO STATISTIKA, koda ne spremeni zneska narocila. code velike crke; club_id = vsi dogodki kluba, sicer promo_code_events.';
+
+
+--
+-- Name: promo_codes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.promo_codes_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: promo_codes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.promo_codes_id_seq OWNED BY public.promo_codes.id;
 
 
 --
@@ -2337,6 +2406,13 @@ ALTER TABLE ONLY public.predlogi_dejanj ALTER COLUMN id SET DEFAULT nextval('pub
 
 
 --
+-- Name: promo_codes id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.promo_codes ALTER COLUMN id SET DEFAULT nextval('public.promo_codes_id_seq'::regclass);
+
+
+--
 -- Name: racuni id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -2622,6 +2698,22 @@ ALTER TABLE ONLY public.orders
 
 ALTER TABLE ONLY public.predlogi_dejanj
     ADD CONSTRAINT predlogi_dejanj_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: promo_code_events promo_code_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.promo_code_events
+    ADD CONSTRAINT promo_code_events_pkey PRIMARY KEY (promo_code_id, event_id);
+
+
+--
+-- Name: promo_codes promo_codes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.promo_codes
+    ADD CONSTRAINT promo_codes_pkey PRIMARY KEY (id);
 
 
 --
@@ -3162,6 +3254,13 @@ CREATE UNIQUE INDEX orders_pi_key ON public.orders USING btree (stripe_payment_i
 
 
 --
+-- Name: orders_promo_code_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_promo_code_idx ON public.orders USING btree (promo_code_id, event_id) WHERE (promo_code_id IS NOT NULL);
+
+
+--
 -- Name: orders_public_ref_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3208,6 +3307,27 @@ CREATE INDEX predlogi_dejanj_stanje_idx ON public.predlogi_dejanj USING btree (s
 --
 
 CREATE INDEX predlogi_dejanj_zeton_idx ON public.predlogi_dejanj USING btree (agent_zeton_id, ustvarjen_at DESC);
+
+
+--
+-- Name: promo_code_events_event_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX promo_code_events_event_idx ON public.promo_code_events USING btree (event_id);
+
+
+--
+-- Name: promo_codes_club_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX promo_codes_club_idx ON public.promo_codes USING btree (club_id) WHERE (club_id IS NOT NULL);
+
+
+--
+-- Name: promo_codes_code_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX promo_codes_code_key ON public.promo_codes USING btree (code);
 
 
 --
@@ -3921,6 +4041,14 @@ ALTER TABLE ONLY public.orders
 
 
 --
+-- Name: orders orders_promo_code_fk; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_promo_code_fk FOREIGN KEY (promo_code_id) REFERENCES public.promo_codes(id) NOT VALID;
+
+
+--
 -- Name: orders orders_table_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3942,6 +4070,30 @@ ALTER TABLE ONLY public.orders
 
 ALTER TABLE ONLY public.predlogi_dejanj
     ADD CONSTRAINT predlogi_dejanj_agent_zeton_id_fkey FOREIGN KEY (agent_zeton_id) REFERENCES public.agent_zetoni(id);
+
+
+--
+-- Name: promo_code_events promo_code_events_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.promo_code_events
+    ADD CONSTRAINT promo_code_events_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE CASCADE;
+
+
+--
+-- Name: promo_code_events promo_code_events_promo_code_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.promo_code_events
+    ADD CONSTRAINT promo_code_events_promo_code_id_fkey FOREIGN KEY (promo_code_id) REFERENCES public.promo_codes(id) ON DELETE CASCADE;
+
+
+--
+-- Name: promo_codes promo_codes_club_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.promo_codes
+    ADD CONSTRAINT promo_codes_club_id_fkey FOREIGN KEY (club_id) REFERENCES public.clubs(id) ON DELETE CASCADE;
 
 
 --
