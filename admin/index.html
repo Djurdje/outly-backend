@@ -105,6 +105,7 @@
   img.mini{width:34px;height:34px;border-radius:6px;object-fit:cover;background:var(--panel2);vertical-align:middle}
 </style>
 <link rel="stylesheet" href="dogodki.css">
+<link rel="stylesheet" href="danes.css">
 </head>
 <body>
 <div class="wrap">
@@ -129,6 +130,7 @@
   <div id="panel" class="skrito">
     <nav>
       <button data-z="pregled" class="aktiven">Pregled</button>
+      <button data-z="opozorila">Opozorila <span class="n skrito" id="nOpozorila"></span></button>
       <button data-z="prosnje">Prošnje <span class="n skrito" id="nProsenj"></span></button>
       <button data-z="klubi">Klubi</button>
       <button data-z="uporabniki">Uporabniki</button>
@@ -142,7 +144,9 @@
 
     <!-- PREGLED -->
     <section id="z-pregled">
-      <div class="skupina"><h2>Stanje <span class="desno"><button class="tih mali" onclick="naloziPregled()">Osveži</button></span></h2>
+      <!-- »Danes« (admin/danes.js, #326): prodaja, racuni, nocojsnji dogodki, rdeca opozorila; osvezevanje vsakih 20 s samo ko je zavihek viden -->
+      <div id="dn_koren"></div>
+      <div class="skupina"><h2>Števci <span class="desno"><button class="tih mali" onclick="naloziPregled()">Osveži</button></span></h2>
         <div class="telo"><div class="stevilke" id="stevilke"></div></div>
       </div>
       <div class="skupina"><h2>Varnostna kopija <span class="desno"><button class="tih mali" id="bkGumb" onclick="varnostnaKopija()">Prenesi izvoz baze (JSON)</button></span></h2>
@@ -150,6 +154,12 @@
       </div>
     </section>
 
+
+    <!-- OPOZORILA (admin/opozorila.js, #326): seznam po resnosti + davcno potrjeni racuni po stanju -->
+    <section id="z-opozorila" class="skrito">
+      <div id="op_opozorila"></div>
+      <div id="op_racuni"></div>
+    </section>
 
     <!-- REPORTS (prijave zlorabe, migracija 041) -->
     <section id="z-prijave" class="skrito">
@@ -333,6 +343,8 @@
 <!-- Moduli panela (DECISIONS 21. 10. 2026: vec datotek, brez ogrodja in gradnje). Nalozita se PRED glavno skripto: ta jih uporabi ob zagonu. -->
 <script src="dialog.js"></script>
 <script src="dogodki.js"></script>
+<script src="danes.js"></script>
+<script src="opozorila.js"></script>
 <script>
 // Panel teče na istem naslovu kot backend (Express streže /admin), zato je
 // osnova kar location.origin. Za lokalni test: ?api=http://localhost:3000
@@ -442,7 +454,7 @@ async function klic(metoda, pot, telo, ponovno = true) {
   let podatki = bes; try { podatki = JSON.parse(bes); } catch (_) {}
   if (!r.ok) {
     const sporocilo = typeof podatki === "string" ? podatki : (podatki.message || podatki.error || bes);
-    throw new Error(`${r.status}: ${sporocilo}`);
+    throw Object.assign(new Error(`${r.status}: ${sporocilo}`), { status: r.status });   // status: panel ob 503 podaljsa premor (danes.js)
   }
   return podatki;
 }
@@ -495,7 +507,7 @@ function pokaziPanel() {
 
 // ---------- zavihki ----------
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => pokaziZavihek(b.dataset.z));
-const nalozi = { pregled: naloziPregled, prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: () => (window.naloziDogodke ? window.naloziDogodke() : obvesti("Zavihek Dogodki se ni naložil (dogodki.js). Osveži stran.", "slabo")), guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila, pomoc: naloziPomoc };
+const nalozi = { pregled: naloziPregled, opozorila: () => (window.naloziOpozorila ? window.naloziOpozorila() : obvesti("Zavihek Opozorila se ni naložil (opozorila.js). Osveži stran.", "slabo")), prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: () => (window.naloziDogodke ? window.naloziDogodke() : obvesti("Zavihek Dogodki se ni naložil (dogodki.js). Osveži stran.", "slabo")), guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila, pomoc: naloziPomoc };
 function pokaziZavihek(z) {
   // Povezava na dogodek (#/dogodki/35) velja samo v zavihku Dogodki; drug zavihek jo pobriše.
   if (z !== "dogodki" && /^#\/dogodki/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search);
@@ -511,6 +523,7 @@ async function varno(fn) { try { await fn(); } catch (e) { obvesti(e.message, "s
 
 // ---------- pregled ----------
 async function naloziPregled() {
+  if (window.danesOsvezi) window.danesOsvezi(false);   // »Danes« (danes.js): lasten klic in lasten casovnik, ne ovira stevcev spodaj
   await varno(async () => {
     const s = await klic("GET", "/admin/api/summary");
     const kos = (n, ime) => `<div class="stevilka"><b>${ubezi(n)}</b><span>${ubezi(ime)}</span></div>`;
@@ -524,6 +537,8 @@ async function naloziPregled() {
       kosPozor(s.dispute_recovery_attention, "povrnitev sporov za pozornost", "pozor");
     const nV = (Number(s.refunds_attention) || 0) + (Number(s.dispute_recovery_attention) || 0);
     $("nVracil").textContent = nV; $("nVracil").classList.toggle("skrito", !nV);
+    const nRdeca = Number(s.warnings_red) || 0;   // DODANO polje (#326); star backend ga nima -> znacka skrita
+    $("nOpozorila").textContent = nRdeca; $("nOpozorila").classList.toggle("skrito", !nRdeca);
     $("nProsenj").textContent = s.new_applications; $("nProsenj").classList.toggle("skrito", !s.new_applications);
     $("nPrijav").textContent = s.open_reports || 0; $("nPrijav").classList.toggle("skrito", !s.open_reports);
   });

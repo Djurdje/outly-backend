@@ -3609,6 +3609,8 @@ function celoId4(v) { const n = celoId(v); return n !== null && n <= 2147483647 
 // --- pregled ---
 admin.get("/summary", async (req, res) => {
   try {
+    // warnings_red (DODANO, 23. 10. 2026, #326): stevilo rdecih opozoril (admin_nadzor.js, predpomnilnik 10 s); ob napaki null, pregled se zaradi tega ne podre.
+    const rdeca = adminNadzor.rdeceStevilo().catch((e) => { console.error("[admin] summary: rdeca opozorila niso na voljo:", e && e.message); return null; });
     const r = await pool.query(`
       SELECT
         (SELECT COUNT(*)::int FROM creator_applications WHERE status='new') AS new_applications,
@@ -3622,8 +3624,9 @@ admin.get("/summary", async (req, res) => {
         (SELECT COUNT(*)::int FROM reports WHERE status='open')              AS open_reports,
         (SELECT COUNT(*)::int FROM vracila WHERE stanje IN ('ni_uspelo','rocno')) AS refunds_attention,
         (SELECT COUNT(*)::int FROM spori WHERE zaprt_at IS NULL)             AS open_disputes,
-        (SELECT COUNT(*)::int FROM spori WHERE povrnitev_stanje IN ('ni_uspelo','rocno')) AS dispute_recovery_attention`);
-    return res.json(r.rows[0]);
+        (SELECT COUNT(*)::int FROM spori WHERE povrnitev_stanje IN ('ni_uspelo','rocno')) AS dispute_recovery_attention,
+        (SELECT COUNT(*)::int FROM racuni WHERE stanje='napaka')             AS racuni_napaka`);
+    return res.json({ ...r.rows[0], warnings_red: await rdeca });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
@@ -4513,6 +4516,10 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
   }
 });
 
+// Opozorila, seznam racunov in nadzorna plosca »Danes« (23. 10. 2026, #326): GET /admin/api/opozorila, /racuni, /danes (admin_nadzor.js; samo branje, glavni pool, nikoli skenPool).
+const adminNadzor = require("./admin_nadzor").ustvari({
+  pool, router: admin, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
+});
 app.use("/admin/api", admin);
 
 // ---------------------------
