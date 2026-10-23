@@ -1140,10 +1140,10 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
     }
 
     // ================================================================
-    console.log("\n# 32. Migracija 062: racun za OUT-TTWH2V4Q (Create je dal 500 »#Item1_productCode - This field is required«) ponovno v izdajo; varno za caka (izid neznan) IN napaka; natanko 1 Create");
+    console.log("\n# 32. Migracija 063: racun za OUT-TTWH2V4Q (Create je dal 500 »#Item1_productCode - This field is required«) ponovno v izdajo; varno za caka (izid neznan) IN napaka; natanko 1 Create");
     {
       const fs = require("fs"), path = require("path");
-      const sql = fs.readFileSync(path.join(__dirname, "..", "db", "migracije", "062_racun_ttwh2v4q_artikel.sql"), "utf8");
+      const sql = fs.readFileSync(path.join(__dirname, "..", "db", "migracije", "063_racun_ttwh2v4q_artikel.sql"), "utf8");
       const zaganjaj = async () => { const c = await pool.connect(); const note = []; c.on("notice", (n) => note.push(n.message)); try { await c.query(sql); } finally { c.release(); } return note; };
       const REF = "OUT-TTWH2V4Q";
       const priprava = async (stanje, { poslanoPrej = "3 hours", napaka = "SalesInvoiceCreate: HTTP 500 (apiMethod=SalesInvoiceCreate; Error nr: 1 #Item1_productCode - This field is required)" } = {}) => {
@@ -1166,7 +1166,7 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
         assert(r.stanje === "caka" && r.poslano_at === null && r.poskusi === 0 && r.iskanja_ne === 0 && r.iskanje_ne_at === null && r.iskanja_nejasna === 0 && r.zadnja_napaka === null && r.prevzeto_at === null && r.prevzem_zeton === null
           && Math.abs(new Date(r.naslednji_poskus_at).getTime() - (Date.now() + 5 * 60 * 1000)) < 30000, `[${stanje}] vrstica je po migraciji v izdaji (caka, poslano_at/stevci/napaka pocisceni, na vrsti sele cez 5 minut)`, r);
         assert(t.poskusi === 2 && t.zadnja_napaka === "tuja" && t.poslano_at !== null, `[${stanje}] tuja vrstica nespremenjena`);
-        assert(note.some((x) => /062/.test(x)), `[${stanje}] migracija izpise obvestilo`, note);
+        assert(note.some((x) => /063/.test(x)), `[${stanje}] migracija izpise obvestilo`, note);
         const w = deloven(); const c0 = klicov("SalesInvoiceCreate"), l0 = klicov("SalesInvoiceList");
         await pool.query("UPDATE racuni SET poslano_at = poslano_at WHERE id = $1", [T.id]);
         await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() + INTERVAL '3 hours' WHERE id = $1", [T.id]);   // tuje vrstice ta test ne izdaja
@@ -1180,7 +1180,7 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
         assert(klicov("SalesInvoiceCreate") - c0 === 1 && klicov("SalesInvoiceList") === l0 && r2.stanje === "potrjen" && F.docs.length === 1, `[${stanje}] po migraciji natanko 1 Create (brez iskanja), racun potrjen, en dokument`, [klicov("SalesInvoiceCreate") - c0, r2.stanje, F.docs.length]);
         // ponovni zagon migracije (ne bi se smel zgoditi): vrstica je potrjena -> nic, obvestilo
         const note2 = await zaganjaj();
-        assert((await vrstica(R.id)).stanje === "potrjen" && note2.some((x) => /062/.test(x)), `[${stanje}] ponovni zagon: potrjena vrstica ostane, obvestilo`, note2);
+        assert((await vrstica(R.id)).stanje === "potrjen" && note2.some((x) => /063/.test(x)), `[${stanje}] ponovni zagon: potrjena vrstica ostane, obvestilo`, note2);
         await tek(w, 2, 40);
         assert(klicov("SalesInvoiceCreate") - c0 === 1, `[${stanje}] ponovni zagon ne sprozi nove izdaje`);
       }
@@ -1191,11 +1191,11 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       ]) {
         const R = await priprava("caka"); await popravi(R.id);
         const pred = await vrstica(R.id); const note = await zaganjaj(); const po = await vrstica(R.id);
-        assert(JSON.stringify(po) === JSON.stringify(pred) && note.some((x) => /062/.test(x)), `ne ustreza pogoju (${ime}): nic ne spremeni, izpise obvestilo`, [note, po.stanje]);
+        assert(JSON.stringify(po) === JSON.stringify(pred) && note.some((x) => /063/.test(x)), `ne ustreza pogoju (${ime}): nic ne spremeni, izpise obvestilo`, [note, po.stanje]);
       }
       await pool.query("TRUNCATE racuni CASCADE"); await pool.query("UPDATE orders SET public_ref = 'OUT-STARO-' || id WHERE public_ref = $1", [REF]);
       const noteBrez = await zaganjaj();
-      assert(noteBrez.some((x) => /062/.test(x)), "narocila ni (prazna baza, druga okolja): migracija ne naredi nic in ne pade", noteBrez);
+      assert(noteBrez.some((x) => /063/.test(x)), "narocila ni (prazna baza, druga okolja): migracija ne naredi nic in ne pade", noteBrez);
       // prekrivanje instanc ob deployu: stara instanca drzi prevzem; migracija ga prekine, njen zapis (zeton) ne spremeni nic, nov delavec izda natanko enkrat
       const Ro = await priprava("caka");
       await pool.query("UPDATE racuni SET prevzeto_at = NOW(), prevzem_zeton = 'zeton-stare-instance' WHERE id = $1", [Ro.id]);

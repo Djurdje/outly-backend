@@ -1,4 +1,4 @@
--- 062_racun_ttwh2v4q_artikel.sql
+-- 063_racun_ttwh2v4q_artikel.sql
 -- PODATKOVNA MIGRACIJA (potrebuje Martinov DA in oznako odobril-martin): racun za narocilo OUT-TTWH2V4Q gre ZNOVA v izdajo. Ena vrstica, brez drugih sprememb.
 --
 -- Kaj se je zgodilo: po migraciji 061 (23. 10. 2026 13:02:21 UTC) je delavec poslal SalesInvoiceCreate, e-racuni pa je odgovoril
@@ -32,26 +32,26 @@ BEGIN
   SELECT r.* INTO v FROM racuni r JOIN orders o ON o.id = r.order_id
    WHERE o.public_ref = 'OUT-TTWH2V4Q' AND r.vrsta = 'racun' FOR UPDATE OF r;
   IF NOT FOUND THEN
-    RAISE NOTICE '062: racuna za narocilo OUT-TTWH2V4Q ni (druga baza ali ze obdelan): nic ni spremenjeno';
+    RAISE NOTICE '063: racuna za narocilo OUT-TTWH2V4Q ni (druga baza ali ze obdelan): nic ni spremenjeno';
     RETURN;
   END IF;
   IF v.stevilka IS NOT NULL OR v.ponudnik_id IS NOT NULL OR v.ponudnik_stevilka IS NOT NULL THEN
-    RAISE NOTICE '062: racun % (stanje %) ima stevilko ali dokument pri ponudniku: nic ni spremenjeno', v.id, v.stanje;
+    RAISE NOTICE '063: racun % (stanje %) ima stevilko ali dokument pri ponudniku: nic ni spremenjeno', v.id, v.stanje;
     RETURN;
   END IF;
   IF v.stanje NOT IN ('caka', 'napaka') THEN
-    RAISE NOTICE '062: racun % je v stanju %: nic ni spremenjeno', v.id, v.stanje;
+    RAISE NOTICE '063: racun % je v stanju %: nic ni spremenjeno', v.id, v.stanje;
     RETURN;
   END IF;
   IF v.poslano_at IS NOT NULL AND v.poslano_at > NOW() - INTERVAL '10 minutes' THEN
-    RAISE NOTICE '062: racun % ima zahtevek poslan pred manj kot 10 minutami (lahko je se v teku): nic ni spremenjeno', v.id;
+    RAISE NOTICE '063: racun % ima zahtevek poslan pred manj kot 10 minutami (lahko je se v teku): nic ni spremenjeno', v.id;
     RETURN;
   END IF;
   UPDATE racuni
      SET stanje = 'caka', poslano_at = NULL, poskusi = 0, iskanja_ne = 0, iskanje_ne_at = NULL, iskanja_nejasna = 0, zadnja_napaka = NULL,
          naslednji_poskus_at = NOW() + INTERVAL '5 minutes', prevzeto_at = NULL, prevzem_zeton = NULL
    WHERE id = v.id;
-  RAISE NOTICE '062: racun % za narocilo OUT-TTWH2V4Q (stanje %, poslano_at %) je spet v izdaji (izda se cez 5 minut)', v.id, v.stanje, v.poslano_at;
+  RAISE NOTICE '063: racun % za narocilo OUT-TTWH2V4Q (stanje %, poslano_at %) je spet v izdaji (izda se cez 5 minut)', v.id, v.stanje, v.poslano_at;
 END $$;
 
 COMMIT;

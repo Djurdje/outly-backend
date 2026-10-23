@@ -1,0 +1,17 @@
+/* Admin panel: mnozicna dejanja nad dogodki (#329, admin/mnozicno.js). Isti zetoni kot index.html in dogodki.css. */
+.mn-trak:empty { display:none }
+.mn-trak { padding:10px 15px; border-bottom:1px solid var(--line); background:var(--panel2) }
+.mn-vrsta { display:flex; flex-wrap:wrap; gap:8px; align-items:center }
+.mn-vrsta b { margin-right:4px }
+.mn-rezultat { margin-top:8px; font-size:13px }
+.mn-seznam { margin:6px 0 0; padding:0; list-style:none; max-height:240px; overflow:auto; font-size:13px }
+.mn-seznam li { padding:3px 0; overflow-wrap:anywhere }
+.mn-ok b { color:var(--ok) }
+.mn-napaka b { color:var(--napaka) }
+th.mn-izbira, td.mn-izbira { width:34px; padding-right:0 }
+.mn-izbira input { width:auto; margin:0; accent-color:var(--modra); cursor:pointer }
+@media (max-width: 640px) {
+  .dg-tabela td.mn-izbira { grid-column:1 / -1; padding-bottom:4px }
+  .mn-izbira input { min-height:24px; width:24px; height:24px }
+  .mn-seznam { max-height:200px }
+}

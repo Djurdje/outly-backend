@@ -640,4 +640,4 @@ function ustvari(dep) {
   return { agentPoti, izvedi, DEJANJA, nujnoStikalo, nujnoMailPoslji };
 }
 
-module.exports = { ustvari, DEJANJA, nujnoIzkljuceno, NUJNO_IZKLJUCENO };
+module.exports = { ustvari, DEJANJA, nujnoIzkljuceno, NUJNO_IZKLJUCENO, NEVIDNI };

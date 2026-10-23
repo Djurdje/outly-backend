@@ -3078,7 +3078,7 @@ async function dogodekZaUrejanje(req, res) {
   if (!/^\d+$/.test(req.params.id)) { res.status(400).send("Invalid event id."); return null; }
 
   const r = await pool.query(
-    `SELECT e.id, e.club_id, e.status, e.title, c.owner_user_id, c.is_organizer, e.poster_url, e.ticket_url,
+    `SELECT e.id, e.club_id, e.status, e.title, e.start_at, c.owner_user_id, c.is_organizer, e.poster_url, e.ticket_url,
             e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng,
             (COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') <= NOW()) AS je_koncan
      FROM events e JOIN clubs c ON c.id = e.club_id
@@ -3114,6 +3114,14 @@ async function zapisiAdminDejanje(c, req, dejanje, ciljTip, ciljId, prej, potem,
      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)`,
     [req.user.userId === undefined ? null : req.user.userId, dejanje, ciljTip, String(ciljId), prej === null || prej === undefined ? null : JSON.stringify(prej),
      potem === null || potem === undefined ? null : JSON.stringify(potem), razlog || (nujno ? pr.razlogNujno : null) || null, pr ? pr.agentZetonId : null, pr ? pr.id : null, nujno]);
+}
+// Navaden uporabnik postane business (odobritev prosnje, nov klub, prenos lastnistva): ISTA transakcija kot UPDATE, vrstica `user.role` brez e-naslova (U3, #328).
+async function postaniBusiness(c, req, uporabnik, razlog) {
+  if (!uporabnik || uporabnik.role !== "user") return;
+  // WHERE role='user': soCasen PATCH vloge (npr. na admin) ne sme biti tiho znizan; vrstica v dnevniku samo, ce je vloga res bila user.
+  const r = await c.query("UPDATE users SET role='business' WHERE id=$1 AND role='user' RETURNING id", [uporabnik.id]);
+  if (r.rowCount !== 1) return;
+  await zapisiAdminDejanje(c, req, "user.role", "user", uporabnik.id, { role: "user" }, { role: "business" }, razlog);
 }
 // Primerljiva vrednost za dnevnik (Date -> ISO, NUMERIC/BIGINT niz ostane niz).
 const vrednostDnevnika = (v) => (v instanceof Date ? v.toISOString() : v === undefined ? null : v);
@@ -3171,9 +3179,21 @@ function requireClubUrednikDogodka() {
   };
 }
 app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), (req, res) => urediDogodek(req, res));
+// ISO cas z obmocjem (Z ali +hh:mm) -> ISO niz (UTC) ali null, ce zapis ni veljaven. Komponente morajo biti prave (V8 bi 31. 2. tiho premaknil v marec);
+// leto 2000-2100 (leto 0000/0001 je za Postgres napaka 22008 -> bi bilo 500). Uporabljata ga okno prodaje (#327) in samodejna objava (062).
+function isoCasZObmocjem(v) {
+  const m = typeof v === "string" ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})$/i.exec(v) : null;
+  const [ll, me, dn, ur, mi, se] = m ? [m[1], m[2], m[3], m[4], m[5], m[6] || "0"].map(Number) : [];
+  const prav = !!m && ll >= 2000 && ll <= 2100 && me >= 1 && me <= 12 && dn >= 1 && dn <= new Date(Date.UTC(ll, me, 0)).getUTCDate() && ur <= 23 && mi <= 59 && se <= 59;
+  const cas = prav ? new Date(v) : null;
+  return cas && Number.isFinite(cas.getTime()) ? cas.toISOString() : null;
+}
+const NAPAKA_OBJAVA_NI_OSNUTEK = { error: "not_a_draft", message: "Automatic publishing can only be scheduled for a draft event." };
+const NAPAKA_OBJAVA_PO_ZACETKU = { error: "invalid_publish_at", message: "publishAt must be before the event start." };
 // Telo PATCH /events/:id. `opcije` uporablja samo agent_predlogi.js (#330, I57; obstojeca pot ostane ena sama, brez kopije validacije):
 //   samoPreveri(dovoljeno, d)  po CELOTNI validaciji, pred transakcijo: vrne normalizirana polja, nic ne zapise in nic ne zaklene (predlog agenta);
 //   predZaklepom(c)            takoj po BEGIN, PRED zaklepom vrstice dogodka (nujni nacin agenta, I58: globalni advisory zaklep 73121);
+//   razlog                     besedilo za stolpec `razlog` vrstice admin_dejanja (mnozicna dejanja, #329);
 //   predlog(c, st)             v transakciji po zaklepu vrstice dogodka in branju starih vrednosti: zaklep predloga, zastarelost, caka -> potrjen (vrze e.odgovor).
 async function urediDogodek(req, res, opcije = {}) {
   try {
@@ -3278,17 +3298,32 @@ async function urediDogodek(req, res, opcije = {}) {
       const oknoV = b[camel] !== undefined ? b[camel] : b[stolpec];
       if (oknoV === undefined) continue;
       if (oknoV !== null) {
-        // Komponente morajo biti prave (V8 bi 31. 2. tiho premaknil v marec); leto 2000-2100 (leto 0000/0001 je za Postgres napaka 22008 -> bi bilo 500).
-        const m = typeof oknoV === "string" ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})$/i.exec(oknoV) : null;
-        const [ll, me, dn, ur, mi, se] = m ? [m[1], m[2], m[3], m[4], m[5], m[6] || "0"].map(Number) : [];
-        const prav = !!m && ll >= 2000 && ll <= 2100 && me >= 1 && me <= 12 && dn >= 1 && dn <= new Date(Date.UTC(ll, me, 0)).getUTCDate() && ur <= 23 && mi <= 59 && se <= 59;
-        const cas = prav ? new Date(oknoV) : null;
-        if (!cas || !Number.isFinite(cas.getTime())) return res.status(400).send(`${camel} must be an ISO date-time with a time zone, or null.`);
-        dovoljeno[stolpec] = cas.toISOString();
+        const iso = isoCasZObmocjem(oknoV);
+        if (!iso) return res.status(400).send(`${camel} must be an ISO date-time with a time zone, or null.`);
+        dovoljeno[stolpec] = iso;
       } else dovoljeno[stolpec] = null;
     }
 
+    // Samodejna objava (#327, migracija 062, I59): ISO cas z obmocjem ali null (preklic); izpuscen kljuc = brez spremembe. Nastavi se SAMO osnutku (po tem
+    // zahtevku osnutek: status se v istem zahtevku lahko vrne v osnutek) in mora biti pred zacetkom dogodka; drugace 400. null je vedno sprejet (preklic je brez ucinka
+    // na objavljenem dogodku). Cas v preteklosti je dovoljen: delavec ga objavi v naslednjem krogu (kot rocna objava). Dokoncna preverba stanja je spodaj POD zaklepom vrstice.
+    const objavaV = b.publishAt !== undefined ? b.publishAt : b.publish_at;
+    if (objavaV !== undefined) {
+      if (objavaV === null) dovoljeno.publish_at = null;
+      else {
+        const iso = isoCasZObmocjem(objavaV);
+        if (!iso) return res.status(400).send("publishAt must be an ISO date-time with a time zone, or null.");
+        if ((dovoljeno.status !== undefined ? dovoljeno.status : d.status) !== "draft") return res.status(400).json(NAPAKA_OBJAVA_NI_OSNUTEK);
+        const zacetek = new Date(dovoljeno.start_at !== undefined && dovoljeno.start_at !== null ? dovoljeno.start_at : d.start_at).getTime();
+        if (Number.isFinite(zacetek) && new Date(iso).getTime() >= zacetek) return res.status(400).json(NAPAKA_OBJAVA_PO_ZACETKU);
+        dovoljeno.publish_at = iso;
+      }
+    }
+
     if (opcije.samoPreveri) return opcije.samoPreveri(dovoljeno, d);
+    // Samodejna objava (062, I59): ob vsaki spremembi STANJA (objava, med osnutke, odpoved) se nacrtovani cas pobrise, razen ce ga zahtevek izrecno nastavi. Brez tega bi osnutek,
+    // vrnjen iz objave (»Med osnutke«), s starim casom v preteklosti skocil nazaj v objavo ze v naslednji minuti. Za samoPreveri (predlog agenta) to ni del `dovoljeno`.
+    if (dovoljeno.publish_at === undefined && dovoljeno.status !== undefined && dovoljeno.status !== d.status) dovoljeno.publish_at = null;
     const sets = [], vrednosti = [];
     for (const [k, v] of Object.entries(dovoljeno)) {
       if (v === undefined) continue;
@@ -3315,8 +3350,13 @@ async function urediDogodek(req, res, opcije = {}) {
       if (opcije.predZaklepom) await opcije.predZaklepom(c);
       // Odpoved/datum neadmina: polna preverba I42 (steje narocila). Sicer samo kratek zaklep vrstice (FOR NO KEY UPDATE: ne caka na tuje kljuce novih narocil).
       const z = !admin && (odpoved || datum) ? await zaklepDogodkaZaOdpoved(c, d.id)
-        : (await c.query("SELECT id FROM events WHERE id = $1 FOR NO KEY UPDATE", [d.id])).rows[0];
+        : (await c.query("SELECT id, status FROM events WHERE id = $1 FOR NO KEY UPDATE", [d.id])).rows[0];
       if (!z) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+      // Samodejna objava (062, I59): dokoncna preverba POD zaklepom vrstice (stanje, prebrano pred zaklepom, je lahko zastarelo: hkratna objava ali odpoved).
+      if (dovoljeno.publish_at && (dovoljeno.status !== undefined ? dovoljeno.status : z.status) !== "draft") {
+        await c.query("ROLLBACK");
+        return res.status(400).json(NAPAKA_OBJAVA_NI_OSNUTEK);
+      }
       if (!admin && odpoved && z.status !== "cancelled" && odpovedZaklenjena(z)) {
         await c.query("ROLLBACK");
         return res.status(409).json(NAPAKA_DOGODEK_MINIL);
@@ -3340,7 +3380,7 @@ async function urediDogodek(req, res, opcije = {}) {
       }
       if (admin) {
         const dnevnik = razlikaPolj(polja, st, r.rows[0]);
-        if (dnevnik) await zapisiAdminDejanje(c, req, dejanjeDogodka(dnevnik.prej, dnevnik.potem), "event", d.id, dnevnik.prej, dnevnik.potem);
+        if (dnevnik) await zapisiAdminDejanje(c, req, dejanjeDogodka(dnevnik.prej, dnevnik.potem), "event", d.id, dnevnik.prej, dnevnik.potem, opcije.razlog);
       }
       await c.query("COMMIT");
     } catch (e) {
@@ -3362,7 +3402,7 @@ async function urediDogodek(req, res, opcije = {}) {
     razprodanoPozabi("v:" + d.id);   // capacity ali status se je morda spremenil
     if (pavzaOd) {
       console.log(`[pavza] dogodek ${d.id}: prodaja ustavljena (uporabnik ${req.user.userId}), preklicanih cakajocih narocil ${preklicanih}`);
-      void pavzaOkna.zazeni(d.id, pavzaOd);   // po COMMIT-u, brez await: odgovor ne caka na Stripe
+      void pavzaOkna.zazeni(d.id, pavzaOd, { mnozicno: opcije.mnozicno === true });   // po COMMIT-u, brez await: odgovor ne caka na Stripe
     } else if (prej && prej.sales_paused === true && r.rows[0].sales_paused === false) {
       console.log(`[pavza] dogodek ${d.id}: prodaja spet tece (uporabnik ${req.user.userId})`);
     }
@@ -3414,7 +3454,7 @@ app.delete("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, 
         await c.query("ROLLBACK");
         return res.status(409).json(NAPAKA_DOGODEK_MINIL);
       }
-      r = await c.query("UPDATE events SET status='cancelled' WHERE id=$1 RETURNING *", [d.id]);
+      r = await c.query("UPDATE events SET status='cancelled', publish_at = NULL WHERE id=$1 RETURNING *", [d.id]);   // publish_at (062, I59): odpoved pobrise nacrtovano samodejno objavo
       vVrsti = await vracilaStripe.vrstiZaDogodek(c, d.id);
       if (jeAdminDogodka(req) && z.status !== "cancelled") await zapisiAdminDejanje(c, req, "event.cancel", "event", d.id, { status: z.status }, { status: "cancelled" });   // I53
       await c.query("COMMIT");
@@ -3758,7 +3798,7 @@ admin.post("/creator-applications/:id/approve", async (req, res) => {
     }
 
     // Admin ostane admin (requireRole admina povsod spusti); navaden uporabnik postane business.
-    if (u.role === "user") await c.query("UPDATE users SET role='business' WHERE id=$1", [u.id]);
+    await postaniBusiness(c, req, u, `Odobritev prosnje ${id}`);
 
     const kr = await c.query(
       `INSERT INTO clubs (owner_user_id, name, address, city, contact_email, contact_phone)
@@ -3941,7 +3981,7 @@ admin.post("/clubs", async (req, res) => {
       await c.query("ROLLBACK");
       return res.status(409).send(`User ${u.email} already owns club "${ima.rows[0].name}" (id ${ima.rows[0].id}). One club per business account.`);
     }
-    if (u.role === "user") await c.query("UPDATE users SET role='business' WHERE id=$1", [u.id]);
+    await postaniBusiness(c, req, u, "Nov klub");
 
     const stolpci = ["owner_user_id", ...Object.keys(pk.polja)];
     const vrednosti = [u.id, ...Object.values(pk.polja)];
@@ -3991,7 +4031,7 @@ admin.patch("/clubs/:id", async (req, res) => {
       if (l.uporabnik.id !== obstaja.rows[0].owner_user_id) {
         const ima = await c.query("SELECT id FROM clubs WHERE owner_user_id=$1 AND id<>$2 LIMIT 1", [l.uporabnik.id, id]);
         if (ima.rows.length > 0) { await c.query("ROLLBACK"); return res.status(409).send(`User ${l.uporabnik.email} already owns another club.`); }
-        if (l.uporabnik.role === "user") await c.query("UPDATE users SET role='business' WHERE id=$1", [l.uporabnik.id]);
+        await postaniBusiness(c, req, l.uporabnik, `Prenos lastnistva kluba ${id}`);
         polja.owner_user_id = l.uporabnik.id;
       }
     }
@@ -4126,7 +4166,7 @@ admin.get("/events", async (req, res) => {
     const r = await pool.query(
       `SELECT e.id, e.club_id, c.name AS club_name, c.hidden AS club_hidden, e.title, e.poster_url,
               e.start_at, e.end_at, e.min_age, e.genres, e.status, e.ticket_price_cents, e.currency,
-              e.ticket_url, e.created_at, e.capacity, e.sold_count, e.sales_paused, e.sales_open_at, e.sales_close_at, e.vip_enabled, ${PRIZORISCE_E},
+              e.ticket_url, e.created_at, e.capacity, e.sold_count, e.sales_paused, e.sales_open_at, e.sales_close_at, e.publish_at, e.vip_enabled, ${PRIZORISCE_E},
               -- #190: koliko placanih narocil (brez guest liste) bi odpoved vrnila kupcem; admin panel to pokaze v potrditvenem oknu pred »Umakni«
               -- #236: paid_orders/paid_cents = samo PRAVI promet; testna (lazni nacin, Stripe sandbox) locena v test_paid_*; odpoved vrne vsa placana narocila (panel pokaze oboje)
               (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = e.id AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}) AS paid_orders,
@@ -4145,28 +4185,40 @@ admin.get("/events", async (req, res) => {
 // Odpoved gre prek sprozilca events_odpoved + sweep vracil (I37). Od faze 1 panela (055, I53): zapis v admin_dejanja v ISTI transakciji, zaklep vrstice
 // (FOR NO KEY UPDATE: hkratni PATCH istega dogodka pocaka), objava obvesti sledilce kot PATCH /events/:id (U1; prej jih panel ni obvestil).
 // Neobvezen `reason` (do 500 znakov) gre v dnevnik.
-admin.patch("/events/:id", async (req, res) => {
+admin.patch("/events/:id", (req, res) => adminStatusDogodka(req, res));
+// `opcije.predZaklepom(c)` takoj po BEGIN (kot pri urediDogodek); `opcije.brezOdpovedanih` (mnozicna dejanja, #329): odpovedan dogodek se NE vrne med osnutke (vracila so ze v vrsti, I37) -> 409 event_cancelled.
+async function adminStatusDogodka(req, res, opcije = {}) {
   const id = celoId4(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const b = req.body || {};
   const status = b.status;
   if (!["draft", "published", "cancelled"].includes(status)) return res.status(400).send("status must be draft, published or cancelled.");
-  const razlog = b.reason === undefined || b.reason === null ? null : String(b.reason).trim().slice(0, 500) || null;
+  const razlog = b.reason === undefined || b.reason === null ? null : [...String(b.reason).trim()].slice(0, 500).join("") || null;   // po znakih Unicode (ne po UTF-16 enotah: emoji se ne razpolovi)
   const c = await pool.connect();
   let r, star;
   try {
     await c.query("BEGIN");
+    if (opcije.predZaklepom) await opcije.predZaklepom(c);
     star = (await c.query("SELECT id, club_id, status FROM events WHERE id = $1 FOR NO KEY UPDATE", [id])).rows[0];
     if (!star) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+    if (opcije.brezOdpovedanih && star.status === "cancelled") {
+      await c.query("ROLLBACK");
+      return res.status(409).json({ error: "event_cancelled", message: "The event is cancelled; it can't be moved back to drafts in bulk." });
+    }
     r = await c.query(
-      `UPDATE events SET status=$2 WHERE id=$1
+      // publish_at (062, I59): ob spremembi stanja se nacrtovana samodejna objava pobrise (osnutek, vrnjen iz objave, ne sme skociti nazaj)
+      `UPDATE events SET status=$2, publish_at = CASE WHEN status <> $2 THEN NULL ELSE publish_at END WHERE id=$1
        RETURNING id, club_id, title, start_at, status`, [id, status]
     );
     if (star.status !== status) {
       await zapisiAdminDejanje(c, req, dejanjeDogodka({ status: star.status }, { status }), "event", id, { status: star.status }, { status }, razlog);
     }
     await c.query("COMMIT");
-  } catch (e) { await c.query("ROLLBACK").catch(() => {}); console.error(e); return res.status(500).send("Server error."); }
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (e && (e.code === "40P01" || e.code === "55P03")) return res.status(503).set("Retry-After", "2").send("The event is busy. Please try again.");   // kot PATCH /events/:id; nic spremenjeno
+    console.error(e); return res.status(500).send("Server error.");
+  }
   finally { c.release(); }
   razprodanoPozabi("v:" + id);
   console.log(`Admin ${req.user.userId} dogodek ${id} -> ${status}`);
@@ -4175,7 +4227,7 @@ admin.patch("/events/:id", async (req, res) => {
     catch (e) { console.error("Obvescanje sledilcev ni uspelo:", e.message); }
   }
   return res.status(200).json(r.rows[0]);
-});
+}
 
 // POST /admin/api/events/:id/duplicate (#328): podvoji dogodek v OSNUTEK/OSNUTKE. Telo: { startAt } (ISO z obmocjem) ali { startAt, ponovi: "weekly", n } (1 <= n <= 12;
 // n je SKUPNO stevilo osnutkov, prvi je na startAt, vsak naslednji 7 koledarskih dni pozneje po ljubljanskem casu, zato ura po spremembi poletnega casa ostane).
@@ -4265,6 +4317,12 @@ async function podvojiDogodek(req, res, opcije = {}) {
   return res.status(201).json({ events: nove.map((x) => ({ id: x.id, title: x.title, start_at: new Date(x.start_at).toISOString(), status: x.status })) });
 }
 
+// POST /admin/api/events/bulk (#329, I60): mnozicna dejanja nad dogodki (pause | resume | draft | reschedule); logika in odlocitve v admin_mnozicno.js.
+// Omejevalnik: 10 klicev na minuto na admina (vsak klic = do 50 zaporednih transakcij na glavnem poolu; clovek ne klikne pogosteje, zanka agenta ali dvojni klik pa ne sme
+// zasesti poola, ki ga rabijo nakupi). Okvara omejevalnika: lokalni stevec (kot ostale admin poti). Nic na skenPool.
+admin.post("/events/bulk", omeji({ kljuc: "admin-bulk", najvec: 10, oknoSekund: 60, poUporabniku: true, priNapaki: "lokalno" }),
+  require("./admin_mnozicno").ustvari({ pool, urediDogodek, adminStatusDogodka, celoId4 }));
+
 // GET /admin/api/events/:id — vsa urejljiva polja dogodka (za urejevalnik v panelu) + stevci + zadnjih 30 vrstic dnevnika (055, I53).
 // Samo branje v READ ONLY transakciji s casovno mejo (glavni pool nima statement_timeout); vse po indeksih (orders_event_idx, tickets_event_idx, admin_dejanja_cilj_idx).
 // Brez osebnih podatkov kupcev (samo stevila); dnevnik ima e-naslov ADMINA, ki je dejanje naredil (ne kupca).
@@ -4278,7 +4336,7 @@ admin.get("/events/:id", async (req, res) => {
     const er = await c.query(
       `SELECT e.id, e.club_id, cl.name AS club_name, cl.hidden AS club_hidden, cl.is_demo AS club_is_demo, e.title, e.description, e.poster_url,
               e.start_at, e.end_at, e.min_age, e.genres, e.status, e.ticket_price_cents, e.currency, e.ticket_url, e.capacity, e.sold_count,
-              e.sales_paused, e.sales_open_at, e.sales_close_at, e.vip_enabled, e.recap_video_url, e.created_at,
+              e.sales_paused, e.sales_open_at, e.sales_close_at, e.publish_at, e.vip_enabled, e.recap_video_url, e.created_at,
               e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng
          FROM events e JOIN clubs cl ON cl.id = e.club_id WHERE e.id = $1`, [id]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
@@ -4690,6 +4748,13 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
 const adminNadzor = require("./admin_nadzor").ustvari({
   pool, router: admin, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
 });
+// Samodejna objava osnutkov ob casu (#327, migracija 062, I59; samodejna_objava.js): delavec vsako minuto, glavni pool, nikoli skenPool. Isti koraki po objavi kot rocna objava
+// (predpomnilnik, obvestilo sledilcem); SAMODEJNA_OBJAVA_MS=0 izklopi delavca (PATCH publishAt ostane: osnutek se potem objavi rocno).
+const samodejnaObjava = require("./samodejna_objava").ustvari({
+  pool, zapisiAdminDejanje, opozorilaDogodka: adminNadzor.zaDelavca().opozorilaDogodka,
+  naObjavljen: async (id, klubId) => { razprodanoPozabi("v:" + id); javniPredpomnilnik.razveljavi(); await obvestiSledilce(id, klubId); },
+});
+samodejnaObjava.zazeni(okoljeCelo("SAMODEJNA_OBJAVA_MS", 60000, 0, 3600000));
 // Dostop za agenta (Claude) z zetonom samo za branje (#330, 1. del; migracija 058; ARCHITECTURE »Dostop za agenta«, I56). Upravljanje zetonov: GET/POST /admin/api/agent-zetoni
 // (vloga admin, na routerju `admin`); poti za agenta: /agent/api/* (samo GET). Zeton agenta je na VSEH drugih poteh 403 že v requireAuthNa (brez baze).
 const agentApi = require("./agent_api").ustvari({

@@ -3375,7 +3375,32 @@ BEGIN
   RAISE NOTICE '061: racun % za narocilo OUT-TTWH2V4Q (stanje %, poslano_at %) je spet v izdaji', v.id, v.stanje, v.poslano_at;
 END $$;
 
--- 062_racun_ttwh2v4q_artikel.sql
+-- 062_samodejna_objava.sql
+-- SAMODEJNA OBJAVA DOGODKA OB CASU (issue #327, »PR B« nacrta admin panela 23. 10. 2026, outly-hq docs/ideje/2026-10-23-admin-panel-nadgradnja.md 2.5).
+-- Samo DODAJANJE stolpca in delnega indeksa; brez UPDATE/DELETE obstojecih vrstic (obstojeci dogodki dobijo NULL = ni nacrtovane objave).
+--
+-- events.publish_at   Cas, ko se OSNUTEK sam objavi (delavec samodejna_objava.js, vsako minuto; ista objava kot rocna: obvestilo sledilcem, predpomnilnik,
+--                     vrstica admin_dejanja `event.publish_auto`). NULL = ni nacrtovano. Velja samo za status 'draft': ob vsaki spremembi stanja (objava, med osnutke,
+--                     odpoved) in ob samodejni objavi ga streznik postavi na NULL, da osnutek, ki se vrne iz objave, ne skoci takoj nazaj. Javni odgovori ga NE kazejo
+--                     (STOLPCI_DOGODKA ga ne vsebuje); PATCH /events/:id (isti klub/admin kot ostala polja) in admin odgovori ga.
+--
+-- events_publish_at_idx  Delni indeks samo za osnutke z nacrtovano objavo: delavec bere ENO kratko poizvedbo na minuto, tabela `events` ob tem ostane brez
+--                        sekvencnega branja. Vrstic je malo (osnutki z urnikom), zato je vzdrzevanje indeksa ob pisanju dogodkov zanemarljivo.
+--
+-- Zaklep: ADD COLUMN brez privzete vrednosti (NULL) je v PostgreSQL 16 samo sprememba kataloga, a vzame kratek ACCESS EXCLUSIVE na `events`. CREATE INDEX je
+-- na ISTI tabeli v ISTI transakciji (zaklep ze drzimo od ALTER), zato ne zahteva zaklepa nobene druge tabele: brez mrtve zanke z nakupom, ki bere `events` prek
+-- tujega kljuca in vstavlja v `orders` (past iz 055: CREATE INDEX ON orders bi drzal SHARE na orders, medtem ko ALTER events caka). Migracija se `orders`,
+-- `tickets` in `clubs` NE dotakne. Sken (skenPool, lock_timeout 1 s) ob ALTER vrne 503 + Retry-After in telefon preklopi na sken brez povezave (I16).
+-- migrate.js nastavi lock_timeout in migracijo ob izteku ponovi. Deploy NE med dogodkom (kratek zaklep `events`).
+
+-- ALTER je PRVI in indeks za njim: ACCESS EXCLUSIVE na events se drzi do COMMIT, zato pred ALTER ni nicesar, kar bi cakalo.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS publish_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS events_publish_at_idx ON events (publish_at) WHERE status = 'draft' AND publish_at IS NOT NULL;
+
+COMMENT ON COLUMN events.publish_at IS 'Samodejna objava osnutka ob tem casu (062, I59); NULL = ni nacrtovano; ob vsaki spremembi stanja in ob samodejni objavi NULL. Ni v javnih odgovorih.';
+
+-- 063_racun_ttwh2v4q_artikel.sql
 -- PODATKOVNA MIGRACIJA (potrebuje Martinov DA in oznako odobril-martin): racun za narocilo OUT-TTWH2V4Q gre ZNOVA v izdajo. Ena vrstica, brez drugih sprememb.
 --
 -- Kaj se je zgodilo: po migraciji 061 (23. 10. 2026 13:02:21 UTC) je delavec poslal SalesInvoiceCreate, e-racuni pa je odgovoril
@@ -3407,26 +3432,26 @@ BEGIN
   SELECT r.* INTO v FROM racuni r JOIN orders o ON o.id = r.order_id
    WHERE o.public_ref = 'OUT-TTWH2V4Q' AND r.vrsta = 'racun' FOR UPDATE OF r;
   IF NOT FOUND THEN
-    RAISE NOTICE '062: racuna za narocilo OUT-TTWH2V4Q ni (druga baza ali ze obdelan): nic ni spremenjeno';
+    RAISE NOTICE '063: racuna za narocilo OUT-TTWH2V4Q ni (druga baza ali ze obdelan): nic ni spremenjeno';
     RETURN;
   END IF;
   IF v.stevilka IS NOT NULL OR v.ponudnik_id IS NOT NULL OR v.ponudnik_stevilka IS NOT NULL THEN
-    RAISE NOTICE '062: racun % (stanje %) ima stevilko ali dokument pri ponudniku: nic ni spremenjeno', v.id, v.stanje;
+    RAISE NOTICE '063: racun % (stanje %) ima stevilko ali dokument pri ponudniku: nic ni spremenjeno', v.id, v.stanje;
     RETURN;
   END IF;
   IF v.stanje NOT IN ('caka', 'napaka') THEN
-    RAISE NOTICE '062: racun % je v stanju %: nic ni spremenjeno', v.id, v.stanje;
+    RAISE NOTICE '063: racun % je v stanju %: nic ni spremenjeno', v.id, v.stanje;
     RETURN;
   END IF;
   IF v.poslano_at IS NOT NULL AND v.poslano_at > NOW() - INTERVAL '10 minutes' THEN
-    RAISE NOTICE '062: racun % ima zahtevek poslan pred manj kot 10 minutami (lahko je se v teku): nic ni spremenjeno', v.id;
+    RAISE NOTICE '063: racun % ima zahtevek poslan pred manj kot 10 minutami (lahko je se v teku): nic ni spremenjeno', v.id;
     RETURN;
   END IF;
   UPDATE racuni
      SET stanje = 'caka', poslano_at = NULL, poskusi = 0, iskanja_ne = 0, iskanje_ne_at = NULL, iskanja_nejasna = 0, zadnja_napaka = NULL,
          naslednji_poskus_at = NOW() + INTERVAL '5 minutes', prevzeto_at = NULL, prevzem_zeton = NULL
    WHERE id = v.id;
-  RAISE NOTICE '062: racun % za narocilo OUT-TTWH2V4Q (stanje %, poslano_at %) je spet v izdaji (izda se cez 5 minut)', v.id, v.stanje, v.poslano_at;
+  RAISE NOTICE '063: racun % za narocilo OUT-TTWH2V4Q (stanje %, poslano_at %) je spet v izdaji (izda se cez 5 minut)', v.id, v.stanje, v.poslano_at;
 END $$;
 
 -- =============================================================================
@@ -3495,7 +3520,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('059_agent_predlogi.sql', 'aa6fc09564f9e42b'),
     ('060_agent_nujno.sql', 'bd109720c9bbdba9'),
     ('061_racun_ttwh2v4q_ponovitev.sql', '38d14d7efaece77b'),
-    ('062_racun_ttwh2v4q_artikel.sql', '9ab37f85c14658b8')
+    ('062_samodejna_objava.sql', '5c0b68654780a4ee'),
+    ('063_racun_ttwh2v4q_artikel.sql', '8d09de49320ce6f0')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

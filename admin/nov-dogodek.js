@@ -27,6 +27,8 @@
     const p = (n) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
   }
+  // Samodejna objava (#327): vedno po ljubljanskem casu
+  const datumLj = (iso) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString("sl-SI", { timeZone: "Europe/Ljubljana", dateStyle: "short", timeStyle: "short" }); };
   const izLokalnega = (v) => { const t = v ? new Date(v).getTime() : NaN; return Number.isNaN(t) ? null : t; };
   function polje(id, oznaka, vnos, pomoc) {
     vnos.id = id;
@@ -235,6 +237,10 @@
       if (rdeca.length) telo.push(h("p", { class: "pr-opomba" }, "Gumb »Objavi« je onemogočen, dokler obstaja rdeča ovira. Oranžna in rumena opozorila objave ne ustavijo."));
       else if (p.items.length) telo.push(h("p", { class: "pr-opomba" }, "Opozorila objave ne ustavijo."));
       telo.push(h("p", { class: "pr-opomba" }, "Pregled velja za shranjene podatke; neshranjenih sprememb ne vidi."));
+    }
+    const nacrtovan = trenutniDogodek;
+    if (nacrtovan && nacrtovan.publish_at && cele(nacrtovan.id) === p.id) {
+      telo.push(h("p", { class: "pr-opomba", id: "dge_objava_nacrt" }, `Samodejna objava ob ${datumLj(nacrtovan.publish_at)} (ljubljanski čas): ob tem času se opravi ta isti pregled. Rdeča ovira ali začetek dogodka pred tem časom pustita dogodek kot osnutek in sprožita rdeče opozorilo.`));
     }
     if (p.stanje === "rdece" || p.stanje === "napaka") {   // izredna pot: objava kljub oviri, z vpisom in razlogom (dnevnik)
       const vseeno = h("button", { type: "button", class: "nevarno mali", id: "dge_objavi_vseeno" }, "Objavi vseeno");
