@@ -1,4 +1,4 @@
--- 061_samodejna_objava.sql
+-- 062_samodejna_objava.sql
 -- SAMODEJNA OBJAVA DOGODKA OB CASU (issue #327, »PR B« nacrta admin panela 23. 10. 2026, outly-hq docs/ideje/2026-10-23-admin-panel-nadgradnja.md 2.5).
 -- Samo DODAJANJE stolpca in delnega indeksa; brez UPDATE/DELETE obstojecih vrstic (obstojeci dogodki dobijo NULL = ni nacrtovane objave).
 --
@@ -23,6 +23,6 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS publish_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS events_publish_at_idx ON events (publish_at) WHERE status = 'draft' AND publish_at IS NOT NULL;
 
-COMMENT ON COLUMN events.publish_at IS 'Samodejna objava osnutka ob tem casu (061, I59); NULL = ni nacrtovano; ob vsaki spremembi stanja in ob samodejni objavi NULL. Ni v javnih odgovorih.';
+COMMENT ON COLUMN events.publish_at IS 'Samodejna objava osnutka ob tem casu (062, I59); NULL = ni nacrtovano; ob vsaki spremembi stanja in ob samodejni objavi NULL. Ni v javnih odgovorih.';
 
 COMMIT;

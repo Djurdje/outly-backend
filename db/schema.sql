@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–061, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–062, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict dld9bNgx4DI9QlObGWaqiuARBkhXCOEm9XfhLWKy9syrEGpZppw9cEGCXVamSLW
+\restrict a3FemfPE4w2mMXlKYgBdLPx3TUF8KBM5FvYOW2q39j3AUgPpyKUd9UPGbjCqnrg
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -959,7 +959,7 @@ COMMENT ON COLUMN public.events.sales_paused IS 'Pavza prodaje (055): TRUE = nak
 -- Name: COLUMN events.publish_at; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.events.publish_at IS 'Samodejna objava osnutka ob tem casu (061, I59); NULL = ni nacrtovano; ob vsaki spremembi stanja in ob samodejni objavi NULL. Ni v javnih odgovorih.';
+COMMENT ON COLUMN public.events.publish_at IS 'Samodejna objava osnutka ob tem casu (062, I59); NULL = ni nacrtovano; ob vsaki spremembi stanja in ob samodejni objavi NULL. Ni v javnih odgovorih.';
 
 
 --
@@ -4164,5 +4164,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict dld9bNgx4DI9QlObGWaqiuARBkhXCOEm9XfhLWKy9syrEGpZppw9cEGCXVamSLW
+\unrestrict a3FemfPE4w2mMXlKYgBdLPx3TUF8KBM5FvYOW2q39j3AUgPpyKUd9UPGbjCqnrg
 

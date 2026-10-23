@@ -1,5 +1,5 @@
 "use strict";
-// Samodejna objava osnutka ob casu (#327, migracija 061, invarianta I59; nacrt outly-hq docs/ideje/2026-10-23-admin-panel-nadgradnja.md 2.5).
+// Samodejna objava osnutka ob casu (#327, migracija 062, invarianta I59; nacrt outly-hq docs/ideje/2026-10-23-admin-panel-nadgradnja.md 2.5).
 //
 // Delavec vsako minuto (SAMODEJNA_OBJAVA_MS, 0 = izklop) objavi osnutke, katerih `events.publish_at` je minil. Pravila (vsako ima test v test_samodejna_objava.js):
 //  - ENA kratka poizvedba za kandidate (delni indeks events_publish_at_idx), nato na kandidata ena transakcija: `FOR NO KEY UPDATE SKIP LOCKED` + UPDATE v ENEM stavku.

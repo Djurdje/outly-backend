@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Samodejna objava osnutka ob casu (#327, »PR B« nacrta admin panela 23. 10. 2026; migracija 061, invarianta I59). Zagon (PG16, prazna baza z vsemi migracijami):
+ * Samodejna objava osnutka ob casu (#327, »PR B« nacrta admin panela 23. 10. 2026; migracija 062, invarianta I59). Zagon (PG16, prazna baza z vsemi migracijami):
  *   DATABASE_URL="postgres://postgres:postgres@localhost:5432/outly" node _testi/test_samodejna_objava.js
  * Vzorec kot test_push.js (lokalni JWKS, lazni APNs prek http2, backend kot otrok proces) in test_admin_podvoji.js (klubi, osnutki). Brez fiksnega cakanja: vse je cakanje
  * na pogoj (stanje v bazi, vrstica v dnevniku procesa, zahtevek na APNs). Delavec tece na kratkem intervalu (SAMODEJNA_OBJAVA_MS=200), v 1. delu pa se kliče izpostavljen krog().

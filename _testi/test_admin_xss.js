@@ -831,7 +831,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     assert(nv.objavaBlokirana(13) === false && $8("dge_razsiritve").children.length === 0, "nov-dogodek.js: objavljen dogodek nima bloka Pred objavo in ni blokiran");
     assert(najdi($8("dge_gumbi"), e => idje(e, "dge_podvoji")).length >= 2, "nov-dogodek.js: gumb Podvoji pri vsakem odprtju urejevalnika (dogodki.js ustvari nov vsebnik)");
 
-    // samodejna objava (#327, 061): nacrtovani cas v bloku »Pred objavo« je besedilo (ljubljanski cas), brez elementov iz podatkov; brez casa bloka ni
+    // samodejna objava (#327, 062): nacrtovani cas v bloku »Pred objavo« je besedilo (ljubljanski cas), brez elementov iz podatkov; brez casa bloka ni
     odg8 = { "/admin/api/opozorila?dogodek=": { telo: { items: [], stevci: { rdece: 0, oranzno: 0, rumeno: 0 } } } };
     nv.zaUrejevalnik({ event: { id: 16, status: "draft", title: ZLO8[0], start_at: "2030-06-01T10:00:00Z", publish_at: "2030-05-01T10:30:00Z" } }); await new Promise(r => setImmediate(r));
     const nacrt = najdi($8("dge_razsiritve"), e => idje(e, "dge_objava_nacrt"));

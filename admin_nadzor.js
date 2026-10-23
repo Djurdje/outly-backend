@@ -210,7 +210,7 @@ function ustvari(dep) {
         if (e.poster_url === "" && zacetek > zdaj && zacetek <= zdaj + OKNO_PLAKATA_DNI * 864e5) {
           dodaj("brez_plakata", "oranzno", "dogodek", e.id, `${ime}: brez plakata, začetek v manj kot ${OKNO_PLAKATA_DNI} dneh${objavljen ? "" : " (osnutek)"}.`, e.start_at);
         }
-        // Samodejna objava (#327, 061, I59), ki je ni bilo: delavec je osnutek pustil (rdeca ovira pred objavo, dogodek se je ze zacel, pregled ni uspel) ali ne tece.
+        // Samodejna objava (#327, 062, I59), ki je ni bilo: delavec je osnutek pustil (rdeca ovira pred objavo, dogodek se je ze zacel, pregled ni uspel) ali ne tece.
         // Samo v splosnem seznamu: pregled ENEGA dogodka (»Pred objavo«) ne sme dobiti rdeca vrstica, ki bi sama blokirala rocno objavo.
         if (!objavljen && dogodekId === null && e.publish_at && new Date(e.publish_at).getTime() <= zdaj - ZAMUDA_OBJAVE_MS) {
           const ob = new Date(e.publish_at).toLocaleString("sl-SI", { timeZone: "Europe/Ljubljana", dateStyle: "short", timeStyle: "short" });

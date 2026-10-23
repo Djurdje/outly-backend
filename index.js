@@ -3172,7 +3172,7 @@ function requireClubUrednikDogodka() {
 }
 app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), (req, res) => urediDogodek(req, res));
 // ISO cas z obmocjem (Z ali +hh:mm) -> ISO niz (UTC) ali null, ce zapis ni veljaven. Komponente morajo biti prave (V8 bi 31. 2. tiho premaknil v marec);
-// leto 2000-2100 (leto 0000/0001 je za Postgres napaka 22008 -> bi bilo 500). Uporabljata ga okno prodaje (#327) in samodejna objava (061).
+// leto 2000-2100 (leto 0000/0001 je za Postgres napaka 22008 -> bi bilo 500). Uporabljata ga okno prodaje (#327) in samodejna objava (062).
 function isoCasZObmocjem(v) {
   const m = typeof v === "string" ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})$/i.exec(v) : null;
   const [ll, me, dn, ur, mi, se] = m ? [m[1], m[2], m[3], m[4], m[5], m[6] || "0"].map(Number) : [];
@@ -3295,7 +3295,7 @@ async function urediDogodek(req, res, opcije = {}) {
       } else dovoljeno[stolpec] = null;
     }
 
-    // Samodejna objava (#327, migracija 061, I59): ISO cas z obmocjem ali null (preklic); izpuscen kljuc = brez spremembe. Nastavi se SAMO osnutku (po tem
+    // Samodejna objava (#327, migracija 062, I59): ISO cas z obmocjem ali null (preklic); izpuscen kljuc = brez spremembe. Nastavi se SAMO osnutku (po tem
     // zahtevku osnutek: status se v istem zahtevku lahko vrne v osnutek) in mora biti pred zacetkom dogodka; drugace 400. null je vedno sprejet (preklic je brez ucinka
     // na objavljenem dogodku). Cas v preteklosti je dovoljen: delavec ga objavi v naslednjem krogu (kot rocna objava). Dokoncna preverba stanja je spodaj POD zaklepom vrstice.
     const objavaV = b.publishAt !== undefined ? b.publishAt : b.publish_at;
@@ -3312,7 +3312,7 @@ async function urediDogodek(req, res, opcije = {}) {
     }
 
     if (opcije.samoPreveri) return opcije.samoPreveri(dovoljeno, d);
-    // Samodejna objava (061, I59): ob vsaki spremembi STANJA (objava, med osnutke, odpoved) se nacrtovani cas pobrise, razen ce ga zahtevek izrecno nastavi. Brez tega bi osnutek,
+    // Samodejna objava (062, I59): ob vsaki spremembi STANJA (objava, med osnutke, odpoved) se nacrtovani cas pobrise, razen ce ga zahtevek izrecno nastavi. Brez tega bi osnutek,
     // vrnjen iz objave (»Med osnutke«), s starim casom v preteklosti skocil nazaj v objavo ze v naslednji minuti. Za samoPreveri (predlog agenta) to ni del `dovoljeno`.
     if (dovoljeno.publish_at === undefined && dovoljeno.status !== undefined && dovoljeno.status !== d.status) dovoljeno.publish_at = null;
     const sets = [], vrednosti = [];
@@ -3343,7 +3343,7 @@ async function urediDogodek(req, res, opcije = {}) {
       const z = !admin && (odpoved || datum) ? await zaklepDogodkaZaOdpoved(c, d.id)
         : (await c.query("SELECT id, status FROM events WHERE id = $1 FOR NO KEY UPDATE", [d.id])).rows[0];
       if (!z) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
-      // Samodejna objava (061, I59): dokoncna preverba POD zaklepom vrstice (stanje, prebrano pred zaklepom, je lahko zastarelo: hkratna objava ali odpoved).
+      // Samodejna objava (062, I59): dokoncna preverba POD zaklepom vrstice (stanje, prebrano pred zaklepom, je lahko zastarelo: hkratna objava ali odpoved).
       if (dovoljeno.publish_at && (dovoljeno.status !== undefined ? dovoljeno.status : z.status) !== "draft") {
         await c.query("ROLLBACK");
         return res.status(400).json(NAPAKA_OBJAVA_NI_OSNUTEK);
@@ -4190,7 +4190,7 @@ admin.patch("/events/:id", async (req, res) => {
     star = (await c.query("SELECT id, club_id, status FROM events WHERE id = $1 FOR NO KEY UPDATE", [id])).rows[0];
     if (!star) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
     r = await c.query(
-      // publish_at (061, I59): ob spremembi stanja se nacrtovana samodejna objava pobrise (osnutek, vrnjen iz objave, ne sme skociti nazaj)
+      // publish_at (062, I59): ob spremembi stanja se nacrtovana samodejna objava pobrise (osnutek, vrnjen iz objave, ne sme skociti nazaj)
       `UPDATE events SET status=$2, publish_at = CASE WHEN status <> $2 THEN NULL ELSE publish_at END WHERE id=$1
        RETURNING id, club_id, title, start_at, status`, [id, status]
     );
@@ -4722,7 +4722,7 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
 const adminNadzor = require("./admin_nadzor").ustvari({
   pool, router: admin, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
 });
-// Samodejna objava osnutkov ob casu (#327, migracija 061, I59; samodejna_objava.js): delavec vsako minuto, glavni pool, nikoli skenPool. Isti koraki po objavi kot rocna objava
+// Samodejna objava osnutkov ob casu (#327, migracija 062, I59; samodejna_objava.js): delavec vsako minuto, glavni pool, nikoli skenPool. Isti koraki po objavi kot rocna objava
 // (predpomnilnik, obvestilo sledilcem); SAMODEJNA_OBJAVA_MS=0 izklopi delavca (PATCH publishAt ostane: osnutek se potem objavi rocno).
 const samodejnaObjava = require("./samodejna_objava").ustvari({
   pool, zapisiAdminDejanje, opozorilaDogodka: adminNadzor.zaDelavca().opozorilaDogodka,
