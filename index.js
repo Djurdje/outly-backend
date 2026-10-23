@@ -3213,6 +3213,18 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
       dovoljeno.sales_paused = pavzaV;
     }
 
+    // Okno prodaje (#327; stolpca in omejitev events_sales_window_chk od migracije 002): ISO cas z obmocjem (Z ali +hh:mm) ali null (brez omejitve).
+    // Izpuscen kljuc = brez spremembe. Krsitev omejitve (zapre <= odpre, tudi ko je podano samo eno polje) ujame catch spodaj -> 400 invalid_sales_window.
+    for (const [stolpec, camel] of [["sales_open_at", "salesOpenAt"], ["sales_close_at", "salesCloseAt"]]) {
+      const oknoV = b[camel] !== undefined ? b[camel] : b[stolpec];
+      if (oknoV === undefined) continue;
+      if (oknoV !== null) {
+        const cas = typeof oknoV === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})$/i.test(oknoV) ? new Date(oknoV) : null;
+        if (!cas || !Number.isFinite(cas.getTime())) return res.status(400).send(`${camel} must be an ISO date-time with a time zone, or null.`);
+        dovoljeno[stolpec] = cas.toISOString();
+      } else dovoljeno[stolpec] = null;
+    }
+
     const sets = [], vrednosti = [];
     for (const [k, v] of Object.entries(dovoljeno)) {
       if (v === undefined) continue;
@@ -3270,6 +3282,9 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
       if (e && e.code === "23514" && e.constraint === "events_sold_chk") {
         const sold = (await c.query("SELECT sold_count FROM events WHERE id = $1", [d.id]).catch(() => ({ rows: [] }))).rows[0];   // M8: ze drzimo c (I16, #274)
         return res.status(400).json({ error: "capacity_below_sold", message: `Capacity can't be lower than the number of tickets already sold${sold ? ` (${sold.sold_count})` : ""}.`, sold: sold ? sold.sold_count : null });
+      }
+      if (e && e.code === "23514" && e.constraint === "events_sales_window_chk") {
+        return res.status(400).json({ error: "invalid_sales_window", message: "Sales close time must be after the sales open time." });
       }
       // Preklic cakajocih narocil ob pavzi (zaklep dogodek -> narocila) se lahko redko zaklene s hkratnim webhookom (narocilo -> dogodek prek sprozilca):
       // Postgres eno od transakcij prekine; tu nic ni spremenjeno, odjemalec ponovi.
