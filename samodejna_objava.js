@@ -16,6 +16,7 @@
 //  - Odjemalci in javni odgovori publish_at ne vidijo.
 
 const KANDIDATOV_NA_KROG = 20;
+const KANDIDATOV_BRANJE = 500;      // najvec toliko id-jev prebere ena poizvedba; od teh krog obravnava KANDIDATOV_NA_KROG, ki so bili najdlje nepoizkuseni
 const ROK_ODJEMALCA_MS = 8000;       // odjemalski rok ene poizvedbe (strezniski rok je 5 s); po izteku se povezava zavrze
 const OPOMBA_PONOVI_MS = 10 * 60 * 1000;   // isti razlog zavrnitve istega dogodka se v dnevnik zapise najvec enkrat na 10 min
 
@@ -23,6 +24,7 @@ function ustvari(dep) {
   const { pool, opozorilaDogodka, zapisiAdminDejanje, naObjavljen } = dep;
   const log = dep.log || console;
   const opombe = new Map();   // "id|razlog" -> cas zadnjega zapisa
+  const poskusen = new Map(); // id -> cas zadnjega poskusa objave (rotacija: zataknjen osnutek, npr. z rdeco oviro, ne zasede kroga in ne strada novih)
 
   function opomba(id, razlog) {
     const k = id + "|" + razlog, zdaj = Date.now();
@@ -69,10 +71,12 @@ function ustvari(dep) {
     }
   }
 
-  // Kandidati: osnutki z minulim publish_at (delni indeks). Navadno branje: ne caka na zaklepe vrstic, caka le na ACCESS EXCLUSIVE (migracija; lock_timeout).
+  // Kandidati: osnutki z minulim publish_at, ki se se NISO zaceli (dogodek, ki se je zacel, se ne objavi nikoli, zato ne sme zasedati kroga; pregled #347 S2). Navadno branje
+  // (delni indeks): ne caka na zaklepe vrstic, caka le na ACCESS EXCLUSIVE (migracija; lock_timeout). Bere najvec KANDIDATOV_BRANJE id-jev; vrstni red in rez na
+  // KANDIDATOV_NA_KROG naredi krog() po tem, kdaj je bil dogodek nazadnje poskusen (rotacija), ne po publish_at.
   async function kandidati() {
     return vTransakciji(async (q) => (await q(
-      `SELECT id FROM events WHERE status = 'draft' AND publish_at IS NOT NULL AND publish_at <= NOW() ORDER BY publish_at, id LIMIT ${KANDIDATOV_NA_KROG}`)).rows.map((r) => r.id));
+      `SELECT id FROM events WHERE status = 'draft' AND publish_at IS NOT NULL AND publish_at <= NOW() AND start_at > NOW() ORDER BY publish_at, id LIMIT ${KANDIDATOV_BRANJE}`)).rows.map((r) => r.id));
   }
 
   // Pregled »Pred objavo«: true = je rdeca ovira ali pregled ni uspel (dogodek ostane osnutek).
@@ -117,8 +121,13 @@ function ustvari(dep) {
       let ids;
       try { ids = await kandidati(); }
       catch (e) { log.error("[samodejna-objava] kandidatov ni mogoce prebrati:", (e && (e.code || e.message)) || e); return { objavljenih, preskocenih, napaka: true }; }
+      // Rotacija (pregled #347 S2): najprej dogodki, ki jih se nismo poskusili, nato tisti z najstarejsim poskusom; zataknjeni (rdeca ovira) se vrte, novi pridejo takoj na vrsto.
+      // Med se nepoizkusenimi gredo najprej NAJNOVEJSI (najpozneje zapadli) publish_at: zataknjeni so praviloma starejsi. Pomnilnik je omejen na trenutne kandidate.
+      for (const k of [...poskusen.keys()]) if (!ids.includes(k)) poskusen.delete(k);
+      ids = ids.map((id, i) => [id, i]).sort((a, b) => (poskusen.get(a[0]) || 0) - (poskusen.get(b[0]) || 0) || b[1] - a[1]).slice(0, KANDIDATOV_NA_KROG).map((x) => x[0]);
       for (const id of ids) {
         try {
+          poskusen.set(id, Date.now());
           const razlog = await ovira(id);
           if (razlog) { opomba(id, razlog); preskocenih++; continue; }
           const x = await objavi(id);

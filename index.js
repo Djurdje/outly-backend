@@ -3445,7 +3445,7 @@ app.delete("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, 
         await c.query("ROLLBACK");
         return res.status(409).json(NAPAKA_DOGODEK_MINIL);
       }
-      r = await c.query("UPDATE events SET status='cancelled' WHERE id=$1 RETURNING *", [d.id]);
+      r = await c.query("UPDATE events SET status='cancelled', publish_at = NULL WHERE id=$1 RETURNING *", [d.id]);   // publish_at (062, I59): odpoved pobrise nacrtovano samodejno objavo
       vVrsti = await vracilaStripe.vrstiZaDogodek(c, d.id);
       if (jeAdminDogodka(req) && z.status !== "cancelled") await zapisiAdminDejanje(c, req, "event.cancel", "event", d.id, { status: z.status }, { status: "cancelled" });   // I53
       await c.query("COMMIT");

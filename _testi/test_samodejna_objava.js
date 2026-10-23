@@ -250,6 +250,29 @@ const stVLogu = (re) => procesi.reduce((n, p) => n + (p.log.match(re) || []).len
       // delavec ne sme uporabljati skenPool: modul sprejme samo `pool`
       assert(!/skenPool/.test(fs.readFileSync(path.join(__dirname, "..", "samodejna_objava.js"), "utf8").replace(/\/\/.*$/gm, "")), "M3: samodejna_objava.js ne omenja skenPool (I16)");
     }
+    // --- M4: stradanje (pregled #347 S2): zataknjeni osnutki ne smejo zasesti kroga ---
+    {
+      klicani.length = 0;
+      const zataknjeni = [];
+      for (let i = 0; i < 25; i++) zataknjeni.push(await osnutek(`Zacet ${i}`, { start: "-1 hour", publish: "-3 hours" }));   // ze zaceti, najstarejsi publish_at
+      const rdeci = [];
+      for (let i = 0; i < 25; i++) rdeci.push(await osnutek(`Rdec ${i}`, { publish: "-2 hours" }));
+      const veljaven = await osnutek("Nov veljaven", { publish: "-1 minute" });
+      const rdeciSet = new Set(rdeci);
+      const m = modul(async (id) => ({ items: rdeciSet.has(id) ? [{ vrsta: "prodajalec_nepopoln", resnost: "rdece" }] : [] }));
+      const kand = await m.kandidati();
+      assert(!kand.some((id) => zataknjeni.includes(id)), "M4: ze zaceti osnutki niso kandidati (start_at > NOW() v izboru)", kand.length);
+      const r1 = await m.krog();
+      assert(r1.objavljenih === 1 && (await stanje(veljaven)).status === "published", "M4: 25 ze zacetih + 25 z rdeco oviro + 1 veljaven: veljaven je objavljen v ENEM krogu", r1);
+      // rotacija: po vec krogih so obravnavani vsi rdeci (najprej tisti, ki jih se nismo poskusili), nov veljaven spet takoj
+      const rdeciNov = await osnutek("Se en rdec", { publish: "-30 minutes" }); rdeciSet.add(rdeciNov);
+      const veljaven2 = await osnutek("Nov veljaven 2", { publish: "-1 minute" });
+      const r2 = await m.krog();
+      assert(r2.objavljenih === 1 && (await stanje(veljaven2)).status === "published", "M4: tudi po prvem krogu nov veljaven pride na vrsto takoj (zataknjeni se vrtijo)", r2);
+      const dnevnikOpomb = []; 
+      await pool.query("DELETE FROM events WHERE id = ANY($1::int[]) OR id = ANY($2::int[]) OR id = $3", [zataknjeni, rdeci, rdeciNov]);
+    }
+    // --- M5: DELETE /events/:id z narocili je odpoved: publish_at se pobrise (preverjeno v P-delu) ---
     await pool.query("TRUNCATE admin_dejanja, events RESTART IDENTITY CASCADE");
 
     // =================================================================================================================
@@ -287,10 +310,10 @@ const stVLogu = (re) => procesi.reduce((n, p) => n + (p.log.match(re) || []).len
     const ISO = (ms) => new Date(Date.now() + ms).toISOString();
     const URA = 3600e3, DAN = 24 * URA;
     const dogodek = async (klubId, naslov, polja = {}) => {
-      const e = { status: "draft", start: ISO(10 * DAN), end: ISO(10 * DAN + 6 * URA), price: 0, publish: null, ...polja };
+      const e = { status: "draft", start: ISO(10 * DAN), end: ISO(10 * DAN + 6 * URA), price: 0, publish: null, poster: "https://slike.test/p.jpg", ...polja };
       return (await pool.query(
-        `INSERT INTO events (club_id, title, status, start_at, end_at, poster_url, ticket_price_cents, capacity, publish_at) VALUES ($1, $2, $3, $4, $5, 'https://slike.test/p.jpg', $6, 100, $7) RETURNING id`,
-        [klubId, naslov, e.status, e.start, e.end, e.price, e.publish])).rows[0].id;
+        `INSERT INTO events (club_id, title, status, start_at, end_at, poster_url, ticket_price_cents, capacity, publish_at) VALUES ($1, $2, $3, $4, $5, $8, $6, 100, $7) RETURNING id`,
+        [klubId, naslov, e.status, e.start, e.end, e.price, e.publish, e.poster])).rows[0].id;
     };
     const vrstica = async (id) => (await pool.query("SELECT status, publish_at FROM events WHERE id = $1", [id])).rows[0];
     const pat = (id, telo, tok = T.admin) => api("PATCH", `/events/${id}`, tok, telo);
@@ -411,10 +434,9 @@ const stVLogu = (re) => procesi.reduce((n, p) => n + (p.log.match(re) || []).len
     assert(r.status === 200 && (await vrstica(Epreklic)).publish_at === null, "preklic urnika pred potekom: 200, cas NULL");
     const Eodp = await dogodek(klubi.moj, "Odpovedan s casom", { status: "cancelled", publish: ISO(-60e3) });
     const Ezac = await dogodek(klubi.moj, "Zacet s casom", { start: ISO(-30 * 60e3), end: ISO(5 * URA), publish: ISO(-60e3) });
-    assert(await pocakaj(() => vLogu(`dogodek ${Ezac} ostane osnutek`)), "delavec je obravnaval dogodek, ki se je ze zacel (dnevnik procesa)");
-    assert((await vrstica(Ezac)).status === "draft" && (await vrstica(Ezac)).publish_at !== null, "dogodek, ki se je ze zacel: ostane osnutek (z casom, za rocno odlocitev)");
     const Etek = await dogodek(klubi.moj, "Tekmovalni", { publish: ISO(-60e3) });
     assert(await pocakaj(async () => (await vrstica(Etek)).status === "published"), "dogodek s casom v preteklosti objavljen");
+    assert((await vrstica(Ezac)).status === "draft" && (await vrstica(Ezac)).publish_at !== null, "dogodek, ki se je ze zacel, ni kandidat: ostane osnutek (z casom, za rocno odlocitev); modulni test M4 preveri, da ne zaseda kroga");
     const x = await vrstica(Etek);
     assert(x.publish_at === null, "po objavi publish_at = NULL");
     const dn3 = (await dnevnik(Etek)).filter((v) => v.dejanje === "event.publish_auto");
@@ -487,6 +509,23 @@ const stVLogu = (re) => procesi.reduce((n, p) => n + (p.log.match(re) || []).len
     await pat(Ezac, { publishAt: null });
     r = await api("GET", "/admin/api/opozorila", T.admin);
     assert(!r.body.items.some((i) => i.vrsta === "objava_zamujena" && i.cilj_id === Ezac), "po preklicu casa opozorila ni");
+
+    // skriti klub: opozorilo objava_zamujena se vseeno pokaze (admin ga mora videti), druga opozorila skritega kluba ne
+    const uSkrit = (await pool.query("INSERT INTO users (email, username, role) VALUES ('skrit@primer.si', 'skritlastnik', 'business') RETURNING id")).rows[0].id;
+    klubi.skrit = await klub("Skriti Klub", uSkrit, { popoln: false });
+    await pool.query("UPDATE clubs SET hidden = TRUE WHERE id = $1", [klubi.skrit]);
+    const Eskrit = await dogodek(klubi.skrit, "Skriti osnutek", { price: 1500, publish: ISO(-10 * 60e3), poster: "", start: ISO(3 * DAN), end: ISO(3 * DAN + 6 * URA) });
+    assert(await pocakaj(() => vLogu(`dogodek ${Eskrit} ostane osnutek: rdeca ovira`)), "skriti klub: delavec ga pregleda in pusti kot osnutek");
+    r = await api("GET", "/admin/api/opozorila", T.admin);
+    const zs = r.body.items.filter((i) => i.cilj_id === Eskrit);
+    assert(zs.length === 1 && zs[0].vrsta === "objava_zamujena" && zs[0].resnost === "rdece", "skriti klub: objava_zamujena je v opozorilih (druga opozorila skritega kluba ne)", zs);
+    // odpoved z narocili (DELETE /events/:id) pobrise nacrtovani cas
+    const Edel = await dogodek(klubi.moj, "Odpoved z narocilom", { publish: ISO(2 * DAN) });
+    await pool.query(
+      `INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, status, buyer_email)
+       VALUES ('OUT-OBJ-1', $1, $2, $3, 1, 0, 0, 'pending', 'kupec@primer.si')`, [U.kupec, Edel, klubi.moj]);
+    r = await api("DELETE", `/events/${Edel}`, T.admin);
+    assert(r.status === 200 && (await vrstica(Edel)).status === "cancelled" && (await vrstica(Edel)).publish_at === null, "DELETE z narocili (odpoved) pobrise nacrtovani cas", [r.status, await vrstica(Edel)]);
 
     // -----------------------------------------------------------------------------------------------------------------
     console.log("\n# P6 javni predpomnilnik: objava je takoj vidna (razveljavitev, ne TTL)");

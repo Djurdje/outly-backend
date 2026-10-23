@@ -193,11 +193,14 @@ function ustvari(dep) {
       // 2. dogodki (skriti klubi izpuščeni); stolpci in izracun placilnega nacina so isti kot v javnem GET /events (razlogNerazpolozljivosti)
       const dogodki = (await c.query(
         `SELECT events.id, left(events.title, 80) AS title, events.status, events.start_at, events.end_at, left(events.poster_url, 1) AS poster_url, events.ticket_price_cents, left(events.ticket_url, 1) AS ticket_url,
-                events.capacity, events.sales_paused, events.publish_at, left(c.name, 60) AS club_name, c.is_demo AS club_is_demo,
+                events.capacity, events.sales_paused, events.publish_at, c.hidden AS club_hidden, left(c.name, 60) AS club_name, c.is_demo AS club_is_demo,
                 ${VIP_OD_CENTOV} AS vip_from_cents, ${sqlKlubStripePripravljen()}
            FROM events JOIN clubs c ON c.id = events.club_id
           WHERE CASE WHEN $1::int IS NULL
-                     THEN NOT c.hidden AND events.status IN ('published', 'draft') AND COALESCE(events.end_at, events.start_at + INTERVAL '18 hours') > NOW()
+                     THEN COALESCE(events.end_at, events.start_at + INTERVAL '18 hours') > NOW()
+                          AND (   (NOT c.hidden AND events.status IN ('published', 'draft'))
+                               -- skriti klub: samo zamujena samodejna objava (#347 N5; delavec objavlja tudi dogodke skritih klubov kot rocna objava, admin mora videti, ce ne uspe)
+                               OR (c.hidden AND events.status = 'draft' AND events.publish_at IS NOT NULL AND events.publish_at <= NOW() - INTERVAL '3 minutes'))
                      ELSE events.id = $1::int END
           ORDER BY events.start_at, events.id LIMIT 1000`, [dogodekId])).rows;
       const zdaj = Date.now();
@@ -207,16 +210,19 @@ function ustvari(dep) {
         const zacetek = new Date(e.start_at).getTime();
         const cena = e.ticket_price_cents === null || e.ticket_price_cents === undefined ? null : Number(e.ticket_price_cents);
         const vip = e.vip_from_cents === null || e.vip_from_cents === undefined ? null : Number(e.vip_from_cents);
-        if (e.poster_url === "" && zacetek > zdaj && zacetek <= zdaj + OKNO_PLAKATA_DNI * 864e5) {
-          dodaj("brez_plakata", "oranzno", "dogodek", e.id, `${ime}: brez plakata, začetek v manj kot ${OKNO_PLAKATA_DNI} dneh${objavljen ? "" : " (osnutek)"}.`, e.start_at);
-        }
         // Samodejna objava (#327, 062, I59), ki je ni bilo: delavec je osnutek pustil (rdeca ovira pred objavo, dogodek se je ze zacel, pregled ni uspel) ali ne tece.
         // Samo v splosnem seznamu: pregled ENEGA dogodka (»Pred objavo«) ne sme dobiti rdeca vrstica, ki bi sama blokirala rocno objavo.
-        if (!objavljen && dogodekId === null && e.publish_at && new Date(e.publish_at).getTime() <= zdaj - ZAMUDA_OBJAVE_MS) {
+        const zamujena = () => {
+          if (!(!objavljen && dogodekId === null && e.publish_at && new Date(e.publish_at).getTime() <= zdaj - ZAMUDA_OBJAVE_MS)) return;
           const ob = new Date(e.publish_at).toLocaleString("sl-SI", { timeZone: "Europe/Ljubljana", dateStyle: "short", timeStyle: "short" });
           dodaj("objava_zamujena", "rdece", "dogodek", e.id,
             `${ime}: samodejna objava ob ${ob} ni uspela, dogodek je ostal osnutek (rdeča ovira pred objavo, dogodek se je že začel ali pregled ni uspel). Odpri dogodek, preveri »Pred objavo« in objavi ročno ali izbriši čas objave.`, e.publish_at);
+        };
+        if (e.club_hidden === true && dogodekId === null) { zamujena(); continue; }   // skriti klub: nobeno drugo opozorilo (kot doslej)
+        if (e.poster_url === "" && zacetek > zdaj && zacetek <= zdaj + OKNO_PLAKATA_DNI * 864e5) {
+          dodaj("brez_plakata", "oranzno", "dogodek", e.id, `${ime}: brez plakata, začetek v manj kot ${OKNO_PLAKATA_DNI} dneh${objavljen ? "" : " (osnutek)"}.`, e.start_at);
         }
+        zamujena();
         if (!objavljen && dogodekId === null) continue;   // pregled enega dogodka (#328) preveri tudi osnutek: kaj bi veljalo ob objavi
         if (e.sales_paused === true) dodaj("prodaja_ustavljena", "oranzno", "dogodek", e.id, `${ime}: prodaja je ustavljena.`, e.start_at);
         if (cena === null && e.ticket_url === "" && vip === null) {
