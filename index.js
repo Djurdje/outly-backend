@@ -4110,6 +4110,74 @@ admin.patch("/events/:id", async (req, res) => {
   return res.status(200).json(r.rows[0]);
 });
 
+// POST /admin/api/events/:id/duplicate (#328): podvoji dogodek v OSNUTEK/OSNUTKE. Telo: { startAt } (ISO z obmocjem) ali { startAt, ponovi: "weekly", n } (1 <= n <= 12;
+// n je SKUPNO stevilo osnutkov, prvi je na startAt, vsak naslednji 7 koledarskih dni pozneje po ljubljanskem casu, zato ura po spremembi poletnega casa ostane).
+// Kopira: naslov, opis, plakat, starost, zanre, ceno, valuto, zunanjo prodajo, kapaciteto, DDV stopnjo, prizorisce (tudi gostiteljski klub in koordinate).
+// end_at ohrani trajanje; okno prodaje (sales_open_at/sales_close_at) ohrani zamik od zacetka (po ljubljanski uri), sicer null.
+// NE kopira: VIP razporeda dogodka (club_tables.event_id, I28: vip_enabled = false, vip_layout_source = 'club', brez tlorisa), prodanih vstopnic (sold_count 0),
+// pavze prodaje (false), posnetka po dogodku (''). Vse v ENI kratki transakciji (vse ali nic), brez zaklepa izvornega ali tujih dogodkov (en INSERT ... SELECT),
+// nic na skenPool. Za vsak nov dogodek vrstica admin_dejanja `event.duplicate` (cilj = nov id, potem = { iz, start_at }), brez osebnih podatkov.
+const DUPLIKATOV_NAJVEC = 12;
+admin.post("/events/:id/duplicate", async (req, res) => {
+  const napaka = (status, error, message) => res.status(status).json({ error, message });
+  const id = celoId4(req.params.id);
+  if (!id) return napaka(400, "invalid_event_id", "Invalid event id.");
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  const zacetekSurov = b.startAt;
+  // Date.parse sprejme 31. februar (prestavi ga v marec): koledarski dan, uro in minuto preverimo sami.
+  const zm = typeof zacetekSurov === "string" ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:?\d{2})$/.exec(zacetekSurov) : null;
+  const koledarskoVeljavno = !!zm && Number(zm[2]) >= 1 && Number(zm[2]) <= 12 && Number(zm[3]) >= 1 && Number(zm[3]) <= new Date(Date.UTC(Number(zm[1]), Number(zm[2]), 0)).getUTCDate()
+    && Number(zm[4]) <= 23 && Number(zm[5]) <= 59 && (zm[6] === undefined || Number(zm[6]) <= 59);
+  if (!koledarskoVeljavno || Number.isNaN(Date.parse(zacetekSurov))) {
+    return napaka(400, "invalid_start", "startAt must be an ISO date-time with a time zone, e.g. 2026-11-06T22:00:00+01:00.");
+  }
+  if (Date.parse(zacetekSurov) <= Date.now()) return napaka(400, "start_in_past", "startAt must be in the future.");
+  let n = 1;
+  if (b.ponovi !== undefined && b.ponovi !== null) {
+    if (b.ponovi !== "weekly") return napaka(400, "invalid_repeat", 'ponovi must be "weekly".');
+    if (!Number.isInteger(b.n) || b.n < 1 || b.n > DUPLIKATOV_NAJVEC) return napaka(400, "invalid_count", `n must be an integer from 1 to ${DUPLIKATOV_NAJVEC}.`);
+    n = b.n;
+  } else if (b.n !== undefined && b.n !== null) {
+    return napaka(400, "invalid_count", 'n is allowed only together with ponovi: "weekly".');
+  }
+  const zacetekIso = new Date(zacetekSurov).toISOString();
+  const c = await pool.connect();
+  let nove;
+  try {
+    await c.query("BEGIN");
+    await c.query("SET LOCAL statement_timeout = 5000");
+    const r = await c.query(
+      `INSERT INTO events (club_id, title, description, poster_url, start_at, end_at, min_age, genres, status, ticket_price_cents, currency, ticket_url,
+                           capacity, vat_rate, sales_open_at, sales_close_at, venue_club_id, venue_name, venue_address, venue_city, venue_lat, venue_lng)
+       SELECT e.club_id, e.title, e.description, e.poster_url, s.nov_start,
+              CASE WHEN e.end_at IS NULL THEN NULL
+                   ELSE s.nov_start + make_interval(secs => (EXTRACT(EPOCH FROM e.end_at) - EXTRACT(EPOCH FROM e.start_at))::float8) END,
+              e.min_age, e.genres, 'draft', e.ticket_price_cents, e.currency, e.ticket_url,
+              e.capacity, e.vat_rate,
+              CASE WHEN e.sales_open_at IS NULL THEN NULL ELSE ((e.sales_open_at AT TIME ZONE 'Europe/Ljubljana') + s.zamik) AT TIME ZONE 'Europe/Ljubljana' END,
+              CASE WHEN e.sales_close_at IS NULL THEN NULL ELSE ((e.sales_close_at AT TIME ZONE 'Europe/Ljubljana') + s.zamik) AT TIME ZONE 'Europe/Ljubljana' END,
+              e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng
+         FROM events e
+        CROSS JOIN LATERAL (SELECT ((($2::timestamptz AT TIME ZONE 'Europe/Ljubljana') + g * INTERVAL '7 days') AT TIME ZONE 'Europe/Ljubljana') AS nov_start,
+                                   (($2::timestamptz AT TIME ZONE 'Europe/Ljubljana') + g * INTERVAL '7 days') - (e.start_at AT TIME ZONE 'Europe/Ljubljana') AS zamik
+                              FROM generate_series(0, $3::int - 1) AS g) s
+        WHERE e.id = $1
+       RETURNING id, title, start_at, status`, [id, zacetekIso, n]);
+    if (r.rows.length === 0) { await c.query("ROLLBACK"); return napaka(404, "event_not_found", "Event not found."); }
+    nove = r.rows.sort((a, z) => a.start_at - z.start_at || a.id - z.id);
+    for (const nov of nove) {
+      await zapisiAdminDejanje(c, req, "event.duplicate", "event", nov.id, null, { iz: id, start_at: new Date(nov.start_at).toISOString() });
+    }
+    await c.query("COMMIT");
+  } catch (e) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (["22007", "22008", "23514"].includes(e && e.code)) return napaka(400, "duplicate_invalid", "The copy would break an event constraint (dates or sales window).");
+    console.error(e); return res.status(500).send("Server error.");
+  } finally { c.release(); }
+  console.log(`Admin ${req.user.userId} podvojil dogodek ${id} -> ${nove.length} osnutkov`);
+  return res.status(201).json({ events: nove.map((x) => ({ id: x.id, title: x.title, start_at: new Date(x.start_at).toISOString(), status: x.status })) });
+});
+
 // GET /admin/api/events/:id — vsa urejljiva polja dogodka (za urejevalnik v panelu) + stevci + zadnjih 30 vrstic dnevnika (055, I53).
 // Samo branje v READ ONLY transakciji s casovno mejo (glavni pool nima statement_timeout); vse po indeksih (orders_event_idx, tickets_event_idx, admin_dejanja_cilj_idx).
 // Brez osebnih podatkov kupcev (samo stevila); dnevnik ima e-naslov ADMINA, ki je dejanje naredil (ne kupca).

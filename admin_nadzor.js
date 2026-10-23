@@ -156,7 +156,9 @@ function ustvari(dep) {
   // =====================================================================================================================
   // OPOZORILA
   // =====================================================================================================================
-  async function izracunajOpozorila() {
+  // `dogodekId` (neobvezno, samo GET /opozorila?dogodek=ID, #328): preverjanje enega dogodka PRED objavo. Isti pogoji, a tudi za osnutek (sicer se osnutek
+  // preskoci: plakat je edino opozorilo osnutka), brez filtra skritosti/konca; vrne SAMO opozorila tega dogodka. Ne gre v predpomnilnik in ne v `zadnjiRdeci`.
+  async function izracunajOpozorila(dogodekId = null) {
     return beriReadOnly(async (c) => {
       const items = [];
       const dodaj = (vrsta, resnost, cilj_tip, cilj_id, besedilo, cas) =>
@@ -182,9 +184,10 @@ function ustvari(dep) {
                 events.capacity, events.sales_paused, left(c.name, 60) AS club_name, c.is_demo AS club_is_demo,
                 ${VIP_OD_CENTOV} AS vip_from_cents, ${sqlKlubStripePripravljen()}
            FROM events JOIN clubs c ON c.id = events.club_id
-          WHERE NOT c.hidden AND events.status IN ('published', 'draft')
-            AND COALESCE(events.end_at, events.start_at + INTERVAL '18 hours') > NOW()
-          ORDER BY events.start_at, events.id LIMIT 1000`)).rows;
+          WHERE CASE WHEN $1::int IS NULL
+                     THEN NOT c.hidden AND events.status IN ('published', 'draft') AND COALESCE(events.end_at, events.start_at + INTERVAL '18 hours') > NOW()
+                     ELSE events.id = $1::int END
+          ORDER BY events.start_at, events.id LIMIT 1000`, [dogodekId])).rows;
       const zdaj = Date.now();
       for (const e of dogodki) {
         const objavljen = e.status === "published";
@@ -195,7 +198,7 @@ function ustvari(dep) {
         if (e.poster_url === "" && zacetek > zdaj && zacetek <= zdaj + OKNO_PLAKATA_DNI * 864e5) {
           dodaj("brez_plakata", "oranzno", "dogodek", e.id, `${ime}: brez plakata, začetek v manj kot ${OKNO_PLAKATA_DNI} dneh${objavljen ? "" : " (osnutek)"}.`, e.start_at);
         }
-        if (!objavljen) continue;
+        if (!objavljen && dogodekId === null) continue;   // pregled enega dogodka (#328) preveri tudi osnutek: kaj bi veljalo ob objavi
         if (e.sales_paused === true) dodaj("prodaja_ustavljena", "oranzno", "dogodek", e.id, `${ime}: prodaja je ustavljena.`, e.start_at);
         if (cena === null && e.ticket_url === "" && vip === null) {
           dodaj("brez_cene", "oranzno", "dogodek", e.id, `${ime}: objavljen brez cene vstopnice in brez zunanje prodaje.`, e.start_at);
@@ -240,6 +243,12 @@ function ustvari(dep) {
             AND buyer_email !~* '@outly\\.invalid$' AND paid_at < NOW() - INTERVAL '1 hour' AND paid_at > NOW() - INTERVAL '30 days'`)).rows[0];
       if (potrdila.n > 0) dodaj("potrdila_neposlana", "oranzno", "narocila", null, `${potrdila.n} potrdil o nakupu kupcem ni poslanih več kot 1 uro (zadnjih 30 dni).`, potrdila.najstarejse);
 
+      if (dogodekId !== null) {   // samo opozorila tega dogodka (racuni, vracila ... so splosna); stevci stejejo samo ta opozorila
+        const moja = items.filter((o) => o.cilj_tip === "dogodek" && o.cilj_id === dogodekId);
+        const st = { rdece: 0, oranzno: 0, rumeno: 0 };
+        for (const o of moja) st[o.resnost]++;
+        return { items: moja, stevci: st };
+      }
       const stevci = { rdece: dodatno.rdece, oranzno: dodatno.oranzno, rumeno: dodatno.rumeno };
       for (const o of items) stevci[o.resnost]++;
       items.sort((a, b) => RESNOST_VRSTNI_RED[a.resnost] - RESNOST_VRSTNI_RED[b.resnost]);   // sort je stabilen: znotraj resnosti ostane vrstni red (cas dogodka)
@@ -259,6 +268,11 @@ function ustvari(dep) {
   router.get("/opozorila", async (req, res) => {
     try {
       res.set("Cache-Control", "no-store");
+      if (req.query.dogodek !== undefined) {   // #328: pregled enega dogodka pred objavo (brez predpomnilnika: admin je pravkar shranil)
+        const id = /^\d{1,10}$/.test(String(req.query.dogodek)) ? Number(req.query.dogodek) : 0;
+        if (id < 1 || id > 2147483647) return res.status(400).json({ error: "invalid_event_id", message: "dogodek must be an event id." });
+        return res.json(await izracunajOpozorila(id));
+      }
       return res.json(await opozorila());
     } catch (e) { return odgovoriNapaka(res, e, "GET /admin/api/opozorila"); }
   });

@@ -119,3 +119,12 @@ button.nevarno-polno { background:var(--napaka); color:#fff }
   .dlg-okno { max-width:none; border-radius:14px 14px 0 0; padding:18px 16px calc(18px + env(safe-area-inset-bottom)) }
   .dlg-gumbi button { flex:1 1 0 }
 }
+
+/* --- nov dogodek, pregled pred objavo, podvajanje (nov-dogodek.js, #328) --- */
+.op-pika.ok { background:var(--ok) }
+.pr-vrstica .op-besedilo b { font-weight:700 }
+.pr-opomba { font-size:12.5px; color:var(--faint); margin:8px 0 0 }
+.dlg-polje .pomoc { display:block; font-size:12px; color:var(--faint); margin-top:3px; white-space:normal }
+.dlg-polje input, .dlg-polje select { width:100% }
+#dge_plakat_orodja .pomoc { display:inline; margin:0 }
+#dge_razsiritve:empty { display:none }
