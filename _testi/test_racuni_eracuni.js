@@ -27,6 +27,7 @@
  *  24  zastavica »ustvarjeno pri ponudniku«: vrstica je `napaka` ze med iskanjem po uspehu Create brez oznake
  *  25  fail-closed: katerakoli napaka bralnega preizkusa ustavi Create; po zavrnjenem Create se Create ustavi za cel proces
  *  26  preizkus pred izdajo z 5xx/timeoutom: POZOR (3x zapored ali dlje kot cas), omejeno na okno
+ *  27  PDF racuna: pridobitev po `potrjen`, stroga preverba, racuni_pdf, ponovitev + POZOR
  *  15  poverilnice nikoli v dnevniku ali zadnja_napaka
  */
 const http = require("http");
@@ -52,7 +53,7 @@ const logOd = (n) => LOG.slice(n);
 
 // ---------- lazni e-racuni ----------
 const F = {
-  docs: [], klici: [], preizkusi: [], stevec: 41, ndoc: 0, inflight: 0, maxInflight: 0, zacetki: [],
+  docs: [], klici: [], preizkusi: [], pdfKlici: [], pdfOblika: "ok", stevec: 41, ndoc: 0, inflight: 0, maxInflight: 0, zacetki: [],
   vedenje: null,        // { ustvari: 'ok'|'503pred'|'503po'|'timeoutpo'|'429'|'napaka'|'konfig'|'brezOznake', preostalo: n }
   zamudaEor: 0,         // koliko Get klicev pred pojavom EOR
   listOblika: "ok",     // 'ok' | 'neznana' | 'prazno' ({status:ok}) | 'prazenNiz' (SalesInvoices: "") | 'prazenSeznam' ([]) | 'brezRef' | 'okrnjenRef' | 'dvojnik' | 'manjkaZnan'
@@ -69,7 +70,7 @@ const streznik = http.createServer((req, res) => {
     F.inflight++; F.maxInflight = Math.max(F.maxInflight, F.inflight); F.zacetki.push(Date.now());
     const konec = (st, obj, zamik = 0) => setTimeout(() => { F.inflight--; try { res.writeHead(st, { "content-type": "application/json" }); res.end(typeof obj === "string" ? obj : JSON.stringify(obj)); } catch (_) { /* odjemalec je prekinil */ } }, zamik);
     let z; try { z = JSON.parse(tel); } catch (_) { return konec(400, "{}"); }
-    if (req.headers["x-outly-namen"] === "preizkus") F.preizkusi.push({ method: z.method, parameters: z.parameters }); else F.klici.push({ method: z.method, parameters: z.parameters, telo: tel });
+    if (req.headers["x-outly-namen"] === "preizkus") F.preizkusi.push({ method: z.method, parameters: z.parameters }); else if (/GetPDF$/.test(z.method)) F.pdfKlici.push({ method: z.method, parameters: z.parameters }); else F.klici.push({ method: z.method, parameters: z.parameters, telo: tel });
     if (!F.poverilnice || z.username !== TAJNO.user || z.secretKey !== TAJNO.key || z.token !== TAJNO.token) return konec(200, { status: "error", error: { description: F.opisAvt } });
     const p = z.parameters || {};
     const ved = F.vedenje && F.vedenje.preostalo > 0 ? F.vedenje.ustvari : "ok";
@@ -102,6 +103,19 @@ const streznik = http.createServer((req, res) => {
       if (!d) return konec(200, { status: "error", error: { description: "document could not be found" } });
       d.getov++;
       return konec(200, { status: "ok", [z.method === "SalesInvoiceGet" ? "SalesInvoice" : "CreditNote"]: { ...dokJSON(d, d.vrsta) } });
+    }
+    if (z.method === "SalesInvoiceGetPDF" || z.method === "CreditNoteGetPDF") {
+      const dob = z.method === "SalesInvoiceGetPDF";
+      const d = F.docs.find((x) => (p.documentID && x.id === p.documentID) || (p.number && x.number === p.number));
+      if (F.pdfOblika === "503") return konec(503, "{}");
+      if (!d) return konec(200, { status: "error", error: { description: "document could not be found" } });
+      const pdf = Buffer.from(`%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n% ${dob ? "racun" : "dobropis"} ${d.number} ${"x".repeat(80)}\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n`);
+      if (F.pdfOblika === "brezPdf") return konec(200, { status: "ok", PDF: Buffer.from("To ni PDF, ampak neka HTML stran za prijavo ".repeat(5)).toString("base64") });
+      if (F.pdfOblika === "prazno") return konec(200, { status: "ok" });
+      if (F.pdfOblika === "dva") return konec(200, { status: "ok", PDF: pdf.toString("base64"), kopija: Buffer.from(pdf.toString() + " drugi").toString("base64") });
+      if (F.pdfOblika === "okrnjen") return konec(200, { status: "ok", PDF: pdf.subarray(0, pdf.length - 20).toString("base64") });
+      if (F.pdfOblika === "gnezdeno") return konec(200, { status: "ok", Document: { file: { content: pdf.toString("base64") } } });
+      return konec(200, { status: "ok", PDF: pdf.toString("base64") });
     }
     if (z.method === "SalesInvoiceList" || z.method === "CreditNoteList") {
       const vrsta = z.method === "SalesInvoiceList" ? "racun" : "dobropis";
@@ -837,6 +851,54 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       F.listStatus = null;
       await tek(w2, 4, 60, true);
       assert((await vrstica(R2.id)).stanje === "potrjen", "po popravku se izda");
+    }
+
+    // ================================================================
+    console.log("\n# 27. PDF racuna (Issue #319): delavec ga dobi od ponudnika po `potrjen`, strogo preveri in shrani v racuni_pdf; napaka = ponovitev + POZOR, brez PDF mail ne gre");
+    {
+      const w = deloven({ RACUNI_PDF_POZOR_PO: "3" });
+      const R = await nov(1, 2200); const l0 = LOG.length;
+      await tek(w, 3, 40, true);
+      const r = await vrstica(R.id);
+      assert(r.stanje === "potrjen" && r.pdf_prejet === true && r.pdf_poskusi === 0 && r.pdf_napaka === null, "potrjen racun: PDF prejet", [r.stanje, r.pdf_prejet]);
+      const pdf = (await pool.query("SELECT pdf, sha256, octet_length(pdf) AS n FROM racuni_pdf WHERE racun_id = $1", [R.id])).rows[0];
+      assert(pdf && pdf.pdf.subarray(0, 5).toString() === "%PDF-" && pdf.sha256 === crypto.createHash("sha256").update(pdf.pdf).digest("hex"), "PDF v bazi, sha256 ustreza vsebini", pdf && pdf.n);
+      const k = F.pdfKlici.filter((x) => x.parameters.documentID === r.ponudnik_id);
+      assert(k.length === 1 && k[0].method === "SalesInvoiceGetPDF" && k[0].parameters.markDocumentAsSent === undefined && k[0].parameters.documentID === r.ponudnik_id, "SalesInvoiceGetPDF po documentID, brez markDocumentAsSent; natanko en klic", F.pdfKlici.length);
+      await tek(w, 2, 40, true);
+      assert(F.pdfKlici.filter((x) => x.parameters.documentID === r.ponudnik_id).length === 1, "PDF se ne pridobiva znova");
+      assert((await pool.query("SELECT COUNT(*)::int AS n FROM racuni_pdf WHERE racun_id = $1", [R.id])).rows[0].n === 1, "natanko ena vrstica racuni_pdf");
+      let nedovoljeno = null; try { await pool.query("UPDATE racuni_pdf SET sha256 = repeat('0', 64) WHERE racun_id = $1", [R.id]); } catch (e) { nedovoljeno = e; }
+      let nedovoljeno2 = null; try { await pool.query("DELETE FROM racuni_pdf WHERE racun_id = $1", [R.id]); } catch (e) { nedovoljeno2 = e; }
+      assert(nedovoljeno && nedovoljeno2 && nedovoljeno.code === "23001" && nedovoljeno2.code === "23001", "racuni_pdf: UPDATE in DELETE zavrne sprozilec (hramba 10 let)", [nedovoljeno && nedovoljeno.code]);
+      // dobropis: CreditNoteGetPDF po stevilki dokumenta
+      const dop = await pool.query(`INSERT INTO racuni (order_id, vrsta, ref_racun_id, vir, znesek_cents, valuta) VALUES ($1, 'dobropis', $2, 'test-pdf-1', -500, 'EUR') RETURNING id`, [R.oid, R.id]);
+      await pool.query("UPDATE racuni SET vracilo_uspelo = TRUE WHERE id = $1", [dop.rows[0].id]);
+      await tek(w, 6, 40, true);
+      const d = await vrstica(dop.rows[0].id);
+      const kd = F.pdfKlici.filter((x) => x.method === "CreditNoteGetPDF" && x.parameters.number === d.ponudnik_stevilka);
+      assert(d.stanje === "potrjen" && d.pdf_prejet === true && kd.length === 1 && kd[0].parameters.number === d.ponudnik_stevilka && kd[0].parameters.documentID === undefined, "dobropis: PDF prek CreditNoteGetPDF po stevilki dokumenta", [d.stanje, d.pdf_prejet, kd.map((x) => x.parameters)]);
+      // neveljavni odgovori: PDF se NE shrani, vrstica ostane brez PDF, POZOR po N neuspehih
+      for (const oblika of ["brezPdf", "prazno", "dva", "okrnjen", "503"]) {
+        const Rn = await nov(1, 2210); const wn = deloven({ RACUNI_PDF_POZOR_PO: "3" }); const ln = LOG.length;
+        F.pdfOblika = oblika;
+        for (let i = 0; i < 5; i++) { await pool.query("UPDATE racuni SET pdf_naslednji_at = NULL WHERE id = $1", [Rn.id]); await tek(wn, 1, 0, true); }
+        const rn = await vrstica(Rn.id);
+        const nasel = (await pool.query("SELECT COUNT(*)::int AS n FROM racuni_pdf WHERE racun_id = $1", [Rn.id])).rows[0].n;
+        assert(rn.stanje === "potrjen" && !rn.pdf_prejet && nasel === 0 && rn.pdf_poskusi >= 3 && rn.pdf_napaka, `[${oblika}] odgovor ni prepoznan PDF: ni shranjen, poskusi se stejejo, napaka zapisana`, [rn.pdf_prejet, rn.pdf_poskusi, rn.pdf_napaka]);
+        assert(logOd(ln).some((l) => /POZOR.*PDF/.test(l)) && !logOd(ln).some((l) => [TAJNO.user, TAJNO.key, TAJNO.token].some((t) => l.includes(t))), `[${oblika}] po 3 neuspehih POZOR (brez poverilnic)`);
+        F.pdfOblika = "ok";
+        await pool.query("UPDATE racuni SET pdf_naslednji_at = NULL WHERE id = $1", [Rn.id]);
+        await tek(wn, 3, 30, true);
+        assert((await vrstica(Rn.id)).pdf_prejet === true, `[${oblika}] ko ponudnik spet vrne PDF, se shrani`);
+      }
+      // PDF v gnezdenem odgovoru (ime polja ni znano): strogo po vsebini
+      const Rg = await nov(1, 2220); const wg = deloven();
+      F.pdfOblika = "gnezdeno";
+      await tek(wg, 4, 30, true);
+      F.pdfOblika = "ok";
+      assert((await vrstica(Rg.id)).pdf_prejet === true, "ime polja s PDF ni pomembno: prepoznan base64 PDF (%PDF- ... %%EOF) kjerkoli v odgovoru");
+      // ponudnik brez PDF (lazni): nobenega klica, racun ostane brez PDF
     }
 
     // ================================================================

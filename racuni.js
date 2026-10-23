@@ -306,6 +306,26 @@ const skrij = (besedilo, tajno) => { let t = String(besedilo); for (const x of t
 const jeObjekt = (x) => x && typeof x === "object";
 const vrhnji = (o, ime) => { if (!jeObjekt(o) || Array.isArray(o)) return undefined; const k = Object.keys(o).find((x) => x.toLowerCase() === ime.toLowerCase()); return k === undefined ? undefined : o[k]; };
 
+// PDF iz odgovora ponudnika po VSEBINI (ime polja ni znano): vsi nizi do globine 5, ki so base64 in se razkodirajo v PDF (%PDF- ... %%EOF v zadnjem kilobajtu).
+// Natanko en razlicen PDF = uspeh; nic ali vec razlicnih = napaka (ne ugibamo).
+const PDF_NAJVEC_BAJTOV = 15 * 1024 * 1024;
+function izlusciPdf(odg) {
+  const najdeni = new Map();
+  const sprehod = (x, globina) => {
+    if (globina > 5 || x === null || x === undefined) return;
+    if (typeof x === "string") {
+      if (x.length < 100 || x.length > Math.ceil(PDF_NAJVEC_BAJTOV * 4 / 3) + 64 || !/^[A-Za-z0-9+/=\s]+$/.test(x)) return;
+      const b = Buffer.from(x.replace(/\s+/g, ""), "base64");
+      if (b.length < 100 || b.subarray(0, 5).toString("latin1") !== "%PDF-" || !b.subarray(Math.max(0, b.length - 1024)).toString("latin1").includes("%%EOF")) return;
+      najdeni.set(crypto.createHash("sha256").update(b).digest("hex"), b);
+    } else if (Array.isArray(x)) x.forEach((y) => sprehod(y, globina + 1));
+    else if (typeof x === "object") Object.values(x).forEach((y) => sprehod(y, globina + 1));
+  };
+  sprehod(odg, 0);
+  if (najdeni.size !== 1) throw new NapakaPonudnika(najdeni.size === 0 ? "odgovor PDF ni prepoznan (pricakovan base64 PDF z glavo %PDF- in koncem %%EOF)" : `odgovor vsebuje ${najdeni.size} razlicnih PDF-jev, ne ugibam`, { neznan: false });
+  return [...najdeni.values()][0];
+}
+
 // Prvi skalar z danim imenom (brez razlike velikosti) v poljubni globini, plitvo najprej (odgovor je lahko {status, ...} ali ovit v response/SalesInvoice).
 function iskaniKljuc(koren, imena) {
   const iskana = imena.map((x) => x.toLowerCase());
@@ -466,6 +486,18 @@ function eracuniPonudnik(env) {
       if (najdeni.length > 1) throw new NapakaPonudnika(`pri ponudniku obstaja ${najdeni.length} dokumentov z isto referenco ${p.message_id}: DVOJNIK, rocna obravnava (storno)`, { trajna: true, neznan: false });
       return najdeni.length ? sklicDokumenta(najdeni[0]) : null;
     },
+    // PDF izdanega dokumenta (Issue #319): SalesInvoiceGetPDF po `documentID` (dokumentiran primer), CreditNoteGetPDF po stevilki dokumenta (dokumentirano). Odgovor je JSON z
+    // base64 PDF; IME POLJA NI ZNANO (ni zivo preverjeno), zato se PDF prepozna po VSEBINI: base64, ki se razkodira v PDF (glava %PDF-, konec %%EOF), natanko eden v odgovoru.
+    // Karkoli drugega (HTML, prazen odgovor, dva razlicna PDF-ja, okrnjen PDF) je napaka: PDF se ne shrani in mail ne gre. `markDocumentAsSent` se NE poslje.
+    async pridobiPdf(ref, { signal } = {}) {
+      const dobropis = ref.vrsta === "dobropis";
+      const iskano = dobropis
+        ? (ref.ponudnik_stevilka ? { number: ref.ponudnik_stevilka } : (ref.ponudnik_id ? { documentID: ref.ponudnik_id } : null))
+        : (ref.ponudnik_id ? { documentID: ref.ponudnik_id } : (ref.ponudnik_stevilka ? { number: ref.ponudnik_stevilka } : null));
+      if (!iskano) throw new NapakaPonudnika("dokument pri ponudniku nima ne stevilke ne oznake", { trajna: true, neznan: false, neposlano: true });
+      const j = await klic(dobropis ? "CreditNoteGetPDF" : "SalesInvoiceGetPDF", iskano, signal);
+      return izlusciPdf(j);
+    },
     async preberi(ref, { signal } = {}) {
       const dobropis = ref.vrsta === "dobropis";
       // Dokumentirano je branje po STEVILKI dokumenta (»by document number«); oznaka dokumenta (documentID) je rezerva, ce stevilke nimamo. Dveh polj ne mesamo.
@@ -572,6 +604,8 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   const PREIZKUS_ZAPORED = celo(env, "RACUNI_PREIZKUS_ZAPORED", 3, 1, 1000);   // bralni preizkus pred izdajo pade toliko tekov zapored ALI ...
   const PREIZKUS_PO_MS = celo(env, "RACUNI_PREIZKUS_PO_MS", 1800000, 0, 86400000);   // ... dlje kot toliko -> POZOR (zakonski rok za racun sta 2 delovna dneva)
   const PREIZKUS_POZOR_RAZMAK_MS = celo(env, "RACUNI_PREIZKUS_POZOR_RAZMAK_MS", 3600000, 0, 86400000);   // isto opozorilo najvec enkrat na toliko
+  const PDF_POZOR_PO = celo(env, "RACUNI_PDF_POZOR_PO", 5, 1, 1000);   // PDF racuna ni mogoce pridobiti toliko poskusov zapored -> POZOR (kupec racuna ne dobi, dokler PDF ni shranjen)
+  const PDF_PAKET = 5;
   const ISKANJE_RAZMAK_MS = celo(env, "RACUNI_ISKANJE_RAZMAK_MS", 600000, 0, 86400000);   // najmanj toliko med dvema stetima iskanjema po referenci; nova izdaja sele po 2 neuspesnih iskanjih
   const ISKANJE_NEJASNO_MAX = celo(env, "RACUNI_ISKANJE_NEJASNO_MAX", 4, 1, 100);   // toliko iskanj brez zanesljivega izida -> `napaka` (rocna obravnava), nikoli nova izdaja
   const ID_NAJEMA = crypto.randomUUID();
@@ -624,7 +658,9 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   const spustiNajem = () => poizvedba("UPDATE racuni_najem SET potece_at = NOW() WHERE ime = $1 AND lastnik = $2", [ponudnik.ime, ID_NAJEMA]).catch(() => {});
   const obstajaDelo = async () => (await poizvedba(
     `SELECT 1 FROM racuni WHERE stanje IN ('caka', 'izdan') AND naslednji_poskus_at <= NOW() AND (vrsta = 'racun' OR vracilo_uspelo IS TRUE)
-        AND (prevzeto_at IS NULL OR prevzeto_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')) LIMIT 1`, [ZASTARELO_MS])).rows.length > 0;
+        AND (prevzeto_at IS NULL OR prevzeto_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')) LIMIT 1`, [ZASTARELO_MS])).rows.length > 0
+    || (!!ponudnik.pridobiPdf && (await poizvedba(
+      `SELECT 1 FROM racuni WHERE stanje = 'potrjen' AND NOT pdf_prejet AND ponudnik IS NOT NULL AND (pdf_naslednji_at IS NULL OR pdf_naslednji_at <= NOW()) LIMIT 1`)).rows.length > 0);
 
   // Opozorila delavca se zberejo in izpisejo ENKRAT na tek (en izpis na vrsto dogodka, ne na vrstico): sicer zaostanek stotin racunov izcrpa urni proracun opozoril v sentry.js
   // in zakrije druga opozorila (placila).
@@ -641,6 +677,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
       iskanje: (n) => `${n} racunov: izid prejsnjega zahtevka ponudniku ${ponudnik.ime} je neznan, iskanje po referenci se ni zakljucilo (nova izdaja je blokirana)`,
       obdelava: (n) => `POZOR: obdelava ${n} racunov ni uspela`,
       preizkus: () => `POZOR: bralni preizkus pred izdajo pri ponudniku ${ponudnik.ime} ne uspe, racuni CAKAJO in se ne izdajo`,
+      pdf: (n) => `POZOR: PDF ${n} racunov/dobropisov pri ponudniku ${ponudnik.ime} ni mogoce pridobiti (racun je potrjen, a kupec ga ne dobi, dokler PDF ni shranjen; mail brez PDF ne gre)`,
     };
     for (const [tip, sez] of skupine) {
       const primeri = sez.slice(0, 3).map((x) => `${x.oznaka}: ${x.besedilo}`).join(" | ");
@@ -980,6 +1017,42 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
     return r.rows.map((x) => Number(x.id)).sort((a, b) => a - b);
   }
 
+  // PDF potrjenih racunov in dobropisov (Issue #319): po `potrjen` delavec dobi PDF od ponudnika (pod istim najemom, semaforjem in razmakom kot vsak klic), ga strogo preveri
+  // (izlusciPdf) in shrani v racuni_pdf. Napaka: pdf_poskusi + 1, ponovitev s premorom, od PDF_POZOR_PO zaporednih neuspehov POZOR. Mail kupcu gre SELE, ko je PDF shranjen.
+  let pdfKonec = 0;
+  async function pdfFaza() {
+    if (!ponudnik.pridobiPdf) return 0;
+    let n = 0;
+    for (;;) {
+      const vr = (await poizvedba(
+        `SELECT r.id, r.vrsta, r.ponudnik_id, r.ponudnik_stevilka, r.pdf_poskusi, r.message_id, o.public_ref FROM racuni r JOIN orders o ON o.id = r.order_id
+          WHERE r.stanje = 'potrjen' AND NOT r.pdf_prejet AND r.ponudnik IS NOT NULL AND (r.pdf_naslednji_at IS NULL OR r.pdf_naslednji_at <= NOW()) ORDER BY r.id LIMIT $1`, [PDF_PAKET])).rows;
+      if (!vr.length) return n;
+      for (const r of vr) {
+        n++;
+        const oznaka = `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${r.id})`;
+        try {
+          const pdf = await izvediKlic(async (signal) => {
+            if (!(await najemi())) throw new NapakaPonudnika("najem delavca za ponudnika drzi drug proces (klic ni poslan)", { neznan: false, neposlano: true });
+            return ponudnik.pridobiPdf({ vrsta: r.vrsta, ponudnik_id: r.ponudnik_id, ponudnik_stevilka: r.ponudnik_stevilka }, { signal });
+          });
+          const sha = crypto.createHash("sha256").update(pdf).digest("hex");
+          await vTransakciji(async (c) => {
+            await c.query("INSERT INTO racuni_pdf (racun_id, pdf, sha256) VALUES ($1, $2, $3) ON CONFLICT (racun_id) DO NOTHING", [r.id, pdf, sha]);
+            await c.query("UPDATE racuni SET pdf_prejet = TRUE, pdf_napaka = NULL WHERE id = $1", [r.id]);
+          });
+        } catch (e) {
+          const poskusi = Number(r.pdf_poskusi) + 1;
+          const sporocilo = kratko(e).slice(0, 300);
+          await poizvedba(`UPDATE racuni SET pdf_poskusi = pdf_poskusi + 1, pdf_napaka = $2, pdf_naslednji_at = NOW() + ($3::bigint * INTERVAL '1 millisecond') WHERE id = $1`,
+            [r.id, sporocilo, Math.max(premor(poskusi), e instanceof NapakaPonudnika && e.konfiguracija ? KONFIG_PREMOR_MS : 0)]).catch(() => {});
+          if (poskusi >= PDF_POZOR_PO) objavi("pdf", oznaka, sporocilo);
+        }
+        if (Date.now() > pdfKonec) return n;
+      }
+    }
+  }
+
   let tece = false;
   async function tek() {
     if (tece || !ponudnik) return 0;
@@ -1001,6 +1074,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
         await Promise.all(ids.map((id) => obdelaj(id, zeton)));
         if (Date.now() > konec) break;
       }
+      if (stevilcenjePonudnik) { pdfKonec = Date.now() + PRORACUN_MS; await pdfFaza(); }
     } catch (e) { console.error("[racuni] tek:", kratko(e)); }
     finally {
       tece = false;
