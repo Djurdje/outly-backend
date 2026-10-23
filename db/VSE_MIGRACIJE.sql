@@ -3779,15 +3779,27 @@ END $$;
 --   table_holds_app_uporabnik_key  najvec ENA rezervacija v aplikaciji na uporabnika na dogodek (delni unikaten indeks).
 --
 -- Samo DODAJANJE: stolpci z DEFAULT-om ali NULL, novi CHECK-i, indeksa. Brez UPDATE/DELETE obstojecih vrstic (obstojece rezervacije po telefonu dobijo source = 'phone').
--- Zaklepi (past iz 055/062/065): `table_holds` je majhna tabela (rezervacije se brisejo 24 h po dogodku), ALTER je PRVI. Tuja kljuca na `users` in `bottle_packages` vzameta
--- SHARE ROW EXCLUSIVE le za cas dodajanja (stolpec je nov, vsi NULL, preverjanje je trenutno). Nakup mize bere table_holds: migrate.js nastavi lock_timeout in ob izteku
--- migracijo ponovi. Deploy NE med dogodkom (kratek zaklep).
+-- Zaklepi (past iz 055/062/065): ALTER TABLE vzame ACCESS EXCLUSIVE do COMMIT, zato je VRSTNI RED zaklepov enak kot v aplikaciji: najprej `events` (nakup vstavlja v `orders`
+-- in prek sprozilca pise v `events`; nakup nato bere `table_holds`), sele nato `table_holds`, nazadnje tuja kljuca. Obratni vrstni red (table_holds pred events) bi z nakupom, ki ze
+-- drzi vrstico/zaklep `events` in caka na `table_holds`, naredil mrtvo zanko (migrate.js jo sicer ponovi: lock_timeout, 40P01). Obe tabeli sta majhni (rezervacije se brisejo 24 h po
+-- dogodku), stolpci so novi (konstanten DEFAULT / NULL, brez prepisa tabele), CHECK na `events` pregleda vrstice dogodkov v ms.
+-- FK `table_holds.user_id -> users ON DELETE CASCADE` je NAMENOMA tuji kljuc (ne kot `created_by` v 065 brez kljuca): rezervacija nosi osebni podatek (ime, uporabnik) in mora z izbrisom
+-- racuna (DELETE /me, admin) izginiti sama, brez dodatnega brisanja v vsaki poti, ki izbrise uporabnika; brez kljuca bi ostala sirota z imenom, miza pa zasedena. Ceno placa `users` samo ob dodajanju
+-- stolpca (SHARE ROW EXCLUSIVE za ms, vsi user_id NULL, preverjanje je trenutno); piseta mu prijava in profil, zato ga drzimo kratko: tuji kljuc na `users` je zadnji korak. Deploy NE med dogodkom.
 
--- Stolpci na table_holds PRVI (glej zgoraj).
+ALTER TABLE events ADD COLUMN IF NOT EXISTS vip_payment TEXT NOT NULL DEFAULT 'app';
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'events_vip_payment_chk') THEN
+    ALTER TABLE events ADD CONSTRAINT events_vip_payment_chk CHECK (vip_payment IN ('app', 'door'));
+  END IF;
+END $$;
+
+-- Stolpci na table_holds (brez tujih kljucev; ta sta spodaj, zadnja).
 ALTER TABLE table_holds
     ADD COLUMN IF NOT EXISTS source              TEXT    NOT NULL DEFAULT 'phone',
-    ADD COLUMN IF NOT EXISTS user_id             INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS package_id          INTEGER REFERENCES bottle_packages(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS user_id             INTEGER,
+    ADD COLUMN IF NOT EXISTS package_id          INTEGER,
     ADD COLUMN IF NOT EXISTS package_name        TEXT,
     ADD COLUMN IF NOT EXISTS package_description TEXT,
     ADD COLUMN IF NOT EXISTS price_cents         INTEGER;
@@ -3813,11 +3825,14 @@ CREATE INDEX IF NOT EXISTS table_holds_user_idx ON table_holds (user_id) WHERE u
 -- Tuji kljuc proti bottle_packages (SET NULL ob brisanju paketa; paketi se sicer arhivirajo).
 CREATE INDEX IF NOT EXISTS table_holds_package_idx ON table_holds (package_id) WHERE package_id IS NOT NULL;
 
-ALTER TABLE events ADD COLUMN IF NOT EXISTS vip_payment TEXT NOT NULL DEFAULT 'app';
+-- Tuja kljuca ZADNJA (glej zgoraj): `bottle_packages` (SET NULL; paketi se sicer arhivirajo), nato `users` (CASCADE).
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'events_vip_payment_chk') THEN
-    ALTER TABLE events ADD CONSTRAINT events_vip_payment_chk CHECK (vip_payment IN ('app', 'door'));
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'table_holds_package_id_fkey') THEN
+    ALTER TABLE table_holds ADD CONSTRAINT table_holds_package_id_fkey FOREIGN KEY (package_id) REFERENCES bottle_packages(id) ON DELETE SET NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'table_holds_user_id_fkey') THEN
+    ALTER TABLE table_holds ADD CONSTRAINT table_holds_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -3896,7 +3911,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('063_racun_ttwh2v4q_artikel.sql', '8d09de49320ce6f0'),
     ('064_racun_ttwh2v4q_ponovitev3.sql', '58f2a275af877279'),
     ('065_promo_kode.sql', 'dc78c558596b297e'),
-    ('066_brisanje_demo_klubov.sql', 'aa1a24e192ec0558')
+    ('066_brisanje_demo_klubov.sql', 'aa1a24e192ec0558'),
+    ('067_vip_placilo_vrata.sql', '3eebdc75db021fa5')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

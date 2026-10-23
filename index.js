@@ -9741,7 +9741,7 @@ async function pocistiRezervacije() {
     const r = await pool.query(
       `DELETE FROM table_holds h USING events e
         WHERE e.id = h.event_id AND COALESCE(e.end_at, e.start_at + INTERVAL '12 hours') < NOW() - INTERVAL '24 hours'`);
-    if (r.rowCount > 0) console.log(`[rezervacije] pospravljeno ${r.rowCount} starih rezervacij po telefonu`);
+    if (r.rowCount > 0) console.log(`[rezervacije] pospravljeno ${r.rowCount} starih rezervacij miz`);
   } catch (e) {
     console.error("[rezervacije] pospravljanje ni uspelo:", e && e.message);
   } finally {
@@ -9998,6 +9998,9 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
 const NAPAKA_VIP_NA_VRATIH = { error: "vip_pay_at_door", message: "Tables for this event are paid in cash at the door. Update the app to reserve one." };
 const NAPAKA_VIP_V_APLIKACIJI = { error: "vip_pay_in_app", message: "Tables for this event are paid in the app." };
 const NAPAKA_REZERVACIJA_LIMIT = { error: "reservation_limit", message: "You already have a table reserved for this event." };
+// Nevidni in bidi znaki (\p{Cf}: ničelne širine, bidi, mehki vezaj ...; isti nabor kot NEVIDNI v agent_predlogi.js in I60 + U+034F, U+2028/9): ime rezervacije jih NE sme vsebovati
+// (osebje kluba bi videlo prazno ali obrnjeno vrstico) -> 400, ne tiho odstranjevanje.
+const NEVIDNI_IME = /\p{Cf}|[\u034F\u2028\u2029]/u;
 
 // Middleware za POST /events/:id/tables/:tableId/orders (za idempotenco, PRED zavrniRazprodanoMizo, omejevalnikom in semaforjem): dogodek z vip_payment = 'door' je 409 brez
 // porabe nakupnih poskusov (20/uro na IP, ki bi jih sicer pojedli stari odjemalci) in brez mize, zaloge in Stripa. Ponovitev ze obstojecega nakupa (idempotenca) je prej vrnjena.
@@ -10007,7 +10010,9 @@ async function zavrniVipNaVratih(req, res, next) {
   if (!id) return next();
   let door = false;
   try {
-    const r = await sCasovnoMejo(pool.query("SELECT vip_payment FROM events WHERE id = $1", [id]), IDEMPOTENCA_PREVERBA_MS);
+    // Samo objavljen dogodek javnega kluba: za neobstojec, neobjavljen ali skrit dogodek se nastavitev ne razkrije (obstojeca pot vrne 404 / 409).
+    const r = await sCasovnoMejo(pool.query(
+      "SELECT e.vip_payment FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1 AND e.status = 'published' AND NOT c.hidden", [id]), IDEMPOTENCA_PREVERBA_MS);
     door = !!(r.rows[0] && r.rows[0].vip_payment === "door");
   } catch (e) { console.error("[vip_payment] preverba pred semaforjem ni uspela:", e && e.message); }
   if (door) return res.status(409).json(NAPAKA_VIP_NA_VRATIH);
@@ -10021,11 +10026,19 @@ const REZERVACIJA_KUPCU_IZ = `FROM table_holds h JOIN events e ON e.id = h.event
 function rezervacijaKupcu(r) {
   return { ...r, currency: String(r.currency).trim() };
 }
+// Telo 409 reservation_limit: {error, message} + obstojeca rezervacija uporabnika na dogodku (samo dodajanje: star odjemalec bere error/message). db je po ROLLBACK-u v samodejni potrditvi.
+async function telesoLimita(db, eventId, userId) {
+  try {
+    const r = await db.query(`SELECT ${REZERVACIJA_KUPCU_STOLPCI} ${REZERVACIJA_KUPCU_IZ} WHERE h.event_id = $1 AND h.user_id = $2 AND h.source = 'app'`, [eventId, userId]);
+    if (r.rows[0]) return { ...NAPAKA_REZERVACIJA_LIMIT, reservation: rezervacijaKupcu(r.rows[0]) };
+  } catch (e) { console.error("[rezervacija] branje obstojece rezervacije ni uspelo:", e && e.message); }
+  return NAPAKA_REZERVACIJA_LIMIT;
+}
 
 // POST /events/:id/tables/:tableId/reservations — kupec (prijavljen racun, ne gost) rezervira VIP mizo na dogodku, kjer se placa na vratih.
 // Telo: { package_id: int | null, guest_name?: string, expected_price_cents?: int }. Pravila kot pri nakupu mize (dogodek objavljen, VIP vklopljen, miza aktivna in ne izklopljena,
 // okno prodaje, pavza prodaje I53, demo klub I41, starost I8), brez placila in vstopnic. Najvec ena aktivna rezervacija na uporabnika na dogodek.
-app.post("/events/:id/tables/:tableId/reservations", requireAuth, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+app.post("/events/:id/tables/:tableId/reservations", requireAuth, zavrniRazprodanoMizo, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const id = vipId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const mizaId = vipId(req.params.tableId);
@@ -10042,10 +10055,14 @@ app.post("/events/:id/tables/:tableId/reservations", requireAuth, omeji({ kljuc:
     pricakovana = b.expected_price_cents;
   }
   // Ime za rezervacijo: 1-60 znakov po obrezovanju (kot rezervacija po telefonu); izpusceno ali prazno = uporabnisko ime.
+  if (typeof b.guest_name === "string" && NEVIDNI_IME.test(b.guest_name)) return res.status(400).send("guest_name must not contain invisible or direction-control characters.");
   const vpisanoIme = rezervacijaBesedilo(b.guest_name, 0, 60);
   if (vpisanoIme === null) return res.status(400).send("guest_name must be at most 60 characters.");
+  // Semafor nakupov varuje glavni pool pred navalom (kot pri nakupu mize): cakalci cakajo v pomnilniku, ne na povezavi.
+  if (!(await nakupDovoljenje(req, res))) return;
   let c;
-  try { c = await pool.connect(); } catch (err) { console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+  try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+  const d = nakupDrzalec(c);
   try {
     await nakupZacni(c);
     const er = await c.query(
@@ -10074,11 +10091,11 @@ app.post("/events/:id/tables/:tableId/reservations", requireAuth, omeji({ kljuc:
 
     // Ena aktivna rezervacija na uporabnika na dogodek (tudi ponovitev iste rezervacije = reservation_limit). Dokoncna resnica je delni unikatni indeks (23505 spodaj).
     const lr = await c.query("SELECT 1 FROM table_holds WHERE event_id = $1 AND user_id = $2 AND source = 'app'", [e.id, req.user.userId]);
-    if (lr.rows.length > 0) { await c.query("ROLLBACK"); return res.status(409).json(NAPAKA_REZERVACIJA_LIMIT); }
+    if (lr.rows.length > 0) { await c.query("ROLLBACK"); return res.status(409).json(await telesoLimita(c, e.id, req.user.userId)); }
 
     // Zaklep imamo (I13): aktivna naročila so zdaj dokončna; rezervacijo (po telefonu ali v aplikaciji) ujame INSERT ... ON CONFLICT spodaj.
     const nr = await c.query(`SELECT 1 FROM orders WHERE event_id = $1 AND table_id = $2 AND status IN ${VIP_ZASEDENA_STANJA} LIMIT 1`, [e.id, miza.id]);
-    if (nr.rows.length > 0) { await c.query("ROLLBACK"); return res.status(409).send("This table is already booked."); }
+    if (nr.rows.length > 0) { await c.query("ROLLBACK"); razprodanoOznaci("m:" + id + ":" + mizaId); return res.status(409).send("This table is already booked."); }
 
     const np = napakaProdaje(e, { zahtevajCeno: false });
     if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
@@ -10106,7 +10123,7 @@ app.post("/events/:id/tables/:tableId/reservations", requireAuth, omeji({ kljuc:
       `INSERT INTO table_holds (event_id, table_id, guest_name, created_by_user_id, source, user_id, package_id, package_name, package_description, price_cents)
        VALUES ($1,$2,$3,$4,'app',$4,$5,$6,$7,$8) ON CONFLICT (event_id, table_id) DO NOTHING RETURNING id`,
       [e.id, miza.id, ime, req.user.userId, paket ? paket.id : null, paket ? paket.name : null, paket ? paket.description : null, miza.price_cents]);
-    if (ins.rows.length === 0) { await c.query("ROLLBACK"); return res.status(409).send("This table is already booked."); }
+    if (ins.rows.length === 0) { await c.query("ROLLBACK"); razprodanoOznaci("m:" + id + ":" + mizaId); return res.status(409).send("This table is already booked."); }
     if (await pavzaPredCommitom(c, e.id)) { await c.query("ROLLBACK"); return res.status(409).send(NAPAKA_PAVZA_PRODAJE); }   // I53: pavza, vklopljena med transakcijo
     await c.query("COMMIT");
     console.log(`Rezervacija mize v aplikaciji: dogodek ${e.id}, miza ${miza.id}, uporabnik ${req.user.userId}`);   // brez imena
@@ -10114,12 +10131,12 @@ app.post("/events/:id/tables/:tableId/reservations", requireAuth, omeji({ kljuc:
     return res.status(201).json({ reservation: rezervacijaKupcu(o.rows[0]) });
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});
-    if (err && err.code === "23505" && err.constraint === "table_holds_app_uporabnik_key") return res.status(409).json(NAPAKA_REZERVACIJA_LIMIT);
-    if (err && err.code === "23505") return res.status(409).send("This table is already booked.");
+    if (err && err.code === "23505" && err.constraint === "table_holds_app_uporabnik_key") return res.status(409).json(await telesoLimita(c, id, req.user.userId));
+    if (err && err.code === "23505") { razprodanoOznaci("m:" + id + ":" + mizaId); return res.status(409).send("This table is already booked."); }
     if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
     console.error(err);
     return res.status(500).send("Server error.");
-  } finally { c.release(); }
+  } finally { d.sprosti(); }
 });
 
 // DELETE /events/:id/tables/:tableId/reservations — kupec prekliče SVOJO rezervacijo v aplikaciji, do začetka dogodka (miza je spet prosta).
@@ -10144,12 +10161,12 @@ app.delete("/events/:id/tables/:tableId/reservations", requireAuth, async (req, 
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
-// GET /me/table-reservations — moje rezervacije v aplikaciji: prihajajoci dogodki in dogodki, ki so se koncali pred manj kot 24 h (isti izraz konca kot »ended«), najnovejsi zacetek prvi.
+// GET /me/table-reservations — moje rezervacije v aplikaciji (samo objavljen dogodek javnega kluba): prihajajoci dogodki in dogodki, ki so se koncali pred manj kot 24 h (isti izraz konca kot »ended«), najnovejsi zacetek prvi.
 app.get("/me/table-reservations", requireAuth, async (req, res) => {
   try {
     const r = await pool.query(
       `SELECT ${REZERVACIJA_KUPCU_STOLPCI} ${REZERVACIJA_KUPCU_IZ}
-        WHERE h.user_id = $1 AND h.source = 'app'
+        WHERE h.user_id = $1 AND h.source = 'app' AND e.status = 'published' AND NOT c.hidden
           AND COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') > NOW() - INTERVAL '24 hours'
         ORDER BY e.start_at DESC, h.id DESC LIMIT 200`, [req.user.userId]);
     return res.json({ items: r.rows.map(rezervacijaKupcu) });

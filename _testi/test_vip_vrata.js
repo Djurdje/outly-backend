@@ -19,7 +19,7 @@ const { Pool } = require("pg");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const PORT = 3146, PORT_C = 3147, JWKS_PORT = 3979;
+const PORT = 3146, PORT_C = 3147, PORT_D = 3148, PORT_E = 3149, JWKS_PORT = 3979;
 const BASE = `http://127.0.0.1:${PORT}`;
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
@@ -70,7 +70,8 @@ const razvrsti = (o) => Object.keys(o).sort().join();
   const TRUNC = "TRUNCATE omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE";
   await pool.query(TRUNC);
   await new Promise(r => jwksServer.listen(JWKS_PORT, r));
-  await zazeni(PORT);
+  // NAKUP_RAZPRODANO_MS=0: pomnilniska oznaka o zasedeni mizi je izklopljena, da testi, ki brisejo rezervacije neposredno v bazi, niso odvisni od casa; odsek 15c jo preizkusi na lastnem procesu.
+  await zazeni(PORT, { NAKUP_RAZPRODANO_MS: '0' });
 
   const T = {
     lastnik: zeton("lastnik@outly.si", uuid(1)), manager: zeton("manager@outly.si", uuid(2)), doorman: zeton("doorman@outly.si", uuid(3)),
@@ -193,6 +194,9 @@ const razvrsti = (o) => Object.keys(o).sort().join();
     ["guest_name 61 znakov", { package_id: P1, guest_name: "x".repeat(61) }], ["guest_name stevilo", { package_id: P1, guest_name: 5 }],
     ["guest_name seznam", { package_id: P1, guest_name: ["a"] }], ["guest_name z NUL", { package_id: P1, guest_name: "A\u0000B" }],
     ["guest_name 61 kodnih tock (emoji)", { package_id: P1, guest_name: "😀".repeat(61) }],
+    ["guest_name z znakom ničelne širine (U+200B)", { package_id: P1, guest_name: "Ana\u200bNovak" }], ["guest_name z bidi znakom (U+202E)", { package_id: P1, guest_name: "Ana \u202eNovak" }],
+    ["guest_name z mehkim vezajem (U+00AD)", { package_id: P1, guest_name: "Ana\u00adNovak" }], ["guest_name z BOM (U+FEFF)", { package_id: P1, guest_name: "\ufeffAna" }],
+    ["guest_name z locilom vrstice (U+2028)", { package_id: P1, guest_name: "Ana\u2028Novak" }],
     ["expected_price_cents negativen", { package_id: P1, expected_price_cents: -1 }], ["expected_price_cents 1.5", { package_id: P1, expected_price_cents: 1.5 }],
     ["expected_price_cents niz", { package_id: P1, expected_price_cents: "300" }],
   ];
@@ -243,6 +247,8 @@ const razvrsti = (o) => Object.keys(o).sort().join();
   assert(r.status === 409 && r.body.error === "reservation_limit" && r.body.message === "You already have a table reserved for this event.", "ana: druga miza istega dogodka -> 409 reservation_limit", r.body);
   r = await rez(T.ana, ED, M1);
   assert(r.status === 409 && r.body.error === "reservation_limit", "ana: ponovitev iste rezervacije -> 409 reservation_limit", r.body);
+  assert(r.body.reservation && r.body.reservation.id === R1.id && r.body.reservation.table_id === M1 && r.body.reservation.event_id === ED && razvrsti(r.body.reservation) === razvrsti(R1),
+    "reservation_limit vrne se obstojeco rezervacijo (dodano polje reservation, isto kot Reservation)", r.body);
   r = await rez(T.cara, ED, M1);
   assert(r.status === 409 && r.body === "This table is already booked.", "cara: miza, ki jo je rezervirala ana -> 409 already booked", r.body);
   await api("POST", `/business/events/${ED}/tables/${M3}/hold`, T.lastnik, { guest_name: "Telefonski gost", note: "po telefonu" });
@@ -535,6 +541,69 @@ const razvrsti = (o) => Object.keys(o).sort().join();
   assert(ostalo === 0, "app rezervacija dogodka, koncanega pred 40 h, je pobrisana", ostalo);
   assert((await pool.query("SELECT COUNT(*)::int AS n FROM table_holds WHERE event_id=$1 AND table_id=$2", [EK5, M2])).rows[0].n === 1, "app rezervacija dogodka, koncanega pred 5 h, ostane");
   await ustavi(srvC);
+
+  console.log("\n# 15b. Odpovedan/skrit dogodek ni v GET /me/table-reservations; zavrniVipNaVratih ne razkrije nastavitve");
+  const ES = await dogodek(1, "Skrivni", "7 days");
+  await api("PUT", `/business/events/${ES}/vip`, T.lastnik, { enabled: true, payment: "door" });
+  r = await rez(T.ana, ES, M3, { package_id: P1 });
+  assert(r.status === 201, "ana rezervira na ES", r.body);
+  let sez2 = (await api("GET", "/me/table-reservations", T.ana)).body.items;
+  assert(sez2.some(x => x.event_id === ES), "ES je v seznamu (objavljen)");
+  await pool.query("UPDATE events SET status='cancelled' WHERE id=$1", [ES]);
+  sez2 = (await api("GET", "/me/table-reservations", T.ana)).body.items;
+  assert(!sez2.some(x => x.event_id === ES) && sez2.length > 0, "odpovedan dogodek ni v seznamu (ostale so)", sez2.map(x => x.event_title));
+  await pool.query("UPDATE events SET status='published' WHERE id=$1", [ES]);
+  await pool.query("UPDATE clubs SET hidden = TRUE WHERE id=1");
+  sez2 = (await api("GET", "/me/table-reservations", T.ana)).body.items;
+  assert(sez2.length === 0, "skrit klub: seznam prazen", sez2.map(x => x.event_title));
+  r = await nakup(T.ben, ES, M2, { package_id: P1 });
+  assert(!(r.body && r.body.error === "vip_pay_at_door") && r.status === 409 && /not on sale/i.test(String(r.body)), "skrit klub: nakup ne razkrije nastavitve (obstojeca pot: not on sale)", [r.status, r.body]);
+  await pool.query("UPDATE clubs SET hidden = FALSE WHERE id=1");
+  await pool.query("UPDATE events SET status='draft' WHERE id=$1", [ES]);
+  r = await nakup(T.ben, ES, M2, { package_id: P1 });
+  assert(!(r.body && r.body.error === "vip_pay_at_door") && r.status === 409, "osnutek: nakup ne razkrije nastavitve", [r.status, r.body]);
+  r = await nakup(T.ben, 999999, M2, { package_id: P1 });
+  assert(r.status === 404, "neobstojec dogodek: 404 (ne vip_pay_at_door)", [r.status, r.body]);
+  await pool.query("UPDATE events SET status='published' WHERE id=$1", [ES]);
+  r = await nakup(T.ben, ES, M2, { package_id: P1 });
+  assert(r.status === 409 && r.body.error === "vip_pay_at_door", "objavljen dogodek: vip_pay_at_door", r.body);
+
+  console.log("\n# 15c. razprodanoOznaci: zasedena miza se pomni (kot pri nakupu), preklic jo pozabi");
+  const ER = await dogodek(1, "Razprodano", "8 days");
+  await api("PUT", `/business/events/${ER}/vip`, T.lastnik, { enabled: true, payment: "door" });
+  await zazeni(PORT_E);   // privzeta oznaka (3 s)
+  const rezE = (tok, e, m) => apiNa(`http://127.0.0.1:${PORT_E}`, "POST", `/events/${e}/tables/${m}/reservations`, tok, { package_id: P1 });
+  const preklicE = (tok, e, m) => apiNa(`http://127.0.0.1:${PORT_E}`, "DELETE", `/events/${e}/tables/${m}/reservations`, tok);
+  r = await rezE(T.ana, ER, M2); assert(r.status === 201, "ana rezervira T2", r.body);
+  r = await rezE(T.ben, ER, M2); assert(r.status === 409 && r.body === "This table is already booked.", "ben: 409 (oznaci mizo kot zasedeno)", r.body);
+  await pool.query("DELETE FROM table_holds WHERE event_id=$1", [ER]);   // mimo API-ja: pomnilnik ne ve
+  r = await rezE(T.ben, ER, M2);
+  assert(r.status === 409 && r.body === "This table is already booked.", "takoj po brisanju v bazi: se vedno 409 iz pomnilnika (zavrniRazprodanoMizo, brez baze)", r.body);
+  await spi(3300);
+  r = await rezE(T.ben, ER, M2); assert(r.status === 201, "po izteku oznake ben rezervira", r.body);
+  r = await rezE(T.dan, ER, M2); assert(r.status === 409, "dan: 409", r.body);
+  r = await preklicE(T.ben, ER, M2); assert(r.status === 200, "ben prekliche", r.body);
+  r = await rezE(T.dan, ER, M2); assert(r.status === 201, "TAKOJ po preklicu dan rezervira (preklic pozabi oznako)", r.body);
+
+  console.log("\n# 15d. Semafor nakupov varuje glavni pool: naval na zaklenjeno mizo ne ustavi ostalih poti");
+  const EW = await dogodek(1, "Semafor", "9 days");
+  await api("PUT", `/business/events/${EW}/vip`, T.lastnik, { enabled: true, payment: "door" });
+  const srvD = await zazeni(PORT_D, { NAKUP_VZPOREDNO: "2", PG_POOL_MAX: "4", NAKUP_CAKANJE_MS: "6000", NAKUP_DB_TIMEOUT_MS: "2500" });
+  const BASE_D = `http://127.0.0.1:${PORT_D}`;
+  const zaklep = await pool.connect();
+  await zaklep.query("BEGIN");
+  await zaklep.query("SELECT id FROM club_tables WHERE id=$1 FOR SHARE", [M6]);   // konflikt s FOR NO KEY UPDATE rezervacije
+  const naval = kupci.concat([T.ben, T.cara]).map(t => apiNa(BASE_D, "POST", `/events/${EW}/tables/${M6}/reservations`, t, { package_id: P1 }));
+  await spi(500);
+  const t0 = Date.now();
+  const me = await apiNa(BASE_D, "GET", "/me", T.ana);
+  const ms = Date.now() - t0;
+  assert(me.status === 200 && ms < 1000, "GET /me ne caka na zaklep mize med navalom 10 rezervacij (pool 4, semafor 2)", { status: me.status, ms });
+  const izidiNavala = await Promise.all(naval);
+  await zaklep.query("ROLLBACK"); zaklep.release();
+  assert(izidiNavala.every(x => [201, 409, 503].includes(x.status)) && izidiNavala.filter(x => x.status === 201).length <= 1, "naval: samo 201 (najvec ena), 409, 503; nikoli 500", izidiNavala.map(x => x.status));
+  assert(await rezervacij(EW) <= 1, "po navalu najvec 1 rezervacija na mizi");
+  await ustavi(srvD);
 
   console.log("\n# 16. Zasebnost: ime gosta in uporabnisko ime nista v dnevniku");
   const zasebno = /Ben & Co|Ana in prijatelji|Telefonski gost/;
