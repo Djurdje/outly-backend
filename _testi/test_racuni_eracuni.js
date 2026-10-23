@@ -126,6 +126,13 @@ const streznik = http.createServer((req, res) => {
       const el = vrsta === "racun" ? "SalesInvoice" : "CreditNote", zab = vrsta === "racun" ? "SalesInvoices" : "CreditNotes";
       F.listParametri = p;
       if (F.listStatus) return konec(F.listStatus, "{}");
+      // E-racuni (zivo preverjeno 22. 10. 2026): seznam brez dokumentov v obdobju = HTTP 500, status »error«, description s kodo #noDocumentsFound
+      const NI_DOK = { status: "error", description: "Error nr: 1 #noDocumentsFound - No documents were found matching search criteria!" };
+      if (F.listOblika === "ni_dokumentov" && !F.docs.some((x) => x.vrsta === vrsta)) return konec(500, NI_DOK, F.listZamik);
+      if (F.listOblika === "ni_dokumentov_vedno") return konec(500, NI_DOK, F.listZamik);   // (napacen) odgovor kljub dokumentom: ne sme voditi v novo izdajo
+      if (F.listOblika === "ni_dokumentov_gnezdeno") return konec(500, { status: "error", error: { description: NI_DOK.description } }, F.listZamik);
+      if (F.listOblika === "napaka500") return konec(500, { status: "error", description: "Error nr: 7 #internalError - Something went wrong" }, F.listZamik);
+      if (F.listOblika === "ni_dokumentov_brez_kode") return konec(500, { status: "error", description: "No documents were found matching search criteria!" }, F.listZamik);   // brez kode: NI prepoznano
       if (F.listOblika === "neznana") return konec(200, { status: "ok", nekaj: { drugega: 1 } }, F.listZamik);
       if (F.listOblika === "prazno") return konec(200, { status: "ok" }, F.listZamik);
       if (F.listOblika === "prazenNiz") return konec(200, { status: "ok", [zab]: "" }, F.listZamik);
@@ -950,6 +957,49 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       let sporocilo = ""; try { await p.preberi({ vrsta: "racun", ponudnik_id: "60:1" }); } catch (e) { sporocilo = e.message; }
       F.poverilnice = true;
       assert(sporocilo && ![TAJNO.user, TAJNO.key, TAJNO.token].some((t) => sporocilo.includes(t)), "sporocilo napake ponudnika ne vsebuje poverilnic", sporocilo);
+    }
+    // ================================================================
+    console.log("\n# 28. Seznam brez dokumentov (e-racuni: HTTP 500 + #noDocumentsFound) je PRAZEN SEZNAM, ne napaka (produkcija 23. 10. 2026: kokos-jajce, noben racun se ni izdal)");
+    {
+      await pool.query("TRUNCATE racuni CASCADE");   // brez znanih dokumentov (dokaz popolnosti seznama): kot na dan prvega racuna
+      F.docs.length = 0; F.pdfKlici.length = 0;
+      // (a) bralni preizkus pred izdajo: vrstica v `caka` brez poslano_at dobi natanko 1 Create
+      F.listOblika = "ni_dokumentov";
+      const Ra = await nov(1, 2400); const wa = deloven(); const la = LOG.length, ca = klicov("SalesInvoiceCreate"), pa = F.preizkusi.length;
+      await tek(wa, 4, 40, true);
+      const ra = await vrstica(Ra.id);
+      assert(F.preizkusi.length > pa && klicov("SalesInvoiceCreate") - ca === 1 && ra.stanje === "potrjen" && ra.poskusi === 0, "preizkus dobi 500 #noDocumentsFound: preizkus uspe, natanko 1 Create, racun potrjen", [F.preizkusi.length - pa, klicov("SalesInvoiceCreate") - ca, ra.stanje]);
+      assert(!logOd(la).some((l) => /bralni preizkus pred izdajo ni uspel/.test(l)), "v dnevniku ni »bralni preizkus ni uspel«");
+      // (b) vsaka druga napaka 500 ostane napaka (preizkus fail-closed): 0 Create
+      for (const oblika of ["napaka500", "ni_dokumentov_brez_kode"]) {
+        F.listOblika = oblika;
+        const Rb = await nov(1, 2410); const wb = deloven(); const cb = klicov("SalesInvoiceCreate");
+        await tek(wb, 3, 40, true);
+        const rb = await vrstica(Rb.id);
+        assert(klicov("SalesInvoiceCreate") === cb && rb.stanje === "caka" && rb.poslano_at === null, `[${oblika}] 500 brez kode #noDocumentsFound ostane napaka: 0 Create, vrstica caka`, [klicov("SalesInvoiceCreate") - cb, rb.stanje]);
+      }
+      // (c) gnezden description (error.description) je prav tako prepoznan
+      F.listOblika = "ni_dokumentov_gnezdeno"; F.docs.length = 0;
+      await pool.query("TRUNCATE racuni CASCADE");
+      const Rc = await nov(1, 2420); const wc = deloven(); const cc = klicov("SalesInvoiceCreate");
+      await tek(wc, 4, 40, true);
+      assert(klicov("SalesInvoiceCreate") - cc === 1 && (await vrstica(Rc.id)).stanje === "potrjen", "error.description z #noDocumentsFound: natanko 1 Create");
+      // (d) iskanje po referenci: prazen seznam je veljaven negativen izid po obstojecih pravilih (dve iskanji, ni znanih dokumentov) -> ponovna izdaja
+      F.listOblika = "ni_dokumentov"; F.docs.length = 0;
+      await pool.query("TRUNCATE racuni CASCADE");
+      const Rd = await nov(1, 2430); const wd = deloven(); const cd = klicov("SalesInvoiceCreate"), ld = klicov("SalesInvoiceList");
+      nastavi("503pred", 1);
+      await tek(wd, 6, 130, true);
+      const rd = await vrstica(Rd.id);
+      assert(rd.stanje === "potrjen" && klicov("SalesInvoiceCreate") - cd === 2 && F.docs.length === 1 && klicov("SalesInvoiceList") - ld === 2, "iskanje po 503 pred obdelavo: #noDocumentsFound = prazen seznam, po dveh iskanjih ena ponovna izdaja, en dokument", [rd.stanje, klicov("SalesInvoiceCreate") - cd, F.docs.length]);
+      // (e) #noDocumentsFound, ceprav vemo, da dokument obstaja (znan dokument iz (d)): seznam ni popoln -> NIKOLI nova izdaja
+      F.listOblika = "ni_dokumentov_vedno";
+      const Re = await nov(1, 2440); const we = deloven(); const ce = klicov("SalesInvoiceCreate"), de = F.docs.length;
+      nastavi("503pred", 1);
+      await tek(we, 6, 130, true);
+      const re = await vrstica(Re.id);
+      assert(klicov("SalesInvoiceCreate") - ce === 1 && F.docs.length === de && re.stanje !== "potrjen", "500 #noDocumentsFound ob znanem dokumentu: seznam ni popoln, brez druge izdaje", [klicov("SalesInvoiceCreate") - ce, F.docs.length - de, re.stanje]);
+      F.listOblika = "ok";
     }
   } catch (e) {
     fail++; console.log("  ✗ IZJEMA:", e && e.stack || e);

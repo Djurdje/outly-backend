@@ -394,6 +394,14 @@ function eracuniPonudnik(env) {
       throw napaka(`${metoda}: omrezje: ${prekinjen ? "rok potekel" : (e && e.message) || e}${dokazano ? " (zahtevek ni bil poslan)" : ""}`, dokazano ? { neznan: false, neposlano: true } : { neznan: true });
     }
     if (res.status === 429) throw napaka(`${metoda}: HTTP 429 (omejitev klicev)`, { neznan: false, neposlano: true });   // po STATUSNI KODI, ne po besedilu
+    // Seznam brez dokumentov v obdobju: e-racuni NE vrne praznega seznama, ampak HTTP 500 (status »error«) z description »Error nr: 1 #noDocumentsFound - No documents were found
+    // matching search criteria!« (zivo preverjeno 22. 10. 2026). To je veljaven PRAZEN SEZNAM; prepoznano STROGO po kodi #noDocumentsFound v `description` (ne po golem 500, ne po
+    // drugem besedilu), samo za List. Ali je prazen seznam zadosten dokaz »dokumenta ni«, odloca poisci() po obstojecih pravilih (znani dokumenti, ERACUNI_SEZNAM_PREVERJEN, dve iskanji).
+    if ((metoda === "SalesInvoiceList" || metoda === "CreditNoteList") && res.status >= 400) {
+      let tel = null; try { tel = JSON.parse(besedilo); } catch (_) { tel = null; }
+      const opisSeznama = jeObjekt(tel) ? iskaniKljuc(tel, ["description", "errorDescription"]) : undefined;
+      if (typeof opisSeznama === "string" && /#noDocumentsFound\b/.test(opisSeznama)) return metoda === "CreditNoteList" ? { CreditNotes: [] } : { SalesInvoices: [] };
+    }
     if (res.status === 408 || res.status >= 500) throw napaka(`${metoda}: HTTP ${res.status}`, { neznan: true });
     if (res.status === 401 || res.status === 403 || res.status === 404 || res.status === 405) throw napaka(`${metoda}: HTTP ${res.status} (poverilnice, pravice ali naslov)`, { konfiguracija: true, neznan: false });
     let j = null;
