@@ -3281,8 +3281,8 @@ COMMENT ON COLUMN admin_dejanja.predlog_id IS 'Predlog agenta, iz katerega je de
 --   nujno_seja             povezava seje Claude Code (https://claude.ai/..., do 500 znakov), v kateri je potrditev padla.
 --   nujno_at               cas nujne izvedbe (v ISTI transakciji kot sprememba in prehod caka -> potrjen). Meja 3 na 24 h (globalno) se steje po tem stolpcu.
 --   nujno_pregledano_at    admin je v panelu kliknil »Pregledal sem« (rdec pas izgine); nujno_pregledal_admin_id = users.id admina BREZ tujega kljuca (kot 055).
---   nujno_mail_*           mail Martinu (AGENT_NUJNO_MAIL) NATANKO ENKRAT: rezervacija (poskusi+1, prevzeto_at, izid_neznan = TRUE) PRED klicem Resenda, poslano_at po
---                          uspehu; dokazana zavrnitev Resenda (4xx JSON) pobrise izid_neznan in se ponovi, neznan izid (prekinjena povezava, rok) se NE ponovi (vzorec I55).
+--   nujno_mail_*           mail Martinu (AGENT_NUJNO_MAIL) VSAJ ENKRAT: rezervacija (poskusi+1, prevzeto_at, izid_neznan = TRUE) PRED klicem Resenda, poslano_at po
+--                          uspehu; vsak neuspeh se ponovi po narascajocem premoru (najvec 5 poskusov; izid_neznan = zadnji izid ni znan), nato POZOR in rdece opozorilo.
 --   CHECK predlogi_dejanj_nujno_chk: citat, seja in cas nastanejo skupaj; nujna izvedba je vedno potrjen predlog; pregled in mail samo pri nujni izvedbi.
 --
 -- admin_dejanja.nujno  TRUE = dejanje je izvedel agent v nujnem nacinu (brez admina; admin_user_id NULL, agent_zeton_id in predlog_id nastavljena, razlog = citat in seja).
@@ -3390,7 +3390,7 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('057_racuni_pdf_mail.sql', '2576262f2a6ca2c6'),
     ('058_agent_zetoni.sql', 'd21445fa5a35a9e6'),
     ('059_agent_predlogi.sql', 'aa6fc09564f9e42b'),
-    ('060_agent_nujno.sql', 'dfb01d9de78b624f')
+    ('060_agent_nujno.sql', 'bd109720c9bbdba9')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

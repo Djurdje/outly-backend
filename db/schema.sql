@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Xi4MjvsWfmVGSWqc6myOFrxJ94xSFjkhO6rh9LYKFrUqV8xChFTPXabI322P9s7
+\restrict t0PNySu8kwFXmHfid1eUm8p4xms8vNcYbe3jao0TwRbDTWH3x1dqibOhwKZsgD0
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -4149,5 +4149,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Xi4MjvsWfmVGSWqc6myOFrxJ94xSFjkhO6rh9LYKFrUqV8xChFTPXabI322P9s7
+\unrestrict t0PNySu8kwFXmHfid1eUm8p4xms8vNcYbe3jao0TwRbDTWH3x1dqibOhwKZsgD0
 

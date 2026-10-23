@@ -101,7 +101,7 @@ function ustvari(dep) {
   }
   const predlogi = require("./agent_predlogi").ustvari({ pool, adminRouter, omeji, zapisiAdminDejanje, celoId4, ocisti, delo, okoljeCelo,
     odgovoriNaNapako: dep.odgovoriNaNapako, dejanja: dep.dejanjaDogodka, imaResend: dep.imaResend, posljiMail: dep.posljiMail,
-    resendDokazanaZavrnitev: dep.resendDokazanaZavrnitev, ubeziHtml: dep.ubeziHtml });
+    resendDokazanaZavrnitev: dep.resendDokazanaZavrnitev, ubeziHtml: dep.ubeziHtml, mailRokMs: dep.mailRokMs, javiNapako: dep.javiNapako });
 
   // =====================================================================================================================
   // 1. UPRAVLJANJE (admin): GET/POST /admin/api/agent-zetoni, POST /admin/api/agent-zetoni/:id/preklici

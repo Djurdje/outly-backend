@@ -9,7 +9,7 @@
     "event.uredi": "Uredi dogodek", "event.okno_prodaje": "Okno prodaje", "event.objavi": "Objavi dogodek",
     "event.ustavi_prodajo": "Ustavi prodajo", "event.zazeni_prodajo": "Zaženi prodajo", "event.nov_osnutek": "Nov dogodek (osnutek)", "event.podvoji": "Podvoji dogodek",
   };
-  const MAIL = { poslan: "mail poslan", neznan: "mail: izid neznan (preveri Resend)", ni_poslan: "mail NI poslan", caka: "mail se pošilja" };
+  const MAIL = { poslan: "mail poslan", ponavljam: "mail ni potrjen, ponavljam", ni_poslan: "mail NI poslan (izčrpani poskusi)", caka: "mail se pošilja" };
   const NAJVEC = 300;
   let podatki = null;
 

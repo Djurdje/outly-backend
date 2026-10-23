@@ -326,7 +326,9 @@
       const prej = a.prej || {}, potem = a.potem || {};
       const kljuci = [...new Set([...Object.keys(prej), ...Object.keys(potem)])];
       return h("li", {},
-        h("b", {}, IME[a.dejanje] || a.dejanje), " ", h("span", { class: "kdo" }, `${datum(a.cas)} – ${a.admin_email || "izbrisan admin"}`),
+        h("b", {}, IME[a.dejanje] || a.dejanje), " ",
+        a.nujno === true ? h("span", { class: "znacka slabo" }, "NUJNO (agent)") : null, a.nujno === true ? " " : null,
+        h("span", { class: "kdo" }, `${datum(a.cas)} – ${a.nujno === true ? "agent (žeton #" + (Number.isSafeInteger(Number(a.agent_zeton_id)) ? Number(a.agent_zeton_id) : 0) + "), nujni način" : a.admin_email || "izbrisan admin"}`),
         kljuci.map((k) => h("span", { class: "sprememba" }, (POLJA[k] || k) + ": ", h("s", {}, vrednostZaPrikaz(k, prej[k])), " → ", vrednostZaPrikaz(k, potem[k]))),
         a.razlog ? h("span", { class: "razlog" }, "Razlog: " + a.razlog) : null);
     }));

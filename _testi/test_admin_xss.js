@@ -703,7 +703,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
       const DOV10 = new Set(["div", "span", "b", "p", "button", "small"]);
       const postavka10 = (id, polja) => ({ id, dejanje: "event.ustavi_prodajo", cilj_tip: "event", cilj_id: 7, cilj_naslov: ZLO7[0], spremembe: { sales_paused: true, [ZLO7[1]]: ZLO7[2] },
         prej: { sales_paused: false, [ZLO7[1]]: ZLO7[3] }, nujno_potrditev: ZLO7[2] + " potrjujem: ustavi prodajo", nujno_seja: "javascript:alert(1)//" + ZLO7[0], nujno_at: "2026-10-23T10:00:00Z",
-        nujno_pregledano_at: null, agent_zeton_id: 3, zeton_ime: ZLO7[3], mail: "neznan", ...polja });
+        nujno_pregledano_at: null, agent_zeton_id: 3, zeton_ime: ZLO7[3], mail: "ni_poslan", ...polja });
       // brez nujnih dejanj: pas skrit in prazen
       seznam10 = { nepregledanih: 0, zadnjih_24h: 0, meja_24h: 3, items: [] };
       await okno10.naloziNujnoPas();

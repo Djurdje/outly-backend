@@ -13,7 +13,7 @@
 //  3. Nujni nacin (#330, 3. del; migracija 060, I58): POST /agent/api/predlogi/:id/izvedi-nujno { potrditev, seja } (zeton z obsegom `nujno`): ISTA izvedba `izvedi()`
 //     (ista pot, isti zaklepi, isti kavelj: caka, rok, zeton, zastarelost, enkratnost) z izvajalcem »agent v nujnem nacinu« (brez userId; pravice = klubski kontekst
 //     admina kot pri potrditvi v panelu, nic vec) in lastnimi varovali v isti transakciji: predlog mlajsi od 1 h, obseg `nujno` pod zaklepom, meja 3 na 24 h GLOBALNO
-//     (advisory zaklep 73121 + stetje), izkljucena dejanja (izvoz baze, vloga admin/backup) PRED belim seznamom. Mail Martinu natanko enkrat (rezervacija pred Resendom).
+//     (advisory zaklep 73121 + stetje), izkljucena dejanja (izvoz baze, vloga admin/backup) PRED belim seznamom. Mail Martinu vsaj enkrat (rezervacija pred Resendom, ponovitve, alarm).
 //
 // Beli seznam (DEJANJA): urejanje besedila/plakata/zanrov, okno prodaje, objava (samo iz osnutka), ustavitev in zagon prodaje, nov dogodek kot osnutek, podvajanje.
 // NI: cena (denar odloci Martin), kapaciteta, starost, odpoved, vracila, vloge, klubi, uporabniki, izvoz, guest liste, racuni. Isti seznam varuje CHECK v bazi (059).
@@ -256,7 +256,10 @@ function ustvari(dep) {
       const id = celoId4(req.params.id);
       if (!id) return napaka(400, "invalid_id", "Invalid proposal id.");
       const potrditev = typeof b.potrditev === "string" ? b.potrditev.replace(/\r\n?/g, "\n").trim() : "";
-      if (potrditev.length < POTRDITEV_MIN || potrditev.length > POTRDITEV_NAJVEC || RE_KONTROLNI.test(potrditev)) {
+      // dolzina v ZNAKIH Unicode (kot char_length v CHECK 060: emoji = 1), brez kontrolnih in nevidnih/bidi znakov (isti NEVIDNI kot za predlog: citat v panelu in mailu
+      // ne sme izgledati drugace, kot je shranjen)
+      const dolzina = [...potrditev].length;
+      if (dolzina < POTRDITEV_MIN || dolzina > POTRDITEV_NAJVEC || RE_KONTROLNI.test(potrditev) || NEVIDNI.test(potrditev)) {
         return napaka(400, "invalid_potrditev", `potrditev must be Martin's written confirmation, quoted verbatim (${POTRDITEV_MIN}-${POTRDITEV_NAJVEC} characters).`);
       }
       const seja = typeof b.seja === "string" ? b.seja.trim() : "";
@@ -355,7 +358,12 @@ function ustvari(dep) {
     if (nujno) Object.assign(sled, { nujno: true, razlogNujno: razlogNujno(p.agent_zeton_id, nujno) });
     const izvajalec = zahtevaZa(p.cilj_id, teloPoti(p), req.user, sled);
     // V transakciji obstojece poti (po zaklepu vrstice dogodka pri urejanju, takoj po BEGIN pri vstavljanju): zaklep predloga in prehod caka -> potrjen.
+    // nujni nacin (N2): globalni advisory zaklep 73121 PRVI (pri urejanju takoj po BEGIN, pred vrstico dogodka; pri vstavljanju je kavelj prvi korak transakcije).
+    // Vrstni red nujne izvedbe: 73121 -> vrstica dogodka -> 73112 (pavza) -> predlog -> zeton. Nihce drug 73121 ne jemlje (potrditev admina, nakup, pavza ne),
+    // zato krog zaklepov ni mogoc; nujni klic ne drzi vrstice dogodka, medtem ko caka na drugo nujno izvedbo.
+    const zaklepNujno = (c) => c.query("SELECT pg_advisory_xact_lock($1::int, 0)", [NUJNO_ZAKLEP_RAZRED]);
     const kavelj = async (c, st) => {
+      if (nujno) await zaklepNujno(c);   // ponovni prevzem v isti transakciji je brez ucinka (pri urejanju ze vzet v predZaklepom)
       const z = (await c.query(
         `SELECT p.stanje, (p.velja_do > NOW()) AS velja, p.prej, (z.preklican_at IS NULL AND z.velja_do > NOW()) AS zeton_velja,
                 p.agent_zeton_id, ('nujno' = ANY (z.obseg)) AS zeton_nujno, (p.ustvarjen_at > NOW() - make_interval(mins => $2::int)) AS mlad
@@ -376,7 +384,7 @@ function ustvari(dep) {
       if (nujno) {
         // Meja 3 na 24 h GLOBALNO (ne na zeton): advisory zaklep do konca transakcije zaporedi vse nujne izvedbe (tudi cez instance); stetje in zapis nujno_at sta
         // v isti transakciji kot sprememba, zato 4 hkratni klici dajo natanko 3 izvedbe. Zaklep se vzame ZADNJI (po vrstici dogodka in predloga): brez krozenja.
-        await c.query("SELECT pg_advisory_xact_lock($1::int, 0)", [NUJNO_ZAKLEP_RAZRED]);
+        // zaklep 73121 je ze vzet (zgoraj): stetje in zapis nujno_at sta zaporedna cez vse instance
         const n = (await c.query("SELECT COUNT(*)::int AS n FROM predlogi_dejanj WHERE nujno_at > NOW() - INTERVAL '24 hours'")).rows[0].n;
         if (n >= NUJNO_NA_24H) throw odgovor(429, "nujno_meja", `At most ${NUJNO_NA_24H} emergency actions in 24 hours. Put the proposal in the panel for Martin.`);
         await c.query(
@@ -395,7 +403,7 @@ function ustvari(dep) {
     res.send = function (x) { telo = x; poslano = true; return this; };
     let status;
     try {
-      if (opis.pot === "uredi") await dejanja.uredi(izvajalec, res, { predlog: kavelj });
+      if (opis.pot === "uredi") await dejanja.uredi(izvajalec, res, nujno ? { predlog: kavelj, predZaklepom: zaklepNujno } : { predlog: kavelj });
       else if (opis.pot === "ustvari") await dejanja.ustvari(izvajalec, res, { admin: true, predlog: kavelj });
       else await dejanja.podvoji(izvajalec, res, { predlog: kavelj });
       status = res.statusCode;
@@ -478,8 +486,9 @@ function ustvari(dep) {
     const rep = ` | seja: ${n.seja}`;
     const glava = `NUJNO (agent, zeton #${zetonId}); potrditev: «`;
     const prostor = Math.max(10, 500 - glava.length - rep.length - 2);
-    const citat = n.potrditev.length > prostor ? n.potrditev.slice(0, prostor - 1) + "…" : n.potrditev;
-    return (glava + citat + "»" + rep).slice(0, 500);
+    const znaki = [...n.potrditev];   // rezanje po znakih Unicode (CHECK admin_dejanja.razlog steje char_length; brez polovice para UTF-16)
+    const citat = znaki.length > prostor ? znaki.slice(0, prostor - 1).join("") + "…" : n.potrditev;
+    return [...(glava + citat + "»" + rep)].slice(0, 500).join("");
   }
 
   const OZNAKE = { "event.uredi": "Uredi dogodek", "event.okno_prodaje": "Okno prodaje", "event.objavi": "Objavi dogodek", "event.ustavi_prodajo": "Ustavi prodajo",
@@ -516,12 +525,16 @@ function ustvari(dep) {
       <p>Panel: <a href="${panel}">${panel}</a> (rdeč pas na vrhu ostane, dokler ne klikneš »Pregledal sem«).</p></div>`;
     return { zadeva, besedilo, html };
   }
-  const nujnoMailPogoj = `p.nujno_at IS NOT NULL AND p.nujno_mail_poslano_at IS NULL AND NOT p.nujno_mail_izid_neznan AND p.nujno_mail_poskusi < ${NUJNO_MAIL_POSKUSOV}
-    AND (p.nujno_mail_prevzeto_at IS NULL OR p.nujno_mail_prevzeto_at < NOW() - ($2::bigint * INTERVAL '1 millisecond'))`;
+  // VSAJ ENKRAT (menedzer 23. 10. 2026; razlika do I55): mail Martinu je glavno varovalo nujnega nacina (streznik citata ne more preveriti), zato je IZPAD hujsi od dvojnika
+  // (dvojnik je nenevaren obvestilo Martinu, ne racun kupcu). Rezervacija UPDATE ... RETURNING (poskusi+1, prevzeto_at, izid_neznan = TRUE) pred klicem Resenda zaporedi
+  // procese; poslano_at po uspehu. Vsak neuspeh (dokazana zavrnitev, rok, 5xx, prekinjena povezava, padec procesa med rezervacijo in klicem) se ponovi po NARASCAJOCEM
+  // premoru (PREMOR * 2^(poskusi-1), vsaj rok Resenda + 1 s, da se poskus v teku ne podvoji), najvec NUJNO_MAIL_POSKUSOV; stara rezervacija brez poslano_at se prevzame znova.
+  // Po izcrpanju: `[agent-nujno] POZOR` + Sentry error (najvec na 6 h) in rdece opozorilo v /admin/api/opozorila (admin_nadzor.js), dokler admin ne klikne »Pregledal sem«.
+  const premorNajmanj = () => (Number(typeof dep.mailRokMs === "function" ? dep.mailRokMs() : dep.mailRokMs) || 15000) + 1000;   // rok Resenda je v index.js definiran kasneje
+  const nujnoMailPogoj = `p.nujno_at IS NOT NULL AND p.nujno_mail_poslano_at IS NULL AND p.nujno_mail_poskusi < ${NUJNO_MAIL_POSKUSOV}
+    AND (p.nujno_mail_prevzeto_at IS NULL OR p.nujno_mail_prevzeto_at < NOW() - (GREATEST($2::float8 * power(2, GREATEST(p.nujno_mail_poskusi - 1, 0)), $3::float8) * INTERVAL '1 millisecond'))`;
   const nujnoMailVTeku = new Set();
-  // NATANKO ENKRAT (vzorec I55): rezervacija UPDATE ... RETURNING (poskusi+1, prevzeto_at, izid_neznan = TRUE) PRED klicem Resenda; poslano_at po uspehu. Dokazana zavrnitev
-  // (JSON 4xx, resendDokazanaZavrnitev) -> izid_neznan = FALSE in ponovitev po premoru; vse drugo (prekinjena povezava po sprejemu, rok, 5xx) -> BREZ ponovitve + POZOR.
-  // Klice ga SAMO nujna izvedba agenta (po COMMIT-u, brez await) in pospravljalec spodaj; nikoli nakup, webhook ali sken.
+  // Klice ga SAMO nujna izvedba agenta (po odgovoru, brez await) in pospravljalec spodaj; nikoli nakup, webhook ali sken.
   async function nujnoMailPoslji(id) {
     if (nujnoMailVTeku.has(id)) return false;
     nujnoMailVTeku.add(id);
@@ -530,8 +543,8 @@ function ustvari(dep) {
       if (!naslovi.length || !dep.imaResend()) { console.error(`[agent-nujno] POZOR: mail o nujnem dejanju ${id} ni mogoc (AGENT_NUJNO_MAIL ali Resend ni nastavljen); preveri panel`); return false; }
       const k = await pool.query(
         `UPDATE predlogi_dejanj p SET nujno_mail_poskusi = p.nujno_mail_poskusi + 1, nujno_mail_prevzeto_at = NOW(), nujno_mail_izid_neznan = TRUE
-          WHERE p.id = $1 AND ${nujnoMailPogoj} RETURNING p.nujno_mail_poskusi`, [id, NUJNO_MAIL_PREMOR_MS]);
-      if (!k.rows.length) return false;   // ze poslan, v teku drugje ali izid neznan
+          WHERE p.id = $1 AND ${nujnoMailPogoj} RETURNING p.nujno_mail_poskusi`, [id, NUJNO_MAIL_PREMOR_MS, premorNajmanj()]);
+      if (!k.rows.length) return false;   // ze poslan, v teku, v premoru ali izcrpan
       const poskus = k.rows[0].nujno_mail_poskusi;
       const p = (await pool.query(
         `SELECT p.id, p.dejanje, p.cilj_tip, p.cilj_id, p.spremembe, p.prej, p.nujno_potrditev, p.nujno_seja, p.nujno_at, p.agent_zeton_id, z.ime AS zeton_ime,
@@ -541,29 +554,39 @@ function ustvari(dep) {
       const m = nujnoMailVsebina(p);
       const r = await dep.posljiMail({ to: naslovi, subject: m.zadeva, html: m.html, text: m.besedilo });
       if (r && r.error) {
-        if (dep.resendDokazanaZavrnitev(r.error)) {
-          await pool.query("UPDATE predlogi_dejanj SET nujno_mail_izid_neznan = FALSE WHERE id = $1 AND nujno_mail_poslano_at IS NULL", [id]);
-          console.error(`[agent-nujno] Resend zavrnil mail o nujnem dejanju ${id} (poskus ${poskus}/${NUJNO_MAIL_POSKUSOV}):`, String(r.error.name || ""), String(r.error.message || "").slice(0, 120));
-          if (poskus >= NUJNO_MAIL_POSKUSOV) console.error(`[agent-nujno] POZOR: mail o nujnem dejanju ${id} NI poslan (izcrpani poskusi); rdec pas v panelu ostane`);
-          return false;
-        }
-        console.error(`[agent-nujno] POZOR: izid maila o nujnem dejanju ${id} je neznan (${String(r.error.message || "").slice(0, 80)}); mail se NE ponovi. Preveri Resend in panel (rdec pas).`);
+        const dokazana = dep.resendDokazanaZavrnitev(r.error);
+        if (dokazana) await pool.query("UPDATE predlogi_dejanj SET nujno_mail_izid_neznan = FALSE WHERE id = $1 AND nujno_mail_poslano_at IS NULL", [id]);
+        console.error(`[agent-nujno] mail o nujnem dejanju ${id} ni potrjen (poskus ${poskus}/${NUJNO_MAIL_POSKUSOV}, ${dokazana ? "zavrnjen" : "izid neznan"}: ${String(r.error.name || "")} ${String(r.error.message || "").slice(0, 100)}); ${poskus >= NUJNO_MAIL_POSKUSOV ? "poskusi izcrpani" : "ponovim po premoru"}`);
+        if (poskus >= NUJNO_MAIL_POSKUSOV) izcrpanAlarm(true).catch(() => {});
         return false;
       }
       for (let i = 0; ; i++) {
         try { await pool.query("UPDATE predlogi_dejanj SET nujno_mail_poslano_at = NOW(), nujno_mail_izid_neznan = FALSE WHERE id = $1", [id]); break; }
-        catch (e) { if (i >= 2) { console.error(`[agent-nujno] POZOR: mail o nujnem dejanju ${id} je poslan, zapisa ni bilo mogoce narediti (${e && e.message}); ponovitve NI`); return true; } await new Promise((x) => setTimeout(x, 200)); }
+        catch (e) { if (i >= 2) { console.error(`[agent-nujno] mail o nujnem dejanju ${id} je poslan, zapisa ni bilo mogoce narediti (${e && e.message}); morda pride se enkrat`); return true; } await new Promise((x) => setTimeout(x, 200)); }
       }
       console.log(`[agent-nujno] mail o nujnem dejanju ${id} poslan`);
       return true;
     } finally { nujnoMailVTeku.delete(id); }
   }
-  // Pospravljalec: nujna dejanja zadnjih 7 dni brez poslanega maila (proces ustavljen pred rezervacijo, dokazana zavrnitev). Lasten casovnik, ne na poti nakupa/skena.
+  // Alarm ob izcrpanih poskusih (nepregledano nujno dejanje brez poslanega maila): POZOR v dnevnik + Sentry ERROR, najvec enkrat na 6 h na proces (takoj = ob zadnjem poskusu).
+  let zadnjiAlarm = 0;
+  async function izcrpanAlarm(takoj = false) {
+    if (!takoj && Date.now() - zadnjiAlarm < 6 * 3600 * 1000) return;
+    const n = (await pool.query(`SELECT COUNT(*)::int AS n FROM predlogi_dejanj WHERE nujno_at IS NOT NULL AND nujno_pregledano_at IS NULL AND nujno_mail_poslano_at IS NULL
+      AND nujno_mail_poskusi >= ${NUJNO_MAIL_POSKUSOV}`)).rows[0].n;
+    if (!n || (takoj && Date.now() - zadnjiAlarm < 60000)) return;
+    zadnjiAlarm = Date.now();
+    const sporocilo = `[agent-nujno] POZOR: ${n} nujnih dejanj agenta brez poslanega maila Martinu (izcrpanih ${NUJNO_MAIL_POSKUSOV} poskusov); preveri Resend in panel (rdec pas, Opozorila)`;
+    console.error(sporocilo);
+    if (dep.javiNapako) dep.javiNapako(new Error(sporocilo));
+  }
+  // Pospravljalec: nujna dejanja zadnjih 7 dni brez poslanega maila. Lasten casovnik, ne na poti nakupa/skena.
   async function nujnoMailNeposlani() {
     if (!dep.imaResend() || !prejemnikiNujno().length) return;
-    const r = await pool.query(`SELECT p.id FROM predlogi_dejanj p WHERE p.nujno_at > NOW() - INTERVAL '7 days' AND ${nujnoMailPogoj.replace("$2", "$1")} ORDER BY p.id LIMIT 10`,
-      [NUJNO_MAIL_PREMOR_MS]);
+    const r = await pool.query(`SELECT p.id FROM predlogi_dejanj p WHERE p.nujno_at > NOW() - INTERVAL '7 days' AND ${nujnoMailPogoj.replace("$2", "$1").replace("$3", "$2")} ORDER BY p.id LIMIT 10`,
+      [NUJNO_MAIL_PREMOR_MS, premorNajmanj()]);
     for (const x of r.rows) await nujnoMailPoslji(x.id);
+    await izcrpanAlarm();
   }
   const pospravljalec = setInterval(() => { nujnoMailNeposlani().catch((e) => console.error("[agent-nujno] pospravljalec:", e && e.message)); }, NUJNO_MAIL_PONOVI_MS);
   if (pospravljalec.unref) pospravljalec.unref();
@@ -575,8 +598,8 @@ function ustvari(dep) {
       const r = await pool.query(
         `SELECT p.id, p.dejanje, p.cilj_tip, p.cilj_id, p.spremembe, p.prej, p.razlog, p.nujno_potrditev, p.nujno_seja, p.nujno_at, p.nujno_pregledano_at,
                 p.nujno_pregledal_admin_id, p.agent_zeton_id, z.ime AS zeton_ime,
-                CASE WHEN p.nujno_mail_poslano_at IS NOT NULL THEN 'poslan' WHEN p.nujno_mail_izid_neznan THEN 'neznan'
-                     WHEN p.nujno_mail_poskusi >= ${NUJNO_MAIL_POSKUSOV} THEN 'ni_poslan' ELSE 'caka' END AS mail,
+                CASE WHEN p.nujno_mail_poslano_at IS NOT NULL THEN 'poslan' WHEN p.nujno_mail_poskusi >= ${NUJNO_MAIL_POSKUSOV} THEN 'ni_poslan'
+                     WHEN p.nujno_mail_poskusi > 0 THEN 'ponavljam' ELSE 'caka' END AS mail, p.nujno_mail_poskusi AS mail_poskusi,
                 CASE p.cilj_tip WHEN 'event' THEN (SELECT left(e.title, 200) FROM events e WHERE e.id = p.cilj_id)
                                 WHEN 'club'  THEN (SELECT left(k.name, 200) FROM clubs k WHERE k.id = p.cilj_id) END AS cilj_naslov
            FROM predlogi_dejanj p JOIN agent_zetoni z ON z.id = p.agent_zeton_id

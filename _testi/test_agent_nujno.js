@@ -63,11 +63,14 @@ const resendServer = http.createServer((req, res) => {
       R.poslano.push(m);
       const rz = R.rezim.shift();
       if (rz === "reset") return req.socket.destroy();   // mail SPREJET, povezava prekinjena
+      if (rz === "json500") { res.writeHead(500, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "internal_server_error", message: "stub", statusCode: 500 })); }
+      if (rz === "zamik") return setTimeout(() => { try { res.writeHead(200, { "content-type": "application/json" }); res.end('{"id":"pozno"}'); } catch (_) { /* odjemalec je odnehal */ } }, 2500);   // rok odjemalca
       res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ id: "mail_" + R.poslano.length }));
     }
     res.writeHead(404, { "content-type": "application/json" }); res.end("{}");
   });
 });
+const mailiZa = (id) => R.poslano.filter((m) => String(m.subject || "").includes(`#${id}:`));
 const mailiMartinu = () => R.poslano.filter((m) => (Array.isArray(m.to) ? m.to : [m.to]).includes(MARTIN));
 
 let ok = 0, fail = 0;
@@ -84,8 +87,8 @@ async function api(port, metoda, pot, token, telo, rok = 15000) {
   return { status: r.status, body: j, text: t, ms: Date.now() - t0 };
 }
 const SKUPNO = { AGENT_API_NA_URO: "100000", AGENT_API_IP_NA_MIN: "100000", AGENT_PREDLOGI_NA_URO: "100000", AGENT_PREDLOGI_CAKA_NAJVEC: "1000", PAVZA_KMALU_MS: "0", PAVZA_PONOVNO_MS: "0",
-  RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>", GOST_POSTA_TIMEOUT_MS: "1500",
-  AGENT_NUJNO_MAIL: MARTIN, AGENT_NUJNO_MAIL_PONOVI_MS: "300", AGENT_NUJNO_MAIL_PREMOR_MS: "200" };
+  RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>", GOST_POSTA_TIMEOUT_MS: "800",
+  AGENT_NUJNO_MAIL: MARTIN, AGENT_NUJNO_MAIL_PONOVI_MS: "300", AGENT_NUJNO_MAIL_PREMOR_MS: "200", ADMIN_NADZOR_PREDPOMNILNIK_MS: "0" };
 function zazeni(port, okolje) {
   const proc = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test",
     STRIPE_SECRET_KEY: "", STRIPE_WEBHOOK_SECRET: "", TEST_PLACILA: "", AGENT_NUJNO: "", ...SKUPNO, ...okolje }, stdio: ["ignore", "pipe", "pipe"], cwd: path.join(__dirname, "..") });
@@ -109,7 +112,7 @@ function nicOsebnega(ime, tekst) {
   const OFF = zazeni(PORT_OFF, { AGENT_NUJNO: "0" });
   const BREZ = zazeni(PORT_BREZ, { AGENT_NUJNO_MAIL: "" });
   const BREZR = zazeni(PORT_BREZR, { RESEND_API_KEY: "" });
-  const H = PORTI_H.map((p) => zazeni(p, {}));
+  const H = PORTI_H.map((p, i) => zazeni(p, i === 0 ? { AGENT_NUJNO_NA_24H: "5" } : {}));   // H1: okolje NE more dvigniti Martinove meje 3
   const vsi = () => [A, OFF, BREZ, BREZR, ...H];
   for (const s of vsi()) assert(await cakajStreznik(s.port), `streznik ${s.port} tece`);
 
@@ -128,7 +131,10 @@ function nicOsebnega(ime, tekst) {
        VALUES ($1, $2, 'published', NOW() + INTERVAL '3 days', NOW() + INTERVAL '3 days 6 hours', 1500, 100, 'https://x.test/p.jpg', 'Rezervacije: info@klub-nujno.si', ARRAY['techno']) RETURNING id`,
       [K1, naslov])).rows[0].id;
     const E = {};
-    for (const k of ["a", "b", "c", "pavza", "m1", "m2", "meja", "h1", "h2", "h3", "h4", "drsno", "izkl"]) E[k] = await dogodek("Dogodek " + k);
+    for (const k of ["a", "b", "c", "pavza", "m1", "m2", "meja", "h1", "h2", "h3", "h4", "drsno", "izkl", "sk", "zv", "n2a", "n2b", "mail"]) E[k] = await dogodek("Dogodek " + k);
+    const cakajNa = async (fn, rokMs = 5000) => { const konec = Date.now() + rokMs; for (;;) { if (await fn()) return true; if (Date.now() > konec) return false; await pocakaj(20); } };
+    // seja (proces streznika) caka na zaklep: pogoj namesto fiksnega cakanja (S3)
+    const nekdoCakaZaklep = (n = 1) => cakajNa(async () => (await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'")).rows[0].n >= n);
     const vrstica = async (id) => (await pool.query("SELECT * FROM events WHERE id = $1", [id])).rows[0];
     const predlogVBazi = async (id) => (await pool.query("SELECT * FROM predlogi_dejanj WHERE id = $1", [id])).rows[0];
     // cakajoce narocilo na dogodku `pavza` (I53: ustavitev prodaje ga preklice); kupcev e-naslov ne sme priti ne v odgovor ne v mail
@@ -198,6 +204,9 @@ function nicOsebnega(ime, tekst) {
       [{ seja: SEJA }, "invalid_potrditev"], [{ potrditev: "", seja: SEJA }, "invalid_potrditev"], [{ potrditev: "da", seja: SEJA }, "invalid_potrditev"],
       [{ potrditev: "   ", seja: SEJA }, "invalid_potrditev"], [{ potrditev: 12345, seja: SEJA }, "invalid_potrditev"], [{ potrditev: "x".repeat(1001), seja: SEJA }, "invalid_potrditev"],
       [{ potrditev: "potrjujem\u0000skrito", seja: SEJA }, "invalid_potrditev"],
+      [{ potrditev: "potrjujem: ustavi \u202Eodajo", seja: SEJA }, "invalid_potrditev"], [{ potrditev: "potrjujem\u200B: ustavi prodajo", seja: SEJA }, "invalid_potrditev"],
+      [{ potrditev: "potrjujem\u2066 ustavi\u2069", seja: SEJA }, "invalid_potrditev"], [{ potrditev: "\u00AD\u00AD\u00ADpotrjujem", seja: SEJA }, "invalid_potrditev"],
+      [{ potrditev: "😀".repeat(1001), seja: SEJA }, "invalid_potrditev"],
       [{ potrditev: POTRDI }, "invalid_seja"], [{ potrditev: POTRDI, seja: "seja 5" }, "invalid_seja"], [{ potrditev: POTRDI, seja: "http://claude.ai/code/x" }, "invalid_seja"],
       [{ potrditev: POTRDI, seja: "https://evil.example/claude.ai/" }, "invalid_seja"], [{ potrditev: POTRDI, seja: "https://claude.ai/" + "x".repeat(600) }, "invalid_seja"],
     ];
@@ -221,6 +230,8 @@ function nicOsebnega(ime, tekst) {
     r = await izvedi(P_A);
     assert(r.status === 409 && r.body.error === "predlog_prestar", "predlog star 61 min -> 409 predlog_prestar", [r.status, r.body]);
     assert((await predlogVBazi(P_A)).stanje === "caka" && (await vrstica(E.a)).sales_paused === false, "star predlog: nic se ne izvede, predlog ostane caka (Martin ga lahko potrdi v panelu)");
+    r = await izvedi(P_A, { potrditev: "😀".repeat(1000), seja: SEJA });
+    assert(r.status === 409 && r.body.error === "predlog_prestar", "N1: citat 1000 emojijev (2000 enot UTF-16) prestane validacijo dolzine (steje znake kot CHECK)", [r.status, r.body]);
     await pool.query("UPDATE predlogi_dejanj SET ustvarjen_at = NOW() - INTERVAL '59 minutes' WHERE id = $1", [P_A]);   // se veljaven (uporabljen spodaj pri meji)
 
     const P_Z = await nov(NASLOV(E.b, "Dogodek b (agent)"));
@@ -234,7 +245,7 @@ function nicOsebnega(ime, tekst) {
       const k = new pg.Client({ connectionString: DB }); await k.connect();
       await k.query("BEGIN"); await k.query("SELECT id FROM events WHERE id = $1 FOR UPDATE", [E.c]);
       const obljuba = izvedi(P_R, { potrditev: "potrjujem: preimenuj Dogodek c", seja: SEJA }, NUJNO_R);
-      await pocakaj(700);
+      assert(await nekdoCakaZaklep(), "nujni klic caka na zaklep vrstice dogodka (pg_stat_activity)");
       const pr = await api(PORT, "POST", `/admin/api/agent-zetoni/${NUJNO_R_ID}/preklici`, T.admin, { reason: "preizkus" });
       await k.query("ROLLBACK"); await k.end();
       const x = await obljuba;
@@ -330,12 +341,10 @@ function nicOsebnega(ime, tekst) {
     R.poslano.length = 0; R.rezim = ["reset"];
     r = await izvedi(P_M1, { potrditev: "potrjujem: preimenuj Dogodek m1", seja: SEJA });
     assert(r.status === 200 && (await vrstica(E.m1)).title === "Dogodek m1 (agent)", "izvedba uspe ne glede na mail", [r.status, r.body]);
-    await cakaj(() => mailiMartinu().length >= 1, 4000);
-    await pocakaj(1500);   // vec ciklov pospravljalca
+    assert(await cakaj(async () => (await predlogVBazi(P_M1)).nujno_mail_poslano_at !== null, 8000), "napaka PO sprejemu (prekinjena povezava): pospravljalec mail ponovi (vsaj enkrat)");
+    await pocakaj(800);
     const pM1 = await predlogVBazi(P_M1);
-    assert(mailiMartinu().length === 1 && pM1.nujno_mail_izid_neznan === true && pM1.nujno_mail_poslano_at === null && pM1.nujno_mail_poskusi === 1,
-      "napaka PO sprejemu (prekinjena povezava): en mail, BREZ ponovitve, izid neznan", [mailiMartinu().length, pM1.nujno_mail_poskusi, pM1.nujno_mail_izid_neznan]);
-    assert(/\[agent-nujno\] POZOR: izid maila o nujnem dejanju \d+ je neznan/.test(A.log), "neznan izid: POZOR v dnevniku");
+    assert(mailiZa(P_M1).length === 2 && pM1.nujno_mail_poskusi === 2 && pM1.nujno_mail_izid_neznan === false, "prekinjena povezava: 2 maila (dvojnik je dovoljen), nato nic vec", [mailiZa(P_M1).length, pM1.nujno_mail_poskusi]);
 
     const P_M2 = await nov(NASLOV(E.m2, "Dogodek m2 (agent)"));
     R.poslano.length = 0; R.napaka = 1;
@@ -345,6 +354,48 @@ function nicOsebnega(ime, tekst) {
     await pocakaj(800);
     const pM2 = await predlogVBazi(P_M2);
     assert(mailiMartinu().length === 1 && pM2.nujno_mail_poskusi === 2, "natanko en sprejet mail po zavrnitvi (2 poskusa)", [mailiMartinu().length, pM2.nujno_mail_poskusi]);
+
+    // VSAJ ENKRAT (S2): izvedena nujna dejanja vstavljena v bazo (nujno_at pred 2 dnevoma: ne steje v mejo 24 h, pospravljalec jih vidi 7 dni)
+    const izvedeno = async (polja = {}) => (await pool.query(
+      `INSERT INTO predlogi_dejanj (agent_zeton_id, dejanje, cilj_tip, cilj_id, spremembe, prej, razlog, stanje, odloceno_at, nujno_potrditev, nujno_seja, nujno_at,
+                                    nujno_mail_poskusi, nujno_mail_prevzeto_at, nujno_mail_izid_neznan)
+       VALUES ($1, 'event.ustavi_prodajo', 'event', $2, '{"sales_paused": true}', '{"sales_paused": false}', 'mail', 'potrjen', NOW() - INTERVAL '2 days', 'potrjujem: mail', $3,
+               NOW() - INTERVAL '2 days', $4, $5, $6) RETURNING id`,
+      [NUJNO_ID, E.mail, SEJA, polja.poskusi || 0, polja.prevzeto || null, polja.neznan || false])).rows[0].id;
+    R.rezim = ["zamik"];
+    const P_ROK = await izvedeno();
+    assert(await cakaj(async () => (await predlogVBazi(P_ROK)).nujno_mail_poslano_at !== null, 10000), "rok Resenda (izid neznan) -> pospravljalec ponovi, mail potrjen");
+    assert(mailiZa(P_ROK).length === 2 && (await predlogVBazi(P_ROK)).nujno_mail_poskusi === 2, "rok: 2 maila (drugi poskus poslje)", [mailiZa(P_ROK).length]);
+    R.rezim = ["json500"];
+    const P_500 = await izvedeno();
+    assert(await cakaj(async () => (await predlogVBazi(P_500)).nujno_mail_poslano_at !== null, 10000), "5xx Resenda -> ponovitev, mail potrjen");
+    assert(mailiZa(P_500).length === 2, "5xx: 2 maila", mailiZa(P_500).length);
+    // padec procesa med rezervacijo in klicem Resenda: rezervacija brez poslano_at (stara) se prevzame znova
+    const P_PAD = await izvedeno({ poskusi: 1, prevzeto: new Date(Date.now() - 10 * 60000), neznan: true });
+    assert(await cakaj(async () => (await predlogVBazi(P_PAD)).nujno_mail_poslano_at !== null, 6000), "padec med rezervacijo in klicem -> pospravljalec poslje");
+    assert(mailiZa(P_PAD).length === 1 && (await predlogVBazi(P_PAD)).nujno_mail_poskusi === 2, "padec: en mail, drugi poskus", mailiZa(P_PAD).length);
+    const sveza = await izvedeno({ poskusi: 1, prevzeto: new Date(), neznan: true });   // poskus v teku (sveza rezervacija) se ne podvoji takoj
+    await pocakaj(700);
+    assert(mailiZa(sveza).length === 0, "sveza rezervacija (poskus v teku) se ne prevzame pred premorom");
+    await pool.query("UPDATE predlogi_dejanj SET nujno_pregledano_at = NOW() WHERE id = $1", [sveza]);
+    // 5 neuspehov: POZOR + Sentry error, rdece opozorilo v /admin/api/opozorila in warnings_red
+    R.napaka = 1000;
+    const P_IZC = await izvedeno();
+    assert(await cakaj(async () => (await predlogVBazi(P_IZC)).nujno_mail_poskusi === 5, 20000), "5 poskusov (narascajoc premor)");
+    await pocakaj(700);
+    const pIzc = await predlogVBazi(P_IZC);
+    assert(pIzc.nujno_mail_poskusi === 5 && pIzc.nujno_mail_poslano_at === null, "po 5 poskusih ni vec poskusov", pIzc.nujno_mail_poskusi);
+    assert(vsi().some((x) => /\[agent-nujno\] POZOR: \d+ nujnih dejanj agenta brez poslanega maila/.test(x.log)), "izcrpano: [agent-nujno] POZOR v dnevniku");
+    R.napaka = 0;
+    const op = await api(PORT, "GET", "/admin/api/opozorila", T.admin);
+    const rdece = (op.body.items || []).filter((o) => o.vrsta === "nujno_mail_neposlan");
+    assert(op.status === 200 && rdece.some((o) => o.cilj_id === P_IZC && o.resnost === "rdece") && !rdece.some((o) => o.cilj_id === P_OK || o.cilj_id === sveza),
+      "rdece opozorilo za nepregledano nujno dejanje brez poslanega maila (ne za poslane in pregledane)", rdece);
+    nicOsebnega("opozorilo nujno_mail_neposlan", JSON.stringify(rdece));
+    const sm0 = await api(PORT, "GET", "/admin/api/summary", T.admin);
+    assert(sm0.status === 200 && typeof sm0.body.warnings_red === "number" && sm0.body.warnings_red >= 1, "summary.warnings_red steje rdece opozorilo", sm0.body.warnings_red);
+    const kodaSentry = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
+    assert(/javiNapako: \(e\) => sentry\.porociNapako\(e, "agent-nujno"\)/.test(kodaSentry), "izcrpan mail gre v Sentry kot napaka (porociNapako), ne samo opozorilo");
 
     // ---------------- 8. meja 3 na 24 h ----------------
     console.log("\n# 8. meja 3 nujna dejanja na 24 h (globalno)");
@@ -382,6 +433,51 @@ function nicOsebnega(ime, tekst) {
     const zadnji = izidi.find((x) => x.status === 429);
     r = await izvedi(hk[izidi.indexOf(zadnji)], { potrditev: "potrjujem: preimenuj vse stiri", seja: SEJA });
     assert(r.status === 429, "takoj nato spet 429", r.status);
+    r = await api(PORTI_H[0], "GET", "/admin/api/predlogi/nujno", T.admin);
+    assert(r.status === 200 && r.body.meja_24h === 3, "AGENT_NUJNO_NA_24H=5 ne dvigne meje (ostane 3)", r.body.meja_24h);
+
+    // N3: tekme z adminom in zaklepi
+    await pool.query("UPDATE predlogi_dejanj SET nujno_at = nujno_at - INTERVAL '25 hours' WHERE nujno_at > NOW() - INTERVAL '24 hours'");
+    const P_SK = await nov(NASLOV(E.sk, "Dogodek sk (agent)"));
+    const [xn, xa] = await Promise.all([izvedi(P_SK, { potrditev: "potrjujem: preimenuj Dogodek sk", seja: SEJA }), api(PORT_OFF, "POST", `/admin/api/predlogi/${P_SK}/potrdi`, T.admin, {})]);
+    const dejSk = (await pool.query("SELECT COUNT(*)::int AS n FROM admin_dejanja WHERE predlog_id = $1 AND dejanje = 'event.update'", [P_SK])).rows[0].n;
+    assert([xn.status, xa.status].filter((x) => x === 200).length === 1 && [xn.status, xa.status].includes(409) && dejSk === 1 && (await vrstica(E.sk)).title === "Dogodek sk (agent)",
+      "hkratna nujna izvedba in admin Potrdi -> natanko ena sprememba", [xn.status, xa.status, dejSk]);
+    const P_ZV = await nov(NASLOV(E.zv, "Dogodek zv (agent)"));
+    {
+      const k = new pg.Client({ connectionString: DB }); await k.connect();
+      await k.query("BEGIN"); await k.query("SELECT id FROM events WHERE id = $1 FOR UPDATE", [E.zv]);
+      const obljuba = izvedi(P_ZV, { potrditev: "potrjujem: preimenuj Dogodek zv", seja: SEJA });
+      assert(await nekdoCakaZaklep(), "nujni klic caka na vrstico dogodka");
+      const zv = await api(PORT, "POST", `/admin/api/predlogi/${P_ZV}/zavrni`, T.admin, {}, 5000).catch((e) => ({ status: 0, body: String(e) }));
+      await k.query("ROLLBACK"); await k.end();
+      const x = await obljuba;
+      assert(zv.status === 200 && x.status === 409 && x.body.error === "predlog_ne_caka" && (await vrstica(E.zv)).title === "Dogodek zv" && (await predlogVBazi(P_ZV)).stanje === "zavrnjen",
+        "admin Zavrni med cakanjem nujnega klica -> nujni klic 409, nic se ne spremeni", [zv.status, x.status, x.body]);
+    }
+    // N2: nujni klic, ki caka na drugo nujno izvedbo (advisory 73121), NE drzi vrstice svojega dogodka
+    const P_N2A = await nov(NASLOV(E.n2a, "Dogodek n2a (agent)"));
+    const P_N2B = await nov(NASLOV(E.n2b, "Dogodek n2b (agent)"));
+    {
+      const k = new pg.Client({ connectionString: DB }); await k.connect();
+      await k.query("BEGIN"); await k.query("SELECT id FROM events WHERE id = $1 FOR UPDATE", [E.n2a]);
+      const oa = izvedi(P_N2A, { potrditev: "potrjujem: preimenuj Dogodek n2a", seja: SEJA });                 // drzi 73121, caka na vrstico n2a
+      assert(await nekdoCakaZaklep(1), "prvi nujni klic caka na vrstico dogodka");
+      const ob = izvedi(P_N2B, { potrditev: "potrjujem: preimenuj Dogodek n2b", seja: SEJA }, NUJNO, PORTI_H[1]);   // caka na 73121
+      assert(await nekdoCakaZaklep(2), "drugi nujni klic caka na globalni zaklep nujnih izvedb");
+      const k2 = new pg.Client({ connectionString: DB }); await k2.connect();
+      let prosta = false;
+      try { await k2.query("BEGIN"); await k2.query("SET LOCAL lock_timeout = 300"); await k2.query("SELECT id FROM events WHERE id = $1 FOR UPDATE", [E.n2b]); prosta = true; } catch (_) { prosta = false; }
+      await k2.query("ROLLBACK").catch(() => {}); await k2.end();
+      assert(prosta, "N2: med cakanjem na drugo nujno izvedbo vrstica dogodka n2b NI zaklenjena (nakup in admin nista blokirana)");
+      await k.query("ROLLBACK"); await k.end();
+      const [ra, rb] = await Promise.all([oa, ob]);
+      assert(ra.status === 200 && rb.status === 200, "po sprostitvi obe nujni izvedbi uspeta (brez mrtve zanke)", [ra.status, rb.status, ra.body, rb.body]);
+    }
+    for (const port of [PORT, PORT_OFF]) {
+      const x = await api(port, "POST", `/agent/api/predlogi/${P_N2A}/IZVEDI-NUJNO`, NUJNO, { potrditev: "potrjujem: x x", seja: SEJA });
+      assert(x.status === 405, `/IZVEDI-NUJNO (velike crke) -> 405 ${port === PORT_OFF ? "(tudi ob AGENT_NUJNO=0)" : ""}`, [x.status, x.body]);
+    }
 
     // ---------------- 9. panel ----------------
     console.log("\n# 9. panel: rdec pas in »Pregledal sem«");
@@ -390,7 +486,7 @@ function nicOsebnega(ime, tekst) {
     assert(r.status === 200 && r.body.nepregledanih === nepregl && r.body.items.length === nepregl && r.body.meja_24h === 3, "GET /admin/api/predlogi/nujno: vsa nepregledana", [r.status, r.body.nepregledanih, nepregl]);
     const it = r.body.items.find((x) => x.id === P_OK);
     assert(it && it.nujno_potrditev === POTRDI + "\n(Martin)" && it.nujno_seja === SEJA && it.mail === "poslan" && it.cilj_naslov === "Dogodek pavza", "postavka: citat, seja, stanje maila, cilj", it);
-    assert(r.body.items.find((x) => x.id === P_M1).mail === "neznan", "postavka: mail z neznanim izidom je oznacen");
+    assert(r.body.items.find((x) => x.id === P_IZC).mail === "ni_poslan" && r.body.items.find((x) => x.id === P_M1).mail === "poslan", "postavka: stanje maila (ni_poslan po izcrpanju, poslan po ponovitvi)");
     const sm = await api(PORT, "GET", "/admin/api/summary", T.admin);
     assert(sm.status === 200 && sm.body.nujno_nepregledanih === nepregl, "summary.nujno_nepregledanih", sm.body.nujno_nepregledanih);
     r = await api(PORT, "GET", "/admin/api/predlogi/nujno", T.poslovni);
@@ -411,6 +507,12 @@ function nicOsebnega(ime, tekst) {
     assert(r.body.nepregledanih === nepregl - 1 && !r.body.items.some((x) => x.id === P_OK), "po pregledu izgine iz rdecega pasu", r.body.nepregledanih);
     r = await api(PORT, "GET", "/admin/api/predlogi/nujno?vse=1", T.admin);
     assert(r.body.items.some((x) => x.id === P_OK && x.nujno_pregledano_at), "?vse=1 vrne tudi pregledana");
+    r = await api(PORT, "GET", `/admin/api/audit?target_type=event&target_id=${E.pavza}`, T.admin);
+    assert(r.status === 200 && r.body.some((x) => x.dejanje === "event.sales_pause" && x.nujno === true && x.agent_zeton_id === NUJNO_ID), "N5: /admin/api/audit ima polje nujno", r.body);
+    r = await api(PORT, "GET", `/admin/api/events/${E.pavza}`, T.admin);
+    assert(r.status === 200 && (r.body.audit || []).some((x) => x.nujno === true), "N5: zgodovina dogodka (GET /admin/api/events/:id) ima polje nujno", r.body.audit);
+    const kodaDog = fs.readFileSync(path.join(__dirname, "..", "admin", "dogodki.js"), "utf8");
+    assert(/a\.nujno === true \? h\("span", \{ class: "znacka slabo" \}, "NUJNO \(agent\)"\)/.test(kodaDog), "N5: panel (zgodovina dogodka) pokaze oznako »NUJNO (agent)«");
     r = await api(PORT, "GET", "/agent/api/audit?target_type=predlog", NUJNO);
     nicOsebnega("agent /audit po nujnih izvedbah", r.text);
     assert(!r.text.includes(POTRDI), "agent /audit ne vrne citata (razlog ne gre ven)");
