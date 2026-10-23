@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–058, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–059, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 7hiGK6ZN3YuahZ78al6DLiJHT5gdyBqFB6TZ5YBvZ08hB2CbQLj89HzpPWb7PVB
+\restrict bMXOsJp9N8XbveO50ytsbByWQmSVFoNBNjKk1jf6tzgLibaprV6BCUPHGhT9xBK
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -266,6 +266,7 @@ CREATE TABLE public.admin_dejanja (
     potem jsonb,
     razlog text,
     agent_zeton_id integer,
+    predlog_id integer,
     CONSTRAINT admin_dejanja_cilj_id_check CHECK (((char_length(cilj_id) >= 1) AND (char_length(cilj_id) <= 60))),
     CONSTRAINT admin_dejanja_cilj_tip_check CHECK (((char_length(cilj_tip) >= 1) AND (char_length(cilj_tip) <= 30))),
     CONSTRAINT admin_dejanja_dejanje_check CHECK (((char_length(dejanje) >= 1) AND (char_length(dejanje) <= 60))),
@@ -285,6 +286,13 @@ COMMENT ON TABLE public.admin_dejanja IS 'Dnevnik admin dejanj (055, admin panel
 --
 
 COMMENT ON COLUMN public.admin_dejanja.agent_zeton_id IS 'Zeton agenta, ki je dejanje sprozil (058); NULL = dejanje je naredil admin sam. Brez tujega kljuca.';
+
+
+--
+-- Name: COLUMN admin_dejanja.predlog_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.admin_dejanja.predlog_id IS 'Predlog agenta, iz katerega je dejanje nastalo (059); NULL = admin sam. Brez tujega kljuca.';
 
 
 --
@@ -321,7 +329,7 @@ CREATE TABLE public.agent_zetoni (
     ustvaril_admin_id integer,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT agent_zetoni_ime_check CHECK (((char_length(ime) >= 1) AND (char_length(ime) <= 60))),
-    CONSTRAINT agent_zetoni_obseg_chk CHECK (((cardinality(obseg) >= 1) AND (obseg <@ ARRAY['beri'::text]))),
+    CONSTRAINT agent_zetoni_obseg_chk CHECK (((cardinality(obseg) >= 1) AND (obseg <@ ARRAY['beri'::text, 'predlagaj'::text]) AND ('beri'::text = ANY (obseg)))),
     CONSTRAINT agent_zetoni_zeton_sha256_check CHECK ((zeton_sha256 ~ '^[0-9a-f]{64}$'::text))
 );
 
@@ -1354,6 +1362,64 @@ ALTER SEQUENCE public.orders_id_seq OWNED BY public.orders.id;
 
 
 --
+-- Name: predlogi_dejanj; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.predlogi_dejanj (
+    id integer NOT NULL,
+    agent_zeton_id integer NOT NULL,
+    dejanje text NOT NULL,
+    cilj_tip text NOT NULL,
+    cilj_id integer NOT NULL,
+    spremembe jsonb NOT NULL,
+    prej jsonb,
+    razlog text NOT NULL,
+    stanje text DEFAULT 'caka'::text NOT NULL,
+    ustvarjen_at timestamp with time zone DEFAULT now() NOT NULL,
+    velja_do timestamp with time zone DEFAULT (now() + '24:00:00'::interval) NOT NULL,
+    odlocil_admin_id integer,
+    odloceno_at timestamp with time zone,
+    napaka text,
+    CONSTRAINT predlogi_dejanj_cilj_id_check CHECK ((cilj_id > 0)),
+    CONSTRAINT predlogi_dejanj_cilj_tip_check CHECK ((cilj_tip = ANY (ARRAY['event'::text, 'club'::text]))),
+    CONSTRAINT predlogi_dejanj_dejanje_check CHECK ((dejanje = ANY (ARRAY['event.uredi'::text, 'event.okno_prodaje'::text, 'event.objavi'::text, 'event.ustavi_prodajo'::text, 'event.zazeni_prodajo'::text, 'event.nov_osnutek'::text, 'event.podvoji'::text]))),
+    CONSTRAINT predlogi_dejanj_napaka_check CHECK (((napaka IS NULL) OR (char_length(napaka) <= 300))),
+    CONSTRAINT predlogi_dejanj_odloceno_chk CHECK (((stanje = 'caka'::text) = (odloceno_at IS NULL))),
+    CONSTRAINT predlogi_dejanj_prej_check CHECK (((prej IS NULL) OR ((jsonb_typeof(prej) = 'object'::text) AND (octet_length((prej)::text) <= 400000)))),
+    CONSTRAINT predlogi_dejanj_razlog_check CHECK (((char_length(razlog) >= 1) AND (char_length(razlog) <= 1000))),
+    CONSTRAINT predlogi_dejanj_spremembe_check CHECK (((jsonb_typeof(spremembe) = 'object'::text) AND (octet_length((spremembe)::text) <= 40000))),
+    CONSTRAINT predlogi_dejanj_stanje_check CHECK ((stanje = ANY (ARRAY['caka'::text, 'potrjen'::text, 'zavrnjen'::text, 'potekel'::text, 'neuspel'::text])))
+);
+
+
+--
+-- Name: TABLE predlogi_dejanj; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.predlogi_dejanj IS 'Predlogi agenta (059, #330 2. del): namera brez ucinka; izvede jo admin s potrditvijo po obstojeci poti v isti transakciji (I57). Rok 24 h.';
+
+
+--
+-- Name: predlogi_dejanj_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.predlogi_dejanj_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: predlogi_dejanj_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.predlogi_dejanj_id_seq OWNED BY public.predlogi_dejanj.id;
+
+
+--
 -- Name: racuni; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2224,6 +2290,13 @@ ALTER TABLE ONLY public.orders ALTER COLUMN id SET DEFAULT nextval('public.order
 
 
 --
+-- Name: predlogi_dejanj id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.predlogi_dejanj ALTER COLUMN id SET DEFAULT nextval('public.predlogi_dejanj_id_seq'::regclass);
+
+
+--
 -- Name: racuni id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -2501,6 +2574,14 @@ ALTER TABLE ONLY public.omejitve
 
 ALTER TABLE ONLY public.orders
     ADD CONSTRAINT orders_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: predlogi_dejanj predlogi_dejanj_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.predlogi_dejanj
+    ADD CONSTRAINT predlogi_dejanj_pkey PRIMARY KEY (id);
 
 
 --
@@ -3059,6 +3140,20 @@ CREATE INDEX orders_table_idx ON public.orders USING btree (table_id) WHERE (tab
 --
 
 CREATE INDEX orders_user_idx ON public.orders USING btree (user_id, created_at DESC);
+
+
+--
+-- Name: predlogi_dejanj_stanje_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX predlogi_dejanj_stanje_idx ON public.predlogi_dejanj USING btree (stanje, ustvarjen_at DESC);
+
+
+--
+-- Name: predlogi_dejanj_zeton_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX predlogi_dejanj_zeton_idx ON public.predlogi_dejanj USING btree (agent_zeton_id, ustvarjen_at DESC);
 
 
 --
@@ -3788,6 +3883,14 @@ ALTER TABLE ONLY public.orders
 
 
 --
+-- Name: predlogi_dejanj predlogi_dejanj_agent_zeton_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.predlogi_dejanj
+    ADD CONSTRAINT predlogi_dejanj_agent_zeton_id_fkey FOREIGN KEY (agent_zeton_id) REFERENCES public.agent_zetoni(id);
+
+
+--
 -- Name: racuni racuni_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4007,5 +4110,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 7hiGK6ZN3YuahZ78al6DLiJHT5gdyBqFB6TZ5YBvZ08hB2CbQLj89HzpPWb7PVB
+\unrestrict bMXOsJp9N8XbveO50ytsbByWQmSVFoNBNjKk1jf6tzgLibaprV6BCUPHGhT9xBK
 

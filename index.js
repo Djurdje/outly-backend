@@ -2961,6 +2961,7 @@ async function ustvariDogodek(req, res, opcije = {}) {
     const prizorisce = uskladiPrizorisce({ ...PRAZNO_PRIZORISCE, ...pz.dano });
     if (!(await preveriPrizorisce(prizorisce, club.id, club.is_organizer, res))) return;
 
+    if (opcije.samoPreveri) return opcije.samoPreveri();   // predlog agenta (I57): samo validacija, brez zapisa
     const finalMinAge = (minAge ?? club.min_age ?? 18);
     // Podedovani zanri kluba so lahko stari zapisi izven ZANRI: ociscimo (brez 400, neznane izpustimo), da se umazanija ne siri na nove dogodke.
     const finalGenres = zanriDogodka ?? ociscenoZanre(club.genres);
@@ -3002,6 +3003,7 @@ async function ustvariDogodek(req, res, opcije = {}) {
       const c = await pool.connect();
       try {
         await c.query("BEGIN");
+        if (opcije.predlog) await opcije.predlog(c, null);   // predlog agenta (I57): zaklep predloga in caka -> potrjen v isti transakciji
         r = await c.query(sqlVstavi, parametri);
         const n = r.rows[0];
         await zapisiAdminDejanje(c, req, "event.create", "event", n.id, null, { club_id: n.club_id, title: n.title, start_at: new Date(n.start_at).toISOString(), status: n.status });
@@ -3020,6 +3022,7 @@ async function ustvariDogodek(req, res, opcije = {}) {
 
     res.status(201).json(await dopolniPrizorisce(r.rows[0]));
   } catch (e) {
+    if (e && e.odgovor) return res.status(e.odgovor.status).json(e.odgovor.telo);   // predlog agenta zavrnjen, nic ni vstavljeno
     console.error(e);
     res.status(500).send("Server error.");
   }
@@ -3089,12 +3092,14 @@ const NAPAKA_DOGODEK_MINIL = { error: "event_finished", message: "This event has
 const NAPAKA_DOGODEK_MINIL_DATUM = { error: "event_finished", message: "This event has already started or taken place, so its date can't be changed. Contact Outly." };
 // --- dnevnik admin dejanj (055, I53) ---
 // Vrstica se vpise v ISTI transakciji `c` kot sprememba (klicatelj jo commita ali vrne skupaj). Brez osebnih podatkov kupcev: samo polja cilja.
+// `req.predlog` ({ id, agentZetonId }, agent_predlogi.js, 059, I57): dejanje je izvedba ali zapis predloga agenta -> oznaka predloga in zetona v isti vrstici.
 async function zapisiAdminDejanje(c, req, dejanje, ciljTip, ciljId, prej, potem, razlog) {
+  const pr = req.predlog || null;
   await c.query(
-    `INSERT INTO admin_dejanja (admin_user_id, dejanje, cilj_tip, cilj_id, prej, potem, razlog)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)`,
-    [req.user.userId, dejanje, ciljTip, String(ciljId), prej === null || prej === undefined ? null : JSON.stringify(prej),
-     potem === null || potem === undefined ? null : JSON.stringify(potem), razlog || null]);
+    `INSERT INTO admin_dejanja (admin_user_id, dejanje, cilj_tip, cilj_id, prej, potem, razlog, agent_zeton_id, predlog_id)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9)`,
+    [req.user.userId === undefined ? null : req.user.userId, dejanje, ciljTip, String(ciljId), prej === null || prej === undefined ? null : JSON.stringify(prej),
+     potem === null || potem === undefined ? null : JSON.stringify(potem), razlog || null, pr ? pr.agentZetonId : null, pr ? pr.id : null]);
 }
 // Primerljiva vrednost za dnevnik (Date -> ISO, NUMERIC/BIGINT niz ostane niz).
 const vrednostDnevnika = (v) => (v instanceof Date ? v.toISOString() : v === undefined ? null : v);
@@ -3151,7 +3156,11 @@ function requireClubUrednikDogodka() {
     return zaKlub(req, res, next);
   };
 }
-app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, res) => {
+app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), (req, res) => urediDogodek(req, res));
+// Telo PATCH /events/:id. `opcije` uporablja samo agent_predlogi.js (#330, I57; obstojeca pot ostane ena sama, brez kopije validacije):
+//   samoPreveri(dovoljeno, d)  po CELOTNI validaciji, pred transakcijo: vrne normalizirana polja, nic ne zapise in nic ne zaklene (predlog agenta);
+//   predlog(c, st)             v transakciji po zaklepu vrstice dogodka in branju starih vrednosti: zaklep predloga, zastarelost, caka -> potrjen (vrze e.odgovor).
+async function urediDogodek(req, res, opcije = {}) {
   try {
     const d = await dogodekZaUrejanje(req, res);
     if (!d) return;
@@ -3254,6 +3263,7 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
       } else dovoljeno[stolpec] = null;
     }
 
+    if (opcije.samoPreveri) return opcije.samoPreveri(dovoljeno, d);
     const sets = [], vrednosti = [];
     for (const [k, v] of Object.entries(dovoljeno)) {
       if (v === undefined) continue;
@@ -3295,6 +3305,7 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
       const polja = Object.keys(dovoljeno).filter((k) => dovoljeno[k] !== undefined);
       const st = (await c.query(`SELECT ${polja.map((k) => `"${k}"`).join(", ")}, NOW() AS zdaj FROM events WHERE id = $1`, [d.id])).rows[0];
       prej = st;
+      if (opcije.predlog) await opcije.predlog(c, st);
       r = await c.query(sqlPosodobi, vrednosti);
       if (st.sales_paused !== true && r.rows[0].sales_paused === true) {
         pavzaOd = st.zdaj;
@@ -3307,6 +3318,7 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
       await c.query("COMMIT");
     } catch (e) {
       await c.query("ROLLBACK").catch(() => {});
+      if (e && e.odgovor) return res.status(e.odgovor.status).json(e.odgovor.telo);   // predlog agenta zavrnjen (zastarel, potekel ...), nic se ni spremenilo
       // U2: kapaciteta pod ze prodanim (omejitev events_sold_chk) je napaka vnosa, ne strežnika.
       if (e && e.code === "23514" && e.constraint === "events_sold_chk") {
         const sold = (await c.query("SELECT sold_count FROM events WHERE id = $1", [d.id]).catch(() => ({ rows: [] }))).rows[0];   // M8: ze drzimo c (I16, #274)
@@ -3339,7 +3351,7 @@ app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, r
     console.error(e);
     return res.status(500).send("Server error.");
   }
-});
+}
 
 app.delete("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, res) => {
   try {
@@ -3650,7 +3662,8 @@ admin.get("/summary", async (req, res) => {
         (SELECT COUNT(*)::int FROM vracila WHERE stanje IN ('ni_uspelo','rocno')) AS refunds_attention,
         (SELECT COUNT(*)::int FROM spori WHERE zaprt_at IS NULL)             AS open_disputes,
         (SELECT COUNT(*)::int FROM spori WHERE povrnitev_stanje IN ('ni_uspelo','rocno')) AS dispute_recovery_attention,
-        (SELECT COUNT(*)::int FROM racuni WHERE stanje='napaka')             AS racuni_napaka`);
+        (SELECT COUNT(*)::int FROM racuni WHERE stanje='napaka')             AS racuni_napaka,
+        (SELECT COUNT(*)::int FROM predlogi_dejanj WHERE stanje='caka' AND velja_do > NOW()) AS predlogi_caka`);
     return res.json({ ...r.rows[0], warnings_red: adminNadzor.rdeceStevilo() });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
@@ -4149,7 +4162,9 @@ admin.post("/events", async (req, res) => ustvariDogodek(req, res, { admin: true
 
 const DUPLIKATOV_NAJVEC = 12;
 const DUPLIKAT_NAJVEC_VNAPREJ_MS = 2 * 366 * 864e5;   // startAt najvec 2 leti v prihodnost (tipkarska napaka v letu bi ustvarila osnutke, ki jih nihce ne najde)
-admin.post("/events/:id/duplicate", async (req, res) => {
+admin.post("/events/:id/duplicate", (req, res) => podvojiDogodek(req, res));
+// `opcije` (agent_predlogi.js, I57): samoPreveri() po validaciji telesa (brez zapisa), predlog(c) v transakciji pred INSERT-om.
+async function podvojiDogodek(req, res, opcije = {}) {
   const napaka = (status, error, message) => res.status(status).json({ error, message });
   const id = celoId4(req.params.id);
   if (!id) return napaka(400, "invalid_event_id", "Invalid event id.");
@@ -4173,11 +4188,13 @@ admin.post("/events/:id/duplicate", async (req, res) => {
     return napaka(400, "invalid_count", 'n is allowed only together with ponovi: "weekly".');
   }
   const zacetekIso = new Date(zacetekSurov).toISOString();
+  if (opcije.samoPreveri) return opcije.samoPreveri();
   const c = await pool.connect();
   let nove;
   try {
     await c.query("BEGIN");
     await c.query("SET LOCAL statement_timeout = 5000");
+    if (opcije.predlog) await opcije.predlog(c, null);
     // Kopija ne prenese neveljavnih URL-jev (I48: stari zapis iz casov pred #269 bi se sicer razmnozil) in zanrov izven ZANRI: neveljavno postane '' / se izpusti.
     const izvor = (await c.query("SELECT poster_url, ticket_url, genres FROM events WHERE id = $1", [id])).rows[0];
     if (!izvor) { await c.query("ROLLBACK"); return napaka(404, "event_not_found", "Event not found."); }
@@ -4210,12 +4227,13 @@ admin.post("/events/:id/duplicate", async (req, res) => {
     await c.query("COMMIT");
   } catch (e) {
     await c.query("ROLLBACK").catch(() => {});
+    if (e && e.odgovor) return res.status(e.odgovor.status).json(e.odgovor.telo);
     if (["22007", "22008", "23514"].includes(e && e.code)) return napaka(400, "duplicate_invalid", "The copy would break an event constraint (dates or sales window).");
     console.error(e); return res.status(500).send("Server error.");
   } finally { c.release(); }
   console.log(`Admin ${req.user.userId} podvojil dogodek ${id} -> ${nove.length} osnutkov`);
   return res.status(201).json({ events: nove.map((x) => ({ id: x.id, title: x.title, start_at: new Date(x.start_at).toISOString(), status: x.status })) });
-});
+}
 
 // GET /admin/api/events/:id — vsa urejljiva polja dogodka (za urejevalnik v panelu) + stevci + zadnjih 30 vrstic dnevnika (055, I53).
 // Samo branje v READ ONLY transakciji s casovno mejo (glavni pool nima statement_timeout); vse po indeksih (orders_event_idx, tickets_event_idx, admin_dejanja_cilj_idx).
@@ -4648,6 +4666,8 @@ const agentApi = require("./agent_api").ustvari({
   pool, adminRouter: admin, nadzor: adminNadzor, omeji, zapisiAdminDejanje, celoId4, odgovoriNaNapako, SQL_TESTNO_NAROCILO, ZANRI,
   SQL_NAROCILO_PLATFORMNO: (a) => placilaStripe.SQL_NAROCILO_PLATFORMNO(a),
   paymentsMode: () => (placilaStripe.testniNacin() ? "fake" : (placilaStripe.jeSandbox() ? "sandbox" : "live")),
+  // predlogi agenta (#330, 2. del, 059, I57): izvedba SAMO po obstojecih poteh (ista validacija, isti zaklepi, isti dnevnik)
+  dejanjaDogodka: { uredi: urediDogodek, ustvari: ustvariDogodek, podvoji: podvojiDogodek },
 });
 app.use("/agent/api", agentApi.router);
 app.use("/admin/api", admin);

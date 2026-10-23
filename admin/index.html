@@ -140,6 +140,7 @@
       <button data-z="finance">Finance</button>
       <button data-z="vracila">Vračila in spori <span class="n skrito" id="nVracil"></span></button>
       <button data-z="pomoc">Pomoč – odzivi</button>
+      <button data-z="predlogi">Čaka potrditev <span class="n skrito" id="nPredlogov"></span></button>
       <button data-z="agent">Agent</button>
     </nav>
 
@@ -160,6 +161,11 @@
     <section id="z-opozorila" class="skrito">
       <div id="op_opozorila"></div>
       <div id="op_racuni"></div>
+    </section>
+
+    <!-- CAKA POTRDITEV (admin/predlogi.js, #330 2. del): predlogi agenta; izvedejo se sele ob »Potrdi« -->
+    <section id="z-predlogi" class="skrito">
+      <div id="pr_koren"></div>
     </section>
 
     <!-- AGENT (admin/agent.js, #330): zetoni za agenta (Claude) samo za branje -->
@@ -353,6 +359,7 @@
 <script src="opozorila.js"></script>
 <script src="nov-dogodek.js"></script>
 <script src="agent.js"></script>
+<script src="predlogi.js"></script>
 <script>
 // Panel teče na istem naslovu kot backend (Express streže /admin), zato je
 // osnova kar location.origin. Za lokalni test: ?api=http://localhost:3000
@@ -515,7 +522,7 @@ function pokaziPanel() {
 
 // ---------- zavihki ----------
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => pokaziZavihek(b.dataset.z));
-const nalozi = { pregled: naloziPregled, opozorila: () => (window.naloziOpozorila ? window.naloziOpozorila() : obvesti("Zavihek Opozorila se ni naložil (opozorila.js). Osveži stran.", "slabo")), prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: () => (window.naloziDogodke ? window.naloziDogodke() : obvesti("Zavihek Dogodki se ni naložil (dogodki.js). Osveži stran.", "slabo")), guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila, pomoc: naloziPomoc, agent: () => (window.naloziAgenta ? window.naloziAgenta() : obvesti("Zavihek Agent se ni naložil (agent.js). Osveži stran.", "slabo")) };
+const nalozi = { pregled: naloziPregled, opozorila: () => (window.naloziOpozorila ? window.naloziOpozorila() : obvesti("Zavihek Opozorila se ni naložil (opozorila.js). Osveži stran.", "slabo")), prosnje: naloziProsnje, klubi: naloziKlube, uporabniki: naloziUporabnike, dogodki: () => (window.naloziDogodke ? window.naloziDogodke() : obvesti("Zavihek Dogodki se ni naložil (dogodki.js). Osveži stran.", "slabo")), guest: naloziGuest, prijave: naloziPrijave, finance: naloziFinance, vracila: naloziVracila, pomoc: naloziPomoc, predlogi: () => (window.naloziPredloge ? window.naloziPredloge() : obvesti("Zavihek Čaka potrditev se ni naložil (predlogi.js). Osveži stran.", "slabo")), agent: () => (window.naloziAgenta ? window.naloziAgenta() : obvesti("Zavihek Agent se ni naložil (agent.js). Osveži stran.", "slabo")) };
 function pokaziZavihek(z) {
   // Povezava na dogodek (#/dogodki/35) velja samo v zavihku Dogodki; drug zavihek jo pobriše.
   if (z !== "dogodki" && /^#\/dogodki/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search);
@@ -542,7 +549,9 @@ async function naloziPregled() {
       kos(s.events, "dogodkov") + kos(s.upcoming_events, "prihajajočih") + kos(s.users, "uporabnikov") +
       kos(s.business_users, "poslovnih računov") + kos(s.admins, "adminov") +
       kosPozor(s.refunds_attention, "vračil za pozornost", "pozor") + kosPozor(s.open_disputes, "odprtih sporov", "opoz") +
-      kosPozor(s.dispute_recovery_attention, "povrnitev sporov za pozornost", "pozor");
+      kosPozor(s.dispute_recovery_attention, "povrnitev sporov za pozornost", "pozor") +
+      kos(Number(s.predlogi_caka) || 0, "predlogov agenta čaka");
+    if (typeof s.predlogi_caka === "number" && window.predlogiZnacka) window.predlogiZnacka(s.predlogi_caka);   // DODANO polje (#330, 2. del); star backend ga nima
     const nV = (Number(s.refunds_attention) || 0) + (Number(s.dispute_recovery_attention) || 0);
     $("nVracil").textContent = nV; $("nVracil").classList.toggle("skrito", !nV);
     if (typeof s.warnings_red === "number") {   // DODANO polje (#326); null = se ni izracunano (znacko postavi »Danes« ali zavihek Opozorila), star backend ga nima

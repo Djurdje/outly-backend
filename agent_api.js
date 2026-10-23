@@ -23,7 +23,8 @@ const express = require("express");
 
 const PREDPONA = "outly_agent_";
 const ZETON_VZOREC = /^outly_agent_[A-Za-z0-9_-]{43}$/;   // 32 nakljucnih bajtov v base64url brez polnila = 43 znakov
-const OBSEGI = ["beri"];                                    // v bazi ga varuje CHECK agent_zetoni_obseg_chk (058); razsiri ga samo migracija z mehanizmom
+// v bazi ga varuje CHECK agent_zetoni_obseg_chk (058, razsirjen v 059): `beri` je obvezen, `predlagaj` (predlogi, agent_predlogi.js, I57) samo skupaj z njim; `nujno` (3. del) se ne obstaja
+const OBSEGI = ["beri", "predlagaj"];
 const AKTIVNIH_NAJVEC = 10;
 const DNI_PRIVZETO = 30, DNI_NAJVEC = 90;
 const RABA_ZAPIS_MS = 60000;                                // zadnja_raba_at najvec enkrat na minuto na zeton
@@ -91,6 +92,14 @@ function ustvari(dep) {
   const agentSplosno = nadzor.zaAgenta();   // samo odgovoriNapaka
   const MEJA_ZETON = okoljeCelo("AGENT_API_NA_URO", 300, 1, 100000);   // zahtevkov na uro na zeton
   const MEJA_IP = okoljeCelo("AGENT_API_IP_NA_MIN", 120, 1, 100000);   // zahtevkov na minuto na IP (pred prijavo: napacni zetoni)
+  // Delo zahteve agenta zunaj bralca (pisanje predloga, validacija po obstojeci poti): steje se pod semaforjem agenta kot branje; prekinjen zahtevek novega dela ne zacne.
+  async function delo(req, fn) {
+    if (req.agentPrekinjen) throw Object.assign(new Error("agent: odjemalec je prekinil zahtevek"), { code: "AGENT_PREKINJEN" });
+    vBranju++;
+    try { return await fn(); } finally { vBranju--; sprosti(); }
+  }
+  const predlogi = require("./agent_predlogi").ustvari({ pool, adminRouter, omeji, zapisiAdminDejanje, celoId4, ocisti, delo, okoljeCelo,
+    odgovoriNaNapako: dep.odgovoriNaNapako, dejanja: dep.dejanjaDogodka });
 
   // =====================================================================================================================
   // 1. UPRAVLJANJE (admin): GET/POST /admin/api/agent-zetoni, POST /admin/api/agent-zetoni/:id/preklici
@@ -115,8 +124,8 @@ function ustvari(dep) {
     const dni = b.dni === undefined ? DNI_PRIVZETO : b.dni;
     if (!Number.isInteger(dni) || dni < 1 || dni > DNI_NAJVEC) return res.status(400).json({ error: "invalid_days", message: `dni must be a whole number from 1 to ${DNI_NAJVEC}.` });
     const obseg = b.obseg === undefined ? ["beri"] : b.obseg;
-    if (!Array.isArray(obseg) || obseg.length < 1 || obseg.some((x) => !OBSEGI.includes(x)) || new Set(obseg).size !== obseg.length) {
-      return res.status(400).json({ error: "invalid_scope", message: `obseg must be a non-empty list of: ${OBSEGI.join(", ")}.` });
+    if (!Array.isArray(obseg) || obseg.length < 1 || obseg.some((x) => !OBSEGI.includes(x)) || new Set(obseg).size !== obseg.length || !obseg.includes("beri")) {
+      return res.status(400).json({ error: "invalid_scope", message: `obseg must be a list of: ${OBSEGI.join(", ")} (beri is required).` });
     }
     const razlog = b.reason === undefined || b.reason === null ? null : String(b.reason).trim().slice(0, 500) || null;
     const zeton = PREDPONA + crypto.randomBytes(32).toString("base64url");
@@ -279,10 +288,11 @@ function ustvari(dep) {
   }
   router.use(zahtevaj("beri"));
 
+  // samo branje; edina izjema je POST /predlogi (obseg predlagaj): zapis NAMERE, ki nicesar ne spremeni (agent_predlogi.js, I57)
   router.use((req, res, next) => {
-    if (req.method === "GET") return next();
-    res.set("Allow", "GET");
-    return res.status(405).json({ error: "method_not_allowed", message: "The agent API is read-only (GET)." });
+    if (req.method === "GET" || (req.method === "POST" && req.path === "/predlogi")) return next();
+    res.set("Allow", req.path === "/predlogi" ? "GET, POST" : "GET");
+    return res.status(405).json({ error: "method_not_allowed", message: "The agent API is read-only (GET); only POST /agent/api/predlogi records a proposal." });
   });
 
   function posljiJson(res, telo) {
@@ -461,11 +471,14 @@ function ustvari(dep) {
     } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/audit"); }
   });
 
+  // --- predlogi (#330, 2. del, 059, I57): POST zapise namero (nic se ne spremeni), GET lastni predlogi; admin jih potrdi/zavrne v panelu ---
+  predlogi.agentPoti(router, { zahtevaj, odgovoriNapaka, posljiJson });
+
   // vse ostalo pod /agent/api: 404 v JSON (po prijavi: neprijavljen odjemalec ne izve, katere poti obstajajo)
   router.use((req, res) => res.status(404).json({ error: "not_found", message: "Unknown agent API path." }));
 
   console.log(`[agent] /agent/api ${process.env.AGENT_API === "0" ? "IZKLOPLJEN (AGENT_API=0)" : "vklopljen"}: ${MEJA_ZETON}/h na zeton, ${MEJA_IP}/min na IP, 1 zahteva agenta naenkrat`);
-  return { router, ocisti };
+  return { router, ocisti, predlogi };
 }
 
 module.exports = { ustvari, ocisti, ocistiNiz, brezBesedil, PREDPONA, OBSEGI };

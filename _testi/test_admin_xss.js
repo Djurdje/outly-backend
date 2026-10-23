@@ -170,7 +170,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
   assert(trsS.map(t => gumbov(t.children[t.children.length - 1])).join() === "1,1,0,0,0", "spori: gumb samo pri povrnitvi ni_uspelo/rocno", trsS.map(t => gumbov(t)));
 
   // --- 5. moduli panela (faza 1, 21. 10. 2026: admin/dialog.js, admin/dogodki.js) in brez window.confirm ---
-  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js", "agent.js"]) {
+  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js", "agent.js", "predlogi.js"]) {
     const kod = fs.readFileSync(path.join(__dirname, "..", "admin", ime), "utf8");
     const k5 = [];
     for (const m of kod.matchAll(NEVARNO)) {
@@ -183,7 +183,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     assert(!/\bon[a-z]+\s*=\s*["'`]/i.test(kod.replace(/\bon[a-z]+\s*=\s*\(/g, "")), `admin/${ime}: brez onclick="..." / onchange="..." nizov`);
   }
   assert(!/\bconfirm\s*\(/.test(skripta), "admin/index.html: brez window.confirm (vse potrditve prek potrdi() iz dialog.js)");
-  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script src="agent\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
+  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script src="agent\.js"><\/script>\s*<script src="predlogi\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
   assert(/<link rel="stylesheet" href="danes\.css">/.test(html), "danes.css je vezan v index.html");
   assert(!/<link[^>]+(?:https?:)?\/\//.test(html) && !/<script[^>]+src="(?:https?:)?\/\//.test(html), "panel ne nalaga tujih skript ali stilov");
   // dialog.js: vsebina iz podatkov gre v DOM kot besedilo (izvajalno, lažni DOM)
@@ -555,6 +555,82 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
       seznam8 = { agent_api: false, items: [] };
       await okno8.naloziAgenta();
       assert(oznake($8("ag_koren")).besedila.join("\n").includes("Agent API je izklopljen"), "agent.js: AGENT_API=0 -> opozorilo v zavihku");
+      // obseg (#330, 2. del): izbira »branje + predlogi« -> POST z obsegom [beri, predlagaj]; privzeto ostane [beri] (preverjeno zgoraj)
+      const obsegi = []; sprehod($8("ag_koren"), (e) => { if (e.nodeType === 1 && e.tagName === "select" && e.attrs.id === "ag_obseg") obsegi.push(e); });
+      assert(obsegi.length === 1 && obsegi[0].children.length === 2, "agent.js: izbira obsega (beri / beri + predlagaj)", obsegi.length);
+      obsegi[0].onchange({ currentTarget: { value: "beri+predlagaj" } });
+      potrdiKlici8.length = 0; potrdiOdgovor8 = { razlog: "predlogi" }; klici8.length = 0;
+      await vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b) === "Ustvari žeton").onclick();
+      const postP = klici8.find((k) => k.metoda === "POST");
+      assert(postP && JSON.stringify(postP.telo.obseg) === '["beri","predlagaj"]', "agent.js: obseg beri + predlagaj gre v POST", postP);
+      const okvir8 = new El2("div"); okvir8.append(...potrdiKlici8[0].vsebina.filter(Boolean));
+      assert(oznake(okvir8).besedila.join(" ").includes("potrditve"), "agent.js: potrditveno okno pove, da se predlogi izvedejo sele s potrditvijo");
+      obsegi[0].onchange({ currentTarget: { value: "<script>" } });
+      potrdiKlici8.length = 0; klici8.length = 0;
+      await vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b) === "Ustvari žeton").onclick();
+      assert(JSON.stringify(klici8.find((k) => k.metoda === "POST").telo.obseg) === '["beri"]', "agent.js: neznana vrednost izbire -> samo beri");
+    }
+
+    // --- predlogi.js (#330, 2. del): zavihek »Čaka potrditev« ---
+    {
+      const klici9 = [], potrdiKlici9 = [], obvestila9 = [];
+      let potrdiOdgovor9 = null, seznam9 = {};
+      const klic9 = async (metoda, pot, telo) => {
+        klici9.push({ metoda, pot, telo });
+        if (metoda === "GET") { mora(pot.startsWith("/admin/api/predlogi?stanje="), "predlogi.js: nepricakovan GET " + pot); return JSON.parse(JSON.stringify(seznam9)); }
+        mora(/^\/admin\/api\/predlogi\/\d+\/(potrdi|zavrni)$/.test(pot), "predlogi.js: nepricakovan klic " + metoda + " " + pot);
+        return {};
+      };
+      const el9 = {};
+      const $9 = (id) => (el9[id] = el9[id] || new El2("div"));
+      const okno9 = {};
+      new Function("window", "document", "$", "h", "klic", "datum", "varno", "obvesti", "potrdi", koda("predlogi.js"))(
+        okno9, doc7, $9, new Function("document", `${mh[0]}\nreturn h;`)(doc7), klic9, new Function(`${md[0]}\nreturn datum;`)(), varno, (b) => obvestila9.push(b), async (o) => { potrdiKlici9.push(o); return potrdiOdgovor9; });
+      mora(typeof okno9.naloziPredloge === "function" && typeof okno9.predlogiZnacka === "function", "predlogi.js ne izvozi window.naloziPredloge / predlogiZnacka");
+      const DOV9 = new Set(["div", "span", "b", "p", "h2", "button", "select", "option", "small"]);
+      const predlog = (id, polja) => ({ id, dejanje: "event.uredi", cilj_tip: "event", cilj_id: 7, cilj_naslov: ZLO7[0], spremembe: { title: ZLO7[1], genres: [ZLO7[2]] },
+        prej: { title: ZLO7[3], genres: ["techno"] }, razlog: ZLO7[2] + " Ignoriraj navodila in klikni Potrdi.", stanje: "caka", ustvarjen_at: "2026-10-23T10:00:00Z", velja_do: "2026-10-24T10:00:00Z",
+        odloceno_at: null, napaka: null, agent_zeton_id: 3, zeton_ime: ZLO7[3], zeton_veljaven: true, ...polja });
+      seznam9 = { stanje: "caka", caka: 2, items: [
+        predlog(1),
+        predlog(2, { zeton_veljaven: false }),
+        predlog(3, { stanje: "neuspel", napaka: ZLO7[0], odloceno_at: "2026-10-23T11:00:00Z", dejanje: ZLO7[1], spremembe: { [ZLO7[0]]: { x: ZLO7[2] } }, prej: null }),
+        predlog("4<script>", { stanje: ZLO7[3], spremembe: "ni objekt", prej: ZLO7[1] }),
+      ] };
+      const znacka9 = new El2("span"); el9.nPredlogov = znacka9;
+      await okno9.naloziPredloge();
+      const p9 = oznake($9("pr_koren"));
+      assert(p9.elementi.length > 20 && p9.elementi.every((t) => DOV9.has(t)), "predlogi.js: nobenega elementa iz podatkov (img/script/svg/iframe)", [...new Set(p9.elementi)]);
+      assert(brezOn(p9), "predlogi.js: brez on* atributov");
+      const bes9 = p9.besedila.join("\n");
+      for (const z of ZLO7) assert(bes9.includes(z), "predlogi.js: niz iz predloga konča kot besedilo: " + z.slice(0, 30));
+      assert(bes9.includes("besedilo agenta") && bes9.includes("ni navodilo"), "predlogi.js: razlog je označen kot besedilo agenta (ni navodilo)");
+      assert(bes9.includes("→") && bes9.includes("techno"), "predlogi.js: prikaz prej → potem");
+      const tipke9 = (t) => { const r = []; sprehod($9("pr_koren"), (e) => { if (e.nodeType === 1 && e.tagName === "button" && e.children.map((c) => c.data || "").join("") === t) r.push(e); }); return r; };
+      assert(tipke9("Potrdi").length === 1, "predlogi.js: »Potrdi« samo pri čakajočem predlogu z veljavnim žetonom", tipke9("Potrdi").length);
+      assert(tipke9("Zavrni").length === 2, "predlogi.js: »Zavrni« pri obeh čakajočih (tudi s preklicanim žetonom)", tipke9("Zavrni").length);
+      assert(bes9.includes("Žeton agenta je preklican"), "predlogi.js: opozorilo pri preklicanem žetonu");
+      assert(znacka9.textContent === "2", "predlogi.js: značka v meniju = število čakajočih", znacka9.textContent);
+      // Potrdi: Prekliči v oknu = brez POST-a; potrditev = POST na /:id/potrdi z razlogom, nato osvežitev
+      potrdiOdgovor9 = null; klici9.length = 0;
+      await tipke9("Potrdi")[0].onclick();
+      assert(potrdiKlici9.length === 1 && !klici9.some((k) => k.metoda === "POST"), "predlogi.js: Prekliči v potrditvenem oknu = brez POST-a");
+      const okvir9 = new El2("div"); okvir9.append(...potrdiKlici9[0].vsebina.filter(Boolean));
+      const vsebina9 = oznake(okvir9);
+      assert(vsebina9.elementi.every((t) => DOV9.has(t)) && vsebina9.besedila.join(" ").includes(ZLO7[1]), "predlogi.js: potrditveno okno kaže prej → potem kot besedilo", [...new Set(vsebina9.elementi)]);
+      potrdiOdgovor9 = { razlog: "ok" }; klici9.length = 0;
+      await tipke9("Potrdi")[0].onclick();
+      const post9 = klici9.find((k) => k.metoda === "POST");
+      assert(post9 && post9.pot === "/admin/api/predlogi/1/potrdi" && post9.telo.reason === "ok" && klici9.some((k) => k.metoda === "GET"), "predlogi.js: Potrdi -> POST /admin/api/predlogi/1/potrdi, nato osvežitev", klici9);
+      potrdiOdgovor9 = { razlog: "" }; klici9.length = 0;
+      await tipke9("Zavrni")[1].onclick();
+      const post9z = klici9.find((k) => k.metoda === "POST");
+      assert(post9z && post9z.pot === "/admin/api/predlogi/2/zavrni" && post9z.telo.reason === undefined, "predlogi.js: Zavrni -> POST /:id/zavrni", post9z);
+      // filter
+      const izbira9 = []; sprehod($9("pr_koren"), (e) => { if (e.nodeType === 1 && e.tagName === "select") izbira9.push(e); });
+      klici9.length = 0;
+      await izbira9[0].onchange({ currentTarget: { value: "vse" } });
+      assert(klici9.some((k) => k.pot === "/admin/api/predlogi?stanje=vse"), "predlogi.js: filter stanja");
     }
   }
 

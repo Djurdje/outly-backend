@@ -1,4 +1,4 @@
-// Admin panel, zavihek »Agent« (#330, 23. 10. 2026): zetoni za agenta (Claude) samo za branje. Seznam (ime, obseg, velja do, zadnja raba, stanje), »Ustvari zeton«
+// Admin panel, zavihek »Agent« (#330, 23. 10. 2026): zetoni za agenta (Claude); obseg `beri` ali `beri + predlagaj` (2. del, 059: predlogi, ki jih admin potrdi v »Čaka potrditev«). Seznam (ime, obseg, velja do, zadnja raba, stanje), »Ustvari zeton«
 // (potrdi() z obveznim razlogom; zeton se prikaze ENKRAT z gumbom »Kopiraj«) in »Preklici« (potrdi()). API: GET/POST /admin/api/agent-zetoni, POST .../:id/preklici (agent_api.js).
 // Zeton v cistopisu je samo v spremenljivki `prikazanZeton`, dokler ga admin ne zapre ali ne osvezi zavihka; nikamor se ne shrani (ne localStorage, ne URL).
 // Brez ogrodja in brez gradnje (DECISIONS 21. 10. 2026). Uporablja globalne funkcije iz index.html: klic, h, datum, $, obvesti, varno, potrdi (dialog.js).
@@ -8,7 +8,8 @@
   const STANJA = { aktiven: ["aktiven", "ok"], potekel: ["potekel", "siva"], preklican: ["preklican", "siva"] };
   const DNEVI = [[7, "7 dni"], [30, "30 dni (privzeto)"], [90, "90 dni (najvec)"]];
   const GOSTITELJ = "outly-backend-roy3.onrender.com";
-  let podatki = null, prikazanZeton = null, formIme = "Claude Code", formDni = 30;
+  const OBSEGI = [["beri", "samo branje"], ["beri+predlagaj", "branje + predlogi (potrdiš jih ti)"]];
+  let podatki = null, prikazanZeton = null, formIme = "Claude Code", formDni = 30, formObseg = "beri";
 
   const cele = (n) => (Number.isSafeInteger(Number(n)) ? Number(n) : 0);
 
@@ -57,15 +58,20 @@
     const dniIzbira = h("select", { id: "ag_dni", "aria-label": "Veljavnost žetona", onchange: (ev) => { formDni = cele(ev.currentTarget.value) || 30; } },
       DNEVI.map(([d, t]) => h("option", { value: String(d) }, t)));
     dniIzbira.value = String(formDni);
+    const obsegIzbira = h("select", { id: "ag_obseg", "aria-label": "Obseg žetona", onchange: (ev) => { formObseg = ev.currentTarget.value === "beri+predlagaj" ? "beri+predlagaj" : "beri"; } },
+      OBSEGI.map(([v, t]) => h("option", { value: v }, t)));
+    obsegIzbira.value = formObseg;
     const telo = [
       h("p", { class: "telo-opomba" },
-        "Žeton za Claude (samo branje): dogodki, prodaja, računi, opozorila in dnevnik dejanj. Agent ne vidi e-naslovov, imen ali telefonov kupcev in ničesar ne spreminja. ",
+        "Žeton za Claude: branje dogodkov, prodaje, računov, opozoril in dnevnika dejanj. Agent ne vidi e-naslovov, imen ali telefonov kupcev in sam ničesar ne spreminja; ",
+        "z obsegom »predlogi« lahko predlaga urejanje, objavo ali ustavitev prodaje, ki se izvede šele, ko ga potrdiš v zavihku »Čaka potrditev«. ",
         "Žeton velja na /agent/api/*, drugje je zavrnjen. Preklic velja takoj; vse naenkrat izklopi AGENT_API=0 na Renderju."),
       podatki && podatki.agent_api === false ? h("div", { class: "opozorilo", role: "alert" }, "Agent API je izklopljen (AGENT_API=0 na Renderju): vsi klici agenta dobijo 503.") : null,
       okvirZetona(),
       h("div", { class: "ag-obrazec" },
         h("label", {}, h("small", {}, "ime (kje je žeton vpisan)"), imePolje),
         h("label", {}, h("small", {}, "velja"), dniIzbira),
+        h("label", {}, h("small", {}, "obseg"), obsegIzbira),
         h("button", { type: "button", onclick: ustvari }, "Ustvari žeton")),
       items.length ? h("div", { class: "rc-seznam" }, items.map(kartica)) : h("div", { class: "prazno" }, podatki ? "Ni žetonov." : "Nalagam …"),
     ];
@@ -86,14 +92,16 @@
     if (!ime) { obvesti("Vpiši ime žetona.", "slabo"); return; }
     if (ime.length > 60) { obvesti("Ime je predolgo (največ 60 znakov).", "slabo"); return; }
     const dni = formDni;
+    const obseg = formObseg === "beri+predlagaj" ? ["beri", "predlagaj"] : ["beri"];
     const izid = await potrdi({
       naslov: "Ustvarim žeton za agenta?", potrdiBesedilo: "Ustvari žeton", razlog: "obvezen",
-      vsebina: [h("p", {}, `Žeton »${ime}« bo veljal ${dni} dni in dovoli samo branje (dogodki, prodaja, računi, opozorila, dnevnik). Brez osebnih podatkov kupcev.`),
+      vsebina: [h("p", {}, `Žeton »${ime}« bo veljal ${dni} dni in dovoli branje (dogodki, prodaja, računi, opozorila, dnevnik). Brez osebnih podatkov kupcev.`),
+        obseg.includes("predlagaj") ? h("p", {}, "Dovoli tudi PREDLOGE (urejanje besedila, plakata in žanrov, okno prodaje, objava, ustavitev in zagon prodaje, nov osnutek, podvajanje). Nič se ne izvede brez tvoje potrditve v »Čaka potrditev«; cene, odpovedi, vračil in vlog agent ne more predlagati.") : null,
         h("p", {}, "Prikazan bo samo enkrat. Vpiši ga v nastavitve okolja Claude Code (Network secrets), ne v chat.")],
     });
     if (!izid) return;
     await varno(async () => {
-      const d = await klic("POST", "/admin/api/agent-zetoni", { ime, dni, obseg: ["beri"], reason: izid.razlog });
+      const d = await klic("POST", "/admin/api/agent-zetoni", { ime, dni, obseg, reason: izid.razlog });
       prikazanZeton = { zeton: String(d.zeton), ime: String(d.ime) };
       podatki = await klic("GET", "/admin/api/agent-zetoni");
       narisi();
