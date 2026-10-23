@@ -1164,12 +1164,17 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
         const note = await zaganjaj();
         const r = await vrstica(R.id), t = await vrstica(T.id);
         assert(r.stanje === "caka" && r.poslano_at === null && r.poskusi === 0 && r.iskanja_ne === 0 && r.iskanje_ne_at === null && r.iskanja_nejasna === 0 && r.zadnja_napaka === null && r.prevzeto_at === null && r.prevzem_zeton === null
-          && new Date(r.naslednji_poskus_at).getTime() <= Date.now() + 1000, `[${stanje}] vrstica je po migraciji v izdaji (caka, poslano_at/stevci/napaka pocisceni, takoj na vrsti)`, r);
+          && Math.abs(new Date(r.naslednji_poskus_at).getTime() - (Date.now() + 5 * 60 * 1000)) < 30000, `[${stanje}] vrstica je po migraciji v izdaji (caka, poslano_at/stevci/napaka pocisceni, na vrsti sele cez 5 minut)`, r);
         assert(t.poskusi === 2 && t.zadnja_napaka === "tuja" && t.poslano_at !== null, `[${stanje}] tuja vrstica nespremenjena`);
         assert(note.some((x) => /062/.test(x)), `[${stanje}] migracija izpise obvestilo`, note);
         const w = deloven(); const c0 = klicov("SalesInvoiceCreate"), l0 = klicov("SalesInvoiceList");
         await pool.query("UPDATE racuni SET poslano_at = poslano_at WHERE id = $1", [T.id]);
         await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() + INTERVAL '3 hours' WHERE id = $1", [T.id]);   // tuje vrstice ta test ne izdaja
+        // stara instanca ob deployu (koda brez productCode) vrstice NE sme prevzeti pred casom: nobenega Create, nobenega Lista, vrstica nespremenjena
+        await tek(w, 4, 40);
+        const pred5 = await vrstica(R.id);
+        assert(klicov("SalesInvoiceCreate") === c0 && klicov("SalesInvoiceList") === l0 && pred5.stanje === "caka" && pred5.poslano_at === null && pred5.prevzem_zeton === null && F.docs.length === 0, `[${stanje}] pred potekom 5 minut vrstice noben delavec ne prevzame (0 Create, 0 List)`, [klicov("SalesInvoiceCreate") - c0, pred5.stanje, pred5.poslano_at]);
+        await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() WHERE id = $1", [R.id]);   // 5 minut je minilo
         await tek(w, 4, 40);
         const r2 = await vrstica(R.id);
         assert(klicov("SalesInvoiceCreate") - c0 === 1 && klicov("SalesInvoiceList") === l0 && r2.stanje === "potrjen" && F.docs.length === 1, `[${stanje}] po migraciji natanko 1 Create (brez iskanja), racun potrjen, en dokument`, [klicov("SalesInvoiceCreate") - c0, r2.stanje, F.docs.length]);
@@ -1198,6 +1203,7 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       const staroPisanje = await pool.query("UPDATE racuni SET poslano_at = NOW() WHERE id = $1 AND prevzem_zeton = 'zeton-stare-instance' AND prevzeto_at IS NOT NULL", [Ro.id]);
       assert(staroPisanje.rowCount === 0 && (await vrstica(Ro.id)).poslano_at === null, "stara instanca po migraciji ne more vec zapisati (prevzem_zeton), poslano_at ostane prazen");
       const co = klicov("SalesInvoiceCreate"), w1 = deloven(), w2 = deloven();
+      await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() WHERE id = $1", [Ro.id]);   // 5 minut je minilo
       await Promise.all([tek(w1, 3, 30), tek(w2, 3, 30)]);   // dve instanci hkrati (najem + zeton)
       assert(klicov("SalesInvoiceCreate") - co === 1 && (await vrstica(Ro.id)).stanje === "potrjen" && F.docs.length === 1, "dve instanci hkrati: natanko 1 Create", [klicov("SalesInvoiceCreate") - co, F.docs.length]);
     }

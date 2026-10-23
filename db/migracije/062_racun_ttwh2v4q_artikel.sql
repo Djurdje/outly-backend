@@ -9,8 +9,11 @@
 -- brise zapis o »izidu neznan« in izda brez iskanja po referenci).
 --
 -- Kaj naredi: vrstico racuna (vrsta racun) tega narocila, ki je v `caka` (izid neznan, poslano_at zapisan) ali `napaka`, postavi v cisto `caka`:
---   poslano_at = NULL (delavec izda takoj, BREZ iskanja po referenci), poskusi = 0, iskanja_ne = 0, iskanje_ne_at = NULL, iskanja_nejasna = 0, zadnja_napaka = NULL,
---   naslednji_poskus_at = NOW(), prevzeto_at = NULL, prevzem_zeton = NULL. Delavec racuni.js ga nato izda natanko enkrat (en Create).
+--   poslano_at = NULL (delavec izda BREZ iskanja po referenci), poskusi = 0, iskanja_ne = 0, iskanje_ne_at = NULL, iskanja_nejasna = 0, zadnja_napaka = NULL,
+--   naslednji_poskus_at = NOW() + 5 minut, prevzeto_at = NULL, prevzem_zeton = NULL. Delavec racuni.js ga nato izda natanko enkrat (en Create).
+-- ZAKAJ +5 MINUT (pregled #351; pri 061 se je zgodilo prav to): ob deployu migracija tece na NOVI instanci, STARA instanca (koda brez productCode, z najemom racuni_najem) pa se nekaj
+-- casa tece in osvezeno vrstico prevzame v sekundah -> Create brez productCode -> spet »izid neznan«. Delavec ne prevzame vrstic z naslednji_poskus_at v prihodnosti, do takrat se
+-- stara instanca ugasne in vrstico izda ze nova koda.
 -- Kdaj NE naredi nicesar (RAISE NOTICE, migracija vseeno uspe): narocila ni (druga okolja, test), vrstica ni racun, ima stevilko / ponudnik_id / ponudnik_stevilka (dokument obstaja),
 --   stanje ni `caka` ali `napaka`, ali je poslano_at mlajsi od 10 minut (zahtevek je lahko se v teku). Druge vrstice se ne dotakne.
 --
@@ -46,9 +49,9 @@ BEGIN
   END IF;
   UPDATE racuni
      SET stanje = 'caka', poslano_at = NULL, poskusi = 0, iskanja_ne = 0, iskanje_ne_at = NULL, iskanja_nejasna = 0, zadnja_napaka = NULL,
-         naslednji_poskus_at = NOW(), prevzeto_at = NULL, prevzem_zeton = NULL
+         naslednji_poskus_at = NOW() + INTERVAL '5 minutes', prevzeto_at = NULL, prevzem_zeton = NULL
    WHERE id = v.id;
-  RAISE NOTICE '062: racun % za narocilo OUT-TTWH2V4Q (stanje %, poslano_at %) je spet v izdaji', v.id, v.stanje, v.poslano_at;
+  RAISE NOTICE '062: racun % za narocilo OUT-TTWH2V4Q (stanje %, poslano_at %) je spet v izdaji (izda se cez 5 minut)', v.id, v.stanje, v.poslano_at;
 END $$;
 
 COMMIT;

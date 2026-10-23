@@ -1297,11 +1297,18 @@ async function webhook(tip, objekt, id) {
     console.log("\n# SP. #285: spor pred mailom `ni_izvedeno` (pravi chargeback in neznano odlozi, lost ukine, ostalo gre); spor brez order_id (PI); valuta vracila (N3)");
     const evSp = await dogodek("Spor pred mailom", 2000);
     const vnesiSp = async (a, stanjeSpora, extra = {}) => {   // inactive_order: `ni_izvedeno` velja sam (brez maila »odpovedan«); spor brez mailov lastniku (ze poslana), brez povrnitve
-      const idV = (await pool.query(`INSERT INTO vracila (order_id, event_id, razlog, stanje, znesek_cents, payment_intent_id, stripe_vracilo_id, stripe_stanje, ni_izvedeno_od_at, naslednji_poskus_at, valuta)
+      // Vracilo in spor se vstavita v ENI transakciji: obdelovalec tece vsakih 250 ms in bi ob obremenitvi (CI) med dvema loceno potrjenima stavkoma vzel vracilo, ki spora se nima,
+      // in poslal mail, ki bi moral biti odlozen (nestabilen test, #351). Z eno transakcijo obdelovalec vidi bodisi oboje bodisi nic.
+      const c = await pool.connect();
+      try {
+        await c.query("BEGIN");
+        const idV = (await c.query(`INSERT INTO vracila (order_id, event_id, razlog, stanje, znesek_cents, payment_intent_id, stripe_vracilo_id, stripe_stanje, ni_izvedeno_od_at, naslednji_poskus_at, valuta)
                       VALUES ($1, $2, 'inactive_order', 'ni_uspelo', $6, $3, $4, 'failed', NOW() - INTERVAL '2 hours', NOW() + INTERVAL '1 hour', $5) RETURNING id`, [a.id, evSp, a.pi, "re_sp" + a.id, extra.valuta || null, extra.znesek || 2000])).rows[0].id;
-      if (stanjeSpora) await pool.query(`INSERT INTO spori (id, order_id, payment_intent_id, stanje, znesek_cents, valuta, mail_odprt_poslano_at, mail_zaprt_poslano_at)
+        if (stanjeSpora) await c.query(`INSERT INTO spori (id, order_id, payment_intent_id, stanje, znesek_cents, valuta, mail_odprt_poslano_at, mail_zaprt_poslano_at)
                       VALUES ($1, $2, $3, $4, $5, 'EUR', NOW(), NOW())`, ["dp_sp" + a.id, extra.brezOrder ? null : a.id, a.pi, stanjeSpora, extra.sporZnesek || 2000]);
-      return idV;
+        await c.query("COMMIT");
+        return idV;
+      } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; } finally { c.release(); }
     };
     // N5: dokaz, da je obdelovalec OBSEL vrstice: kontrolno vracilo (brez spora, vstavljeno PO nastavitvi) dobi mail; poizvedba obdelovalca vzame vse kandidate v enem prehodu (po id), zato je
     // prehod, ki je poslal kontrolni mail, vrstice z nizjim id ze ovrednotil. Cakanje na pogoj namesto fiksnega pocakaj().
