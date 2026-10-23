@@ -3108,11 +3108,12 @@ const NAPAKA_DOGODEK_MINIL_DATUM = { error: "event_finished", message: "This eve
 // `req.predlog` ({ id, agentZetonId }, agent_predlogi.js, 059, I57): dejanje je izvedba ali zapis predloga agenta -> oznaka predloga in zetona v isti vrstici.
 async function zapisiAdminDejanje(c, req, dejanje, ciljTip, ciljId, prej, potem, razlog) {
   const pr = req.predlog || null;
+  const nujno = !!(pr && pr.nujno === true);   // nujni nacin agenta (060, I58): oznaka + citat in seja v razlogu (dejanje poti razloga nima)
   await c.query(
-    `INSERT INTO admin_dejanja (admin_user_id, dejanje, cilj_tip, cilj_id, prej, potem, razlog, agent_zeton_id, predlog_id)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9)`,
+    `INSERT INTO admin_dejanja (admin_user_id, dejanje, cilj_tip, cilj_id, prej, potem, razlog, agent_zeton_id, predlog_id, nujno)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)`,
     [req.user.userId === undefined ? null : req.user.userId, dejanje, ciljTip, String(ciljId), prej === null || prej === undefined ? null : JSON.stringify(prej),
-     potem === null || potem === undefined ? null : JSON.stringify(potem), razlog || null, pr ? pr.agentZetonId : null, pr ? pr.id : null]);
+     potem === null || potem === undefined ? null : JSON.stringify(potem), razlog || (nujno ? pr.razlogNujno : null) || null, pr ? pr.agentZetonId : null, pr ? pr.id : null, nujno]);
 }
 // Primerljiva vrednost za dnevnik (Date -> ISO, NUMERIC/BIGINT niz ostane niz).
 const vrednostDnevnika = (v) => (v instanceof Date ? v.toISOString() : v === undefined ? null : v);
@@ -3686,7 +3687,8 @@ admin.get("/summary", async (req, res) => {
         (SELECT COUNT(*)::int FROM spori WHERE zaprt_at IS NULL)             AS open_disputes,
         (SELECT COUNT(*)::int FROM spori WHERE povrnitev_stanje IN ('ni_uspelo','rocno')) AS dispute_recovery_attention,
         (SELECT COUNT(*)::int FROM racuni WHERE stanje='napaka')             AS racuni_napaka,
-        (SELECT COUNT(*)::int FROM predlogi_dejanj WHERE stanje='caka' AND velja_do > NOW()) AS predlogi_caka`);
+        (SELECT COUNT(*)::int FROM predlogi_dejanj WHERE stanje='caka' AND velja_do > NOW()) AS predlogi_caka,
+        (SELECT COUNT(*)::int FROM predlogi_dejanj WHERE nujno_at IS NOT NULL AND nujno_pregledano_at IS NULL) AS nujno_nepregledanih`);
     return res.json({ ...r.rows[0], warnings_red: adminNadzor.rdeceStevilo() });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
@@ -4693,6 +4695,8 @@ const agentApi = require("./agent_api").ustvari({
   paymentsMode: () => (placilaStripe.testniNacin() ? "fake" : (placilaStripe.jeSandbox() ? "sandbox" : "live")),
   // predlogi agenta (#330, 2. del, 059, I57): izvedba SAMO po obstojecih poteh (ista validacija, isti zaklepi, isti dnevnik)
   dejanjaDogodka: { uredi: urediDogodek, ustvari: ustvariDogodek, podvoji: podvojiDogodek },
+  // nujni nacin (#330, 3. del, 060, I58): mail Martinu (AGENT_NUJNO_MAIL) z istim posiljanjem kot ostala obvestila; brez Resenda je nujni nacin izklopljen
+  imaResend: () => !!resend, posljiMail: (m) => gostResendPosli(m), resendDokazanaZavrnitev, ubeziHtml,
 });
 app.use("/agent/api", agentApi.router);
 app.use("/admin/api", admin);

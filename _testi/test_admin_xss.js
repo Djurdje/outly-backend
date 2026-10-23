@@ -170,7 +170,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
   assert(trsS.map(t => gumbov(t.children[t.children.length - 1])).join() === "1,1,0,0,0", "spori: gumb samo pri povrnitvi ni_uspelo/rocno", trsS.map(t => gumbov(t)));
 
   // --- 5. moduli panela (faza 1, 21. 10. 2026: admin/dialog.js, admin/dogodki.js) in brez window.confirm ---
-  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js", "agent.js", "predlogi.js"]) {
+  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js", "agent.js", "predlogi.js", "nujno.js"]) {
     const kod = fs.readFileSync(path.join(__dirname, "..", "admin", ime), "utf8");
     const k5 = [];
     for (const m of kod.matchAll(NEVARNO)) {
@@ -183,7 +183,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     assert(!/\bon[a-z]+\s*=\s*["'`]/i.test(kod.replace(/\bon[a-z]+\s*=\s*\(/g, "")), `admin/${ime}: brez onclick="..." / onchange="..." nizov`);
   }
   assert(!/\bconfirm\s*\(/.test(skripta), "admin/index.html: brez window.confirm (vse potrditve prek potrdi() iz dialog.js)");
-  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script src="agent\.js"><\/script>\s*<script src="predlogi\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
+  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script src="agent\.js"><\/script>\s*<script src="predlogi\.js"><\/script>\s*<script src="nujno\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
   assert(/<link rel="stylesheet" href="danes\.css">/.test(html), "danes.css je vezan v index.html");
   assert(!/<link[^>]+(?:https?:)?\/\//.test(html) && !/<script[^>]+src="(?:https?:)?\/\//.test(html), "panel ne nalaga tujih skript ali stilov");
   // dialog.js: vsebina iz podatkov gre v DOM kot besedilo (izvajalno, lažni DOM)
@@ -557,7 +557,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
       assert(oznake($8("ag_koren")).besedila.join("\n").includes("Agent API je izklopljen"), "agent.js: AGENT_API=0 -> opozorilo v zavihku");
       // obseg (#330, 2. del): izbira »branje + predlogi« -> POST z obsegom [beri, predlagaj]; privzeto ostane [beri] (preverjeno zgoraj)
       const obsegi = []; sprehod($8("ag_koren"), (e) => { if (e.nodeType === 1 && e.tagName === "select" && e.attrs.id === "ag_obseg") obsegi.push(e); });
-      assert(obsegi.length === 1 && obsegi[0].children.length === 2, "agent.js: izbira obsega (beri / beri + predlagaj)", obsegi.length);
+      assert(obsegi.length === 1 && obsegi[0].children.length === 3, "agent.js: izbira obsega (beri / beri + predlagaj / beri + predlagaj + nujno)", obsegi.length);
       obsegi[0].onchange({ currentTarget: { value: "beri+predlagaj" } });
       potrdiKlici8.length = 0; potrdiOdgovor8 = { razlog: "predlogi" }; klici8.length = 0;
       await vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b) === "Ustvari žeton").onclick();
@@ -569,6 +569,20 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
       potrdiKlici8.length = 0; klici8.length = 0;
       await vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b) === "Ustvari žeton").onclick();
       assert(JSON.stringify(klici8.find((k) => k.metoda === "POST").telo.obseg) === '["beri"]', "agent.js: neznana vrednost izbire -> samo beri");
+      // nujni nacin (#330, 3. del): izrecna izbira, potrditveno okno je »nevarno« in opozori; POST z [beri, predlagaj, nujno]
+      obsegi[0].onchange({ currentTarget: { value: "beri+predlagaj+nujno" } });
+      potrdiKlici8.length = 0; potrdiOdgovor8 = null; klici8.length = 0;
+      await vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b) === "Ustvari žeton").onclick();
+      const okvirN = new El2("div"); okvirN.append(...potrdiKlici8[0].vsebina.filter(Boolean));
+      const besN = oznake(okvirN).besedila.join(" ");
+      assert(potrdiKlici8[0].nevarno === true && besN.includes("NUJNI NAČIN") && besN.includes("3 nujna dejanja na 24 ur") && besN.includes("Izvoz baze in vloga admin/backup nikoli") && !klici8.some((k) => k.metoda === "POST"),
+        "agent.js: nujni nacin: opozorilo v potrditvenem oknu (nevarno), Prekliči = brez POST-a", besN.slice(0, 200));
+      potrdiOdgovor8 = { razlog: "nujno" }; klici8.length = 0;
+      await vseTipke($8("ag_koren")).find((b) => tipkaBesedilo(b) === "Ustvari žeton").onclick();
+      assert(JSON.stringify(klici8.find((k) => k.metoda === "POST").telo.obseg) === '["beri","predlagaj","nujno"]', "agent.js: obseg beri + predlagaj + nujno gre v POST");
+      seznam8 = { agent_api: true, agent_nujno: "nujno_brez_obvestila", items: [] };
+      await okno8.naloziAgenta();
+      assert(oznake($8("ag_koren")).besedila.join("\n").includes("AGENT_NUJNO_MAIL"), "agent.js: nujni nacin brez prejemnika -> opomba v zavihku");
     }
 
     // --- predlogi.js (#330, 2. del): zavihek »Čaka potrditev« ---
@@ -631,6 +645,62 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
       klici9.length = 0;
       await izbira9[0].onchange({ currentTarget: { value: "vse" } });
       assert(klici9.some((k) => k.pot === "/admin/api/predlogi?stanje=vse"), "predlogi.js: filter stanja");
+    }
+
+    // --- nujno.js (#330, 3. del): rdec pas nujnih dejanj agenta in »Pregledal sem« ---
+    {
+      const klici10 = [], potrdiKlici10 = [], obvestila10 = [];
+      let potrdiOdgovor10 = null, seznam10 = {};
+      const klic10 = async (metoda, pot, telo) => {
+        klici10.push({ metoda, pot, telo });
+        if (metoda === "GET") { mora(pot === "/admin/api/predlogi/nujno", "nujno.js: nepricakovan GET " + pot); return JSON.parse(JSON.stringify(seznam10)); }
+        mora(/^\/admin\/api\/predlogi\/\d+\/nujno-pregledano$/.test(pot), "nujno.js: nepricakovan klic " + metoda + " " + pot);
+        return {};
+      };
+      class El10 extends El2 { constructor(t) { super(t); this.skrit = false; } get classList() { const s = this; return { add(c) { if (c === "skrito") s.skrit = true; }, remove(c) { if (c === "skrito") s.skrit = false; }, toggle() {}, contains: () => s.skrit }; } }
+      const el10 = {};
+      const $10 = (id) => (el10[id] = el10[id] || new El10("div"));
+      const okno10 = {};
+      new Function("window", "document", "$", "h", "klic", "datum", "varno", "obvesti", "potrdi", koda("nujno.js"))(
+        okno10, doc7, $10, new Function("document", `${mh[0]}\nreturn h;`)(doc7), klic10, new Function(`${md[0]}\nreturn datum;`)(), varno, (b) => obvestila10.push(b), async (o) => { potrdiKlici10.push(o); return potrdiOdgovor10; });
+      mora(typeof okno10.naloziNujnoPas === "function", "nujno.js ne izvozi window.naloziNujnoPas");
+      const DOV10 = new Set(["div", "span", "b", "p", "button", "small"]);
+      const postavka10 = (id, polja) => ({ id, dejanje: "event.ustavi_prodajo", cilj_tip: "event", cilj_id: 7, cilj_naslov: ZLO7[0], spremembe: { sales_paused: true, [ZLO7[1]]: ZLO7[2] },
+        prej: { sales_paused: false, [ZLO7[1]]: ZLO7[3] }, nujno_potrditev: ZLO7[2] + " potrjujem: ustavi prodajo", nujno_seja: "javascript:alert(1)//" + ZLO7[0], nujno_at: "2026-10-23T10:00:00Z",
+        nujno_pregledano_at: null, agent_zeton_id: 3, zeton_ime: ZLO7[3], mail: "neznan", ...polja });
+      // brez nujnih dejanj: pas skrit in prazen
+      seznam10 = { nepregledanih: 0, zadnjih_24h: 0, meja_24h: 3, items: [] };
+      await okno10.naloziNujnoPas();
+      assert($10("nujno_pas").skrit === true && $10("nujno_pas").children.length === 0, "nujno.js: brez nujnih dejanj ni pasu");
+      seznam10 = { nepregledanih: 2, zadnjih_24h: 2, meja_24h: 3, items: [postavka10(1), postavka10("2<img src=x onerror=alert(1)>", { dejanje: ZLO7[1], spremembe: "ni objekt", prej: [1], mail: ZLO7[0] })] };
+      await okno10.naloziNujnoPas();
+      const p10 = oznake($10("nujno_pas"));
+      assert($10("nujno_pas").skrit === false, "nujno.js: z nujnimi dejanji je pas viden");
+      assert(p10.elementi.length > 20 && p10.elementi.every((t) => DOV10.has(t)), "nujno.js: nobenega elementa iz podatkov (img/script/a/iframe) — seja ni povezava", [...new Set(p10.elementi)]);
+      assert(brezOn(p10), "nujno.js: brez on* atributov");
+      const bes10 = p10.besedila.join("\n");
+      for (const z of ZLO7) assert(bes10.includes(z), "nujno.js: niz iz podatkov konča kot besedilo: " + z.slice(0, 30));
+      assert(bes10.includes("javascript:alert(1)//") && bes10.includes("nujnem načinu") && bes10.includes("Pregledal sem") && bes10.includes("2 od 3"), "nujno.js: seja kot besedilo, naslov pasu, meja 24 h");
+      const vlogaAlert = []; sprehod($10("nujno_pas"), (e) => { if (e.nodeType === 1 && e.attrs && e.attrs.role === "alert") vlogaAlert.push(e); });
+      assert(vlogaAlert.length === 1, "nujno.js: pas ima role=alert");
+      const tipke10 = () => { const r = []; sprehod($10("nujno_pas"), (e) => { if (e.nodeType === 1 && e.tagName === "button" && e.children.map((c) => c.data || "").join("") === "Pregledal sem") r.push(e); }); return r; };
+      assert(tipke10().length === 2, "nujno.js: »Pregledal sem« pri vsakem nujnem dejanju posebej", tipke10().length);
+      // Pregledal sem: Prekliči v oknu = brez POST-a; potrditev = POST z razlogom, nato osvežitev
+      potrdiOdgovor10 = null; klici10.length = 0;
+      await tipke10()[0].onclick();
+      assert(potrdiKlici10.length === 1 && !klici10.some((k) => k.metoda === "POST"), "nujno.js: Prekliči v potrditvenem oknu = brez POST-a");
+      const okvir10 = new El2("div"); okvir10.append(...potrdiKlici10[0].vsebina.filter(Boolean));
+      const v10 = oznake(okvir10);
+      assert(v10.elementi.every((t) => DOV10.has(t)) && v10.besedila.join(" ").includes(ZLO7[2]) && v10.besedila.join(" ").includes("prekliči žeton"), "nujno.js: potrditveno okno kaže citat kot besedilo in kaj narediti, če ni tvoj", [...new Set(v10.elementi)]);
+      potrdiOdgovor10 = { razlog: "res sem potrdil" }; klici10.length = 0;
+      seznam10 = { nepregledanih: 0, zadnjih_24h: 2, meja_24h: 3, items: [] };
+      await tipke10()[0].onclick();
+      const post10 = klici10.find((k) => k.metoda === "POST");
+      assert(post10 && post10.pot === "/admin/api/predlogi/1/nujno-pregledano" && post10.telo.reason === "res sem potrdil" && klici10.some((k) => k.metoda === "GET"), "nujno.js: Pregledal sem -> POST /:id/nujno-pregledano, nato osvežitev", klici10);
+      assert($10("nujno_pas").skrit === true, "nujno.js: ko ni več nepregledanih, pas izgine");
+      // index.html: pas je na vrhu panela (pred meniji), naloži se ob Pregledu
+      assert(/<div id="panel" class="skrito">\s*<!--[^>]*-->\s*<div id="nujno_pas" class="skrito"><\/div>\s*<nav>/.test(html), "index.html: rdeč pas na vrhu panela, pred menijem");
+      assert(/window\.naloziNujnoPas\(\)/.test(skripta), "index.html: Pregled naloži rdeč pas");
     }
   }
 

@@ -1,4 +1,5 @@
-// Admin panel, zavihek »Agent« (#330, 23. 10. 2026): zetoni za agenta (Claude); obseg `beri` ali `beri + predlagaj` (2. del, 059: predlogi, ki jih admin potrdi v »Čaka potrditev«). Seznam (ime, obseg, velja do, zadnja raba, stanje), »Ustvari zeton«
+// Admin panel, zavihek »Agent« (#330, 23. 10. 2026): zetoni za agenta (Claude); obseg `beri`, `beri + predlagaj` (2. del, 059: predlogi, ki jih admin potrdi v »Čaka potrditev«)
+// ali `beri + predlagaj + nujno` (3. del, 060: NUJNI NAČIN — agent sam izvede svoj predlog z Martinovo pisno potrditvijo; izrecna izbira, opozorilo v potrditvenem oknu). Seznam (ime, obseg, velja do, zadnja raba, stanje), »Ustvari zeton«
 // (potrdi() z obveznim razlogom; zeton se prikaze ENKRAT z gumbom »Kopiraj«) in »Preklici« (potrdi()). API: GET/POST /admin/api/agent-zetoni, POST .../:id/preklici (agent_api.js).
 // Zeton v cistopisu je samo v spremenljivki `prikazanZeton`, dokler ga admin ne zapre ali ne osvezi zavihka; nikamor se ne shrani (ne localStorage, ne URL).
 // Brez ogrodja in brez gradnje (DECISIONS 21. 10. 2026). Uporablja globalne funkcije iz index.html: klic, h, datum, $, obvesti, varno, potrdi (dialog.js).
@@ -8,7 +9,9 @@
   const STANJA = { aktiven: ["aktiven", "ok"], potekel: ["potekel", "siva"], preklican: ["preklican", "siva"] };
   const DNEVI = [[7, "7 dni"], [30, "30 dni (privzeto)"], [90, "90 dni (najvec)"]];
   const GOSTITELJ = "outly-backend-roy3.onrender.com";
-  const OBSEGI = [["beri", "samo branje"], ["beri+predlagaj", "branje + predlogi (potrdiš jih ti)"]];
+  const OBSEGI = [["beri", "samo branje"], ["beri+predlagaj", "branje + predlogi (potrdiš jih ti)"],
+    ["beri+predlagaj+nujno", "branje + predlogi + NUJNI NAČIN (agent izvede z tvojo pisno potrditvijo)"]];
+  const OBSEG_IZ = { "beri": ["beri"], "beri+predlagaj": ["beri", "predlagaj"], "beri+predlagaj+nujno": ["beri", "predlagaj", "nujno"] };
   let podatki = null, prikazanZeton = null, formIme = "Claude Code", formDni = 30, formObseg = "beri";
 
   const cele = (n) => (Number.isSafeInteger(Number(n)) ? Number(n) : 0);
@@ -58,15 +61,18 @@
     const dniIzbira = h("select", { id: "ag_dni", "aria-label": "Veljavnost žetona", onchange: (ev) => { formDni = cele(ev.currentTarget.value) || 30; } },
       DNEVI.map(([d, t]) => h("option", { value: String(d) }, t)));
     dniIzbira.value = String(formDni);
-    const obsegIzbira = h("select", { id: "ag_obseg", "aria-label": "Obseg žetona", onchange: (ev) => { formObseg = ev.currentTarget.value === "beri+predlagaj" ? "beri+predlagaj" : "beri"; } },
+    const obsegIzbira = h("select", { id: "ag_obseg", "aria-label": "Obseg žetona", onchange: (ev) => { formObseg = Object.prototype.hasOwnProperty.call(OBSEG_IZ, ev.currentTarget.value) ? ev.currentTarget.value : "beri"; } },
       OBSEGI.map(([v, t]) => h("option", { value: v }, t)));
     obsegIzbira.value = formObseg;
     const telo = [
       h("p", { class: "telo-opomba" },
         "Žeton za Claude: branje dogodkov, prodaje, računov, opozoril in dnevnika dejanj. Agent ne vidi e-naslovov, imen ali telefonov kupcev in sam ničesar ne spreminja; ",
         "z obsegom »predlogi« lahko predlaga urejanje, objavo ali ustavitev prodaje, ki se izvede šele, ko ga potrdiš v zavihku »Čaka potrditev«. ",
+        "Z »nujnim načinom« sme predlog izvesti sam, samo z tvojo pisno potrditvijo v seji (dobiš mail, rdeč pas na vrhu, največ 3 na 24 ur). ",
         "Žeton velja na /agent/api/*, drugje je zavrnjen. Preklic velja takoj; vse naenkrat izklopi AGENT_API=0 na Renderju."),
       podatki && podatki.agent_api === false ? h("div", { class: "opozorilo", role: "alert" }, "Agent API je izklopljen (AGENT_API=0 na Renderju): vsi klici agenta dobijo 503.") : null,
+      podatki && podatki.agent_nujno === "nujno_off" ? h("p", { class: "telo-opomba" }, "Nujni način je izklopljen (AGENT_NUJNO=0 na Renderju).") : null,
+      podatki && podatki.agent_nujno === "nujno_brez_obvestila" ? h("p", { class: "telo-opomba" }, "Nujni način ne deluje: na Renderju ni nastavljen AGENT_NUJNO_MAIL (kam gre obvestilo) ali Resend. Brez obvestila agent nič ne izvede sam.") : null,
       okvirZetona(),
       h("div", { class: "ag-obrazec" },
         h("label", {}, h("small", {}, "ime (kje je žeton vpisan)"), imePolje),
@@ -92,11 +98,17 @@
     if (!ime) { obvesti("Vpiši ime žetona.", "slabo"); return; }
     if (ime.length > 60) { obvesti("Ime je predolgo (največ 60 znakov).", "slabo"); return; }
     const dni = formDni;
-    const obseg = formObseg === "beri+predlagaj" ? ["beri", "predlagaj"] : ["beri"];
+    const obseg = OBSEG_IZ[formObseg] || ["beri"];
+    const nujno = obseg.includes("nujno");
     const izid = await potrdi({
-      naslov: "Ustvarim žeton za agenta?", potrdiBesedilo: "Ustvari žeton", razlog: "obvezen",
+      naslov: "Ustvarim žeton za agenta?", potrdiBesedilo: "Ustvari žeton", razlog: "obvezen", nevarno: nujno,
       vsebina: [h("p", {}, `Žeton »${ime}« bo veljal ${dni} dni in dovoli branje (dogodki, prodaja, računi, opozorila, dnevnik). Brez osebnih podatkov kupcev.`),
         obseg.includes("predlagaj") ? h("p", {}, "Dovoli tudi PREDLOGE (urejanje besedila, plakata in žanrov, okno prodaje, objava, ustavitev in zagon prodaje, nov osnutek, podvajanje). Nič se ne izvede brez tvoje potrditve v »Čaka potrditev«; cene, odpovedi, vračil in vlog agent ne more predlagati.") : null,
+        nujno ? h("div", { class: "opozorilo", role: "alert" },
+          h("b", {}, "NUJNI NAČIN: "),
+          "agent sme svoj predlog (mlajši od 1 ure) izvesti SAM, brez tvojega klika, če v seji Claude Code napišeš potrditev, ki poimenuje dejanje. ",
+          "Strežnik ne more preveriti, da je potrditev res tvoja: varovala so pravila agenta, tvoj mail ob vsakem nujnem dejanju, rdeč pas v panelu in največ 3 nujna dejanja na 24 ur. ",
+          "Izvoz baze in vloga admin/backup nikoli. Vklopi samo, če res rabiš.") : null,
         h("p", {}, "Prikazan bo samo enkrat. Vpiši ga v nastavitve okolja Claude Code (Network secrets), ne v chat.")],
     });
     if (!izid) return;
