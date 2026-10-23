@@ -138,7 +138,8 @@ function nicOsebnega(ime, tekst) {
     E.demo = await dogodek(K_DEMO, "Demo dogodek", { start: "4 days", end: "4 days 6 hours" });
     E.skrit = await dogodek(K_SKRIT, "Dogodek skritega kluba", { start: "7 days", end: "7 days 6 hours" });
     E.stara = await dogodek(K1, "Stara zabava", { start: "-40 days", end: "-39 days" });
-    await pool.query("UPDATE events SET sold_count = 3 WHERE id = $1", [E.pub]);
+    await pool.query("UPDATE events SET sold_count = 3, genres = ARRAY['techno', '<img src=x onerror=alert(1)>', 'house', 'ni-zanr']::text[] WHERE id = $1", [E.pub]);
+    await pool.query("UPDATE events SET poster_url = '' WHERE id = $1", [E.osnutek]);
 
     let ref = 1;
     const narocilo = async (eventId, klubId, polja = {}) => {
@@ -336,11 +337,13 @@ function nicOsebnega(ime, tekst) {
     const seznam = odg["/events"].body;
     const idji = seznam.items.map((e) => e.id);
     assert(seznam.items.length === 7 && [E.pub, E.osnutek, E.preklican, E.zlobni, E.demo, E.skrit, E.stara].every((i) => idji.includes(i)), "events: vseh 7 dogodkov (osnutek, preklican, skriti klub, demo, stari)", idji);
-    const KLJUCI = ["id", "club_id", "club_name", "club_hidden", "club_is_demo", "title", "status", "start_at", "end_at", "ticket_price_cents", "currency", "capacity", "sold_count", "sales_paused", "sales_open_at", "sales_close_at", "poster_url", "min_age", "genres", "vip_enabled", "venue_name", "venue_city", "has_ticket_url", "created_at", "prodaja"];
+    const KLJUCI = ["id", "club_id", "club_name", "club_hidden", "club_is_demo", "title", "status", "start_at", "end_at", "ticket_price_cents", "currency", "capacity", "sold_count", "sales_paused", "sales_open_at", "sales_close_at", "has_poster", "min_age", "genres", "vip_enabled", "venue_name", "venue_city", "has_ticket_url", "created_at", "prodaja"];
     const pub = seznam.items.find((e) => e.id === E.pub);
     assert(re(Object.keys(pub).sort()) === re([...KLJUCI].sort()), "events: natanko nasteti stolpci (brez opisa, ticket_url, koordinat ...)", Object.keys(pub));
     assert(pub.club_name === "Klub Eden" && pub.currency === "EUR" && pub.ticket_price_cents === 1500 && pub.has_ticket_url === true && pub.venue_city === "Ljubljana" && pub.club_hidden === false && pub.club_is_demo === false, "events: polja dogodka", pub);
     assert(seznam.items.find((e) => e.id === E.skrit).club_hidden === true && seznam.items.find((e) => e.id === E.demo).club_is_demo === true, "events: oznaki club_hidden in club_is_demo");
+    assert(re(pub.genres) === re(["techno", "house"]) && pub.has_poster === true && seznam.items.find((e) => e.id === E.osnutek).has_poster === false && !("poster_url" in pub), "events: zanri samo iz seznama ZANRI (tuj niz izpuscen); has_poster boolean namesto poster_url", [pub.genres, pub.has_poster]);
+    assert(!odg["/events"].text.includes("p.jpg") && !odg["/events"].text.includes("<img"), "events: ni URL-ja plakata in ni tujih nizov med zanri");
     assert(!odg["/events"].text.includes("tajna-povezava") && !odg["/events"].text.includes("Opis:"), "events: brez povezave za vstopnice in brez opisa");
     // stevci prodaje = kot GET /admin/api/events/:id stats
     const adm = await api(PORT, "GET", `/admin/api/events/${E.pub}`, T.admin);
@@ -507,6 +510,26 @@ function nicOsebnega(ime, tekst) {
     r = await dobi("/opozorila");
     assert(r.status === 200, "po koncu poizvedbe se semafor sprosti (spet 200)", [r.status, r.body]);
 
+    // S1-b: prekinitev odjemalca MED visecim iskanjem zetona: prekinjen zahtevek ne sme zaceti novega dela (finance bi obvisela na zaklepu orders), agent nikoli ne drzi 2 povezav
+    {
+      let maks = 0, videno = 0, teci = true;
+      const vzorcevalec = (async () => { while (teci) { const n = (await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE application_name = 'agent_api'")).rows[0].n; maks = Math.max(maks, n); if (n > 0) videno++; await pocakaj(15); } })();
+      const ko = await zakleni("orders");
+      for (let i = 0; i < 3; i++) {
+        const kz = await zakleni("agent_zetoni");
+        const ac = new AbortController();
+        const p = fetch(`http://127.0.0.1:${PORT}/agent/api/finance`, { headers: { authorization: "Bearer " + TOK }, signal: ac.signal }).then((x) => x.status, () => "prekinjeno");
+        await pocakaj(150); ac.abort(); await p; await pocakaj(50);
+        await odkleni(kz); await pocakaj(400);   // iskanje zetona se zakljuci; finance NE sme zaceti
+        const n = (await pool.query("SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE application_name = 'agent_api'")).rows[0].n;
+        assert(n === 0, `prekinjen zahtevek (${i + 1}.) po koncu iskanja ne zacne finance: nobene povezave agent_api`, n);
+      }
+      const navadna = await api(PORT, "GET", "/agent/api/finance", TOK);   // orders je se zaklenjen: poizvedba preseze 2 s
+      assert(navadna.status === 503 && navadna.body.error === "admin_busy", "po prekinitvah se semafor sprosti: navadna zahteva ni 429, dobi 503 (zaklep orders)", [navadna.status, navadna.body]);
+      await odkleni(ko); teci = false; await vzorcevalec;
+      assert(videno > 0 && maks <= 1, `v pg_stat_activity nikoli vec kot ena povezava agent_api (najvec ${maks}, videno ${videno}x)`, [maks, videno]);
+    }
+
     // 6b. omejevalnik po zetonu (C: 4/h)
     const CZ = (await api(PORT_ZETON, "POST", "/admin/api/agent-zetoni", T.admin, { ime: "C-zeton" })).body;
     const CZ2 = (await api(PORT_ZETON, "POST", "/admin/api/agent-zetoni", T.admin, { ime: "C-zeton-2" })).body;
@@ -601,6 +624,7 @@ function nicOsebnega(ime, tekst) {
         const t2 = Date.now(); const izh = ocisti({ n: niz });
         assert(Date.now() - t2 < 500 && izh.n.length <= 2000 * 5, `ocisti(${ime}): ${Date.now() - t2} ms, vhod odrezan na 2000 znakov (izhod najvec nekaj-krat daljsi zaradi zamenjav)`, [Date.now() - t2, izh.n.length]);
       }
+      assert(brezBesedil({ currency: "EUR" }).currency === "EUR" && brezBesedil({ currency: "eur" }).currency === "[besedilo spremenjeno]" && brezBesedil({ currency: "EURO" }).currency === "[besedilo spremenjeno]" && brezBesedil({ status: "EUR" }).status === "[besedilo spremenjeno]", "brezBesedil: currency samo ^[A-Z]{3}$");
       const bb = brezBesedil({ a: 1, b: true, c: null, d: "besedilo", status: "published", role: "Admin Bob", e: "2026-10-23T10:00:00Z", f: ["x", 2], g: { h: "y", status: "draft" } });
       assert(JSON.stringify(bb) === JSON.stringify({ a: 1, b: true, c: null, d: "[besedilo spremenjeno]", status: "published", role: "[besedilo spremenjeno]", e: "2026-10-23T10:00:00Z", f: ["[besedilo spremenjeno]", 2], g: { h: "[besedilo spremenjeno]", status: "draft" } }), "brezBesedil: stevila, boolovi, null, ISO datum in status ostanejo; vse drugo placeholder", bb);
     }

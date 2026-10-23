@@ -4629,7 +4629,7 @@ const adminNadzor = require("./admin_nadzor").ustvari({
 // Dostop za agenta (Claude) z zetonom samo za branje (#330, 1. del; migracija 058; ARCHITECTURE »Dostop za agenta«, I56). Upravljanje zetonov: GET/POST /admin/api/agent-zetoni
 // (vloga admin, na routerju `admin`); poti za agenta: /agent/api/* (samo GET). Zeton agenta je na VSEH drugih poteh 403 že v requireAuthNa (brez baze).
 const agentApi = require("./agent_api").ustvari({
-  pool, adminRouter: admin, nadzor: adminNadzor, omeji, zapisiAdminDejanje, celoId4, odgovoriNaNapako, SQL_TESTNO_NAROCILO,
+  pool, adminRouter: admin, nadzor: adminNadzor, omeji, zapisiAdminDejanje, celoId4, odgovoriNaNapako, SQL_TESTNO_NAROCILO, ZANRI,
   SQL_NAROCILO_PLATFORMNO: (a) => placilaStripe.SQL_NAROCILO_PLATFORMNO(a),
   paymentsMode: () => (placilaStripe.testniNacin() ? "fake" : (placilaStripe.jeSandbox() ? "sandbox" : "live")),
 });

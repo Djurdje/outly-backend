@@ -58,7 +58,7 @@ const PLACEHOLDER = "[besedilo spremenjeno]";
 const KLJUCI_NABORA = new Set(["status", "role", "currency", "obseg"]);
 const RE_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
 function brezBesedil(v, kljuc = "", globina = 0) {
-  if (typeof v === "string") return (KLJUCI_NABORA.has(kljuc) && /^[a-z_]{1,30}$/.test(v)) || RE_ISO.test(v) ? v : PLACEHOLDER;
+  if (typeof v === "string") return (KLJUCI_NABORA.has(kljuc) && (kljuc === "currency" ? /^[A-Z]{3}$/ : /^[a-z_]{1,30}$/).test(v)) || RE_ISO.test(v) ? v : PLACEHOLDER;
   if (v === null || typeof v !== "object") return v;   // stevila, boolovi, null
   if (globina >= NAJVEC_GLOBINA) return PLACEHOLDER;
   if (Array.isArray(v)) return v.map((x) => brezBesedil(x, kljuc, globina + 1));
@@ -78,12 +78,17 @@ const veljavenDan = (s) => {
 };
 
 function ustvari(dep) {
-  const { pool, adminRouter, nadzor, omeji, zapisiAdminDejanje, celoId4, SQL_TESTNO_NAROCILO, SQL_NAROCILO_PLATFORMNO, paymentsMode } = dep;
+  const { pool, adminRouter, nadzor, omeji, zapisiAdminDejanje, celoId4, SQL_TESTNO_NAROCILO, SQL_NAROCILO_PLATFORMNO, paymentsMode, ZANRI } = dep;
   const T = SQL_TESTNO_NAROCILO;
   let zaseden = false, zahtevekZaprt = true, vBranju = 0;
   const sprosti = () => { if (zaseden && zahtevekZaprt && vBranju === 0) zaseden = false; };
-  // lasten bralec (brez admin semaforja) in lasten predpomnilnik (#330 S1); vsako branje se steje, semafor agenta se sprosti sele po koncu branj
-  const agent = nadzor.zaAgenta({ zacni: () => { vBranju++; }, konec: () => { vBranju--; sprosti(); } });
+  // Lasten bralec (brez admin semaforja) in lasten predpomnilnik (#330 S1) PO ZAHTEVKU: vsako branje se steje (semafor se sprosti sele po koncu branj), PREKINJEN zahtevek
+  // (odjemalec je zaprl povezavo pred koncem odgovora) pa NOVEGA branja ne zacne (AGENT_PREKINJEN): po prekinitvi tece najvec ze zaceta poizvedba, nikoli nova (S1-b).
+  const kavljiZa = (req) => ({
+    zacni: () => { if (req.agentPrekinjen) throw Object.assign(new Error("agent: odjemalec je prekinil zahtevek"), { code: "AGENT_PREKINJEN" }); vBranju++; },
+    konec: () => { vBranju--; sprosti(); },
+  });
+  const agentSplosno = nadzor.zaAgenta();   // samo odgovoriNapaka
   const MEJA_ZETON = okoljeCelo("AGENT_API_NA_URO", 300, 1, 100000);   // zahtevkov na uro na zeton
   const MEJA_IP = okoljeCelo("AGENT_API_IP_NA_MIN", 120, 1, 100000);   // zahtevkov na minuto na IP (pred prijavo: napacni zetoni)
 
@@ -195,12 +200,14 @@ function ustvari(dep) {
   const zadnjaRaba = new Map();   // id zetona -> ms zadnjega zapisa (omejitev pisanja na minuto)
   // Zapis se opravi V zahtevku (ob prvem klicu v minuti, nekaj ms), da agent skupaj nikoli ne drzi vec kot ene povezave glavnega poola; zunaj READ ONLY transakcije
   // (pisanje), z mejnima casoma (lock_timeout 1 s, statement_timeout 2 s); napaka se ne pozna odgovoru. Pogoj v SQL-u zadrzi mejo tudi med vec instancami.
-  async function zapisiRabo(id) {
+  async function zapisiRabo(req, id) {
+    if (req.agentPrekinjen) return;
     const zdaj = Date.now();
     const prej = zadnjaRaba.get(id);
     if (prej !== undefined && zdaj - prej < RABA_ZAPIS_MS) return;
     zadnjaRaba.set(id, zdaj);
     let c;
+    vBranju++;   // delo pod semaforjem agenta
     try {
       c = await pool.connect();
       await c.query("BEGIN");
@@ -211,7 +218,7 @@ function ustvari(dep) {
     } catch (e) {
       if (c) await c.query("ROLLBACK").catch(() => {});
       console.error("[agent] zadnja_raba_at ni zapisana:", e && e.message);
-    } finally { if (c) c.release(); }
+    } finally { if (c) c.release(); vBranju--; sprosti(); }
   }
 
   // 1. oblika zetona + odtis (brez baze); napacna oblika ne zasede semaforja
@@ -227,28 +234,42 @@ function ustvari(dep) {
   router.use((req, res, next) => {
     if (zaseden) return res.status(429).set("Retry-After", "1").json({ error: "agent_busy", message: "Only one agent request at a time." });
     zaseden = true; zahtevekZaprt = false;
-    res.once("close", () => { zahtevekZaprt = true; sprosti(); });
+    req.agentPrekinjen = false;
+    req.agent = nadzor.zaAgenta(kavljiZa(req));
+    // close brez konca odgovora = odjemalec je prekinil: zahtevek ne sme zaceti nobenega novega dela (gate pred vsakim branjem, zapisom in korakom spodaj);
+    // semafor se sprosti, ko je zahtevek zaprt IN ni vec nobenega tekocega dela (poizvedba, zapis, omejevalnik)
+    res.once("close", () => { if (!res.writableFinished) req.agentPrekinjen = true; zahtevekZaprt = true; sprosti(); });
     next();
   });
 
   // 3. meja po zetonu: 300/h (AGENT_API_NA_URO); kljuc je ODTIS predlozenega zetona, zato velja PRED iskanjem v bazi (zeton nad mejo ne povzroca vec poizvedb; N1);
   // stevec v bazi, ne v pomnilniku (I15). Izmisljeni zetoni dobijo vsak svojo vrstico (omejeno z mejo po IP zgoraj in ciscenjem izteklih vrstic).
-  router.use(omeji({ kljuc: "agent_zeton", najvec: MEJA_ZETON, oknoSekund: 3600, kljucIz: (req) => "agent:" + req.zetonOdtis.slice(0, 32),
-    telo429: { error: "agent_rate_limited", message: "Hourly request limit for this agent token reached." } }));
+  const omejiZeton = omeji({ kljuc: "agent_zeton", najvec: MEJA_ZETON, oknoSekund: 3600, kljucIz: (req) => "agent:" + req.zetonOdtis.slice(0, 32),
+    telo429: { error: "agent_rate_limited", message: "Hourly request limit for this agent token reached." } });
+  router.use(async (req, res, next) => {   // omejevalnik je delo pod semaforjem: steje se, nadaljevanje po prekinitvi se ne zgodi
+    let naprej = false;
+    vBranju++;
+    try { await omejiZeton(req, res, () => { naprej = true; }); }
+    catch (e) { return next(e); }
+    finally { vBranju--; sprosti(); }
+    if (naprej && !req.agentPrekinjen) next();
+  });
 
   // 4. prijava: odtis -> vrstica; napacen/preklican/potekel = 401 (isti odgovor); izpad baze = 503 (I10). Iskanje gre prek bralca agenta (READ ONLY, 2 s), ne prek
   // semaforja plosce. Preklic velja takoj (brez predpomnilnika).
   async function prijava(req, res, next) {
     let v;
     try {
-      v = (await agent.beri((c) => c.query(
+      v = (await req.agent.beri((c) => c.query(
         "SELECT id, obseg, preklican_at, (velja_do > NOW()) AS veljaven FROM agent_zetoni WHERE zeton_sha256 = $1", [req.zetonOdtis]))).rows[0];
-    } catch (e) { return agent.odgovoriNapaka(res, e, "agent prijava"); }
+    } catch (e) { return odgovoriNapaka(res, e, "agent prijava"); }
+    if (req.agentPrekinjen) return;
     if (!v) return res.status(401).json({ error: "invalid_token", message: "Missing or invalid agent token." });
     req.agentId = v.id;   // za dnevnik
     if (v.preklican_at || !v.veljaven) return res.status(401).json({ error: "invalid_token", message: "Missing or invalid agent token." });
     req.user = { role: "agent", agentZetonId: v.id, obseg: v.obseg };   // brez userId: nobena pot, ki isce uporabnika, agenta ne najde
-    await zapisiRabo(v.id);
+    await zapisiRabo(req, v.id);
+    if (req.agentPrekinjen) return;
     next();
   }
   router.use(prijava);
@@ -269,21 +290,22 @@ function ustvari(dep) {
     return res.json(ocisti(telo));
   }
   const napaka400 = (res, error, message) => res.status(400).json({ error, message });
-  const odgovoriNapaka = (res, e, kje) => agent.odgovoriNapaka(res, e, kje);
+  // prekinjen zahtevek: odjemalca ni vec, odgovora ne pisemo (in tega ne sporocamo kot napake)
+  const odgovoriNapaka = (res, e, kje) => (e && e.code === "AGENT_PREKINJEN" ? undefined : agentSplosno.odgovoriNapaka(res, e, kje));
 
   // --- danes, opozorila, racuni: isti izracun in predpomnilnik kot v panelu ---
   router.get("/danes", async (req, res) => {
     try {
-      const d = await agent.danes();
+      const d = await req.agent.danes();
       const rez200 = (x) => (typeof x === "string" ? x.slice(0, 200) : x);   // naslov in klub nocojsnjega dogodka: najvec 200 znakov (kopija, predpomnjeni objekt ostane nespremenjen)
       return posljiJson(res, { ...d, nocoj: Array.isArray(d.nocoj) ? d.nocoj.map((n) => ({ ...n, naslov: rez200(n.naslov), klub: rez200(n.klub) })) : d.nocoj });
     } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/danes"); }
   });
   router.get("/opozorila", async (req, res) => {
-    try { return posljiJson(res, await agent.opozorila()); } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/opozorila"); }
+    try { return posljiJson(res, await req.agent.opozorila()); } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/opozorila"); }
   });
   router.get("/racuni", async (req, res) => {
-    try { return posljiJson(res, await agent.racuni(req.query.stanje, req.query.limit)); }
+    try { return posljiJson(res, await req.agent.racuni(req.query.stanje, req.query.limit)); }
     catch (e) {
       if (e && e.code === "NEVELJAVNO_STANJE") return napaka400(res, "invalid_stanje", e.message);
       return odgovoriNapaka(res, e, "GET /agent/api/racuni");
@@ -291,11 +313,14 @@ function ustvari(dep) {
   });
 
   // --- dogodki ---
-  // Nasteti stolpci (I4): brez opisa, zunanje povezave za vstopnice (samo has_ticket_url), posnetka, naslova in koordinat prizorisca, floor_plan.
+  // Nasteti stolpci (I4): brez opisa, zunanje povezave za vstopnice (samo has_ticket_url) in plakata (samo has_poster: URL je tuj vnos), posnetka, naslova in koordinat prizorisca, floor_plan.
   // Besedila so odrezana ze v SQL-u (naslov dogodka nima omejitve dolzine, #330 K1): agent ne dobi niti ne obdela vec kot 200 znakov naslova, imena kluba ali prizorisca.
   const STOLPCI_DOGODKA = `e.id, e.club_id, left(c.name, 200) AS club_name, c.hidden AS club_hidden, c.is_demo AS club_is_demo, left(e.title, 200) AS title, e.status, e.start_at, e.end_at,
-    e.ticket_price_cents, e.currency, e.capacity, e.sold_count, e.sales_paused, e.sales_open_at, e.sales_close_at, left(e.poster_url, 500) AS poster_url, e.min_age, e.genres, e.vip_enabled,
+    e.ticket_price_cents, e.currency, e.capacity, e.sold_count, e.sales_paused, e.sales_open_at, e.sales_close_at, (e.poster_url <> '') AS has_poster, e.min_age, e.genres, e.vip_enabled,
     left(e.venue_name, 200) AS venue_name, left(e.venue_city, 200) AS venue_city, (e.ticket_url <> '') AS has_ticket_url, e.created_at`;
+
+  // zanri samo iz znanega seznama ZANRI (tuj vnos ne pride do agenta), valuta brez presledkov
+  const oblikaDogodka = (e) => ({ ...e, currency: String(e.currency).trim(), genres: (Array.isArray(e.genres) ? e.genres : []).filter((g) => ZANRI.includes(g)) });
 
   // Stevci prodaje po dogodkih (kot stats v GET /admin/api/events/:id): pravi in testni promet LOCENO (I39), brez guest liste (I24), samo stevila.
   async function prodajaDogodkov(c, ids) {
@@ -325,7 +350,7 @@ function ustvari(dep) {
     if (q.od !== undefined && q.do !== undefined && q.od > q.do) return napaka400(res, "invalid_range", "od must not be after do.");
     const limit = Math.min(Math.max(Number.parseInt(q.limit, 10) || 50, 1), 200);
     try {
-      const r = await agent.beri(async (c) => {
+      const r = await req.agent.beri(async (c) => {
         const ev = await c.query(
           `SELECT ${STOLPCI_DOGODKA}
              FROM events e JOIN clubs c ON c.id = e.club_id
@@ -336,7 +361,7 @@ function ustvari(dep) {
           [q.status === undefined ? null : q.status, q.od === undefined ? null : q.od, q.do === undefined ? null : q.do, limit]);
         return { ev: ev.rows, prodaja: await prodajaDogodkov(c, ev.rows.map((x) => x.id)) };
       });
-      return posljiJson(res, { limit, items: r.ev.map((e) => ({ ...e, currency: String(e.currency).trim(), prodaja: r.prodaja.get(e.id) })) });
+      return posljiJson(res, { limit, items: r.ev.map((e) => ({ ...oblikaDogodka(e), prodaja: r.prodaja.get(e.id) })) });
     } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/events"); }
   });
 
@@ -344,13 +369,13 @@ function ustvari(dep) {
     const id = celoId4(req.params.id);
     if (!id) return napaka400(res, "invalid_id", "Invalid event id.");
     try {
-      const r = await agent.beri(async (c) => {
+      const r = await req.agent.beri(async (c) => {
         const ev = await c.query(`SELECT ${STOLPCI_DOGODKA} FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
         if (!ev.rows.length) return null;
         return { e: ev.rows[0], prodaja: (await prodajaDogodkov(c, [id])).get(id) };
       });
       if (!r) return res.status(404).json({ error: "not_found", message: "Event not found." });
-      return posljiJson(res, { event: { ...r.e, currency: String(r.e.currency).trim() }, prodaja: r.prodaja });
+      return posljiJson(res, { event: oblikaDogodka(r.e), prodaja: r.prodaja });
     } catch (e) { return odgovoriNapaka(res, e, "GET /agent/api/events/:id"); }
   });
 
@@ -369,7 +394,7 @@ function ustvari(dep) {
     const KJE = `${KJE_VSE} AND NOT ${T}`;   // pravi promet
     const PLATFORMNO = SQL_NAROCILO_PLATFORMNO("o");   // I50: prodajalec je platforma (v index.js je placilaStripe definiran sele za ustvari(): zato sele tu)
     try {
-      const r = await agent.beri(async (c) => {
+      const r = await req.agent.beri(async (c) => {
         const skupaj = await c.query(
           `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                   COALESCE(SUM(o.application_fee_cents) FILTER (WHERE ${NETO}),0)::int AS fee_cents,
@@ -426,7 +451,7 @@ function ustvari(dep) {
     if (cilj !== undefined && (typeof cilj !== "string" || !/^[\w-]{1,60}$/.test(cilj))) return napaka400(res, "invalid_target_id", "Invalid target_id.");
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
     try {
-      const r = await agent.beri((c) => c.query(
+      const r = await req.agent.beri((c) => c.query(
         `SELECT a.id, a.cas, a.dejanje, a.cilj_tip AS target_type, a.cilj_id AS target_id, a.prej, a.potem, (a.razlog IS NOT NULL) AS ima_razlog, a.admin_user_id, a.agent_zeton_id
            FROM admin_dejanja a
           WHERE ($1::text IS NULL OR a.cilj_tip = $1) AND ($2::text IS NULL OR a.cilj_id = $2)
