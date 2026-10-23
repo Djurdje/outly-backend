@@ -110,7 +110,7 @@
     });
     if (!izid) return;
     await varno(async () => {
-      await klic("PATCH", `/admin/api/promo-codes/${cele(k.id)}`, { active: vklop });
+      await klic("PATCH", `/admin/api/promo-codes/${cele(k.id)}`, izid.razlog ? { active: vklop, reason: izid.razlog } : { active: vklop });
       obvesti(vklop ? "Koda je vklopljena." : "Koda je izklopljena.", "ok");
       await osvezi();
     });

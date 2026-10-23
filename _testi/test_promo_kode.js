@@ -391,6 +391,45 @@ const jeNeveljavna = (r) => r.status === 400 && r.body && r.body.error === NEVEL
     r = await api("PATCH", `/admin/api/promo-codes/${KLUB.id}`, T.admin, { club_id: null });
     assert(r.status === 400, "KLUB1: odstranitev kluba brez dogodkov -> 400");
 
+    console.log("\n# 9b. Koda brez dogodkov (dogodek izbrisan) ostane upravljiva; razlog v dnevniku; PATCH ne ustavi nakupov s kodo");
+    const E5 = await dogodek("lastnik", 1, "Za izbris", 1000, 10);
+    r = await api("POST", "/admin/api/promo-codes", T.admin, { code: "SIROTA", label: "Sirota", event_ids: [E5], reason: "  Prva kampanja  " });
+    assert(r.status === 201, "POST SIROTA (samo dogodek E5) -> 201", r.body);
+    const SIROTA = r.body;
+    assert((await admDejanja("promo.create")).pop().razlog === "Prva kampanja", "POST: reason (trim) v admin_dejanja.razlog");
+    r = await api("POST", "/admin/api/promo-codes", T.admin, { code: "SIROTA2", label: "x", club_id: 1, reason: 5 });
+    assert(r.status === 400, "POST: reason ni niz -> 400");
+    r = await api("PATCH", `/admin/api/promo-codes/${SIROTA.id}`, T.admin, { active: false, reason: "x".repeat(501) });
+    assert(r.status === 400, "PATCH: reason daljsi od 500 znakov -> 400");
+    r = await api("DELETE", `/events/${E5}`, T.lastnik);
+    assert(r.status === 200 && (await pool.query("SELECT COUNT(*)::int AS n FROM events WHERE id=$1", [E5])).rows[0].n === 0, "lastnik izbrise dogodek E5 (brez narocil)", r);
+    assert((await pool.query("SELECT COUNT(*)::int AS n FROM promo_code_events WHERE promo_code_id=$1", [SIROTA.id])).rows[0].n === 0, "CASCADE: koda je ostala brez dogodkov");
+    r = await api("GET", "/admin/api/promo-codes", T.admin);
+    const sir = r.body.find(x => x.id === SIROTA.id);
+    assert(r.status === 200 && sir && sir.club === null && sir.events.length === 0 && sir.tickets_sold === 0, "seznam: koda brez kluba in dogodkov se vrne (events [])", sir);
+    r = await api("GET", `/admin/api/promo-codes/${SIROTA.id}/stats`, T.admin);
+    assert(r.status === 200 && r.body.events.length === 0 && r.body.total.tickets_sold === 0, "stats take kode: prazen seznam, skupaj 0", r.body);
+    r = await api("PATCH", `/admin/api/promo-codes/${SIROTA.id}`, T.admin, { active: false, reason: "Dogodek je izbrisan" });
+    assert(r.status === 200 && r.body.active === false, "PATCH {active:false} na kodi brez dogodkov -> 200", r);
+    assert((await admDejanja("promo.update")).pop().razlog === "Dogodek je izbrisan", "PATCH: reason v admin_dejanja.razlog");
+    r = await api("PATCH", `/admin/api/promo-codes/${SIROTA.id}`, T.admin, { label: "Sirota 2" });
+    assert(r.status === 200 && r.body.label === "Sirota 2", "PATCH {label} na kodi brez dogodkov -> 200");
+    r = await api("PATCH", `/admin/api/promo-codes/${SIROTA.id}`, T.admin, { event_ids: [] });
+    assert(r.status === 400, "PATCH, ki spreminja obseg v prazno (event_ids: []), je se vedno 400");
+    r = await api("PATCH", `/admin/api/promo-codes/${SIROTA.id}`, T.admin, { club_id: null });
+    assert(r.status === 400, "PATCH club_id null brez dogodkov je 400");
+    r = await api("PATCH", `/admin/api/promo-codes/${SIROTA.id}`, T.admin, { event_ids: [E1] });
+    assert(r.status === 200 && r.body.events.length === 1, "PATCH event_ids na kodi brez dogodkov -> 200");
+    // zaklep vrstice kode: PATCH (FOR NO KEY UPDATE) ne sme ustaviti nakupa s kodo (FK preverba vzame FOR KEY SHARE)
+    const drzalec = await pool.connect();
+    try {
+      await drzalec.query("BEGIN");
+      await drzalec.query("SELECT id FROM promo_codes WHERE id = $1 FOR NO KEY UPDATE", [KLUB.id]);
+      const t0 = Date.now();
+      const nak = await Promise.race([kupi(E2, { quantity: 1, promo_code: "KLUB1" }), new Promise(res => setTimeout(() => res("zatakne"), 4000))]);
+      assert(nak !== "zatakne" && nak.status === 201 && await promoId(nak.body.order.id) === KLUB.id, `nakup s kodo ne caka na PATCH, ki drzi vrstico kode (${Date.now() - t0} ms)`, nak.status);
+    } finally { await drzalec.query("ROLLBACK").catch(() => {}); drzalec.release(); }
+
     console.log("\n# 10. Migracija: brez sprememb obstojecih podatkov");
     const shema = (await pool.query(`SELECT (SELECT COUNT(*)::int FROM pg_constraint WHERE conname='orders_promo_code_fk') AS fk,
       (SELECT indexdef FROM pg_indexes WHERE indexname='orders_promo_code_idx') AS idx`)).rows[0];

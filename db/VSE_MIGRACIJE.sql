@@ -3522,14 +3522,15 @@ END $$;
 --
 -- Zaklep (past iz 055/062: nakup vstavlja v `orders` in prek sprozilca pise v `events`; migracija, ki drzi SHARE ROW EXCLUSIVE na `events` in caka na `orders`, se zaklene
 -- z nakupom): ALTER na `orders` je PRVI (ACCESS EXCLUSIVE se drzi do COMMIT, zato pred njim ni nicesar, kar bi cakalo; nakup, ki je ze v teku, ga pocaka, za njim pa nov
--- nakup caka na nas, ne obratno), tabeli sta nova (ni zaklepa obstojecih vrstic), tuja kljuca na `clubs` in `events` vzameta SHARE ROW EXCLUSIVE sele po tem. Tuji kljuc
--- orders.promo_code_id je NOT VALID: stolpec je nov in povsod NULL, kršitev ne more obstajati, zato se `orders` pod ACCESS EXCLUSIVE ne bere (sicer VALIDATE = sekvencno
--- branje cele tabele); za vse NOVE vrstice kljuc velja. Indeks je DELNI (samo narocila s kodo): vzdrzevanje ob nakupu brez kode je nic. CREATE INDEX je na ISTI tabeli v ISTI
--- transakciji (zaklep ze drzimo), brez zaklepa druge tabele. Sken (skenPool, lock_timeout 1 s) ob ALTER vrne 503 + Retry-After in telefon preklopi na sken brez povezave
--- (I16). migrate.js nastavi lock_timeout in migracijo ob izteku ponovi. Deploy NE med dogodkom (kratek zaklep `orders`).
+-- nakup caka na nas, ne obratno); tabeli sta novi (ni zaklepa obstojecih vrstic), tuja kljuca na `clubs` in `events` vzameta SHARE ROW EXCLUSIVE sele po tem.
+-- ISKRENO O BRANJU `orders`: tuji kljuc orders.promo_code_id (validacija) in CREATE INDEX (tudi delni) sta vsak SEKVENCNO BRANJE CELE tabele `orders`, in sicer pod
+-- ACCESS EXCLUSIVE, ki ga drzimo od ALTER (izmerjeno ~50 ms pri 300.000 narocilih; nakup in sken v tem casu cakata). Pri danasnji velikosti tabele je to
+-- zanemarljivo; NOT VALID in CONCURRENTLY nista uporabljena namenoma (enostavnost; CONCURRENTLY ne gre v transakciji, NOT VALID prihrani en sken, a pusti kljuc nepreverjen).
+-- Indeks je delni (samo narocila s kodo): vzdrzevanje ob nakupu brez kode je nic. Sken (skenPool, lock_timeout 1 s) ob ALTER vrne 503 + Retry-After in telefon preklopi na
+-- sken brez povezave (I16). migrate.js nastavi lock_timeout in migracijo ob izteku ponovi. Deploy NE med dogodkom (kratek zaklep `orders`).
 
 
--- ALTER je PRVI (glej zgoraj). Brez REFERENCES v istem stavku: tuji kljuc se doda NOT VALID spodaj, ko tabela promo_codes obstaja.
+-- ALTER je PRVI (glej zgoraj). Brez REFERENCES v istem stavku: tuji kljuc se doda spodaj, ko tabela promo_codes obstaja.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_code_id INTEGER;
 
 CREATE TABLE IF NOT EXISTS promo_codes (
@@ -3558,7 +3559,7 @@ CREATE INDEX IF NOT EXISTS promo_code_events_event_idx ON promo_code_events (eve
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'orders_promo_code_fk') THEN
-    ALTER TABLE orders ADD CONSTRAINT orders_promo_code_fk FOREIGN KEY (promo_code_id) REFERENCES promo_codes(id) NOT VALID;
+    ALTER TABLE orders ADD CONSTRAINT orders_promo_code_fk FOREIGN KEY (promo_code_id) REFERENCES promo_codes(id);
   END IF;
 END $$;
 
@@ -3637,7 +3638,7 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('062_samodejna_objava.sql', '5c0b68654780a4ee'),
     ('063_racun_ttwh2v4q_artikel.sql', '8d09de49320ce6f0'),
     ('064_racun_ttwh2v4q_ponovitev3.sql', '58f2a275af877279'),
-    ('065_promo_kode.sql', 'f8c5a3ec5bc34770')
+    ('065_promo_kode.sql', '3050674e6ee43053')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

@@ -4620,6 +4620,12 @@ function promoDogodkiIds(v) {
   }
   return { ids: ids.sort((a, b) => a - b) };
 }
+// Neobvezen `reason` (niz, do 500 znakov; kot PATCH /admin/api/users/:id) gre v stolpec `razlog` vrstice admin_dejanja. Vrne { razlog } | { napaka }.
+function promoRazlog(b) {
+  if (b.reason === undefined || b.reason === null) return { razlog: null };
+  if (typeof b.reason !== "string" || b.reason.length > 500) return { napaka: "reason must be a string of at most 500 characters." };
+  return { razlog: b.reason.trim() || null };
+}
 // Odgovor ene ali vseh kod: seznam z zbirnimi stevci (en poizvedbi + dogodki).
 async function promoSeznam(db, id = null) {
   const p = [];
@@ -4666,7 +4672,7 @@ admin.get("/promo-codes", async (req, res) => {
   catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
-// POST /admin/api/promo-codes { code, label, club_id?, event_ids? } (vsaj eno od obeh) -> 201 vrstica kot v seznamu; 409 promo_code_exists.
+// POST /admin/api/promo-codes { code, label, club_id?, event_ids?, reason? } (vsaj eno od obeh) -> 201 vrstica kot v seznamu; 409 promo_code_exists.
 admin.post("/promo-codes", async (req, res) => {
   const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
   const koda = promoKodaAdmin(b.code);
@@ -4685,6 +4691,8 @@ admin.post("/promo-codes", async (req, res) => {
     eventIds = d.ids;
   }
   if (clubId === null && eventIds.length === 0) return res.status(400).send("Choose a club or at least one event (club_id or event_ids).");
+  const rz = promoRazlog(b);
+  if (rz.napaka) return res.status(400).send(rz.napaka);
   let c;
   try {
     c = await pool.connect();
@@ -4695,7 +4703,7 @@ admin.post("/promo-codes", async (req, res) => {
       `INSERT INTO promo_codes (code, label, club_id, created_by) VALUES ($1, $2, $3, $4) RETURNING id`, [koda.vrednost, oznaka.vrednost, clubId, req.user.userId]);
     const id = ins.rows[0].id;
     if (eventIds.length) await c.query("INSERT INTO promo_code_events (promo_code_id, event_id) SELECT $1, UNNEST($2::int[])", [id, eventIds]);
-    await zapisiAdminDejanje(c, req, "promo.create", "promo_code", id, null, { code: koda.vrednost, label: oznaka.vrednost, club_id: clubId, event_ids: eventIds });
+    await zapisiAdminDejanje(c, req, "promo.create", "promo_code", id, null, { code: koda.vrednost, label: oznaka.vrednost, club_id: clubId, event_ids: eventIds }, rz.razlog);
     await c.query("COMMIT");
     console.log(`Admin ${req.user.userId} je ustvaril promo kodo ${id} (${koda.vrednost})`);
     return res.status(201).json((await promoSeznam(c, id))[0]);
@@ -4706,8 +4714,11 @@ admin.post("/promo-codes", async (req, res) => {
   } finally { if (c) c.release(); }
 });
 
-// PATCH /admin/api/promo-codes/:id { label?, active?, club_id?, event_ids? } — besedila kode se ne da spremeniti. club_id null odstrani klub, event_ids zamenja seznam;
-// koda mora ostati vezana na klub ali vsaj en dogodek. Enake vrednosti (brez spremembe) vrstice dnevnika ne pustijo.
+// PATCH /admin/api/promo-codes/:id { label?, active?, club_id?, event_ids?, reason? } — besedila kode se ne da spremeniti. club_id null odstrani klub, event_ids zamenja seznam;
+// PATCH, ki SPREMINJA obseg (club_id ali event_ids), mora kodo pustiti vezano na klub ali vsaj en dogodek; preverba obsega se NE izvaja pri label/active: koda, ki je ostala brez
+// dogodkov (lastnik je izbrisal dogodek -> CASCADE na promo_code_events), se mora se vedno dati izklopiti in preimenovati. Enake vrednosti (brez spremembe) vrstice dnevnika ne pustijo.
+// `reason` (neobvezno, do 500 znakov) gre v dnevnik. Vrstico kode zaklene FOR NO KEY UPDATE (ne FOR UPDATE): preverba tujega kljuca ob INSERT INTO orders s promo_code_id vzame
+// FOR KEY SHARE, ki se z NO KEY UPDATE ne spopade, zato PATCH nakupov s kodo ne ustavi.
 admin.patch("/promo-codes/:id", async (req, res) => {
   const id = celoId4(req.params.id);
   if (!id) return res.status(400).send("Invalid promo code id.");
@@ -4722,16 +4733,18 @@ admin.patch("/promo-codes/:id", async (req, res) => {
   }
   if (b.event_ids !== undefined) { const d = promoDogodkiIds(b.event_ids); if (d.napaka) return res.status(400).send(d.napaka); nov.event_ids = d.ids; }
   if (Object.keys(nov).length === 0) return res.status(400).send("Nothing to update.");
+  const rz = promoRazlog(b);
+  if (rz.napaka) return res.status(400).send(rz.napaka);
   let c;
   try {
     c = await pool.connect();
     await c.query("BEGIN");
-    const st = await c.query("SELECT label, active, club_id FROM promo_codes WHERE id = $1 FOR UPDATE", [id]);
+    const st = await c.query("SELECT label, active, club_id FROM promo_codes WHERE id = $1 FOR NO KEY UPDATE", [id]);
     if (!st.rows.length) { await c.query("ROLLBACK"); return res.status(404).send("Promo code not found."); }
     const stDog = (await c.query("SELECT event_id FROM promo_code_events WHERE promo_code_id = $1 ORDER BY event_id", [id])).rows.map((x) => x.event_id);
     const star = { ...st.rows[0], event_ids: stDog };
     const koncno = { ...star, ...nov };
-    if (koncno.club_id === null && koncno.event_ids.length === 0) { await c.query("ROLLBACK"); return res.status(400).send("A promo code needs a club or at least one event."); }
+    if ((nov.club_id !== undefined || nov.event_ids !== undefined) && koncno.club_id === null && koncno.event_ids.length === 0) { await c.query("ROLLBACK"); return res.status(400).send("A promo code needs a club or at least one event."); }
     const napaka = await promoPreveriObseg(c, nov.club_id, nov.event_ids ? nov.event_ids.filter((x) => !stDog.includes(x)) : null);
     if (napaka) { await c.query("ROLLBACK"); return res.status(400).send(napaka); }
     const razlika = razlikaPolj(["label", "active", "club_id", "event_ids"], star, koncno);
@@ -4741,7 +4754,7 @@ admin.patch("/promo-codes/:id", async (req, res) => {
         await c.query("DELETE FROM promo_code_events WHERE promo_code_id = $1 AND NOT (event_id = ANY($2::int[]))", [id, nov.event_ids]);
         await c.query("INSERT INTO promo_code_events (promo_code_id, event_id) SELECT $1, UNNEST($2::int[]) ON CONFLICT DO NOTHING", [id, nov.event_ids]);
       }
-      await zapisiAdminDejanje(c, req, "promo.update", "promo_code", id, razlika.prej, razlika.potem);
+      await zapisiAdminDejanje(c, req, "promo.update", "promo_code", id, razlika.prej, razlika.potem, rz.razlog);
     }
     await c.query("COMMIT");
     if (razlika) console.log(`Admin ${req.user.userId} je spremenil promo kodo ${id}:`, JSON.stringify(Object.keys(razlika.potem)));

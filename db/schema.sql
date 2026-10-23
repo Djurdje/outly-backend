@@ -4045,7 +4045,7 @@ ALTER TABLE ONLY public.orders
 --
 
 ALTER TABLE ONLY public.orders
-    ADD CONSTRAINT orders_promo_code_fk FOREIGN KEY (promo_code_id) REFERENCES public.promo_codes(id) NOT VALID;
+    ADD CONSTRAINT orders_promo_code_fk FOREIGN KEY (promo_code_id) REFERENCES public.promo_codes(id);
 
 
 --
