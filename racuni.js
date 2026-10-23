@@ -137,6 +137,25 @@ function deliCasa(t) {
   for (const x of DELI_CASA.formatToParts(d)) if (x.type !== "literal") o[x.type] = x.value;
   return { leto: o.year, mesec: o.month, dan: o.day, ura: o.hour, minuta: o.minute, sekunda: o.second };
 }
+// Cas brez casovnega pasu (»2026-10-23 16:45:06«, zivo: issuedTimestamp pri e-racuni) je LJUBLJANSKI lokalni cas (ne UTC, ne casovni pas procesa). Vrne Date ali null. Cas z oznako pasu
+// (Z, +02:00) se bere kot tak. Karkoli drugega, neobstojec lokalni cas (preskok ure) ali neprepoznana oblika = null (izdan_at ostane NULL, nikoli izmisljen); dvoumen lokalni cas
+// (vrnitev ure, enkrat letno) se razlozi kot PRVI (poletni) cas.
+function casIzOdgovora(v) {
+  const t = String(v === undefined || v === null ? "" : v).trim();
+  let m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/.exec(t);
+  if (m) { const d = new Date(t.replace(" ", "T")); return Number.isNaN(d.getTime()) ? null : d; }
+  m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(t);
+  if (!m) return null;
+  const [leto, mesec, dan, ura, minuta, sekunda] = [m[1], m[2], m[3], m[4], m[5], m[6] || "00"];
+  const kot = Date.UTC(Number(leto), Number(mesec) - 1, Number(dan), Number(ura), Number(minuta), Number(sekunda));
+  for (const zamik of [2, 1]) {   // ljubljanski zamik proti UTC: poletni +2 h, zimski +1 h; velja tisti, ki se ob obratni pretvorbi ujema z vnosom
+    const d = new Date(kot - zamik * 3600 * 1000);
+    if (Number.isNaN(d.getTime())) return null;
+    const p = deliCasa(d);
+    if (p.leto === leto && p.mesec === mesec && p.dan === dan && p.ura === ura && p.minuta === minuta && p.sekunda === sekunda) return d;
+  }
+  return null;
+}
 const stevilkaRacuna = (prostor, naprava, stevilka) => `${prostor}-${naprava}-${String(stevilka)}`;
 const datumSl = (t) => { const d = deliCasa(t); return `${Number(d.dan)}. ${Number(d.mesec)}. ${d.leto}`; };
 const casSl = (t) => { const d = deliCasa(t); return `${d.ura}:${d.minuta}:${d.sekunda}`; };
@@ -555,12 +574,23 @@ function eracuniPonudnik(env) {
       if ((bu !== null && bu !== prostor) || (bl !== null && bl !== naprava)) {
         throw new NapakaPonudnika(`dokument je izdan na drugi poslovni enoti/blagajni (${String(bu).slice(0, 20)}/${String(bl).slice(0, 20)}, pricakovano ${prostor}/${naprava})`, { konfiguracija: true, neznan: false });
       }
-      const fn = Number(iskaniKljuc(j, ["fiscalNumber"]));
+      // fiscalNumber (zivo preverjeno 23. 10. 2026): NIZ »<poslovna enota>-<blagajna>-<zaporedna>«, npr. »A001-1-1«. Celo stevilo >= 1 (JSON stevilo ali niz samih stevk) velja kot doslej.
+      // Pri obliki »PE-blagajna-N« velja N SAMO, ce se PE in blagajna ujemata z nasima (prostor/naprava), sicer konfiguracijska napaka (kot pri businessUnit). Vse drugo = null (brez ugibanja).
+      const fnSurov = niz(iskaniKljuc(j, ["fiscalNumber"]));
+      let fn = null;
+      if (fnSurov !== null) {
+        const celo1 = (x) => { const n = Number(x); return /^\d{1,15}$/.test(x) && Number.isSafeInteger(n) && n >= 1 ? n : null; };
+        const f = /^([0-9A-Za-z]{1,20})-([0-9A-Za-z]{1,20})-(\d{1,15})$/.exec(fnSurov);
+        if (f) {
+          if (f[1] !== prostor || f[2] !== naprava) throw new NapakaPonudnika(`davcna stevilka dokumenta je z druge poslovne enote/blagajne (${f[1]}/${f[2]}, pricakovano ${prostor}/${naprava})`, { konfiguracija: true, neznan: false });
+          fn = celo1(f[3]);
+        } else fn = celo1(fnSurov);
+      }
       const datum = niz(iskaniKljuc(j, ["date"]));
-      const cas = niz(iskaniKljuc(j, ["dateTimeOfIssue", "issueDateTime", "fiscalDateTime", "issuedAt"]));
-      const izdan = cas && !Number.isNaN(new Date(cas).getTime()) ? new Date(cas) : null;
+      const cas = niz(iskaniKljuc(j, ["issuedTimestamp", "dateTimeOfIssue", "issueDateTime", "fiscalDateTime", "issuedAt"]));
+      const izdan = cas ? casIzOdgovora(cas) : null;
       return {
-        stevilka: Number.isInteger(fn) && fn >= 1 ? fn : null, eor: niz(iskaniKljuc(j, ["eor"])), zoi: niz(iskaniKljuc(j, ["zoi"])),
+        stevilka: fn, eor: niz(iskaniKljuc(j, ["eor"])), zoi: niz(iskaniKljuc(j, ["zoi"])),
         datum: datum && /^\d{4}-\d{2}-\d{2}/.test(datum) ? datum.slice(0, 10) : null, izdan_at: izdan, ponudnik_stevilka: niz(iskaniKljuc(j, ["number"])),
       };
     },
