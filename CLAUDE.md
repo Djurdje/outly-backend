@@ -38,7 +38,7 @@ Skupni možgani projekta (preberi, preden karkoli spremeniš):
 
 ```
 index.js            ves API (en proces; poti, middleware requireAuth/requireRole/requireClub)
-admin/index.html    admin panel (ena datoteka, brez ogrodja, prijava prek Supabase)
+admin/               admin panel v več datotekah, brez ogrodja in brez gradnje: `index.html` (lupina, prijava prek Supabase) + `*.js` moduli + `*.css`
 db/migrate.js       zaganjalnik migracij (evidenca schema_migrations, odtis datoteke, advisory lock)
 db/migracije/       NNN_ime.sql — 000…015; VSAKA sprememba sheme je nova oštevilčena migracija
 db/VSE_MIGRACIJE.sql združen izpis vseh migracij (blok brez BEGIN/COMMIT + sha256[:16] odtis)
