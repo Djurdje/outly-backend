@@ -26,6 +26,7 @@
  *  23  rocni postopek za vrstico v `napaka` (povezava obstojecega dokumenta, ponovitev): isti SQL kot v STATE
  *  24  zastavica »ustvarjeno pri ponudniku«: vrstica je `napaka` ze med iskanjem po uspehu Create brez oznake
  *  25  fail-closed: katerakoli napaka bralnega preizkusa ustavi Create; po zavrnjenem Create se Create ustavi za cel proces
+ *  26  preizkus pred izdajo z 5xx/timeoutom: POZOR (3x zapored ali dlje kot cas), omejeno na okno
  *  15  poverilnice nikoli v dnevniku ali zadnja_napaka
  */
 const http = require("http");
@@ -56,6 +57,7 @@ const F = {
   zamudaEor: 0,         // koliko Get klicev pred pojavom EOR
   listOblika: "ok",     // 'ok' | 'neznana' | 'prazno' ({status:ok}) | 'prazenNiz' (SalesInvoices: "") | 'prazenSeznam' ([]) | 'brezRef' | 'okrnjenRef' | 'dvojnik' | 'manjkaZnan'
   opisAvt: "Access denied. Invalid credentials",   // pravo besedilo napake avtentikacije pri e-racuni NI znano
+  listStatus: null,   // npr. 503: seznam (tudi bralni preizkus) ne dela
   listZamik: 0, casIzdaje: null, poverilnice: true, vrniBlagajno: null,
 };
 const dan = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Ljubljana", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
@@ -105,6 +107,7 @@ const streznik = http.createServer((req, res) => {
       const vrsta = z.method === "SalesInvoiceList" ? "racun" : "dobropis";
       const el = vrsta === "racun" ? "SalesInvoice" : "CreditNote", zab = vrsta === "racun" ? "SalesInvoices" : "CreditNotes";
       F.listParametri = p;
+      if (F.listStatus) return konec(F.listStatus, "{}");
       if (F.listOblika === "neznana") return konec(200, { status: "ok", nekaj: { drugega: 1 } }, F.listZamik);
       if (F.listOblika === "prazno") return konec(200, { status: "ok" }, F.listZamik);
       if (F.listOblika === "prazenNiz") return konec(200, { status: "ok", [zab]: "" }, F.listZamik);
@@ -800,6 +803,40 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
         const st = (await pool.query("SELECT stanje FROM racuni WHERE id = ANY($1::bigint[])", [ids])).rows.map((x) => x.stanje);
         assert(st.every((x) => x === "potrjen") && F.docs.length === d0 + 4, `[${ime}] po koncu izpada se vseh 4 izda enkrat`, [st, F.docs.length - d0]);
       }
+    }
+
+    // ================================================================
+    console.log("\n# 26. Preizkus pred izdajo, ki pade z 5xx/timeoutom, javi POZOR (3x zapored ALI dlje kot cas), najvec enkrat na casovno okno (pregled #321)");
+    {
+      const imaPozor = (l0) => logOd(l0).filter((l) => /POZOR.*bralni preizkus pred izdajo/.test(l) && /zapored|ze \d/.test(l));
+      // (a) 3x zapored
+      const R = await nov(1, 1930); const w = deloven({ RACUNI_PREIZKUS_POZOR_RAZMAK_MS: "700", RACUNI_PREIZKUS_PO_MS: "3600000" }); const l0 = LOG.length, c0 = klicov("SalesInvoiceCreate");
+      F.listStatus = 503;
+      await tek(w, 2, 20, true);
+      assert(imaPozor(l0).length === 0 && klicov("SalesInvoiceCreate") === c0, "preizkus 503: po 2 tekih se brez POZOR (samo »ponovim«), 0 izdaj", [imaPozor(l0).length]);
+      await tek(w, 1, 20, true);
+      assert(imaPozor(l0).length === 1 && /3x zapored/.test(imaPozor(l0)[0]) && klicov("SalesInvoiceCreate") === c0, "3. zaporedni neuspeh: POZOR (enkrat), 0 izdaj", imaPozor(l0));
+      assert(![TAJNO.user, TAJNO.key, TAJNO.token].some((t) => imaPozor(l0).join().includes(t)), "POZOR brez poverilnic");
+      await tek(w, 3, 20, true);
+      assert(imaPozor(l0).length === 1, "omejitev ponavljanja: v oknu (700 ms) ni drugega POZOR", imaPozor(l0).length);
+      await pocakaj(750);
+      await tek(w, 1, 20, true);
+      assert(imaPozor(l0).length === 2, "po izteku okna POZOR spet", imaPozor(l0).length);
+      // uspeh pobrise zaporedje
+      F.listStatus = null;
+      await tek(w, 4, 60, true);
+      assert((await vrstica(R.id)).stanje === "potrjen", "ko seznam spet dela, se racun izda");
+      // (b) dlje kot cas, ceprav manj kot 3 zapored
+      const R2 = await nov(1, 1940); const w2 = deloven({ RACUNI_PREIZKUS_PO_MS: "300", RACUNI_PREIZKUS_POZOR_RAZMAK_MS: "3600000" }); const l1 = LOG.length;
+      F.listStatus = 503;
+      await tek(w2, 1, 20, true);
+      assert(imaPozor(l1).length === 0, "1. neuspeh: se brez POZOR");
+      await pocakaj(350);
+      await tek(w2, 1, 20, true);
+      assert(imaPozor(l1).length === 1 && /ze \d/.test(imaPozor(l1)[0]), "2. neuspeh po izteku casa (RACUNI_PREIZKUS_PO_MS): POZOR", imaPozor(l1));
+      F.listStatus = null;
+      await tek(w2, 4, 60, true);
+      assert((await vrstica(R2.id)).stanje === "potrjen", "po popravku se izda");
     }
 
     // ================================================================

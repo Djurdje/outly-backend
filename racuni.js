@@ -569,6 +569,9 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   const ODLOG_MS = celo(env, "RACUNI_ODLOG_MS", 30000, 0, 3600000);             // dobropis caka na stevilko oz. potrditev izvirnega racuna
   const ZASTARELO_MS = celo(env, "RACUNI_ZASTARELO_MS", (ponudnik && ponudnik.zastarelo) || 120000, 1000, 3600000); // prevzeto brez zakljucka (proces ugasnjen) se prevzame znova (isti message_id)
   const NAJEM_MS = celo(env, "RACUNI_NAJEM_MS", 90000, 1000, 3600000);          // najem delavca e-racuni (en delavec v celem sistemu): daljsi od roka klica, podaljsa se pred vsakim klicem
+  const PREIZKUS_ZAPORED = celo(env, "RACUNI_PREIZKUS_ZAPORED", 3, 1, 1000);   // bralni preizkus pred izdajo pade toliko tekov zapored ALI ...
+  const PREIZKUS_PO_MS = celo(env, "RACUNI_PREIZKUS_PO_MS", 1800000, 0, 86400000);   // ... dlje kot toliko -> POZOR (zakonski rok za racun sta 2 delovna dneva)
+  const PREIZKUS_POZOR_RAZMAK_MS = celo(env, "RACUNI_PREIZKUS_POZOR_RAZMAK_MS", 3600000, 0, 86400000);   // isto opozorilo najvec enkrat na toliko
   const ISKANJE_RAZMAK_MS = celo(env, "RACUNI_ISKANJE_RAZMAK_MS", 600000, 0, 86400000);   // najmanj toliko med dvema stetima iskanjema po referenci; nova izdaja sele po 2 neuspesnih iskanjih
   const ISKANJE_NEJASNO_MAX = celo(env, "RACUNI_ISKANJE_NEJASNO_MAX", 4, 1, 100);   // toliko iskanj brez zanesljivega izida -> `napaka` (rocna obravnava), nikoli nova izdaja
   const ID_NAJEMA = crypto.randomUUID();
@@ -637,6 +640,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
       ponovitev: (n) => `${n} racunov: klic ponudniku ${ponudnik.ime} ni uspel, ponovim`,
       iskanje: (n) => `${n} racunov: izid prejsnjega zahtevka ponudniku ${ponudnik.ime} je neznan, iskanje po referenci se ni zakljucilo (nova izdaja je blokirana)`,
       obdelava: (n) => `POZOR: obdelava ${n} racunov ni uspela`,
+      preizkus: () => `POZOR: bralni preizkus pred izdajo pri ponudniku ${ponudnik.ime} ne uspe, racuni CAKAJO in se ne izdajo`,
     };
     for (const [tip, sez] of skupine) {
       const primeri = sez.slice(0, 3).map((x) => `${x.oznaka}: ${x.besedilo}`).join(" | ");
@@ -768,9 +772,22 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   // `caka` s praznim `poslano_at`, POZOR z besedilom napake. Pravo besedilo napake avtentikacije pri e-racuni NI znano, zato razvrstitev po besedilu ni varna.
   // Poleg tega po prvem ZAVRNJENEM Create (konfiguracija ali trajna zavrnitev ponudnika) Create stoji za CEL proces RACUNI_KONFIG_PREMOR_MS (»List dela, Create nima pravic«).
   let preizkusTek = null, preizkusNapaka = null, createStopDo = 0, createStopRazlog = "";
+  // Zaporedje neuspelih preizkusov (en preizkus na tek): 5xx/timeout sicer ne sprozi nobenega POZOR (samo "ponovim"), racuni pa cakajo. POZOR (in z njim Sentry opozorilo) ob
+  // PREIZKUS_ZAPORED neuspehih zapored ALI ko neuspeh traja dlje kot PREIZKUS_PO_MS; isto opozorilo najvec enkrat na PREIZKUS_POZOR_RAZMAK_MS. Uspeh zaporedje pobrise.
+  let preizkusZapored = 0, preizkusPrviPadec = 0, preizkusZadnjiPozor = 0;
+  function preizkusUspel() { preizkusZapored = 0; preizkusPrviPadec = 0; }
+  function preizkusPadel(e) {
+    const zdaj = Date.now();
+    preizkusZapored++; if (!preizkusPrviPadec) preizkusPrviPadec = zdaj;
+    const traja = zdaj - preizkusPrviPadec;
+    if ((preizkusZapored >= PREIZKUS_ZAPORED || traja >= PREIZKUS_PO_MS) && zdaj - preizkusZadnjiPozor >= PREIZKUS_POZOR_RAZMAK_MS) {
+      preizkusZadnjiPozor = zdaj;
+      objavi("preizkus", `preizkus (${preizkusZapored}x zapored, ze ${Math.round(traja / 60000)} min)`, kratko(e).slice(0, 200));
+    }
+  }
   async function preizkusPredIzdajo(klicPonudniku) {
     if (!ponudnik.preizkusi) return;
-    if (!preizkusTek) preizkusTek = klicPonudniku((signal) => ponudnik.preizkusi({ signal })).then(() => null, (e) => { if (!(e instanceof NapakaPonudnika)) throw e; return e; });
+    if (!preizkusTek) preizkusTek = klicPonudniku((signal) => ponudnik.preizkusi({ signal })).then(() => { preizkusUspel(); return null; }, (e) => { if (!(e instanceof NapakaPonudnika)) throw e; preizkusPadel(e); return e; });
     const e = await preizkusTek;
     if (e && !preizkusNapaka) preizkusNapaka = e;
   }
