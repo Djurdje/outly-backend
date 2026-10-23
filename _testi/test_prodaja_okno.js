@@ -12,6 +12,7 @@
  *      slab zapis (niz brez casa, brez obmocja, stevilo, prazen niz, nesmiselen datum) -> 400
  *  O5  null pobrise (eno ali obe polji); snake_case imena delujejo
  *  O6  vloge: manager 200, vratar 403, tuj lastnik 403, navaden uporabnik 403, brez zetona 401; po 403 vrednosti nespremenjene
+ *  O8  javni GET /events (tudi lite) in /events/:id vrnejo sales_open_at / sales_close_at (ISO ali null); publish_at ne
  *  O7  dnevnik: admin sprememba = vrstica admin_dejanja (prej/potem samo spremenjeni polji); sprememba lastnika vrstice NE ustvari; ista vrednost vrstice ne ustvari
  */
 const crypto = require("crypto");
@@ -229,6 +230,24 @@ let srv = null, log = "";
     assert(r.status === 200 && dn.length === 2 && JSON.stringify(dn[1].potem) === '{"sales_close_at":null}' && dn[1].prej.sales_close_at === doA, "brisanje zapre -> druga vrstica (prej ISO, potem null)", dn);
     r = await api("GET", `/admin/api/audit?target_type=event&target_id=${E}`, T.admin);
     assert(r.status === 200 && JSON.stringify(r.body).includes("sales_open_at"), "GET /admin/api/audit kaze spremembo okna", r.body);
+    console.log("\n# O8: okno v javnih odgovorih (GET /events, GET /events/:id)");
+    const od8 = ure(5), do8 = ure(7);
+    await pool.query("UPDATE events SET sales_open_at=$2, sales_close_at=$3 WHERE id=$1", [E, od8, do8]);
+    j = await javni();
+    assert(j.sales_open_at === od8 && j.sales_close_at === do8, "GET /events/:id vrne sales_open_at in sales_close_at (ISO)", { o: j.sales_open_at, z: j.sales_close_at });
+    r = await api("GET", "/events");
+    assert(r.status === 200 && r.body[0].sales_open_at === od8 && r.body[0].sales_close_at === do8, "GET /events vrne oba casa", r.body[0]);
+    r = await api("GET", "/events?lite=true");
+    assert(r.status === 200 && r.body[0].sales_open_at === od8 && r.body[0].sales_close_at === do8, "GET /events?lite=true vrne oba casa", r.body[0]);
+    r = await api("GET", `/events/${E}`, T.ana);
+    assert(r.status === 200 && r.body.sales_open_at === od8, "prijavljen uporabnik dobi isto", r.body);
+    await pool.query("UPDATE events SET sales_open_at=NULL, sales_close_at=NULL WHERE id=$1", [E]);
+    j = await javni();
+    assert(j.sales_open_at === null && j.sales_close_at === null, "GET /events/:id: oba null, ko nista nastavljena", { o: j.sales_open_at, z: j.sales_close_at });
+    r = await api("GET", "/events");
+    assert(r.body[0].sales_open_at === null && r.body[0].sales_close_at === null, "GET /events: oba null, ko nista nastavljena", r.body[0]);
+    assert(!("publish_at" in j) && !("publishAt" in j), "publish_at se javno ne vraca", Object.keys(j));
+
     assert(!/Server error|TypeError|ReferenceError/.test(log), "dnevnik streznika brez napak", log.split("\n").filter(l => /Server error|Error/.test(l)).slice(0, 3));
   } catch (e) {
     fail++; console.error("NAPAKA TESTA:", e);
