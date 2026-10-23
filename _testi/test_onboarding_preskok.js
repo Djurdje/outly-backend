@@ -113,7 +113,12 @@ function letaNazaj(leta, dniNaprej = 0, danes = danesLjubljana()) {
     r = await api("PATCH", "/me", T.e, { date_of_birth: null, complete_onboarding: true });
     assert(r.status === 400 && r.body.error === "date_of_birth_required", "date_of_birth: null + true -> 400 date_of_birth_required", r);
     r = await api("PATCH", "/me", T.e, { dateOfBirth: null, complete_onboarding: true });
-    assert(r.status === 400, "dateOfBirth: null + true -> 400 (camelCase null je ze od prej 400, ne zapise nicesar)", r);
+    assert(r.status === 400 && r.body === "dateOfBirth must be YYYY-MM-DD.", "dateOfBirth: null + true -> 400 »dateOfBirth must be YYYY-MM-DD.« (camelCase null je ze od prej 400 po stari poti)", r);
+    for (const [datum, besedilo] of [["2000-02-31", /^Invalid dateOfBirth\.$/], [iso(new Date(Date.now() + 3 * 24 * 3600 * 1000)), /^dateOfBirth cannot be in the future\.$/]]) {
+      r = await api("PATCH", "/me", T.e, { dateOfBirth: datum, complete_onboarding: true });
+      b = await baza("e");
+      assert(r.status === 400 && besedilo.test(r.body) && b.d === null && b.onboarded_at === null, `datum ${datum} + true -> 400 in onboarded_at ostane NULL`, [r, b]);
+    }
     r = await api("PATCH", "/me", T.e, { dateOfBirth: "", complete_onboarding: true });
     assert(r.status === 400 && r.body.error === "date_of_birth_required", "dateOfBirth: \"\" + true -> 400 date_of_birth_required", r);
     await api("PATCH", "/me", T.a, { dateOfBirth: odrasel });
