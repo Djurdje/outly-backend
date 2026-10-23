@@ -350,13 +350,13 @@ function eracuniPonudnik(env) {
   const tajno = [username, secretKey, token];
   let naslednji = 0;
 
-  async function klic(metoda, parametri, signal) {
+  async function klic(metoda, parametri, signal, namen = null) {
     const zdaj = Date.now(); const cakaj = Math.max(0, naslednji - zdaj); naslednji = Math.max(zdaj, naslednji) + razmak;
     await pocakajSignal(cakaj, signal);
     const napaka = (sporocilo, opcije) => new NapakaPonudnika(skrij(sporocilo, tajno), opcije);
     let res, besedilo;
     try {
-      res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ username, secretKey, token, method: metoda, parameters: parametri }), signal, redirect: "error" });
+      res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", ...(namen ? { "x-outly-namen": namen } : {}) }, body: JSON.stringify({ username, secretKey, token, method: metoda, parameters: parametri }), signal, redirect: "error" });
       besedilo = await res.text();
     } catch (e) {
       const prekinjen = e && e.name === "AbortError";
@@ -417,6 +417,14 @@ function eracuniPonudnik(env) {
       }
       const j = await klic("SalesInvoiceCreate", { SalesInvoice: skupno }, signal);
       return sklicDokumenta(j);
+    },
+    // Bralni preizkus PRED izdajo (pregled #318, 3. krog): poverilnice, uporabnik in naslov delujejo, preden gre v svet prvi Create. Nic ne izda in ne spremeni; oblike odgovora
+    // NE preverja (samo da klic uspe): pomen seznama ni zivo preverjen. Napacen kljuc bi sicer pustil `poslano_at` na vsaki vrstici zaostanka (besedilo napake ni dokaz, da dokument
+    // ni nastal), po popravku kljuca pa bi vsaka morala skozi iskanje po referenci.
+    async preizkusi({ signal } = {}) {
+      const danes = datumIso(new Date());
+      await klic("SalesInvoiceList", { dateFrom: danes, dateTo: danes }, signal, "preizkus");   // glava samo za sled v testih/posrednikih, API je ne rabi
+      return true;
     },
     // Iskanje po referenci (= pred novo izdajo): seznam dokumentov v ozkem obdobju okoli `poslano_at`, filter po `orderReference` v odjemalcu. API nima filtra po referenci in
     // oblike seznama (omejitev, strani) dokumentacija ne opisuje, zato je NEGATIVEN izid (return null) dovoljen SAMO, ce je seznam dokazljivo popoln:
@@ -752,8 +760,25 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   // Vrstica se TRAJNO zaklene pred novo izdajo (`napaka`, brez ponovitve): ponudnik je dokument ze ustvaril ali pa izida ne moremo zanesljivo ugotoviti.
   async function zakleni(r, zeton, sporocilo) {
     const s = String(sporocilo).slice(0, 300);
-    await uredi(r.id, zeton, "stanje = 'napaka', poskusi = poskusi + 1, zadnja_napaka = $3, prevzeto_at = NULL", [s], "stanje IN ('caka', 'izdan')");
+    await uredi(r.id, zeton, "stanje = 'napaka', poskusi = poskusi + 1, zadnja_napaka = $3, prevzeto_at = NULL", [s], "stanje IN ('caka', 'izdan', 'napaka')");
     objavi("trajna", `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${r.id})`, s);
+  }
+
+  // Bralni preizkus pred prvim Create v teku (en klic na tek, ne na vrstico). FAIL-CLOSED (pregled #321): KATERAKOLI napaka preizkusa ustavi Create (`neposlano`), vrstica ostane
+  // `caka` s praznim `poslano_at`, POZOR z besedilom napake. Pravo besedilo napake avtentikacije pri e-racuni NI znano, zato razvrstitev po besedilu ni varna.
+  // Poleg tega po prvem ZAVRNJENEM Create (konfiguracija ali trajna zavrnitev ponudnika) Create stoji za CEL proces RACUNI_KONFIG_PREMOR_MS (»List dela, Create nima pravic«).
+  let preizkusTek = null, preizkusNapaka = null, createStopDo = 0, createStopRazlog = "";
+  async function preizkusPredIzdajo(klicPonudniku) {
+    if (!ponudnik.preizkusi) return;
+    if (!preizkusTek) preizkusTek = klicPonudniku((signal) => ponudnik.preizkusi({ signal })).then(() => null, (e) => { if (!(e instanceof NapakaPonudnika)) throw e; return e; });
+    const e = await preizkusTek;
+    if (e && !preizkusNapaka) preizkusNapaka = e;
+  }
+  const ustavljenaIzdaja = (sporocilo, pocasi) => { const e = new NapakaPonudnika(sporocilo.slice(0, 300), { konfiguracija: pocasi, neznan: false, neposlano: true }); e.izBlokade = true; return e; };
+  function blokadaIzdaje() {
+    if (preizkusNapaka) return ustavljenaIzdaja(`bralni preizkus pred izdajo ni uspel, racun ni poslan: ${String(preizkusNapaka.message || preizkusNapaka).slice(0, 200)}`, !!(preizkusNapaka.konfiguracija || preizkusNapaka.trajna));
+    if (Date.now() < createStopDo) return ustavljenaIzdaja(`izdaja je ustavljena (ponudnik je zavrnil prejsnji Create: ${createStopRazlog}); racun ni poslan`, true);
+    return null;
   }
 
   async function napakaPriPonudniku(r, e, korak, zeton) {
@@ -826,16 +851,29 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
         }
         if (!pid && !pst) {
           korak = "ustvari";
+          { const b0 = blokadaIzdaje(); if (b0) throw b0; }
+          await preizkusPredIzdajo(klicPonudniku);
+          { const b1 = blokadaIzdaje(); if (b1) throw b1; }
           const o = await klicPonudniku(async (signal) => {
+            { const b2 = blokadaIzdaje(); if (b2) throw b2; }   // v istem teku je kljuc ze odpovedal (preizkus ali Create): ostalim vrsticam Create ne gre
             // Varovalo (K2): zapis »poslano« velja samo ob nasem prevzemu IN ob nespremenjenem prejsnjem poslano_at; sicer klic NI poslan.
             const ok = await uredi(id, zeton, "poslano_at = NOW(), iskanja_ne = 0, iskanje_ne_at = NULL, iskanja_nejasna = 0", [r.poslano_niz],
               "stanje = 'caka' AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL AND poslano_at IS NOT DISTINCT FROM $3::timestamptz");
             if (!ok) throw new NapakaPonudnika("vrstico je medtem prevzel ali spremenil drug proces (zahtevek ni poslan)", { neznan: false, neposlano: true });
-            return ponudnik.ustvari(pz.podatki, { signal });
+            try { return await ponudnik.ustvari(pz.podatki, { signal }); } catch (err) {
+              // Create ZAVRNJEN (nastavitev/poverilnice ali trajna zavrnitev ponudnika; ne lokalna zavrnitev ene vrstice): Create stoji za cel proces KONFIG_PREMOR_MS.
+              // Zapisano pred sprostitvijo semaforja, da ga ostale vrstice v istem teku vidijo.
+              if (err instanceof NapakaPonudnika && (err.konfiguracija || (err.trajna && !err.neposlano))) { createStopDo = Date.now() + KONFIG_PREMOR_MS; createStopRazlog = kratko(err).slice(0, 150); }
+              throw err;
+            }
           });
           pid = o && o.ponudnik_id; pst = o && o.ponudnik_stevilka;
           if (!pid && !pst) {   // izdano (ponudnik je potrdil uspeh), a odgovor brez oznake dokumenta: poisci ga po referenci; ce ga ne najdemo, vrstica NIKOLI ne gre v novo izdajo
             korak = "iskanje";
+            // Zastavica »ustvarjeno pri ponudniku«: vrstica je `napaka` ze PRED iskanjem (prevzem ostane nas). Ce se proces ustavi (deploy, padec) med Create in koncem iskanja, vrstice
+            // nihce vec ne prevzame in po restartu ne gre v novo izdajo, tudi ob ERACUNI_SEZNAM_PREVERJEN=1 (seznam je lahko viden z zamikom).
+            const zakljucena = await uredi(id, zeton, "stanje = 'napaka', zadnja_napaka = $3", ["Create je uspel, a odgovor ni vseboval oznake dokumenta; poteka iskanje po referenci"], "stanje = 'caka'");
+            if (!zakljucena) throw new NapakaPonudnika("vrstico je medtem prevzel ali spremenil drug proces", { neznan: false, neposlano: true });
             let najden = null;
             try {
               const ip = await podatkiZaIskanje(r, new Date());
@@ -849,8 +887,8 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
           }
         }
         // Oznaka in stevilka dokumenta sta LOCENI polji (S1): nikoli ena namesto druge.
-        const zapisano = await uredi(id, zeton, "ponudnik = $3, ponudnik_id = $4, ponudnik_stevilka = $5", [ponudnik.ime, pid || null, pst || null],
-          "stanje = 'caka' AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL");
+        const zapisano = await uredi(id, zeton, "ponudnik = $3, ponudnik_id = $4, ponudnik_stevilka = $5, stanje = 'caka', zadnja_napaka = NULL", [ponudnik.ime, pid || null, pst || null],
+          "stanje IN ('caka', 'napaka') AND stevilka IS NULL AND ponudnik_id IS NULL AND ponudnik_stevilka IS NULL");
         if (!zapisano) {
           objavi("obdelava", `${r.vrsta} (narocilo ${r.public_ref}, vrstica ${id})`, `dokument ${pid || pst} pri ponudniku je nastal, a vrstice ni bilo mogoce posodobiti (prevzel jo je drug proces); nadaljuje ta, najde ga z iskanjem po referenci`);
           return;
@@ -937,6 +975,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
         if (!imamNajem) return 0;
       }
       const zeton = crypto.randomUUID();
+      preizkusTek = null; preizkusNapaka = null;   // preizkus velja en tek
       const konec = Date.now() + PRORACUN_MS;
       for (;;) {
         const ids = await prevzemi(PAKET, zeton);
