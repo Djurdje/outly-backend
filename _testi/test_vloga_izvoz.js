@@ -188,7 +188,11 @@ async function api(method, path, token, body) {
     r = await api("GET", "/me", T.kopija);
     assert(r.status === 200, "po vrnitvi na user spet deluje navadna prijava (/me 200)", r.status);
     r = await api("PATCH", `/admin/api/users/${kopijaId}`, T.admin, { role: "backup" });
-    assert(r.status === 200 && r.body.role === "backup", "admin nastavi vlogo backup prek PATCH /admin/api/users/:id", r.body);
+    assert(r.status === 400 && r.body && r.body.error === "reason_required", "brez razloga nova vloga backup -> 400 reason_required (N1)", [r.status, r.body]);
+    r = await api("GET", "/admin/api/export", T.kopija);
+    assert(r.status === 403, "po zavrnjeni spremembi (brez razloga) vloga ostane user: izvoz se vedno 403", r.status);
+    r = await api("PATCH", `/admin/api/users/${kopijaId}`, T.admin, { role: "backup", reason: "racun za kopije" });
+    assert(r.status === 200 && r.body.role === "backup", "admin nastavi vlogo backup prek PATCH /admin/api/users/:id (z razlogom)", r.body);
     r = await api("GET", "/admin/api/export", T.kopija);
     assert(r.status === 200, "izvoz takoj spet 200", r.status);
     r = await api("PATCH", `/admin/api/users/${kopijaId}`, T.admin, { role: "napacna" });
