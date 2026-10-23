@@ -57,7 +57,7 @@ async function api(method, path, token) {
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE racuni, vracila, spori, admin_dejanja, omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE racuni, vracila, spori, admin_dejanja, agent_zetoni, omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
   // racuni/vracila/spori: vstavljanje v poljubnem stanju (trigger racuni_varuj sicer dovoli samo nov dolg): seja brez sprozilcev, samo za te vstavke
   const brezSprozilcev = new Client({ connectionString: DB });
   await brezSprozilcev.connect();

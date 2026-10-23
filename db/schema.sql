@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–059, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–060, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict bMXOsJp9N8XbveO50ytsbByWQmSVFoNBNjKk1jf6tzgLibaprV6BCUPHGhT9xBK
+\restrict t0PNySu8kwFXmHfid1eUm8p4xms8vNcYbe3jao0TwRbDTWH3x1dqibOhwKZsgD0
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -267,6 +267,7 @@ CREATE TABLE public.admin_dejanja (
     razlog text,
     agent_zeton_id integer,
     predlog_id integer,
+    nujno boolean DEFAULT false NOT NULL,
     CONSTRAINT admin_dejanja_cilj_id_check CHECK (((char_length(cilj_id) >= 1) AND (char_length(cilj_id) <= 60))),
     CONSTRAINT admin_dejanja_cilj_tip_check CHECK (((char_length(cilj_tip) >= 1) AND (char_length(cilj_tip) <= 30))),
     CONSTRAINT admin_dejanja_dejanje_check CHECK (((char_length(dejanje) >= 1) AND (char_length(dejanje) <= 60))),
@@ -293,6 +294,13 @@ COMMENT ON COLUMN public.admin_dejanja.agent_zeton_id IS 'Zeton agenta, ki je de
 --
 
 COMMENT ON COLUMN public.admin_dejanja.predlog_id IS 'Predlog agenta, iz katerega je dejanje nastalo (059); NULL = admin sam. Brez tujega kljuca.';
+
+
+--
+-- Name: COLUMN admin_dejanja.nujno; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.admin_dejanja.nujno IS 'Dejanje je izvedel agent v nujnem nacinu z Martinovo pisno potrditvijo (060, I58); admin_user_id je NULL, razlog = citat in seja.';
 
 
 --
@@ -329,7 +337,7 @@ CREATE TABLE public.agent_zetoni (
     ustvaril_admin_id integer,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT agent_zetoni_ime_check CHECK (((char_length(ime) >= 1) AND (char_length(ime) <= 60))),
-    CONSTRAINT agent_zetoni_obseg_chk CHECK (((cardinality(obseg) >= 1) AND (obseg <@ ARRAY['beri'::text, 'predlagaj'::text]) AND ('beri'::text = ANY (obseg)))),
+    CONSTRAINT agent_zetoni_obseg_chk CHECK (((cardinality(obseg) >= 1) AND (obseg <@ ARRAY['beri'::text, 'predlagaj'::text, 'nujno'::text]) AND ('beri'::text = ANY (obseg)) AND ((NOT ('nujno'::text = ANY (obseg))) OR ('predlagaj'::text = ANY (obseg))))),
     CONSTRAINT agent_zetoni_zeton_sha256_check CHECK ((zeton_sha256 ~ '^[0-9a-f]{64}$'::text))
 );
 
@@ -1380,10 +1388,20 @@ CREATE TABLE public.predlogi_dejanj (
     odlocil_admin_id integer,
     odloceno_at timestamp with time zone,
     napaka text,
+    nujno_potrditev text,
+    nujno_seja text,
+    nujno_at timestamp with time zone,
+    nujno_pregledano_at timestamp with time zone,
+    nujno_pregledal_admin_id integer,
+    nujno_mail_poskusi integer DEFAULT 0 NOT NULL,
+    nujno_mail_prevzeto_at timestamp with time zone,
+    nujno_mail_poslano_at timestamp with time zone,
+    nujno_mail_izid_neznan boolean DEFAULT false NOT NULL,
     CONSTRAINT predlogi_dejanj_cilj_id_check CHECK ((cilj_id > 0)),
     CONSTRAINT predlogi_dejanj_cilj_tip_check CHECK ((cilj_tip = ANY (ARRAY['event'::text, 'club'::text]))),
     CONSTRAINT predlogi_dejanj_dejanje_check CHECK ((dejanje = ANY (ARRAY['event.uredi'::text, 'event.okno_prodaje'::text, 'event.objavi'::text, 'event.ustavi_prodajo'::text, 'event.zazeni_prodajo'::text, 'event.nov_osnutek'::text, 'event.podvoji'::text]))),
     CONSTRAINT predlogi_dejanj_napaka_check CHECK (((napaka IS NULL) OR (char_length(napaka) <= 300))),
+    CONSTRAINT predlogi_dejanj_nujno_chk CHECK ((((nujno_at IS NULL) = (nujno_potrditev IS NULL)) AND ((nujno_at IS NULL) = (nujno_seja IS NULL)) AND ((nujno_potrditev IS NULL) OR ((char_length(nujno_potrditev) >= 3) AND (char_length(nujno_potrditev) <= 1000))) AND ((nujno_seja IS NULL) OR ((char_length(nujno_seja) >= 1) AND (char_length(nujno_seja) <= 500))) AND ((nujno_at IS NULL) OR (stanje = 'potrjen'::text)) AND ((nujno_pregledano_at IS NULL) OR (nujno_at IS NOT NULL)) AND ((nujno_mail_poskusi = 0) OR (nujno_at IS NOT NULL)) AND (nujno_mail_poskusi >= 0))),
     CONSTRAINT predlogi_dejanj_odloceno_chk CHECK (((stanje = 'caka'::text) = (odloceno_at IS NULL))),
     CONSTRAINT predlogi_dejanj_prej_check CHECK (((prej IS NULL) OR ((jsonb_typeof(prej) = 'object'::text) AND (octet_length((prej)::text) <= 400000)))),
     CONSTRAINT predlogi_dejanj_razlog_check CHECK (((char_length(razlog) >= 1) AND (char_length(razlog) <= 1000))),
@@ -1397,6 +1415,20 @@ CREATE TABLE public.predlogi_dejanj (
 --
 
 COMMENT ON TABLE public.predlogi_dejanj IS 'Predlogi agenta (059, #330 2. del): namera brez ucinka; izvede jo admin s potrditvijo po obstojeci poti v isti transakciji (I57). Rok 24 h.';
+
+
+--
+-- Name: COLUMN predlogi_dejanj.nujno_potrditev; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.predlogi_dejanj.nujno_potrditev IS 'Dobesedni citat Martinove pisne potrditve za nujno izvedbo (060, I58); streznik ne more preveriti avtorja: pravila agenta, mail, rdec pas.';
+
+
+--
+-- Name: COLUMN predlogi_dejanj.nujno_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.predlogi_dejanj.nujno_at IS 'Cas nujne izvedbe agenta (060, I58); meja 3 na 24 h globalno. NULL = predlog ni bil izveden v nujnem nacinu.';
 
 
 --
@@ -3143,6 +3175,13 @@ CREATE INDEX orders_user_idx ON public.orders USING btree (user_id, created_at D
 
 
 --
+-- Name: predlogi_dejanj_nujno_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX predlogi_dejanj_nujno_idx ON public.predlogi_dejanj USING btree (nujno_at DESC) WHERE (nujno_at IS NOT NULL);
+
+
+--
 -- Name: predlogi_dejanj_stanje_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4110,5 +4149,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict bMXOsJp9N8XbveO50ytsbByWQmSVFoNBNjKk1jf6tzgLibaprV6BCUPHGhT9xBK
+\unrestrict t0PNySu8kwFXmHfid1eUm8p4xms8vNcYbe3jao0TwRbDTWH3x1dqibOhwKZsgD0
 

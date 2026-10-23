@@ -23,8 +23,9 @@ const express = require("express");
 
 const PREDPONA = "outly_agent_";
 const ZETON_VZOREC = /^outly_agent_[A-Za-z0-9_-]{43}$/;   // 32 nakljucnih bajtov v base64url brez polnila = 43 znakov
-// v bazi ga varuje CHECK agent_zetoni_obseg_chk (058, razsirjen v 059): `beri` je obvezen, `predlagaj` (predlogi, agent_predlogi.js, I57) samo skupaj z njim; `nujno` (3. del) se ne obstaja
-const OBSEGI = ["beri", "predlagaj"];
+// v bazi ga varuje CHECK agent_zetoni_obseg_chk (058, razsirjen v 059 in 060): `beri` je obvezen, `predlagaj` (predlogi, agent_predlogi.js, I57) samo skupaj z njim,
+// `nujno` (nujni nacin, 060, I58) samo skupaj s `predlagaj`
+const OBSEGI = ["beri", "predlagaj", "nujno"];
 const AKTIVNIH_NAJVEC = 10;
 const DNI_PRIVZETO = 30, DNI_NAJVEC = 90;
 const RABA_ZAPIS_MS = 60000;                                // zadnja_raba_at najvec enkrat na minuto na zeton
@@ -99,7 +100,8 @@ function ustvari(dep) {
     try { return await fn(); } finally { vBranju--; sprosti(); }
   }
   const predlogi = require("./agent_predlogi").ustvari({ pool, adminRouter, omeji, zapisiAdminDejanje, celoId4, ocisti, delo, okoljeCelo,
-    odgovoriNaNapako: dep.odgovoriNaNapako, dejanja: dep.dejanjaDogodka });
+    odgovoriNaNapako: dep.odgovoriNaNapako, dejanja: dep.dejanjaDogodka, imaResend: dep.imaResend, posljiMail: dep.posljiMail,
+    resendDokazanaZavrnitev: dep.resendDokazanaZavrnitev, ubeziHtml: dep.ubeziHtml, mailRokMs: dep.mailRokMs, javiNapako: dep.javiNapako });
 
   // =====================================================================================================================
   // 1. UPRAVLJANJE (admin): GET/POST /admin/api/agent-zetoni, POST /admin/api/agent-zetoni/:id/preklici
@@ -111,7 +113,8 @@ function ustvari(dep) {
     try {
       res.set("Cache-Control", "no-store");
       const r = await pool.query(`SELECT ${STOLPCI_ZETONA} FROM agent_zetoni ORDER BY id DESC LIMIT 100`);
-      return res.json({ agent_api: process.env.AGENT_API !== "0", items: r.rows });
+      const nujno = predlogi.nujnoStikalo();
+      return res.json({ agent_api: process.env.AGENT_API !== "0", agent_nujno: nujno ? nujno.error : "vklopljen", items: r.rows });
     } catch (e) { return dep.odgovoriNaNapako(res, e, "GET /admin/api/agent-zetoni"); }
   });
 
@@ -124,8 +127,9 @@ function ustvari(dep) {
     const dni = b.dni === undefined ? DNI_PRIVZETO : b.dni;
     if (!Number.isInteger(dni) || dni < 1 || dni > DNI_NAJVEC) return res.status(400).json({ error: "invalid_days", message: `dni must be a whole number from 1 to ${DNI_NAJVEC}.` });
     const obseg = b.obseg === undefined ? ["beri"] : b.obseg;
-    if (!Array.isArray(obseg) || obseg.length < 1 || obseg.some((x) => !OBSEGI.includes(x)) || new Set(obseg).size !== obseg.length || !obseg.includes("beri")) {
-      return res.status(400).json({ error: "invalid_scope", message: `obseg must be a list of: ${OBSEGI.join(", ")} (beri is required).` });
+    if (!Array.isArray(obseg) || obseg.length < 1 || obseg.some((x) => !OBSEGI.includes(x)) || new Set(obseg).size !== obseg.length || !obseg.includes("beri")
+        || (obseg.includes("nujno") && !obseg.includes("predlagaj"))) {
+      return res.status(400).json({ error: "invalid_scope", message: `obseg must be a list of: ${OBSEGI.join(", ")} (beri is required; nujno only with predlagaj).` });
     }
     const razlog = b.reason === undefined || b.reason === null ? null : String(b.reason).trim().slice(0, 500) || null;
     const zeton = PREDPONA + crypto.randomBytes(32).toString("base64url");
@@ -195,6 +199,15 @@ function ustvari(dep) {
   // stikalo: AGENT_API=0 izklopi vse naenkrat (Render okolje), brez baze in brez preverjanja zetona
   router.use((req, res, next) => {
     if (process.env.AGENT_API === "0") return res.status(503).set("Retry-After", "60").json({ error: "agent_api_off", message: "The agent API is switched off." });
+    next();
+  });
+
+  // nujni nacin (060, I58): AGENT_NUJNO=0 ali brez prejemnika maila (AGENT_NUJNO_MAIL) / Resenda -> 503 BREZ baze (pred omejevalnikom in iskanjem zetona)
+  const JE_NUJNO = /^\/predlogi\/[^/]+\/izvedi-nujno\/?$/;
+  router.use((req, res, next) => {
+    if (!JE_NUJNO.test(req.path)) return next();
+    const z = predlogi.nujnoStikalo();
+    if (z) return res.status(503).set("Retry-After", "60").json(z);
     next();
   });
 
@@ -288,11 +301,12 @@ function ustvari(dep) {
   }
   router.use(zahtevaj("beri"));
 
-  // samo branje; edina izjema je POST /predlogi (obseg predlagaj): zapis NAMERE, ki nicesar ne spremeni (agent_predlogi.js, I57)
+  // samo branje; izjemi: POST /predlogi (obseg predlagaj): zapis NAMERE, ki nicesar ne spremeni (agent_predlogi.js, I57), in POST /predlogi/:id/izvedi-nujno
+  // (obseg nujno: izvedba lastnega predloga z Martinovo pisno potrditvijo, I58)
   router.use((req, res, next) => {
-    if (req.method === "GET" || (req.method === "POST" && req.path === "/predlogi")) return next();
-    res.set("Allow", req.path === "/predlogi" ? "GET, POST" : "GET");
-    return res.status(405).json({ error: "method_not_allowed", message: "The agent API is read-only (GET); only POST /agent/api/predlogi records a proposal." });
+    if (req.method === "GET" || (req.method === "POST" && (req.path === "/predlogi" || JE_NUJNO.test(req.path)))) return next();
+    res.set("Allow", req.path === "/predlogi" || JE_NUJNO.test(req.path) ? (JE_NUJNO.test(req.path) ? "POST" : "GET, POST") : "GET");
+    return res.status(405).json({ error: "method_not_allowed", message: "The agent API is read-only (GET); only POST /agent/api/predlogi records a proposal (and POST .../izvedi-nujno in emergency mode)." });
   });
 
   function posljiJson(res, telo) {

@@ -3108,11 +3108,12 @@ const NAPAKA_DOGODEK_MINIL_DATUM = { error: "event_finished", message: "This eve
 // `req.predlog` ({ id, agentZetonId }, agent_predlogi.js, 059, I57): dejanje je izvedba ali zapis predloga agenta -> oznaka predloga in zetona v isti vrstici.
 async function zapisiAdminDejanje(c, req, dejanje, ciljTip, ciljId, prej, potem, razlog) {
   const pr = req.predlog || null;
+  const nujno = !!(pr && pr.nujno === true);   // nujni nacin agenta (060, I58): oznaka + citat in seja v razlogu (dejanje poti razloga nima)
   await c.query(
-    `INSERT INTO admin_dejanja (admin_user_id, dejanje, cilj_tip, cilj_id, prej, potem, razlog, agent_zeton_id, predlog_id)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9)`,
+    `INSERT INTO admin_dejanja (admin_user_id, dejanje, cilj_tip, cilj_id, prej, potem, razlog, agent_zeton_id, predlog_id, nujno)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)`,
     [req.user.userId === undefined ? null : req.user.userId, dejanje, ciljTip, String(ciljId), prej === null || prej === undefined ? null : JSON.stringify(prej),
-     potem === null || potem === undefined ? null : JSON.stringify(potem), razlog || null, pr ? pr.agentZetonId : null, pr ? pr.id : null]);
+     potem === null || potem === undefined ? null : JSON.stringify(potem), razlog || (nujno ? pr.razlogNujno : null) || null, pr ? pr.agentZetonId : null, pr ? pr.id : null, nujno]);
 }
 // Primerljiva vrednost za dnevnik (Date -> ISO, NUMERIC/BIGINT niz ostane niz).
 const vrednostDnevnika = (v) => (v instanceof Date ? v.toISOString() : v === undefined ? null : v);
@@ -3172,6 +3173,7 @@ function requireClubUrednikDogodka() {
 app.patch("/events/:id", requireAuth, requireClubUrednikDogodka(), (req, res) => urediDogodek(req, res));
 // Telo PATCH /events/:id. `opcije` uporablja samo agent_predlogi.js (#330, I57; obstojeca pot ostane ena sama, brez kopije validacije):
 //   samoPreveri(dovoljeno, d)  po CELOTNI validaciji, pred transakcijo: vrne normalizirana polja, nic ne zapise in nic ne zaklene (predlog agenta);
+//   predZaklepom(c)            takoj po BEGIN, PRED zaklepom vrstice dogodka (nujni nacin agenta, I58: globalni advisory zaklep 73121);
 //   predlog(c, st)             v transakciji po zaklepu vrstice dogodka in branju starih vrednosti: zaklep predloga, zastarelost, caka -> potrjen (vrze e.odgovor).
 async function urediDogodek(req, res, opcije = {}) {
   try {
@@ -3309,6 +3311,8 @@ async function urediDogodek(req, res, opcije = {}) {
     const c = await pool.connect();
     try {
       await c.query("BEGIN");
+      // nujni nacin agenta (I58): globalni advisory zaklep nujnih izvedb PRED zaklepom vrstice dogodka (nujni klic ne drzi vrstice, medtem ko caka na drugo nujno izvedbo)
+      if (opcije.predZaklepom) await opcije.predZaklepom(c);
       // Odpoved/datum neadmina: polna preverba I42 (steje narocila). Sicer samo kratek zaklep vrstice (FOR NO KEY UPDATE: ne caka na tuje kljuce novih narocil).
       const z = !admin && (odpoved || datum) ? await zaklepDogodkaZaOdpoved(c, d.id)
         : (await c.query("SELECT id FROM events WHERE id = $1 FOR NO KEY UPDATE", [d.id])).rows[0];
@@ -3686,7 +3690,8 @@ admin.get("/summary", async (req, res) => {
         (SELECT COUNT(*)::int FROM spori WHERE zaprt_at IS NULL)             AS open_disputes,
         (SELECT COUNT(*)::int FROM spori WHERE povrnitev_stanje IN ('ni_uspelo','rocno')) AS dispute_recovery_attention,
         (SELECT COUNT(*)::int FROM racuni WHERE stanje='napaka')             AS racuni_napaka,
-        (SELECT COUNT(*)::int FROM predlogi_dejanj WHERE stanje='caka' AND velja_do > NOW()) AS predlogi_caka`);
+        (SELECT COUNT(*)::int FROM predlogi_dejanj WHERE stanje='caka' AND velja_do > NOW()) AS predlogi_caka,
+        (SELECT COUNT(*)::int FROM predlogi_dejanj WHERE nujno_at IS NOT NULL AND nujno_pregledano_at IS NULL) AS nujno_nepregledanih`);
     return res.json({ ...r.rows[0], warnings_red: adminNadzor.rdeceStevilo() });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
@@ -4285,7 +4290,7 @@ admin.get("/events/:id", async (req, res) => {
               (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = $1 AND o.status = 'pending') AS pending_orders,
               (SELECT COUNT(*)::int FROM tickets t WHERE t.event_id = $1 AND t.status = 'used') AS checked_in`, [id])).rows[0];
     const dn = await c.query(
-      `SELECT a.id, a.cas, a.dejanje, a.prej, a.potem, a.razlog, u.email AS admin_email
+      `SELECT a.id, a.cas, a.dejanje, a.prej, a.potem, a.razlog, u.email AS admin_email, a.nujno, a.agent_zeton_id
          FROM admin_dejanja a LEFT JOIN users u ON u.id = a.admin_user_id
         WHERE a.cilj_tip = 'event' AND a.cilj_id = $1 ORDER BY a.cas DESC, a.id DESC LIMIT 30`, [String(id)]);
     await c.query("COMMIT");
@@ -4312,7 +4317,7 @@ admin.get("/audit", async (req, res) => {
     const lim = Math.min(200, Math.max(1, celoId(req.query.limit) || 50));
     p.push(lim);
     const r = await pool.query(
-      `SELECT a.id, a.cas, a.dejanje, a.cilj_tip AS target_type, a.cilj_id AS target_id, a.prej, a.potem, a.razlog, u.email AS admin_email
+      `SELECT a.id, a.cas, a.dejanje, a.cilj_tip AS target_type, a.cilj_id AS target_id, a.prej, a.potem, a.razlog, u.email AS admin_email, a.nujno, a.agent_zeton_id
          FROM admin_dejanja a LEFT JOIN users u ON u.id = a.admin_user_id
         ${pogoji.length ? "WHERE " + pogoji.join(" AND ") : ""} ORDER BY a.cas DESC, a.id DESC LIMIT $${p.length}`, p);
     return res.json(r.rows);
@@ -4693,6 +4698,9 @@ const agentApi = require("./agent_api").ustvari({
   paymentsMode: () => (placilaStripe.testniNacin() ? "fake" : (placilaStripe.jeSandbox() ? "sandbox" : "live")),
   // predlogi agenta (#330, 2. del, 059, I57): izvedba SAMO po obstojecih poteh (ista validacija, isti zaklepi, isti dnevnik)
   dejanjaDogodka: { uredi: urediDogodek, ustvari: ustvariDogodek, podvoji: podvojiDogodek },
+  // nujni nacin (#330, 3. del, 060, I58): mail Martinu (AGENT_NUJNO_MAIL) z istim posiljanjem kot ostala obvestila; brez Resenda je nujni nacin izklopljen
+  imaResend: () => !!resend, posljiMail: (m) => gostResendPosli(m), resendDokazanaZavrnitev, ubeziHtml,
+  mailRokMs: () => GOST_POSTA_TIMEOUT_MS, javiNapako: (e) => sentry.porociNapako(e, "agent-nujno"),   // izcrpan mail Martinu: Sentry ERROR (ne warning)
 });
 app.use("/agent/api", agentApi.router);
 app.use("/admin/api", admin);

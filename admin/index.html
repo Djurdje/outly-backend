@@ -128,6 +128,8 @@
 
   <!-- PANEL -->
   <div id="panel" class="skrito">
+    <!-- RDEČ PAS (admin/nujno.js, #330 3. del): nujna dejanja agenta, dokler jih admin ne označi z »Pregledal sem« -->
+    <div id="nujno_pas" class="skrito"></div>
     <nav>
       <button data-z="pregled" class="aktiven">Pregled</button>
       <button data-z="opozorila">Opozorila <span class="n skrito" id="nOpozorila"></span></button>
@@ -360,6 +362,7 @@
 <script src="nov-dogodek.js"></script>
 <script src="agent.js"></script>
 <script src="predlogi.js"></script>
+<script src="nujno.js"></script>
 <script>
 // Panel teče na istem naslovu kot backend (Express streže /admin), zato je
 // osnova kar location.origin. Za lokalni test: ?api=http://localhost:3000
@@ -552,6 +555,7 @@ async function naloziPregled() {
       kosPozor(s.dispute_recovery_attention, "povrnitev sporov za pozornost", "pozor") +
       kos(Number(s.predlogi_caka) || 0, "predlogov agenta čaka");
     if (typeof s.predlogi_caka === "number" && window.predlogiZnacka) window.predlogiZnacka(s.predlogi_caka);   // DODANO polje (#330, 2. del); star backend ga nima
+    if (typeof s.nujno_nepregledanih === "number" && window.naloziNujnoPas) window.naloziNujnoPas();   // rdeč pas (#330, 3. del): ob vsakem Pregledu (tudi ob prikazu panela)
     const nV = (Number(s.refunds_attention) || 0) + (Number(s.dispute_recovery_attention) || 0);
     $("nVracil").textContent = nV; $("nVracil").classList.toggle("skrito", !nV);
     if (typeof s.warnings_red === "number") {   // DODANO polje (#326); null = se ni izracunano (znacko postavi »Danes« ali zavihek Opozorila), star backend ga nima

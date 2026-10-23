@@ -81,3 +81,20 @@ a.op-vrstica:hover, a.op-vrstica:focus-visible { background:var(--panel2); outli
 .pr-gostitelj { display:block; color:var(--opoz); overflow-wrap:anywhere }
 .pr-plakat { display:block; max-width:160px; max-height:160px; margin:4px 0; border:1px solid var(--line); border-radius:4px }
 .pr-okno { max-height:60vh; overflow:auto }
+
+/* Rdeč pas: nujna dejanja agenta (admin/nujno.js, #330 3. del, I58) */
+.nj-pas { margin:0 0 14px; padding:12px 14px; border:1px solid var(--napaka); border-left:5px solid var(--napaka); border-radius:6px; background:var(--napaka-soft) }
+.nj-naslov { font-size:14px; margin-bottom:4px }
+.nj-naslov b { color:var(--napaka) }
+.nj-opomba { margin:0 0 10px; font-size:12.5px; color:var(--muted) }
+.nj-seznam { display:flex; flex-direction:column; gap:10px }
+.nj-postavka { padding:8px 10px; background:var(--panel); border-radius:4px }
+.nj-glava { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:baseline; margin-bottom:6px }
+.nj-glava .desno { margin-left:auto }
+.nj-spremembe { font-size:13px; margin-bottom:6px; overflow-wrap:anywhere }
+.nj-citat { margin:0 0 6px; padding:6px 8px; border-left:3px solid var(--napaka); background:var(--panel2) }
+.nj-citat small, .nj-polja small { display:block; font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--faint) }
+.nj-citat-besedilo { white-space:pre-wrap; overflow-wrap:anywhere; font-style:italic; font-size:13px }
+.nj-polja { display:flex; flex-wrap:wrap; gap:6px 16px; font-size:12.5px }
+.nj-seja { overflow-wrap:anywhere }
+@media (max-width:560px) { .nj-glava .desno { margin-left:0; width:100% } }

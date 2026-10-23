@@ -254,6 +254,15 @@ function ustvari(dep) {
           WHERE receipt_mail_attempts IS NOT NULL AND receipt_mail_sent_at IS NULL AND status = 'paid' AND user_id IS NOT NULL
             AND buyer_email !~* '@outly\\.invalid$' AND paid_at < NOW() - INTERVAL '1 hour' AND paid_at > NOW() - INTERVAL '30 days'`)).rows[0];
       if (potrdila.n > 0) dodaj("potrdila_neposlana", "oranzno", "narocila", null, `${potrdila.n} potrdil o nakupu kupcem ni poslanih več kot 1 uro (zadnjih 30 dni).`, potrdila.najstarejse);
+      // 4. nujni nacin agenta (#330, 3. del, I58): nepregledano nujno dejanje, katerega mail Martinu NI potrjeno poslan = rdece (mail je glavno varovalo; brez besedila agenta)
+      const nujna = (await c.query(
+        `SELECT id, nujno_at, nujno_mail_poskusi FROM predlogi_dejanj
+          WHERE nujno_at IS NOT NULL AND nujno_pregledano_at IS NULL AND nujno_mail_poslano_at IS NULL ORDER BY nujno_at DESC LIMIT 50`)).rows;
+      for (const x of nujna) {
+        dodaj("nujno_mail_neposlan", "rdece", "predlog", x.id,
+          `Agent je v nujnem načinu izvedel dejanje (predlog ${x.id}), mail Martinu pa ni potrjeno poslan (${x.nujno_mail_poskusi} poskusov). Preveri dejanje v rdečem pasu na vrhu panela in klikni »Pregledal sem«.`,
+          x.nujno_at);
+      }
       }
 
       if (dogodekId !== null) {   // samo opozorila tega dogodka (racuni, vracila ... so splosna); stevci stejejo samo ta opozorila
