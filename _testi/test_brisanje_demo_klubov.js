@@ -191,9 +191,12 @@ async function podatki(c) {
   const tGl = await vstopnica(c, nGl.id, e1.id);
   await ins(c, "guest_list_members", { guest_list_id: glDemo.id, user_id: kupec, ticket_id: tGl.id });
   await ins(c, "vracila", { order_id: nVracilo.id, event_id: e1o.id, razlog: "event_cancelled", stanje: "opravljeno", znesek_cents: 1500, brez_stripa: true });
+  await ins(c, "spori", { id: "dp_demo_sbx", order_id: nSandbox.id, stanje: "odprt" });
+  await ins(c, "vracila_iz_stripa", { vracilo_id: "re_demo_sbx", charge_id: "ch_demo_sbx", order_id: nSandbox.id, znesek_cents: 100, skupaj_vrnjeno_cents: 100 });
+  await c.query("UPDATE vracila SET stripe_vracilo_id = 're_demo_test', provizija_vracilo_id = 'fr_demo_test' WHERE order_id = $1", [nVracilo.id]);
   I.demoNarocila = [nLazni, nSandbox, nVip, nGost, nFailed, nCancelled, nVracilo, nGl].map((x) => x.id);
   I.demoVstopnice = [...tLazni, tSandbox, tVip, tGost, tGl].map((x) => x.id);
-  I.nLazni = nLazni.id; I.nSandbox = nSandbox.id;
+  I.nLazni = nLazni.id; I.nSandbox = nSandbox.id; I.nFailed = nFailed.id; I.nCancelled = nCancelled.id; I.nVracilo = nVracilo.id;
   // Narocila se vsaj na enem dogodku vsakega drugega demo kluba (testni promet).
   for (let i = 1; i < 5; i++) {
     const n = await narocilo(c, { ev: dem[i].p.id, club: I.demoKlubi[i], user: kupec, pi: "test_" + crypto.randomUUID() });
@@ -312,7 +315,7 @@ const skupno = async (c) => (await c.query(`SELECT (SELECT COUNT(*) FROM clubs) 
   (SELECT COUNT(*) FROM guest_lists) AS g, (SELECT COUNT(*) FROM vracila) AS v, (SELECT COUNT(*) FROM reports) AS r, (SELECT COUNT(*) FROM predlogi_dejanj WHERE stanje = 'caka') AS p`)).rows[0];
 
 // Zazene 066 v transakciji, ki se vrne nazaj. Vrne { napaka?, obvestila }.
-async function poskusi(c, pripravi) {
+async function poskusi(c, pripravi, preveri) {
   const obvestila = [];
   const naNotice = (n) => obvestila.push(n.message);
   c.on("notice", naNotice);
@@ -321,9 +324,10 @@ async function poskusi(c, pripravi) {
   try { if (pripravi) await pripravi(); await c.query(SQL066); } catch (e) { napaka = e; }
   const znotraj = napaka ? null : await skupno(c);
   const e2 = napaka ? null : (await c.query("SELECT COUNT(*)::int AS n FROM clubs WHERE is_demo")).rows[0].n;
+  const dodatno = !napaka && preveri ? await preveri() : null;
   await c.query("ROLLBACK");
   c.off("notice", naNotice);
-  return { napaka, obvestila, znotraj, demoPo: e2 };
+  return { napaka, obvestila, znotraj, demoPo: e2, dodatno };
 }
 
 (async () => {
@@ -366,9 +370,9 @@ async function poskusi(c, pripravi) {
     await zanikaj("(a) pravo narocilo brez Stripa (0 EUR) na demo dogodku", () => narocilo(c, { ev: prvaDemoPrihodnja, club: I.demoKlubi[0], user: I.kupec, unit: 0 }), /pravih \(ne testnih\) narocil/);
     await zanikaj("(a) pravo v celoti vrnjeno narocilo", () => narocilo(c, { ev: prvaDemoPrihodnja, club: I.demoKlubi[0], user: I.kupec, status: "refunded", pi: "pi_vrnjeno", seja: "cs_live_vrnjeno", refunded: 1500 }), /pravih \(ne testnih\) narocil/);
     await zanikaj("(b) davcni racun za testno narocilo demo dogodka", () => c.query("INSERT INTO racuni (order_id, vrsta, znesek_cents) VALUES ($1, 'racun', 3000)", [I.nLazni]), /davcnih racunov/);
-    await zanikaj("(b) spor za narocilo demo dogodka", () => c.query("INSERT INTO spori (id, order_id, stanje) VALUES ('dp_demo', $1, 'odprt')", [I.nSandbox]), /sporov/);
-    await zanikaj("(b) Stripovo vracilo (vracila_iz_stripa) za narocilo demo dogodka", () => c.query("INSERT INTO vracila_iz_stripa (vracilo_id, charge_id, order_id, znesek_cents, skupaj_vrnjeno_cents) VALUES ('re_demo', 'ch_demo', $1, 100, 100)", [I.nSandbox]), /Stripovih vracil/);
-    await zanikaj("(b) vracilo z oznako Stripa na demo dogodku", () => c.query("UPDATE vracila SET stripe_vracilo_id = 're_demo2' WHERE event_id = ANY($1::int[])", [I.demoDogodki]), /vracil z oznako Stripa/);
+    await zanikaj("(b) spor za PRAVO (failed) narocilo demo dogodka", () => c.query("INSERT INTO spori (id, order_id, stanje) VALUES ('dp_demo', $1, 'odprt')", [I.nFailed]), /sporov \(spori\) za prava narocila/);
+    await zanikaj("(b) Stripovo vracilo (vracila_iz_stripa) za PRAVO (cancelled) narocilo", () => c.query("INSERT INTO vracila_iz_stripa (vracilo_id, charge_id, order_id, znesek_cents, skupaj_vrnjeno_cents) VALUES ('re_demo', 'ch_demo', $1, 100, 100)", [I.nCancelled]), /Stripovih vracil \(vracila_iz_stripa\) za prava narocila/);
+    await zanikaj("(b) vracilo z oznako Stripa za PRAVO (cancelled) narocilo", () => c.query("INSERT INTO vracila (order_id, event_id, razlog, stanje, znesek_cents, stripe_vracilo_id) SELECT id, event_id, 'inactive_order', 'opravljeno', 100, 're_demo2' FROM orders WHERE id = $1", [I.nCancelled]), /vracil z oznako Stripa/);
     await zanikaj("(c) demo klub z imenom Outly", () => c.query("UPDATE clubs SET name = ' outly ' WHERE id = $1", [I.demoKlubi[2]]), /»Outly« ali uradni profil/);
     await zanikaj("(c) demo klub je uradni profil", () => c.query("UPDATE clubs SET is_official = TRUE WHERE id = $1", [I.demoKlubi[3]]), /»Outly« ali uradni profil/);
     await zanikaj("(c) narocilo demo kluba na dogodku, ki ostane", () => narocilo(c, { ev: I.quickie, club: I.demoKlubi[0], user: I.kupec, pi: "test_" + crypto.randomUUID() }), /club_id demo kluba na dogodku, ki ostane/);
@@ -381,7 +385,11 @@ async function poskusi(c, pripravi) {
     const dov = await poskusi(c, async () => {
       await c.query("UPDATE events SET venue_club_id = $1 WHERE id = $2", [I.demoKlubi[0], I.launch]);
       await c.query("UPDATE events SET vip_layout_from_club_id = $1 WHERE id = $2", [I.demoKlubi[1], I.quickie]);
-    });
+    }, async () => (await c.query(`SELECT (SELECT COUNT(*)::int FROM spori WHERE id LIKE 'dp_demo%') AS spori_demo, (SELECT COUNT(*)::int FROM spori) AS spori,
+      (SELECT COUNT(*)::int FROM vracila_iz_stripa WHERE vracilo_id LIKE 're_demo%') AS iz_stripa_demo, (SELECT COUNT(*)::int FROM vracila_iz_stripa) AS iz_stripa,
+      (SELECT COUNT(*)::int FROM vracila WHERE stripe_vracilo_id = 're_demo_test') AS vracila_demo`)).rows[0]);
+    assert(dov.dodatno && dov.dodatno.spori_demo === 0 && dov.dodatno.spori === 1 && dov.dodatno.iz_stripa_demo === 0 && dov.dodatno.iz_stripa === 1 && dov.dodatno.vracila_demo === 0,
+      "sandbox spor, sandbox Stripovo vracilo in testno vracilo z oznako Stripa NE ustavijo migracije in izginejo (Outlyjevi ostanejo)", dov.dodatno);
     assert(!dov.napaka && dov.demoPo === 0, "migracija uspe (odpovedan dogodek s prizoriscem, vip_layout_from_club_id; pravi failed/cancelled sta ze v podatkih)", dov.napaka && dov.napaka.message);
     assert(dov.obvestila.some((m) => /kaskada events tujih klubov \(venue_club_id\/vip_layout_from_club_id -> NULL\): 2/.test(m)), "dnevnik pove, da dva tuja dogodka izgubita kazalec na demo klub", dov.obvestila.filter((m) => /tujih/.test(m)));
 
@@ -390,7 +398,7 @@ async function poskusi(c, pripravi) {
     const mig = migrate(urlBaze(IME_BAZE));
     assert(mig.koda === 0 && /066_brisanje_demo_klubov\.sql \.\.\. v redu/.test(mig.izpis), "migrate.js -> 0, 066 v redu", mig.izpis.slice(-600));
     for (const vzorec of [/066: demo klubov 5, dogodkov 15, narocil 12, vstopnic \d+/, /066: orders 12 \(od tega guest lista 1\)/, /066: tickets \d+/, /066: clubs 5/, /066: events 15/,
-      /066: predlogi_dejanj poteceni 2/, /066: reports 2/, /uporabniki brez kluba po brisanju \(niso izbrisani\): \{/, /066: ostal klub id=\d+ ime=Outly/]) {
+      /066: predlogi_dejanj poteceni 2/, /066: spori \(testni\) 1/, /066: vracila_iz_stripa \(testna\) 1/, /066: reports 2/, /uporabniki brez kluba po brisanju \(niso izbrisani\): \{/, /066: ostal klub id=\d+ ime=Outly/]) {
       assert(vzorec.test(mig.izpis), `dnevnik deploya vsebuje ${vzorec}`, mig.izpis.slice(-1500));
     }
     const zapis = (await c.query("SELECT odtis FROM schema_migrations WHERE datoteka = '066_brisanje_demo_klubov.sql'")).rows;

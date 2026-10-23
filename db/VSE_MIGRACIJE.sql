@@ -3590,7 +3590,9 @@ COMMENT ON COLUMN orders.promo_code_id IS 'Promo koda, vpisana ob nakupu vstopni
 --   (a) kateri koli izbrisan dogodek ima PRAVO (ne testno) narocilo, ki ni failed/cancelled (paid, partially_refunded, refunded, pending): to je denar ali
 --       obveznost do kupca. Testno = enaka definicija kot SQL_TESTNO_NAROCILO v index.js (I39): `stripe_payment_intent_id LIKE 'test\_%'` ALI
 --       `stripe_checkout_session_id LIKE 'cs\_test\_%'`. Narocila guest liste (internemu vnosu brez denarja) se brisejo, a se stejejo v dnevnik.
---   (b) za narocilo, ki bi ga brisali, obstaja davcni racun (`racuni`), spor (`spori`), Stripe vracilo (`vracila_iz_stripa`) ali vracilo z oznako Stripa v `vracila`.
+--   (b) za narocilo, ki bi ga brisali, obstaja davcni racun (`racuni`; velja za VSA narocila, tudi testna). Za PRAVA (ne testna) narocila ustavijo migracijo tudi spor (`spori`),
+--       Stripovo vracilo (`vracila_iz_stripa`) ali vracilo z oznako Stripa v `vracila`; to velja tudi za pravo failed/cancelled narocilo. Spori in Stripova vracila TESTNIH
+--       (sandbox) narocil se brisejo skupaj z narocilom in se stejejo v dnevnik.
 --   (c) med brisanimi je klub z imenom »Outly« ali uradni profil (`is_official`); narocilo kluba, ki bi ga brisali, pripada dogodku, ki ostane;
 --       narocilo, ki ostane, kaze na mizo/paket/kodo/guest listo izbrisanega kluba; neodpovedan dogodek drugega kluba ima izbrisani klub za prizorisce
 --       (`venue_club_id`; po brisanju bi ostal brez lokacije). Po brisanju se preveri, da noben klub z is_demo = FALSE ni izginil, da vsi ostali dogodki,
@@ -3609,6 +3611,7 @@ DECLARE
   dk  INT[];      -- id-ji demo klubov
   de  INT[];      -- id-ji dogodkov demo klubov
   o_  BIGINT[];   -- id-ji narocil teh dogodkov
+  op_ BIGINT[];   -- med njimi PRAVA (ne testna) narocila
   dt  BIGINT[];   -- id-ji vstopnic teh dogodkov/narocil
   gl  BIGINT[];   -- id-ji guest list teh dogodkov
   ostali_klubi   INT[];
@@ -3629,6 +3632,9 @@ BEGIN
 
   SELECT COALESCE(array_agg(id ORDER BY id), '{}') INTO de FROM events WHERE club_id = ANY(dk);
   SELECT COALESCE(array_agg(id ORDER BY id), '{}') INTO o_ FROM orders WHERE event_id = ANY(de);
+  SELECT COALESCE(array_agg(id ORDER BY id), '{}') INTO op_ FROM orders o
+   WHERE o.id = ANY(o_)
+     AND NOT (COALESCE(o.stripe_payment_intent_id LIKE 'test\_%', FALSE) OR COALESCE(o.stripe_checkout_session_id LIKE 'cs\_test\_%', FALSE));
   SELECT COALESCE(array_agg(id ORDER BY id), '{}') INTO dt FROM tickets WHERE event_id = ANY(de) OR order_id = ANY(o_);
   SELECT COALESCE(array_agg(id ORDER BY id), '{}') INTO gl FROM guest_lists WHERE event_id = ANY(de);
   RAISE NOTICE '066: demo klubov %, dogodkov %, narocil %, vstopnic %', cardinality(dk), cardinality(de), cardinality(o_), cardinality(dt);
@@ -3648,16 +3654,16 @@ BEGIN
     RAISE EXCEPTION '066: % pravih (ne testnih) narocil na dogodkih demo klubov (paid/partially_refunded/refunded/pending); to je denar ali obveznost do kupca. Nic ni izbrisano.', n;
   END IF;
 
-  -- (b) racun, spor, Stripe vracilo
+  -- (b) racun (vsa narocila); spor, Stripovo vracilo (samo PRAVA narocila: testne brisemo z narocilom)
   SELECT COUNT(*) INTO n FROM racuni WHERE order_id = ANY(o_);
   IF n > 0 THEN RAISE EXCEPTION '066: % davcnih racunov (racuni) za narocila, ki bi jih brisal. Nic ni izbrisano.', n; END IF;
-  SELECT COUNT(*) INTO n FROM spori WHERE order_id = ANY(o_);
-  IF n > 0 THEN RAISE EXCEPTION '066: % sporov (spori) za narocila, ki bi jih brisal. Nic ni izbrisano.', n; END IF;
-  SELECT COUNT(*) INTO n FROM vracila_iz_stripa WHERE order_id = ANY(o_);
-  IF n > 0 THEN RAISE EXCEPTION '066: % Stripovih vracil (vracila_iz_stripa) za narocila, ki bi jih brisal. Nic ni izbrisano.', n; END IF;
+  SELECT COUNT(*) INTO n FROM spori WHERE order_id = ANY(op_);
+  IF n > 0 THEN RAISE EXCEPTION '066: % sporov (spori) za prava narocila, ki bi jih brisal. Nic ni izbrisano.', n; END IF;
+  SELECT COUNT(*) INTO n FROM vracila_iz_stripa WHERE order_id = ANY(op_);
+  IF n > 0 THEN RAISE EXCEPTION '066: % Stripovih vracil (vracila_iz_stripa) za prava narocila, ki bi jih brisal. Nic ni izbrisano.', n; END IF;
   SELECT COUNT(*) INTO n FROM vracila
-   WHERE (order_id = ANY(o_) OR event_id = ANY(de)) AND (stripe_vracilo_id IS NOT NULL OR provizija_vracilo_id IS NOT NULL);
-  IF n > 0 THEN RAISE EXCEPTION '066: % vracil z oznako Stripa (vracila.stripe_vracilo_id/provizija_vracilo_id). Nic ni izbrisano.', n; END IF;
+   WHERE order_id = ANY(op_) AND (stripe_vracilo_id IS NOT NULL OR provizija_vracilo_id IS NOT NULL);
+  IF n > 0 THEN RAISE EXCEPTION '066: % vracil z oznako Stripa (vracila.stripe_vracilo_id/provizija_vracilo_id) za prava narocila. Nic ni izbrisano.', n; END IF;
 
   -- (c) tuje vrstice, ki kazejo na izbrisane
   SELECT COUNT(*) INTO n FROM orders WHERE club_id = ANY(dk) AND event_id <> ALL(de);
@@ -3695,6 +3701,8 @@ BEGIN
   DELETE FROM guest_list_members WHERE ticket_id = ANY(dt) OR guest_list_id = ANY(gl);
                                                                     GET DIAGNOSTICS n = ROW_COUNT; RAISE NOTICE '066: guest_list_members %', n;
   DELETE FROM tickets WHERE id = ANY(dt);                           GET DIAGNOSTICS n = ROW_COUNT; RAISE NOTICE '066: tickets %', n;
+  DELETE FROM vracila_iz_stripa WHERE order_id = ANY(o_);           GET DIAGNOSTICS n = ROW_COUNT; RAISE NOTICE '066: vracila_iz_stripa (testna) %', n;
+  DELETE FROM spori WHERE order_id = ANY(o_);                       GET DIAGNOSTICS n = ROW_COUNT; RAISE NOTICE '066: spori (testni) %', n;
   DELETE FROM vracila WHERE order_id = ANY(o_) OR event_id = ANY(de);
                                                                     GET DIAGNOSTICS n = ROW_COUNT; RAISE NOTICE '066: vracila %', n;
   DELETE FROM table_service WHERE order_id = ANY(o_) OR event_id = ANY(de) OR club_id = ANY(dk);
@@ -3827,7 +3835,7 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('063_racun_ttwh2v4q_artikel.sql', '8d09de49320ce6f0'),
     ('064_racun_ttwh2v4q_ponovitev3.sql', '58f2a275af877279'),
     ('065_promo_kode.sql', 'dc78c558596b297e'),
-    ('066_brisanje_demo_klubov.sql', '23d8509b74d32d8c')
+    ('066_brisanje_demo_klubov.sql', 'aa1a24e192ec0558')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
