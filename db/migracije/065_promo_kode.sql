@@ -14,7 +14,7 @@
 -- z nakupom): ALTER na `orders` je PRVI (ACCESS EXCLUSIVE se drzi do COMMIT, zato pred njim ni nicesar, kar bi cakalo; nakup, ki je ze v teku, ga pocaka, za njim pa nov
 -- nakup caka na nas, ne obratno); tabeli sta novi (ni zaklepa obstojecih vrstic), tuja kljuca na `clubs` in `events` vzameta SHARE ROW EXCLUSIVE sele po tem.
 -- ISKRENO O BRANJU `orders`: tuji kljuc orders.promo_code_id (validacija) in CREATE INDEX (tudi delni) sta vsak SEKVENCNO BRANJE CELE tabele `orders`, in sicer pod
--- ACCESS EXCLUSIVE, ki ga drzimo od ALTER (izmerjeno ~50 ms pri 300.000 narocilih; nakup in sken v tem casu cakata). Pri danasnji velikosti tabele je to
+-- ACCESS EXCLUSIVE, ki ga drzimo od ALTER (izmerjeno 139 ms pri 300.000 narocilih, ker kljuc in indeks tabelo bereta vsak posebej; nakup in sken v tem casu cakata). Pri danasnji velikosti tabele je to
 -- zanemarljivo; NOT VALID in CONCURRENTLY nista uporabljena namenoma (enostavnost; CONCURRENTLY ne gre v transakciji, NOT VALID prihrani en sken, a pusti kljuc nepreverjen).
 -- Indeks je delni (samo narocila s kodo): vzdrzevanje ob nakupu brez kode je nic. Sken (skenPool, lock_timeout 1 s) ob ALTER vrne 503 + Retry-After in telefon preklopi na
 -- sken brez povezave (I16). migrate.js nastavi lock_timeout in migracijo ob izteku ponovi. Deploy NE med dogodkom (kratek zaklep `orders`).

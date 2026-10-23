@@ -420,15 +420,20 @@ const jeNeveljavna = (r) => r.status === 400 && r.body && r.body.error === NEVEL
     assert(r.status === 400, "PATCH club_id null brez dogodkov je 400");
     r = await api("PATCH", `/admin/api/promo-codes/${SIROTA.id}`, T.admin, { event_ids: [E1] });
     assert(r.status === 200 && r.body.events.length === 1, "PATCH event_ids na kodi brez dogodkov -> 200");
-    // zaklep vrstice kode: PATCH (FOR NO KEY UPDATE) ne sme ustaviti nakupa s kodo (FK preverba vzame FOR KEY SHARE)
+    // zaklep vrstice kode: PATCH (FOR NO KEY UPDATE) ne sme cakati na nakup s kodo (ta vzame FOR KEY SHARE prek FK preverbe) in obratno.
+    // Locena povezava odpre transakcijo, ki VSTAVI narocilo s promo_code_id (FK -> KEY SHARE na vrstici kode) in je ne zakljuci; PATCH mora vseeno uspeti.
+    // Pri FOR UPDATE bi PATCH obvisel (mutacija: zamenjaj v PATCH FOR NO KEY UPDATE -> FOR UPDATE, test mora pasti).
     const drzalec = await pool.connect();
     try {
       await drzalec.query("BEGIN");
-      await drzalec.query("SELECT id FROM promo_codes WHERE id = $1 FOR NO KEY UPDATE", [KLUB.id]);
+      await drzalec.query(`INSERT INTO orders (public_ref, user_id, event_id, club_id, quantity, unit_price_cents, total_cents, currency, application_fee_cents, status, buyer_email, promo_code_id)
+        VALUES ('OUT-ZAKLEP01', (SELECT id FROM users WHERE email='kupec@outly.si'), $1, 1, 1, 2000, 2000, 'EUR', 200, 'pending', 'kupec@outly.si', $2)`, [E2, KLUB.id]);
       const t0 = Date.now();
-      const nak = await Promise.race([kupi(E2, { quantity: 1, promo_code: "KLUB1" }), new Promise(res => setTimeout(() => res("zatakne"), 4000))]);
-      assert(nak !== "zatakne" && nak.status === 201 && await promoId(nak.body.order.id) === KLUB.id, `nakup s kodo ne caka na PATCH, ki drzi vrstico kode (${Date.now() - t0} ms)`, nak.status);
+      const pat = await Promise.race([api("PATCH", `/admin/api/promo-codes/${KLUB.id}`, T.admin, { label: "Klub ena (zaklep)" }), new Promise(res => setTimeout(() => res("zatakne"), 4000))]);
+      assert(pat !== "zatakne" && pat.status === 200 && pat.body.label === "Klub ena (zaklep)", `PATCH kode ne caka na odprto narocilo s to kodo (${Date.now() - t0} ms)`, pat.status);
     } finally { await drzalec.query("ROLLBACK").catch(() => {}); drzalec.release(); }
+    r = await kupi(E2, { quantity: 1, promo_code: "KLUB1" });
+    assert(r.status === 201 && await promoId(r.body.order.id) === KLUB.id, "po sprostitvi zaklepa nakup s kodo spet dela");
 
     console.log("\n# 10. Migracija: brez sprememb obstojecih podatkov");
     const shema = (await pool.query(`SELECT (SELECT COUNT(*)::int FROM pg_constraint WHERE conname='orders_promo_code_fk') AS fk,

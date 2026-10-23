@@ -1481,9 +1481,26 @@ app.patch("/me", requireAuth, async (req, res) => {
       dodaj("share_plans_with_friends", v);
     }
 
-    if (sets.length === 0) return res.status(400).send("Nothing to update.");
+    // --- »Skip for later« pri dokoncanju racuna (Martin, 23. 10. 2026) ---
+    // complete_onboarding: true = uporabnik je v aplikacijo smel brez zanrov, drzave in telefona; datum rojstva ostane OBVEZEN.
+    let dokoncaj = false;
+    if (b.complete_onboarding !== undefined || b.completeOnboarding !== undefined) {
+      const v = b.complete_onboarding ?? b.completeOnboarding;
+      if (typeof v !== "boolean") return res.status(400).send("complete_onboarding must be true or false.");
+      dokoncaj = v;
+    }
+    if (dokoncaj) {
+      // Datum rojstva po tej posodobitvi: poslan v telesu (null = brisanje) ali ze v bazi.
+      const poslan = (b.dateOfBirth !== undefined || b.date_of_birth !== undefined) ? (b.dateOfBirth ?? b.date_of_birth ?? null) : undefined;
+      const imaDatum = poslan !== undefined
+        ? (poslan !== null && poslan !== "")
+        : (await pool.query("SELECT 1 FROM users WHERE id=$1 AND date_of_birth IS NOT NULL", [req.user.userId])).rows.length > 0;
+      if (!imaDatum) return res.status(400).json({ error: "date_of_birth_required", message: "Date of birth is required." });
+    }
 
-    // Racun velja za dokoncan, ko ima datum rojstva in vsaj en zanr.
+    if (sets.length === 0 && !dokoncaj) return res.status(400).send("Nothing to update.");
+
+    // Racun velja za dokoncan, ko ima datum rojstva in vsaj en zanr (ali je uporabnik izrecno poslal complete_onboarding: true).
     sets.push(`onboarded_at = CASE
         WHEN onboarded_at IS NOT NULL THEN onboarded_at
         WHEN date_of_birth IS NOT NULL AND COALESCE(array_length(genres,1),0) > 0 THEN NOW()
@@ -1502,9 +1519,9 @@ app.patch("/me", requireAuth, async (req, res) => {
     const r2 = await pool.query(
       `UPDATE users SET onboarded_at = NOW()
        WHERE id=$1 AND onboarded_at IS NULL
-         AND date_of_birth IS NOT NULL AND COALESCE(array_length(genres,1),0) > 0
+         AND date_of_birth IS NOT NULL AND (COALESCE(array_length(genres,1),0) > 0 OR $2::boolean)
        RETURNING ${POLJA_UPORABNIKA}`,
-      [req.user.userId]
+      [req.user.userId, dokoncaj]
     );
 
     const me = r2.rows[0] || r.rows[0];
