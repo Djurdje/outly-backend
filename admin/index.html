@@ -642,7 +642,7 @@ function kPocisti() {
   kObrazec(false);
 }
 function kObrazec(pokazi) { $("kObrazec").classList.toggle("skrito", !pokazi); }
-function kNov() { kPocisti(); kObrazec(true); $("k_ownerEmail").focus(); window.scrollTo({ top: 0, behavior: "smooth" }); }
+function kNov() { kPocisti(); kObrazec(true); $("kObrazec").scrollIntoView({ behavior: "smooth", block: "start" }); $("k_ownerEmail").focus({ preventScroll: true }); }
 function kTelo() {
   const t = {};
   for (const p of kPolja) {
@@ -691,7 +691,7 @@ function kUredi(id) {
   $("kNaslov").firstChild.textContent = `Uredi klub #${k.id} `; $("kShrani").textContent = "Shrani spremembe";
   $("kSporocilo").textContent = "Sprememba e-naslova lastnika prenese klub na drug račun.";
   kObrazec(true);
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  $("kObrazec").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 async function kDemo(id, isDemo) {
   await varno(async () => { const r = await klic("PATCH", "/admin/api/clubs/" + id, { isDemo }); obvesti(`${r.name}: ${r.is_demo ? "demo klub (nakup vstopnic zavrnjen, razen admin)" : "navaden klub (nakup mogoč)"}.`, "ok"); naloziKlube(); naloziPregled(); });
@@ -783,7 +783,8 @@ async function naloziUporabnike() {
 function h(tag, lastnosti, ...otroci) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(lastnosti || {})) {
-    if (k.startsWith("on") && typeof v === "function") e[k] = v; else if (k === "class") e.className = v; else e.setAttribute(k, v);
+    if (/^on/i.test(k)) { if (typeof v === "function") e[k.toLowerCase()] = v; continue; }   // on* samo kot funkcija; nikoli setAttribute("on...", niz)
+    if (k === "class") e.className = v; else e.setAttribute(k, v);
   }
   for (const o of otroci.flat()) if (o !== null && o !== undefined && o !== false) e.append(o.nodeType ? o : document.createTextNode(String(o)));
   return e;

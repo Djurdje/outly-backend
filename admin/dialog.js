@@ -21,7 +21,8 @@
     return new Promise((koncaj) => {
       const prej = document.activeElement;
       const id = "dlg" + Math.random().toString(36).slice(2, 8);
-      const vpisPolje = o.vpis ? el("input", { id: id + "v", autocomplete: "off", autocapitalize: "characters", spellcheck: "false" }) : null;
+      const vpisEmail = !!o.vpis && String(o.vpis).includes("@");   // e-naslov: tipkovnica za e-naslove, brez samodejnih velikih crk
+      const vpisPolje = o.vpis ? el("input", { id: id + "v", autocomplete: "off", spellcheck: "false", ...(vpisEmail ? { inputmode: "email", autocapitalize: "off" } : { autocapitalize: "characters" }) }) : null;
       const razlogPolje = o.razlog ? el("textarea", { id: id + "r", maxlength: "500", rows: "2" }) : null;
       const gumbOk = el("button", { type: "button", class: o.nevarno ? "nevarno-polno" : "" }, o.potrdiBesedilo || "Potrdi");
       const gumbNe = el("button", { type: "button", class: "tih" }, "Prekliči");

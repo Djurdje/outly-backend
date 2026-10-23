@@ -103,9 +103,28 @@ async function api(method, path, token, body) {
     assert(r.status === 400, "reason ni niz -> 400", r.status);
     r = await api("PATCH", `/admin/api/users/${ciljId}`, T.admin, { role: "user", reason: { a: 1 } });
     assert(r.status === 400, "reason objekt -> 400", r.status);
-    r = await api("PATCH", `/admin/api/users/${ciljId}`, T.admin, { role: "user", reason: "   " });
+    // razlog je obvezen (vsaj 3 znaki po trim) za novo vlogo admin/backup in odvzem vloge admin (N1); ostale spremembe brez razloga
+    const brezSpremembe = async (ime) => assert(await vloga(ciljId) === "admin" && (await vrstice()).length === 3, ime + ": vloga in dnevnik nespremenjena");
+    for (const [ime, telo] of [["admin → user brez reason", { role: "user" }], ["admin → user, reason samo presledki", { role: "user", reason: "   " }], ["admin → business, reason 2 znaka", { role: "business", reason: " ab " }], ["admin → backup, reason null", { role: "backup", reason: null }]]) {
+      r = await api("PATCH", `/admin/api/users/${ciljId}`, T.admin, telo);
+      assert(r.status === 400 && r.body && r.body.error === "reason_required", ime + " -> 400 reason_required", [r.status, r.body]);
+      await brezSpremembe(ime);
+    }
+    r = await api("PATCH", `/admin/api/users/${ciljId}`, T.admin, { role: "user", reason: " abc " });
     v = await vrstice();
-    assert(r.status === 200 && v.length === 4 && v[3].razlog === null, "reason samo presledki -> razlog NULL", v[3]);
+    assert(r.status === 200 && v.length === 4 && v[3].razlog === "abc" && v[3].prej.role === "admin", "admin → user z 3 znaki razloga = 200, razlog obrezan", v[3]);
+    for (const [ime, telo] of [["user → admin brez reason", { role: "admin" }], ["user → backup, reason presledki", { role: "backup", reason: "   " }], ["user → admin, reason 2 znaka", { role: "admin", reason: "ab" }]]) {
+      r = await api("PATCH", `/admin/api/users/${ciljId}`, T.admin, telo);
+      assert(r.status === 400 && r.body && r.body.error === "reason_required" && await vloga(ciljId) === "user" && (await vrstice()).length === 4, ime + " -> 400 reason_required, nič spremenjeno", [r.status, r.body]);
+    }
+    r = await api("PATCH", `/admin/api/users/${ciljId}`, T.admin, { role: "business", reason: "   " });
+    v = await vrstice();
+    assert(r.status === 200 && v.length === 5 && v[4].razlog === null, "user → business, reason samo presledki -> 200, razlog NULL (neobvezen)", v[4]);
+    r = await api("PATCH", `/admin/api/users/${ciljId}`, T.admin, { role: "user" });
+    v = await vrstice();
+    assert(r.status === 200 && v.length === 6 && v[5].razlog === null, "business → user brez reason = 200", v[5]);
+    r = await api("PATCH", `/admin/api/users/${adminId}`, T.admin, { role: "admin" });
+    assert(r.status === 200 && (await vrstice()).length === 6, "admin → admin (brez spremembe) brez reason = 200, brez vrstice");
 
     console.log("\n# Brez spremembe vloge ni vrstice");
     const pred = (await vrstice()).length;

@@ -194,6 +194,24 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     const p5 = pregled(body);
     assert(p5.elementi.every(t => new Set(["body", "div", "h3", "label", "input", "textarea", "button"]).has(t)), "dialog.js: nizi iz podatkov ne postanejo elementi", [...new Set(p5.elementi)]);
     for (const z of [ZLO[0], ZLO[1], ZLO[2]]) assert(p5.besedila.includes(z), "dialog.js: niz konča kot besedilo: " + z);
+    // N5: vpisno polje z e-naslovom (vsebuje @): tipkovnica za e-naslove in brez samodejnih velikih črk; sicer kot prej (velike črke)
+    const vpisnaPolja = () => { const r = []; sprehod(body, (e) => { if (e.nodeType === 1 && e.tagName === "input") r.push(e); }); return r; };
+    let polja = vpisnaPolja();
+    assert(polja.length === 1 && polja[0].attrs.autocapitalize === "characters" && polja[0].attrs.inputmode === undefined, "dialog.js: vpis ODPOVEJ: autocapitalize=characters, brez inputmode", polja.map(x => x.attrs));
+    okno.potrdi({ naslov: "x", vsebina: "y", vpis: "ana@primer.si" });
+    polja = vpisnaPolja();
+    const zadnje = polja[polja.length - 1];
+    assert(zadnje && zadnje.attrs.inputmode === "email" && zadnje.attrs.autocapitalize === "off" && zadnje.attrs.autocomplete === "off", "dialog.js: vpis e-naslova: inputmode=email, autocapitalize=off", zadnje && zadnje.attrs);
+  }
+
+  // N3: h() nikoli ne nastavi on* atributa iz niza (setAttribute("onclick", "...")); funkcija gre kot lastnost
+  {
+    const hh = new Function("document", mh[0] + "\nreturn h;")(dok);
+    const gumb = hh("button", { onclick: "alert(1)", onmouseover: "alert(2)", onChange: "alert(3)", "data-x": "ok" }, "t");
+    assert(!Object.keys(gumb.attrs).some(k => /^on/i.test(k)) && gumb.onclick === null && gumb.attrs["data-x"] === "ok", "h(): on* z nizom ne postane atribut ne lastnost", gumb.attrs);
+    const f = () => 1;
+    const gumb2 = hh("button", { onclick: f, class: "a" }, "t");
+    assert(gumb2.onclick === f && gumb2.className === "a" && !Object.keys(gumb2.attrs).some(k => /^on/i.test(k)), "h(): on* s funkcijo je lastnost");
   }
 
   // --- 6. zavihek Uporabniki (U3, 23. 10. 2026): vrstica prek h(), sprememba vloge samo prek potrdi(), brez onclick/onchange nizov ---

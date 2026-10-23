@@ -3951,6 +3951,7 @@ admin.get("/users", async (req, res) => {
 // PATCH /admin/api/users/:id — { role, reason? } | { unlock: true } | { emailVerified: true }
 // Sprememba vloge (U3, 23. 10. 2026): neobvezen `reason` (niz, do 500 znakov) gre v dnevnik; ob SPREMEMBI vloge se v ISTI transakciji kot UPDATE
 // zapise vrstica admin_dejanja (dejanje `user.role`, cilj `user`, prej/potem `{ role }`). Brez e-naslovov v dnevniku. Enaka vloga (brez spremembe) vrstice ne pusti.
+// Sprememba v `admin`/`backup` ali odvzem `admin` zahteva `reason` (vsaj 3 znaki) -> sicer 400 `reason_required`.
 admin.patch("/users/:id", async (req, res) => {
   let c = null;
   try {
@@ -3992,6 +3993,11 @@ admin.patch("/users/:id", async (req, res) => {
       const star = await c.query("SELECT role FROM users WHERE id = $1 FOR NO KEY UPDATE", [id]);
       if (star.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("User not found."); }
       staraVloga = star.rows[0].role;
+      // Nova vloga admin/backup ali odvzem vloge admin: razlog (vsaj 3 znaki) je obvezen (panel ga zahteva v oknu, streznik ga uveljavi sam).
+      if (staraVloga !== b.role && (b.role === "admin" || b.role === "backup" || staraVloga === "admin") && (razlog || "").length < 3) {
+        await c.query("ROLLBACK");
+        return res.status(400).json({ error: "reason_required", message: "A reason (at least 3 characters) is required to grant admin or backup, or to remove admin." });
+      }
     }
     const r = await c.query(
       `UPDATE users SET ${sets.join(", ")} WHERE id = $${vrednosti.length}
