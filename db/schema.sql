@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–065, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–067, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict a3FemfPE4w2mMXlKYgBdLPx3TUF8KBM5FvYOW2q39j3AUgPpyKUd9UPGbjCqnrg
+\restrict a1UGfXehKbLU6gLX6RxYnav3K52nyDSlR5D80898C2XEI16lcE2rzbXX9740tM8
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -897,6 +897,7 @@ CREATE TABLE public.events (
     vip_layout_from_club_id integer,
     sales_paused boolean DEFAULT false NOT NULL,
     publish_at timestamp with time zone,
+    vip_payment text DEFAULT 'app'::text NOT NULL,
     CONSTRAINT events_capacity_chk CHECK (((capacity IS NULL) OR (capacity > 0))),
     CONSTRAINT events_end_chk CHECK (((end_at IS NULL) OR (end_at > start_at))),
     CONSTRAINT events_floor_plan_chk CHECK (((floor_plan IS NULL) OR (jsonb_typeof(floor_plan) = 'object'::text))),
@@ -909,7 +910,8 @@ CREATE TABLE public.events (
     CONSTRAINT events_vat_chk CHECK (((vat_rate IS NULL) OR ((vat_rate >= (0)::numeric) AND (vat_rate < (1)::numeric)))),
     CONSTRAINT events_venue_club_chk CHECK (((venue_club_id IS NULL) OR (venue_club_id <> club_id))),
     CONSTRAINT events_venue_coords_chk CHECK ((((venue_lat IS NULL) = (venue_lng IS NULL)) AND ((venue_lat IS NULL) OR (((venue_lat >= ('-90'::integer)::double precision) AND (venue_lat <= (90)::double precision)) AND ((venue_lng >= ('-180'::integer)::double precision) AND (venue_lng <= (180)::double precision)))))),
-    CONSTRAINT events_vip_layout_source_chk CHECK ((vip_layout_source = ANY (ARRAY['club'::text, 'event'::text])))
+    CONSTRAINT events_vip_layout_source_chk CHECK ((vip_layout_source = ANY (ARRAY['club'::text, 'event'::text]))),
+    CONSTRAINT events_vip_payment_chk CHECK ((vip_payment = ANY (ARRAY['app'::text, 'door'::text])))
 );
 
 
@@ -960,6 +962,13 @@ COMMENT ON COLUMN public.events.sales_paused IS 'Pavza prodaje (055): TRUE = nak
 --
 
 COMMENT ON COLUMN public.events.publish_at IS 'Samodejna objava osnutka ob tem casu (062, I59); NULL = ni nacrtovano; ob vsaki spremembi stanja in ob samodejni objavi NULL. Ni v javnih odgovorih.';
+
+
+--
+-- Name: COLUMN events.vip_payment; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.events.vip_payment IS 'Kako se placa VIP miza (067): app = v aplikaciji (narocilo, vstopnice); door = z gotovino na VIP vratih (gost mizo v aplikaciji samo rezervira: table_holds source app).';
 
 
 --
@@ -1877,8 +1886,17 @@ CREATE TABLE public.table_holds (
     note text,
     created_by_user_id integer,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    source text DEFAULT 'phone'::text NOT NULL,
+    user_id integer,
+    package_id integer,
+    package_name text,
+    package_description text,
+    price_cents integer,
+    CONSTRAINT table_holds_app_uporabnik_chk CHECK (((source = 'phone'::text) OR (user_id IS NOT NULL))),
     CONSTRAINT table_holds_guest_chk CHECK (((char_length(btrim(guest_name)) >= 1) AND (char_length(btrim(guest_name)) <= 60))),
-    CONSTRAINT table_holds_note_chk CHECK (((note IS NULL) OR (char_length(note) <= 200)))
+    CONSTRAINT table_holds_note_chk CHECK (((note IS NULL) OR (char_length(note) <= 200))),
+    CONSTRAINT table_holds_price_chk CHECK (((price_cents IS NULL) OR (price_cents >= 0))),
+    CONSTRAINT table_holds_source_chk CHECK ((source = ANY (ARRAY['phone'::text, 'app'::text])))
 );
 
 
@@ -1894,6 +1912,27 @@ COMMENT ON TABLE public.table_holds IS 'Rezervacija mize po telefonu (klub jo oz
 --
 
 COMMENT ON COLUMN public.table_holds.guest_name IS 'Ime gosta, ki je poklical klub (prosto besedilo, ne uporabnik Outly). Samo za osebje kluba.';
+
+
+--
+-- Name: COLUMN table_holds.source; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.table_holds.source IS 'Izvor rezervacije (067): phone = klub jo je vpisal po telefonu (032); app = gost jo je rezerviral v aplikaciji (events.vip_payment = door), placa na vratih.';
+
+
+--
+-- Name: COLUMN table_holds.user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.table_holds.user_id IS 'Kdo je rezerviral v aplikaciji (067); NULL pri phone. ON DELETE CASCADE: izbris racuna sprosti mizo.';
+
+
+--
+-- Name: COLUMN table_holds.price_cents; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.table_holds.price_cents IS 'Cena mize ob rezervaciji v aplikaciji (067, celi centi); pri phone NULL. Rezervacija NI narocilo: ne steje v prodajo, finance, provizijo, racune.';
 
 
 --
@@ -3422,10 +3461,31 @@ CREATE INDEX spori_povrnitev_idx ON public.spori USING btree (povrnitev_naslednj
 
 
 --
+-- Name: table_holds_app_uporabnik_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX table_holds_app_uporabnik_key ON public.table_holds USING btree (event_id, user_id) WHERE (source = 'app'::text);
+
+
+--
+-- Name: table_holds_package_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX table_holds_package_idx ON public.table_holds USING btree (package_id) WHERE (package_id IS NOT NULL);
+
+
+--
 -- Name: table_holds_table_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX table_holds_table_idx ON public.table_holds USING btree (table_id);
+
+
+--
+-- Name: table_holds_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX table_holds_user_idx ON public.table_holds USING btree (user_id) WHERE (user_id IS NOT NULL);
 
 
 --
@@ -4161,11 +4221,27 @@ ALTER TABLE ONLY public.table_holds
 
 
 --
+-- Name: table_holds table_holds_package_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_holds
+    ADD CONSTRAINT table_holds_package_id_fkey FOREIGN KEY (package_id) REFERENCES public.bottle_packages(id) ON DELETE SET NULL;
+
+
+--
 -- Name: table_holds table_holds_table_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.table_holds
     ADD CONSTRAINT table_holds_table_id_fkey FOREIGN KEY (table_id) REFERENCES public.club_tables(id) ON DELETE CASCADE;
+
+
+--
+-- Name: table_holds table_holds_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.table_holds
+    ADD CONSTRAINT table_holds_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -4316,5 +4392,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict a3FemfPE4w2mMXlKYgBdLPx3TUF8KBM5FvYOW2q39j3AUgPpyKUd9UPGbjCqnrg
+\unrestrict a1UGfXehKbLU6gLX6RxYnav3K52nyDSlR5D80898C2XEI16lcE2rzbXX9740tM8
 

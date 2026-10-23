@@ -340,7 +340,7 @@ function ustvari(dep) {
   // Nasteti stolpci (I4): brez opisa, zunanje povezave za vstopnice (samo has_ticket_url) in plakata (samo has_poster: URL je tuj vnos), posnetka, naslova in koordinat prizorisca, floor_plan.
   // Besedila so odrezana ze v SQL-u (naslov dogodka nima omejitve dolzine, #330 K1): agent ne dobi niti ne obdela vec kot 200 znakov naslova, imena kluba ali prizorisca.
   const STOLPCI_DOGODKA = `e.id, e.club_id, left(c.name, 200) AS club_name, c.hidden AS club_hidden, c.is_demo AS club_is_demo, left(e.title, 200) AS title, e.status, e.start_at, e.end_at,
-    e.ticket_price_cents, e.currency, e.capacity, e.sold_count, e.sales_paused, e.sales_open_at, e.sales_close_at, (e.poster_url <> '') AS has_poster, e.min_age, e.genres, e.vip_enabled,
+    e.ticket_price_cents, e.currency, e.capacity, e.sold_count, e.sales_paused, e.sales_open_at, e.sales_close_at, (e.poster_url <> '') AS has_poster, e.min_age, e.genres, e.vip_enabled, e.vip_payment,
     left(e.venue_name, 200) AS venue_name, left(e.venue_city, 200) AS venue_city, (e.ticket_url <> '') AS has_ticket_url, e.created_at`;
 
   // zanri samo iz znanega seznama ZANRI (tuj vnos ne pride do agenta), valuta brez presledkov

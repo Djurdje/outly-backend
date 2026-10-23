@@ -488,7 +488,7 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
   assert(r.status === 200, "vratar sme brati rezervacije (GET /business/events/:id/vip)", r.status);
   const rez = r.body.tables.find(t => t.id === M1);
   assert(rez.booking && rez.booking.order_id === o.id && rez.booking.public_ref === o.public_ref && rez.booking.buyer_username === "ana" && rez.booking.package_name === "Jameson 0,7 l" && rez.booking.guests === 6 && rez.booking.checked_in === 1, "rezervacija: kupec ana, paket, guests 6, checked_in 1", rez.booking);
-  assert(Object.keys(rez.booking).sort().join() === "buyer_username,checked_in,created_at,guests,order_id,package_description,package_name,public_ref", "rezervacija vsebuje samo dogovorjena polja (brez e-naslova)", Object.keys(rez.booking));
+  assert(Object.keys(rez.booking).sort().join() === "buyer_username,checked_in,created_at,guests,order_id,package_description,package_name,public_ref,total_cents", "rezervacija vsebuje samo dogovorjena polja (brez e-naslova; od 067 s total_cents)", Object.keys(rez.booking));
   assert(r.body.tables.filter(t => t.booking !== null).length === 1 && r.body.tables.find(t => t.id === M2).disabled === true, "samo ena miza ima rezervacijo, izklopljena kaze disabled", r.body.tables.map(t => [t.id, !!t.booking, t.disabled]));
   // Arhivirana miza z rezervacijo je na seznamu.
   await pool.query("UPDATE club_tables SET archived_at=NOW() WHERE id=$1", [M1]);

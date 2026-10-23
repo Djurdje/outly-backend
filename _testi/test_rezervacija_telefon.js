@@ -188,7 +188,7 @@ const spi = (ms) => new Promise(r => setTimeout(r, ms));
   const odg = r.body;
   assert(odg.event_id === E1 && odg.enabled === true && odg.currency === "EUR" && Array.isArray(odg.tables) && odg.tables.length === 4 && Array.isArray(odg.packages) && odg.plan, "odgovor ima obliko GET /business/events/:id/vip", Object.keys(odg));
   const h1 = odg.tables.find(t => t.id === M1).hold;
-  assert(h1 && h1.guest_name === IME && h1.note === "pride ob 23h, 6 oseb" && typeof h1.created_at === "string" && !isNaN(Date.parse(h1.created_at)) && Object.keys(h1).sort().join() === "created_at,guest_name,note", "hold: ime in opomba obrezana, created_at ISO, tocno tri polja", h1);
+  assert(h1 && h1.guest_name === IME && h1.note === "pride ob 23h, 6 oseb" && typeof h1.created_at === "string" && !isNaN(Date.parse(h1.created_at)) && Object.keys(h1).sort().join() === "created_at,guest_name,note,package_description,package_name,price_cents,source,username" && h1.source === "phone" && h1.username === null && h1.package_name === null && h1.package_description === null && h1.price_cents === null, "hold: ime in opomba obrezana, created_at ISO; od 067 se source phone ter username/paket/cena null (osem polj)", h1);
   assert(odg.tables.filter(t => t.id !== M1).every(t => t.hold === null && "hold" in t), "ostale mize imajo hold: null (polje je vedno prisotno)", odg.tables.map(t => t.hold));
   assert(odg.tables.find(t => t.id === M1).booking === null, "rezervacija po telefonu NI booking (booking je samo narocilo prek Outly)", odg.tables.find(t => t.id === M1).booking);
   const gOdg = await stanje(E1);
