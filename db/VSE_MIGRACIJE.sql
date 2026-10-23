@@ -3454,6 +3454,60 @@ BEGIN
   RAISE NOTICE '063: racun % za narocilo OUT-TTWH2V4Q (stanje %, poslano_at %) je spet v izdaji (izda se cez 5 minut)', v.id, v.stanje, v.poslano_at;
 END $$;
 
+-- 064_racun_ttwh2v4q_ponovitev3.sql
+-- PODATKOVNA MIGRACIJA (potrebuje Martinov DA in oznako odobril-martin): racun za narocilo OUT-TTWH2V4Q gre ZNOVA v izdajo. Ena vrstica, brez drugih sprememb.
+--
+-- Kaj se je zgodilo: po migraciji 063 (23. 10. 2026) je delavec ob 14:17:23 UTC poslal SalesInvoiceCreate s productCode VSTOPNICA, e-racuni pa je odgovoril
+-- »#Item1_productCode - Cannot find product for code: VSTOPNICA«: artikel takrat v e-racuni ni bil shranjen. Zdaj JE (ProductGetByCode vrne VSTOPNICA, type services,
+-- vatTransactionType 7, allowChangeOfPrice/Description true; preverjeno 23. 10. 16:24). Vrstica je `napaka` (POZOR 14:19:24, iskanje po referenci dokumenta ni nasla).
+-- Zahtevek je bil zavrnjen zaradi neobstojecega artikla, dokument ni nastal (iskanje po referenci ga ni nasla).
+-- PRED MERGE-OM naj Martin v e-racuni preveri, da za narocilo OUT-TTWH2V4Q (sklic) na dan 23. 10. NI nobenega dokumenta (migracija brise zapis o neuspelem iskanju in izda
+-- brez iskanja po referenci).
+--
+-- Kaj naredi: vrstico racuna (vrsta racun) tega narocila, ki je v `caka` (izid neznan, poslano_at zapisan) ali `napaka`, postavi v cisto `caka`:
+--   poslano_at = NULL (delavec izda BREZ iskanja po referenci), poskusi = 0, iskanja_ne = 0, iskanje_ne_at = NULL, iskanja_nejasna = 0, zadnja_napaka = NULL,
+--   naslednji_poskus_at = NOW() + 5 minut, prevzeto_at = NULL, prevzem_zeton = NULL. Delavec racuni.js ga nato izda natanko enkrat (en Create).
+-- ZAKAJ +5 MINUT (pregled #351; pri 061 se je zgodilo prav to): ob deployu migracija tece na NOVI instanci, STARA instanca (koda brez productCode, z najemom racuni_najem) pa se nekaj
+-- casa tece in osvezeno vrstico prevzame v sekundah -> Create brez productCode -> spet »izid neznan«. Delavec ne prevzame vrstic z naslednji_poskus_at v prihodnosti, do takrat se
+-- stara instanca ugasne in vrstico izda ze nova koda.
+-- Kdaj NE naredi nicesar (RAISE NOTICE, migracija vseeno uspe): narocila ni (druga okolja, test), vrstica ni racun, ima stevilko / ponudnik_id / ponudnik_stevilka (dokument obstaja),
+--   stanje ni `caka` ali `napaka`, ali je poslano_at mlajsi od 10 minut (zahtevek je lahko se v teku). Druge vrstice se ne dotakne.
+--
+-- Varnost pred dvojno izdajo: vrstica je zaklenjena (FOR UPDATE). prevzeto_at in prevzem_zeton se pocistita, zato noben zapis stare instance (deploy: dve instanci hkrati) vec ne
+-- velja (vsak zapis delavca zahteva svoj prevzem_zeton); en delavec e-racuni v sistemu (racuni_najem) in prevzem vrstice (FOR NO KEY UPDATE SKIP LOCKED) zagotovita en Create.
+-- Sprozilec racuni_varuj dovoli `napaka` brez stevilke -> `caka` (056); `caka` -> `caka` je dovoljeno. `naknadno` ostane TRUE (sprozilec ga ne dovoli zniziti).
+--
+-- Zaklep: UPDATE ene vrstice. Idempotentno: ob ponovnem zagonu vrstica ni vec caka/napaka brez stevilke -> obvestilo.
+
+DO $$
+DECLARE
+  v racuni%ROWTYPE;
+BEGIN
+  SELECT r.* INTO v FROM racuni r JOIN orders o ON o.id = r.order_id
+   WHERE o.public_ref = 'OUT-TTWH2V4Q' AND r.vrsta = 'racun' FOR UPDATE OF r;
+  IF NOT FOUND THEN
+    RAISE NOTICE '064: racuna za narocilo OUT-TTWH2V4Q ni (druga baza ali ze obdelan): nic ni spremenjeno';
+    RETURN;
+  END IF;
+  IF v.stevilka IS NOT NULL OR v.ponudnik_id IS NOT NULL OR v.ponudnik_stevilka IS NOT NULL THEN
+    RAISE NOTICE '064: racun % (stanje %) ima stevilko ali dokument pri ponudniku: nic ni spremenjeno', v.id, v.stanje;
+    RETURN;
+  END IF;
+  IF v.stanje NOT IN ('caka', 'napaka') THEN
+    RAISE NOTICE '064: racun % je v stanju %: nic ni spremenjeno', v.id, v.stanje;
+    RETURN;
+  END IF;
+  IF v.poslano_at IS NOT NULL AND v.poslano_at > NOW() - INTERVAL '10 minutes' THEN
+    RAISE NOTICE '064: racun % ima zahtevek poslan pred manj kot 10 minutami (lahko je se v teku): nic ni spremenjeno', v.id;
+    RETURN;
+  END IF;
+  UPDATE racuni
+     SET stanje = 'caka', poslano_at = NULL, poskusi = 0, iskanja_ne = 0, iskanje_ne_at = NULL, iskanja_nejasna = 0, zadnja_napaka = NULL,
+         naslednji_poskus_at = NOW() + INTERVAL '5 minutes', prevzeto_at = NULL, prevzem_zeton = NULL
+   WHERE id = v.id;
+  RAISE NOTICE '064: racun % za narocilo OUT-TTWH2V4Q (stanje %, poslano_at %) je spet v izdaji (izda se cez 5 minut)', v.id, v.stanje, v.poslano_at;
+END $$;
+
 -- =============================================================================
 -- Vpis v evidenco
 -- =============================================================================
@@ -3521,7 +3575,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('060_agent_nujno.sql', 'bd109720c9bbdba9'),
     ('061_racun_ttwh2v4q_ponovitev.sql', '38d14d7efaece77b'),
     ('062_samodejna_objava.sql', '5c0b68654780a4ee'),
-    ('063_racun_ttwh2v4q_artikel.sql', '8d09de49320ce6f0')
+    ('063_racun_ttwh2v4q_artikel.sql', '8d09de49320ce6f0'),
+    ('064_racun_ttwh2v4q_ponovitev3.sql', '58f2a275af877279')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
