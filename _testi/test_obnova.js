@@ -141,6 +141,13 @@ async function telo() {
   await pool.query("INSERT INTO ticket_transfers (ticket_id, from_user_id, to_user_id, to_email, old_serial, new_serial, to_guest, age_confirmed_min) SELECT id, NULL, NULL, 'gost-prenos@example.com', gen_random_uuid(), serial, TRUE, 18 FROM tickets WHERE id=$1", [vstGost]);
   await pool.query("INSERT INTO gost_zetoni_vstopnic (token_hash, ticket_id) VALUES ($1, $2)", [prenosHash, vstGost]);
 
+  // PDF racuna (racuni_pdf.pdf je bytea, migracija 057): v izvozu {"$bytea_b64": ...}, obnova ga mora vrniti bajt za bajtom (vse vrednosti bajtov 0..255, tudi pred/za glavo).
+  const pdfOrder = (await pool.query("SELECT id FROM orders ORDER BY id LIMIT 1")).rows[0].id;
+  const pdfRacun = (await pool.query("INSERT INTO racuni (order_id, vrsta, znesek_cents) VALUES ($1, 'racun', 3000) RETURNING id", [pdfOrder])).rows[0].id;
+  const pdfBajti = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.from(Array.from({ length: 256 * 4 }, (_, i) => i % 256)), crypto.randomBytes(3000), Buffer.from("\n%%EOF\n")]);
+  const pdfSha = crypto.createHash("sha256").update(pdfBajti).digest("hex");
+  await pool.query("INSERT INTO racuni_pdf (racun_id, pdf, sha256) VALUES ($1, $2, $3)", [pdfRacun, pdfBajti, pdfSha]);
+
   const izvornoStanjeDogodka = await pool.query("SELECT capacity, sold_count FROM events WHERE id=$1", [dogodekId]);
   assert(izvornoStanjeDogodka.rows[0].sold_count === 3, "sold_count v izvorni bazi = 3 (zapolnjeno)", izvornoStanjeDogodka.rows[0]);
   const izvornaVsotaNarocil = await pool.query("SELECT COALESCE(SUM(total_cents),0)::int AS vsota FROM orders");
@@ -180,6 +187,14 @@ async function telo() {
             (SELECT COUNT(*)::int FROM ticket_transfers x WHERE x.ticket_id = t.id AND x.to_guest AND x.age_confirmed_min = 18) AS prenosov FROM tickets t WHERE t.id = $1`, [vstGost, prenosHash]);
   assert(prenosObnovljen.rows.length === 1 && prenosObnovljen.rows[0].holder_is_guest === true && prenosObnovljen.rows[0].holder_guest_email === "gost-prenos@example.com"
     && prenosObnovljen.rows[0].holder_guest_mail_attempts === 2 && prenosObnovljen.rows[0].zetonov === 1 && prenosObnovljen.rows[0].prenosov === 1, "obnovljena vstopnica z gostujocim imetnikom, hash zetona in zapis prenosa (034)", prenosObnovljen.rows);
+
+  console.log("\n# (a3) bytea (racuni_pdf) po obnovi enak bajtom v izvorni bazi");
+  const pdfVIzvozu = izvoz.tables.racuni_pdf.rows.find((x) => String(x.racun_id) === String(pdfRacun));
+  assert(pdfVIzvozu && typeof pdfVIzvozu.pdf.$bytea_b64 === "string" && pdfVIzvozu.pdf.type === undefined, "izvoz: bytea je {\"$bytea_b64\": base64}, ne Buffer-JSON", pdfVIzvozu && Object.keys(pdfVIzvozu.pdf));
+  const pdfObnovljen = (await obnovljeniPool.query("SELECT pdf, sha256 FROM racuni_pdf WHERE racun_id = $1", [pdfRacun])).rows[0];
+  assert(pdfObnovljen && Buffer.compare(pdfObnovljen.pdf, pdfBajti) === 0 && pdfObnovljen.sha256 === pdfSha, "PDF po obnovi enak bajtom v izvorni bazi", pdfObnovljen && pdfObnovljen.pdf.length);
+  let pdfUpdate = null; try { await obnovljeniPool.query("UPDATE racuni_pdf SET sha256 = repeat('0', 64) WHERE racun_id = $1", [pdfRacun]); } catch (e) { pdfUpdate = e; }
+  assert(pdfUpdate && pdfUpdate.code === "23001", "sprozilec racuni_pdf_varuj je po obnovi spet vklopljen", pdfUpdate && pdfUpdate.code);
 
   console.log("\n# (b) sold_count dogodka enak izvornemu (sprozilec ni tekel dvakrat)");
   const obnovljenDogodek = await obnovljeniPool.query("SELECT capacity, sold_count FROM events WHERE id=$1", [dogodekId]);

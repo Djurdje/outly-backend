@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–056 in 058, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–058, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict fl0EWOcjuW3lA4tZ0IiOAs5KfCCGaCw4aymebBzOhj8kMipxzxgoArR1bqYXLYp
+\restrict 7hiGK6ZN3YuahZ78al6DLiJHT5gdyBqFB6TZ5YBvZ08hB2CbQLj89HzpPWb7PVB
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -43,6 +43,18 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 --
 
 COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+--
+-- Name: racuni_pdf_varuj(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.racuni_pdf_varuj() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RAISE EXCEPTION 'racuni_pdf: PDF racuna % ni dovoljeno spreminjati ali brisati (ZDavP-2 38/8, hramba 10 let)', OLD.racun_id USING ERRCODE = 'restrict_violation';
+END $$;
 
 
 --
@@ -1379,10 +1391,21 @@ CREATE TABLE public.racuni (
     iskanje_ne_at timestamp with time zone,
     iskanja_nejasna smallint DEFAULT 0 NOT NULL,
     prevzem_zeton text,
+    pdf_prejet boolean DEFAULT false NOT NULL,
+    pdf_poskusi smallint DEFAULT 0 NOT NULL,
+    pdf_naslednji_at timestamp with time zone,
+    pdf_napaka text,
+    mail_poskusi smallint DEFAULT 0 NOT NULL,
+    mail_prevzeto_at timestamp with time zone,
+    mail_poslano_at timestamp with time zone,
+    mail_izid_neznan boolean DEFAULT false NOT NULL,
     CONSTRAINT racuni_iskanja_ne_check CHECK (((iskanja_ne >= 0) AND (iskanja_ne <= 1000))),
     CONSTRAINT racuni_iskanja_nejasna_check CHECK (((iskanja_nejasna >= 0) AND (iskanja_nejasna <= 1000))),
     CONSTRAINT racuni_leto_check CHECK (((leto IS NULL) OR ((leto >= 2000) AND (leto <= 2999)))),
+    CONSTRAINT racuni_mail_poskusi_check CHECK (((mail_poskusi >= 0) AND (mail_poskusi <= 100))),
     CONSTRAINT racuni_naprava_check CHECK (((naprava IS NULL) OR (naprava ~ '^[0-9A-Za-z]{1,20}$'::text))),
+    CONSTRAINT racuni_pdf_napaka_check CHECK (((pdf_napaka IS NULL) OR (char_length(pdf_napaka) <= 300))),
+    CONSTRAINT racuni_pdf_poskusi_check CHECK (((pdf_poskusi >= 0) AND (pdf_poskusi <= 10000))),
     CONSTRAINT racuni_ponudnik_check CHECK (((ponudnik IS NULL) OR ((char_length(ponudnik) >= 1) AND (char_length(ponudnik) <= 40)))),
     CONSTRAINT racuni_ponudnik_id_check CHECK (((ponudnik_id IS NULL) OR ((char_length(ponudnik_id) >= 1) AND (char_length(ponudnik_id) <= 200)))),
     CONSTRAINT racuni_ponudnik_stevilka_check CHECK (((ponudnik_stevilka IS NULL) OR ((char_length(ponudnik_stevilka) >= 1) AND (char_length(ponudnik_stevilka) <= 100)))),
@@ -1438,6 +1461,20 @@ COMMENT ON COLUMN public.racuni.prevzem_zeton IS 'Zeton prevzema vrstice (056): 
 
 
 --
+-- Name: COLUMN racuni.mail_poslano_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.racuni.mail_poslano_at IS 'Cas, ko je Resend sprejel mail z racunom kupcu (057). Racun gre kupcu natanko enkrat; ponovno posiljanje = kopija z oznako KOPIJA (ni izvedeno).';
+
+
+--
+-- Name: COLUMN racuni.mail_izid_neznan; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.racuni.mail_izid_neznan IS 'Izid klica Resenda je neznan (057): mail se ne ponovi samodejno, POZOR, rocni pregled v Resendu.';
+
+
+--
 -- Name: racuni_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -1474,6 +1511,27 @@ CREATE TABLE public.racuni_najem (
 --
 
 COMMENT ON TABLE public.racuni_najem IS 'Najem delavca za ponudnika, ki ne dovoli socasnih zahtevkov (056, e-racuni): en lastnik, potece_at. Brez osebnih podatkov.';
+
+
+--
+-- Name: racuni_pdf; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.racuni_pdf (
+    racun_id bigint NOT NULL,
+    pdf bytea NOT NULL,
+    sha256 text NOT NULL,
+    prejeto_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT racuni_pdf_pdf_check CHECK (((octet_length(pdf) >= 100) AND (octet_length(pdf) <= 2097152))),
+    CONSTRAINT racuni_pdf_sha256_check CHECK ((sha256 ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: TABLE racuni_pdf; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.racuni_pdf IS 'PDF izdanega racuna ali dobropisa iz e-racuni (057): samo vstavljanje, hramba 10 let. Brez e-naslova kupca na dokumentu.';
 
 
 --
@@ -2454,6 +2512,14 @@ ALTER TABLE ONLY public.racuni_najem
 
 
 --
+-- Name: racuni_pdf racuni_pdf_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.racuni_pdf
+    ADD CONSTRAINT racuni_pdf_pkey PRIMARY KEY (racun_id);
+
+
+--
 -- Name: racuni racuni_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3003,6 +3069,13 @@ CREATE INDEX racuni_delo_idx ON public.racuni USING btree (naslednji_poskus_at, 
 
 
 --
+-- Name: racuni_mail_caka_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX racuni_mail_caka_idx ON public.racuni USING btree (id) WHERE (pdf_prejet AND (mail_poslano_at IS NULL) AND (NOT mail_izid_neznan));
+
+
+--
 -- Name: racuni_narocilo_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3014,6 +3087,13 @@ CREATE INDEX racuni_narocilo_idx ON public.racuni USING btree (order_id);
 --
 
 CREATE UNIQUE INDEX racuni_narocilo_racun_key ON public.racuni USING btree (order_id) WHERE (vrsta = 'racun'::text);
+
+
+--
+-- Name: racuni_pdf_caka_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX racuni_pdf_caka_idx ON public.racuni USING btree (id) WHERE ((stanje = 'potrjen'::text) AND (NOT pdf_prejet) AND (ponudnik IS NOT NULL));
 
 
 --
@@ -3308,6 +3388,13 @@ CREATE TRIGGER orders_rezerviraj BEFORE INSERT ON public.orders FOR EACH ROW EXE
 --
 
 CREATE TRIGGER orders_sprosti AFTER UPDATE OF status ON public.orders FOR EACH ROW EXECUTE FUNCTION public.sprosti_zalogo();
+
+
+--
+-- Name: racuni_pdf racuni_pdf_varuj; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER racuni_pdf_varuj BEFORE DELETE OR UPDATE ON public.racuni_pdf FOR EACH ROW EXECUTE FUNCTION public.racuni_pdf_varuj();
 
 
 --
@@ -3709,6 +3796,14 @@ ALTER TABLE ONLY public.racuni
 
 
 --
+-- Name: racuni_pdf racuni_pdf_racun_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.racuni_pdf
+    ADD CONSTRAINT racuni_pdf_racun_id_fkey FOREIGN KEY (racun_id) REFERENCES public.racuni(id);
+
+
+--
 -- Name: racuni racuni_ref_racun_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3912,5 +4007,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict fl0EWOcjuW3lA4tZ0IiOAs5KfCCGaCw4aymebBzOhj8kMipxzxgoArR1bqYXLYp
+\unrestrict 7hiGK6ZN3YuahZ78al6DLiJHT5gdyBqFB6TZ5YBvZ08hB2CbQLj89HzpPWb7PVB
 
