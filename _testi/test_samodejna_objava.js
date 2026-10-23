@@ -532,6 +532,17 @@ const stVLogu = (re) => procesi.reduce((n, p) => n + (p.log.match(re) || []).len
     r = await api("GET", "/admin/api/opozorila", T.admin);
     const zs = r.body.items.filter((i) => i.cilj_id === Eskrit);
     assert(zs.length === 1 && zs[0].vrsta === "objava_zamujena" && zs[0].resnost === "rdece", "skriti klub: objava_zamujena je v opozorilih (druga opozorila skritega kluba ne)", zs);
+    // mnozicna dejanja (#329, I60): »draft« gre prek adminStatusDogodka -> pobrise zastarel cas; »reschedule« premakne dogodek, publish_at pusti
+    const Ebd = await dogodek(klubi.moj, "Mnozicno med osnutke", { status: "published" });
+    await pool.query("UPDATE events SET publish_at = NOW() - INTERVAL '2 hours' WHERE id = $1", [Ebd]);   // zastarel cas na objavljenem dogodku
+    r = await api("POST", "/admin/api/events/bulk", T.admin, { ids: [Ebd], dejanje: "draft", razlog: "test samodejne objave" });
+    assert(r.status === 200 && r.body.results[0].ok === true && (await vrstica(Ebd)).status === "draft" && (await vrstica(Ebd)).publish_at === null,
+      "mnozicni draft pobrise zastarel publish_at (osnutek ne skoci nazaj v objavo)", [r.status, JSON.stringify(r.body).slice(0, 200), await vrstica(Ebd)]);
+    const Ebr = await dogodek(klubi.moj, "Mnozicni premik", { publish: ISO(2 * DAN) });
+    const prejBr = casIso((await vrstica(Ebr)).publish_at);
+    r = await api("POST", "/admin/api/events/bulk", T.admin, { ids: [Ebr], dejanje: "reschedule", zamik_min: 60, razlog: "test samodejne objave" });
+    assert(r.status === 200 && r.body.results[0].ok === true && casIso((await vrstica(Ebr)).publish_at) === prejBr && (await vrstica(Ebr)).status === "draft",
+      "mnozicni reschedule osnutka: publish_at ostane (premaknil se je samo dogodek)", [r.status, JSON.stringify(r.body).slice(0, 200)]);
     // odpoved z narocili (DELETE /events/:id) pobrise nacrtovani cas
     const Edel = await dogodek(klubi.moj, "Odpoved z narocilom", { publish: ISO(2 * DAN) });
     await pool.query(

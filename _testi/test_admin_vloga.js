@@ -12,7 +12,8 @@
  *  4. neveljaven `reason` (ni niz) -> 400; neveljavna vloga -> 400; neobstojec uporabnik -> 404 brez vrstice; admin si ne vzame lastne vloge -> 400 brez vrstice.
  *  5. ne-admin (user, business, backup) in brez zetona: 403 / 401, vloga ostane, vrstice ni.
  *  6. sprememba vloge in vrstica sta v ISTI transakciji: ce vpis v dnevnik pade (trigger), vloga ostane stara.
- *  7. GET /admin/api/users in admin dnevnik ostaneta enake oblike (polja kot prej).
+ *  7. (#328 ostanek) odobritev prosnje, POST /admin/api/clubs in prenos lastnistva (PATCH /admin/api/clubs/:id), ki user -> business, pustijo vrstico user.role v ISTI transakciji (padec dnevnika razveljavi odobritev); ze-business brez vrstice; ne-admin 403.
+ *  8. GET /admin/api/users in admin dnevnik ostaneta enake oblike (polja kot prej).
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -167,6 +168,75 @@ async function api(method, path, token, body) {
     await pool.query("DROP FUNCTION test_pad_dnevnika()");
     r = await api("PATCH", `/admin/api/users/${ciljId}`, T.admin, { role: "business", reason: "zdaj gre" });
     assert(r.status === 200 && await vloga(ciljId) === "business" && (await vrstice()).length === pred + 1, "po popravku trigerja spet dela");
+
+    console.log("\n# Vloga se spremeni tudi ob odobritvi prosnje, novem klubu in prenosu lastnistva (dnevnik)");
+    const T2 = { n1: zeton("nov1@outly.si", uuid(11)), n2: zeton("nov2@outly.si", uuid(12)), n3: zeton("nov3@outly.si", uuid(13)), n4: zeton("nov4@outly.si", uuid(14)), n5: zeton("nov5@outly.si", uuid(15)) };
+    for (const k of Object.keys(T2)) { const q = await api("GET", "/me", T2[k]); assert(q.status === 200, `GET /me ${k}`, q.body); }
+    const dnevnikUser = async (uid) => (await pool.query("SELECT * FROM admin_dejanja WHERE dejanje='user.role' AND cilj_id=$1 ORDER BY id", [String(uid)])).rows;
+    const prosnja = async (email) => (await pool.query("INSERT INTO creator_applications (business_name, contact_name, email) VALUES ('Bar Test','Ana Test',$1) RETURNING id", [email])).rows[0].id;
+    const n1 = await id("nov1@outly.si"), n2 = await id("nov2@outly.si"), n3 = await id("nov3@outly.si"), n4 = await id("nov4@outly.si"), n5 = await id("nov5@outly.si");
+
+    // padec dnevnika razveljavi odobritev (ista transakcija)
+    const p1 = await prosnja("nov1@outly.si");
+    await pool.query(`CREATE OR REPLACE FUNCTION test_pad_dnevnika() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'dnevnik pade'; END $$`);
+    await pool.query("CREATE TRIGGER test_pad_dnevnika BEFORE INSERT ON admin_dejanja FOR EACH ROW EXECUTE FUNCTION test_pad_dnevnika()");
+    r = await api("POST", `/admin/api/creator-applications/${p1}/approve`, T.admin, {});
+    assert(r.status === 500 && await vloga(n1) === "user" && (await pool.query("SELECT status FROM creator_applications WHERE id=$1", [p1])).rows[0].status === "new" && (await pool.query("SELECT COUNT(*)::int AS n FROM clubs WHERE owner_user_id=$1", [n1])).rows[0].n === 0, "padel dnevnik: odobritev razveljavljena (vloga, prosnja, klub)", r.status);
+    await pool.query("DROP TRIGGER test_pad_dnevnika ON admin_dejanja");
+    await pool.query("DROP FUNCTION test_pad_dnevnika()");
+
+    r = await api("POST", `/admin/api/creator-applications/${p1}/approve`, T.admin, {});
+    let d = await dnevnikUser(n1);
+    assert(r.status === 200 && await vloga(n1) === "business", "odobritev prosnje: 200, uporabnik je business", r.status);
+    assert(d.length === 1 && d[0].admin_user_id === adminId && d[0].cilj_tip === "user" && JSON.stringify(d[0].prej) === '{"role":"user"}' && JSON.stringify(d[0].potem) === '{"role":"business"}' && d[0].razlog === `Odobritev prosnje ${p1}`, "odobritev: ena vrstica user.role (prej user, potem business, razlog s prosnjo)", d);
+    assert(!JSON.stringify(d).includes("@"), "vrstica brez e-naslova");
+
+    // lastnik, ki je ze business: vloga se ne spremeni, vrstice ni
+    await pool.query("UPDATE users SET role='business' WHERE id=$1", [n2]);
+    const p2 = await prosnja("nov2@outly.si");
+    r = await api("POST", `/admin/api/creator-applications/${p2}/approve`, T.admin, {});
+    assert(r.status === 200 && (await dnevnikUser(n2)).length === 0, "odobritev za ze-business: 200, brez vrstice user.role");
+
+    r = await api("POST", "/admin/api/clubs", T.admin, { name: "Klub Tri", ownerEmail: "nov3@outly.si" });
+    d = await dnevnikUser(n3);
+    assert(r.status === 201 && await vloga(n3) === "business" && d.length === 1 && d[0].razlog === "Nov klub" && d[0].potem.role === "business" && d[0].prej.role === "user", "POST /admin/api/clubs: lastnik postane business + vrstica", [r.status, d]);
+    const klubId = r.body && r.body.id;
+
+    r = await api("PATCH", `/admin/api/clubs/${klubId}`, T.admin, { ownerEmail: "nov4@outly.si" });
+    d = await dnevnikUser(n4);
+    assert(r.status === 200 && await vloga(n4) === "business" && d.length === 1 && d[0].razlog === `Prenos lastnistva kluba ${klubId}`, "PATCH /admin/api/clubs/:id (prenos): novi lastnik business + vrstica", [r.status, d]);
+
+    // ne-admin ne more nic od tega in ne pusti vrstice
+    r = await api("POST", "/admin/api/clubs", T.lastnik, { name: "Klub Pet", ownerEmail: "nov5@outly.si" });
+    assert(r.status === 403 && await vloga(n5) === "user" && (await dnevnikUser(n5)).length === 0, "ne-admin: POST kluba 403, brez vrstice");
+
+    console.log("\n# Dirka: soCasen PATCH vloge na admin ne sme biti tiho znizan (postaniBusiness: WHERE role='user')");
+    const dirka = async (ime, klic) => {
+      const T3 = zeton(`${ime}@outly.si`, uuid(30 + dirkaSt)); dirkaSt++;
+      assert((await api("GET", "/me", T3)).status === 200, `GET /me ${ime}`);
+      const uid = await id(`${ime}@outly.si`);
+      const drzi = await pool.connect();
+      try {
+        await drzi.query("BEGIN");
+        await drzi.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [uid]);   // zaklep: SELECT brez zaklepa (lastnikPoEmailu) se ne ustavi, UPDATE v postaniBusiness da
+        const zahteva = klic(uid);
+        let caka = false;
+        for (let i = 0; i < 400 && !caka; i++) {
+          caka = (await pool.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'UPDATE users SET role=%business%'")).rowCount > 0;
+          if (!caka) await new Promise(r => setImmediate(r));
+        }
+        assert(caka, `${ime}: UPDATE v postaniBusiness caka na zaklep (dirka postavljena)`);
+        await drzi.query("UPDATE users SET role='admin' WHERE id=$1", [uid]);
+        await drzi.query("COMMIT");
+        const odg = await zahteva;
+        assert(odg.status === 200 || odg.status === 201, `${ime}: zahteva uspe`, [odg.status, odg.body]);
+      } finally { drzi.release(); }
+      assert(await vloga(uid) === "admin", `${ime}: vloga ostane admin (ni tiho znizana na business)`);
+      assert((await dnevnikUser(uid)).length === 0, `${ime}: v dnevniku ni napacne vrstice user -> business`);
+    };
+    let dirkaSt = 0;
+    await dirka("dirka1", () => api("POST", "/admin/api/clubs", T.admin, { name: "Klub Dirka Ena", ownerEmail: "dirka1@outly.si" }));
+    await dirka("dirka2", () => api("PATCH", `/admin/api/clubs/${klubId}`, T.admin, { ownerEmail: "dirka2@outly.si" }));
 
     console.log("\n# Branje ostane enako");
     r = await api("GET", "/admin/api/users?q=cilj", T.admin);
