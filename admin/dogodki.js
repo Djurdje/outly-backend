@@ -254,7 +254,9 @@
     } else {
       ok = await potrdi({
         naslov: novo === "published" ? "Objavim dogodek?" : "Premaknem med osnutke?", potrdiBesedilo: novo === "published" ? "Objavi" : "Premakni med osnutke",
-        vsebina: novo === "published" ? [h("p", {}, `»${e.title}« bo viden v aplikaciji. Sledilci kluba dobijo obvestilo.`)]
+        nevarno: novo === "published" && e.status === "cancelled",
+        vsebina: novo === "published" ? [h("p", {}, `»${e.title}« bo viden v aplikaciji. Sledilci kluba dobijo obvestilo.`),
+          e.status === "cancelled" ? h("p", {}, "Dogodek je bil odpovedan; kupci so morda že dobili vračila. Ponovna objava obvesti sledilce.") : null]
           : [h("p", {}, `»${e.title}« ne bo več viden v aplikaciji. Plačane vstopnice ostanejo veljavne.`)],
       });
       if (!ok) return;

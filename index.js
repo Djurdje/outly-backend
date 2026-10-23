@@ -4187,7 +4187,8 @@ admin.post("/events/:id/duplicate", async (req, res) => {
               CASE WHEN e.sales_close_at IS NULL THEN NULL ELSE ((e.sales_close_at AT TIME ZONE 'Europe/Ljubljana') + s.zamik) AT TIME ZONE 'Europe/Ljubljana' END,
               e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng
          FROM events e
-        CROSS JOIN LATERAL (SELECT ((($2::timestamptz AT TIME ZONE 'Europe/Ljubljana') + g * INTERVAL '7 days') AT TIME ZONE 'Europe/Ljubljana') AS nov_start,
+        CROSS JOIN LATERAL (SELECT CASE WHEN g = 0 THEN $2::timestamptz   -- prvi osnutek natanko na zahtevanem trenutku (ura v dvoumni uri prehoda casa bi se prek AT TIME ZONE premaknila)
+                                    ELSE ((($2::timestamptz AT TIME ZONE 'Europe/Ljubljana') + g * INTERVAL '7 days') AT TIME ZONE 'Europe/Ljubljana') END AS nov_start,
                                    (($2::timestamptz AT TIME ZONE 'Europe/Ljubljana') + g * INTERVAL '7 days') - (e.start_at AT TIME ZONE 'Europe/Ljubljana') AS zamik
                               FROM generate_series(0, $3::int - 1) AS g) s
         WHERE e.id = $1

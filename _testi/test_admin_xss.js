@@ -551,6 +551,14 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     odg8 = { "/admin/api/opozorila?dogodek=": { napaka: "503: busy" } };
     nv.zaUrejevalnik({ event: { id: 14, status: "cancelled", title: "Odpovedan", start_at: "2030-01-01T10:00:00Z" } }); await new Promise(r => setImmediate(r));
     assert(nv.objavaBlokirana(14) === true && najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno")).length === 1, "nov-dogodek.js: odpovedan dogodek ima tudi pregled in zaklep Objavi; ob napaki pregleda je »Objavi vseeno«");
+    let potrdiC = null; potrdi8 = [async (o) => { potrdiC = o; return null; }];
+    await najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno"))[0].onclick();
+    assert(potrdiC && potrdiC.nevarno === true && pregled({ children: [].concat(potrdiC.vsebina).filter(y => y && y.nodeType), nodeType: 1, tagName: "x", attrs: {} }).besedila.join(" ").includes("Dogodek je bil odpovedan; kupci so morda že dobili vračila. Ponovna objava obvesti sledilce."),
+      "nov-dogodek.js: »Objavi vseeno« pri odpovedanem dogodku: jasno opozorilo o vracilih in sledilcih");
+    potrdiC = null; potrdi8 = [async (o) => { potrdiC = o; return null; }];
+    nv.zaUrejevalnik({ event: { id: 15, status: "draft", title: "Osnutek", start_at: "2030-01-01T10:00:00Z" } }); await new Promise(r => setImmediate(r));
+    await najdi($8("dge_razsiritve"), e => idje(e, "dge_objavi_vseeno"))[0].onclick();
+    assert(potrdiC && !pregled({ children: [].concat(potrdiC.vsebina).filter(y => y && y.nodeType), nodeType: 1, tagName: "x", attrs: {} }).besedila.join(" ").includes("odpovedan"), "nov-dogodek.js: pri osnutku opozorila o odpovedi ni");
     nv.zaUrejevalnik({ event: { id: 13, status: "published", title: "x", start_at: "2030-01-01T10:00:00Z" } });
     assert(nv.objavaBlokirana(13) === false && $8("dge_razsiritve").children.length === 0, "nov-dogodek.js: objavljen dogodek nima bloka Pred objavo in ni blokiran");
     assert(najdi($8("dge_gumbi"), e => idje(e, "dge_podvoji")).length >= 2, "nov-dogodek.js: gumb Podvoji pri vsakem odprtju urejevalnika (dogodki.js ustvari nov vsebnik)");

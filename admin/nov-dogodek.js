@@ -264,6 +264,7 @@
     if (!e || cele(e.id) !== id) return;
     const ok = await potrdi({ naslov: "Objavim kljub oviri?", nevarno: true, potrdiBesedilo: "Objavi vseeno", vpis: "OBJAVI", razlog: "obvezen",
       vsebina: [h("p", {}, `»${e.title}« bo viden v aplikaciji, čeprav pregled pred objavo ni čist (rdeča ovira ali pregled ni uspel). Nakup bo morda zavrnjen. Sledilci kluba dobijo obvestilo.`),
+        e.status === "cancelled" ? h("p", {}, "Dogodek je bil odpovedan; kupci so morda že dobili vračila. Ponovna objava obvesti sledilce.") : null,
         h("p", {}, "Razlog se zapiše v dnevnik dejanj.")] });
     if (!ok) return;
     try {
