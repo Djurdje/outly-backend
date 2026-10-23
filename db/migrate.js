@@ -215,8 +215,14 @@ async function glavno() {
       const zacetek = Date.now();
       process.stdout.write(`  → ${d} ... `);
 
+      // RAISE NOTICE iz migracije (npr. stevila izbrisanih vrstic pri podatkovnih migracijah) gre v dnevnik deploya, ne v prazno.
+      let obvestila = [];
+      const naObvestilo = (n) => { obvestila.push(n.message); };
+      odjemalec.on("notice", naObvestilo);
+      const izpisiObvestila = () => { for (const o of obvestila) console.log(`      ℹ ${o}`); obvestila = []; };
       for (let poskus = 0; ; poskus++) {
         try {
+          obvestila = [];
           await odjemalec.query("BEGIN");
           // set_config(..., true) = samo za to transakcijo (kot SET LOCAL); ob COMMIT/ROLLBACK se meji vrneta na prejšnji vrednosti.
           // To deluje, ker migrate.js sam zavije migracijo v transakcijo (BEGIN/COMMIT iz datoteke odstrani, glej breztransakcije).
@@ -231,6 +237,8 @@ async function glavno() {
           );
           await odjemalec.query("COMMIT");
           console.log(`v redu (${Date.now() - zacetek} ms${poskus > 0 ? `, poskus ${poskus + 1}` : ""})`);
+          izpisiObvestila();
+          odjemalec.off("notice", naObvestilo);
           break;
         } catch (e) {
           await odjemalec.query("ROLLBACK").catch(() => {});
@@ -245,6 +253,8 @@ async function glavno() {
             continue;
           }
           console.log("PADLA");
+          izpisiObvestila();
+          odjemalec.off("notice", naObvestilo);
           console.error(`\n✖ ${d} ni šla skozi. Baza je ostala nespremenjena.\n`);
           console.error(`   ${e.message}`);
           if (e.code === "55P03") {
