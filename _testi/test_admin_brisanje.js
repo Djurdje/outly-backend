@@ -75,7 +75,9 @@ async function narocilo(c, o) {
     paid_at: status === "paid" || status === "refunded" || status === "partially_refunded" ? new Date() : null, stripe_payment_intent_id: o.pi ?? null,
     stripe_checkout_session_id: o.seja ?? null, stripe_account_id: o.acct ?? null, refunded_cents: o.refunded ?? 0,
     table_id: o.tableId ?? null, table_label: o.tableLabel ?? null, table_seats: o.tableSeats ?? null, package_id: o.packageId ?? null, package_name: o.packageName ?? null,
-    guest_list_id: o.guestListId ?? null, promo_code_id: o.promo ?? null, cancelled_at: status === "cancelled" ? (o.cancelledAt ?? new Date()) : null, created_at: o.created ?? new Date(),
+    guest_list_id: o.guestListId ?? null, promo_code_id: o.promo ?? null, cancelled_at: status === "cancelled" ? (o.cancelledAt ?? new Date()) : null, created_at: o.created ?? new Date(), checkout_expires_at: o.expires ?? null,
+    // checkout_url: seja ima povezavo; NULL ob seji = odlozeno placilo (placila_stripe.js oznaciVObdelavi), le ce je izrecno `url: null`
+    checkout_url: o.url === null ? null : (o.seja ? "https://checkout.stripe.com/c/" + o.seja : null),
     ...(o.guest ? { guest_email: "gost@example.com", guest_terms_version: "v1", guest_terms_accepted_at: new Date() } : {}),
   });
 }
@@ -144,7 +146,7 @@ const razlike = (a, b) => Object.keys(a).filter((t) => a[t].n !== b[t].n || a[t]
   await pool.query(`TRUNCATE ${tabeleVse.join(", ")} RESTART IDENTITY CASCADE`);
   await new Promise((r) => jwksServer.listen(JWKS_PORT, r));
   const srv = spawn("node", ["index.js"], { cwd: KOREN, env: { ...process.env, PORT: String(PORT), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test",
-    TEST_PLACILA: "", ADMIN_BRISANJE_ZAKLEP_MS: "500", VRACILA_TICK_MS: "0" }, stdio: ["ignore", "pipe", "pipe"] });
+    TEST_PLACILA: "", GOST_NAKUP_TEST: "1", GOST_NAKUP_NA_URO: "1000", ADMIN_BRISANJE_ZAKLEP_MS: "500", VRACILA_TICK_MS: "0" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; srv.stdout.on("data", (d) => log += d); srv.stderr.on("data", (d) => log += d);
   for (let i = 0; i < 80; i++) { try { await fetch(BASE + "/"); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
 
@@ -166,6 +168,8 @@ const razlike = (a, b) => Object.keys(a).filter((t) => a[t].n !== b[t].n || a[t]
     I.lastnikOutly = await mkUser("lastnik.outly@example.com", "business");
     I.lastnikC4 = await mkUser("lastnik.c4@example.com", "business");
     I.prosilec = await mkUser("prosilec@example.com");
+    I.lastnikC5 = await mkUser("lastnik.c5@example.com", "business");
+    I.lastnikC6 = await mkUser("lastnik.c6@example.com", "business");
     I.zetonAgenta = (await ins(pool, "agent_zetoni", { ime: "test", zeton_sha256: hex("zeton"), obseg: ["beri", "predlagaj"], velja_do: new Date(Date.now() + 864e5) })).id;
 
     // ---- BAZA A: kar mora ostati bit-za-bitom (klub D z dogodkom EK s PRAVIMI placanimi narocili, racunom, sporom, uradni klub ...)
@@ -312,9 +316,16 @@ const razlike = (a, b) => Object.keys(a).filter((t) => a[t].n !== b[t].n || a[t]
     await varovalo("cancelled z odprto Stripe sejo", "checkout_may_complete", async (ev) => { await narocilo(pool, { ev, club: D, user: I.kupec, status: "cancelled", seja: "cs_live_o" + ev }); });
     await varovalo("cancelled, seja potekla pred 2 dnevi (znotraj 3 dni webhookov)", "checkout_may_complete", async (ev) => {
       const d2 = new Date(Date.now() - 2 * 864e5); await narocilo(pool, { ev, club: D, user: I.kupec, status: "cancelled", seja: "cs_live_p" + ev, created: d2, cancelledAt: d2 }); });
-    await varovalo("failed s PaymentIntentom", "checkout_may_complete", async (ev) => { await narocilo(pool, { ev, club: D, user: I.kupec, status: "failed", pi: "pi_live_q" + ev, seja: "cs_live_q" + ev, created: STARO }); });
-    await varovalo("cancelled, ki je bil ze placan (paid_at), seja stara", "checkout_may_complete", async (ev) => {
+    await varovalo("failed s PaymentIntentom (placilo obstaja)", "payment_exists", async (ev) => { await narocilo(pool, { ev, club: D, user: I.kupec, status: "failed", pi: "pi_live_q" + ev, seja: "cs_live_q" + ev, created: STARO }); });
+    await varovalo("cancelled, ki je bil ze placan (paid_at), seja stara", "payment_exists", async (ev) => {
       const n = await narocilo(pool, { ev, club: D, user: I.kupec, status: "cancelled", seja: "cs_live_r" + ev, created: STARO, cancelledAt: STARO }); await pool.query("UPDATE orders SET paid_at = NOW() WHERE id=$1", [n.id]); });
+    // N1: odlozeno placilo (SEPA): cancelled (npr. DELETE /me med placilom) s sejo, checkout_url NULL; created/checkout_expires_at stara, cancelled_at = zdaj -> 409
+    await varovalo("cancelled z odlozenim placilom (checkout_url NULL), cancelled_at zdaj, ostalo staro", "checkout_may_complete", async (ev) => {
+      await narocilo(pool, { ev, club: D, user: I.kupec, status: "cancelled", seja: "cs_live_s" + ev, url: null, created: STARO, expires: STARO }); });
+    await varovalo("cancelled z odlozenim placilom: tudi ko je vse starejse od 3 dni (brez casovne izjeme)", "checkout_may_complete", async (ev) => {
+      await narocilo(pool, { ev, club: D, user: I.kupec, status: "cancelled", seja: "cs_live_t" + ev, url: null, created: STARO, expires: STARO, cancelledAt: STARO }); });
+    await varovalo("sveza checkout_expires_at + star created_at", "checkout_may_complete", async (ev) => {
+      await narocilo(pool, { ev, club: D, user: I.kupec, status: "cancelled", seja: "cs_live_u" + ev, created: STARO, cancelledAt: STARO, expires: new Date(Date.now() + 3600e3) }); });
     // dovoljeno: pravo failed/cancelled narocilo z dokazano mrtvo sejo (brez PI in paid_at, starejse od 3 dni) ali brez seje/PI/paid_at (nakup se ni stekel do Stripa)
     {
       await omejitveCisti();
@@ -410,6 +421,18 @@ const razlike = (a, b) => Object.keys(a).filter((t) => a[t].n !== b[t].n || a[t]
     assert(r.status === 200 && r.body.deleted === true, "ko je gostujoci dogodek odpovedan in narocila ni vec, klub se izbrise", r);
     assert((await pool.query("SELECT venue_club_id FROM events WHERE id=$1", [gost.id])).rows[0].venue_club_id === null, "odpovedan gostujoci dogodek ostane brez prizorisca");
     await pool.query("DELETE FROM events WHERE id=$1", [gost.id]);
+    // N5: klub z odprto sejo (checkout_may_complete), s placilom (payment_exists) in z vracilom pravega narocila (has_refunds)
+    const C5 = (await ins(pool, "clubs", { owner_user_id: I.lastnikC5, name: "Klub z odprto sejo", city: "Kranj" })).id;
+    const EC5 = (await dogodek(pool, C5, "C5 dogodek", 9)).id;
+    await narocilo(pool, { ev: EC5, club: C5, user: I.kupec, status: "cancelled", seja: "cs_live_c5" });
+    await klubVarovalo("klub: cancelled z odprto Stripe sejo", "checkout_may_complete", C5);
+    await narocilo(pool, { ev: EC5, club: C5, user: I.kupec, status: "failed", pi: "pi_live_c5", seja: "cs_live_c5b", created: STARO });
+    await klubVarovalo("klub: failed s PI", "payment_exists", C5);
+    const C6 = (await ins(pool, "clubs", { owner_user_id: I.lastnikC6, name: "Klub z vracilom", city: "Bled" })).id;
+    const EC6 = (await dogodek(pool, C6, "C6 dogodek", 9)).id;
+    const n6 = await narocilo(pool, { ev: EC6, club: C6, user: I.kupec, status: "cancelled", seja: "cs_live_c6", created: STARO, cancelledAt: STARO });
+    await ins(pool, "vracila", { order_id: n6.id, event_id: EC6, razlog: "inactive_order", stanje: "caka", znesek_cents: 1500 });
+    await klubVarovalo("klub: vracilo 'caka' pravega naročila", "has_refunds", C6);
     await pool.query("DELETE FROM tickets WHERE order_id IN (SELECT id FROM orders WHERE club_id=$1)", [C3]);
     await pool.query("DELETE FROM orders WHERE club_id=$1", [C3]);
     await pool.query("DELETE FROM events WHERE club_id=$1", [C3]);
@@ -480,6 +503,9 @@ const razlike = (a, b) => Object.keys(a).filter((t) => a[t].n !== b[t].n || a[t]
     r = await api("DELETE", `/admin/api/events/${EL}`, T.admin, { reason: "po preklicu nakupa" });
     assert(r.status === 409 && r.body.error === "checkout_may_complete", "preklicano pravo narocilo z odprto Stripe sejo (kupec jo utegne se placati, I37) brisanje ZAVRNE", [r.status, r.body]);
     await pool.query("UPDATE orders SET created_at = NOW() - INTERVAL '5 days', cancelled_at = NOW() - INTERVAL '5 days' WHERE event_id=$1 AND public_ref='OUT-BDLOCK'", [EL]);
+    r = await api("DELETE", `/admin/api/events/${EL}`, T.admin, { reason: "odlozeno placilo" });
+    assert(r.status === 409 && r.body.error === "checkout_may_complete", "seja brez checkout_url (odlozeno placilo) tudi po 5 dneh ostane blokada", [r.status, r.body]);
+    await pool.query("UPDATE orders SET checkout_url = 'https://checkout.stripe.com/c/x' WHERE event_id=$1 AND public_ref='OUT-BDLOCK'", [EL]);
     r = await api("DELETE", `/admin/api/events/${EL}`, T.admin, { reason: "seja potekla pred 5 dnevi" });
     assert(r.status === 200 && r.body.deleted === true, "ko je seja dokazano mrtva (brez PI in paid_at, > 3 dni), brisanje uspe", r);
     // (c) izvorna koda
@@ -515,6 +541,39 @@ const razlike = (a, b) => Object.keys(a).filter((t) => a[t].n !== b[t].n || a[t]
       await z2.query("DELETE FROM events WHERE id=$1", [evP]); await z2.query("COMMIT"); z2.release();
       const rn2 = await nakup2;
       assert(rn2.status === 404, "izbrisan dogodek med nakupom -> 404 (ne 500)", [rn2.status, rn2.body]);
+      // gostova nakupna pot (/guest/events/:id/orders): isto
+      const evG = (await dogodek(pool, D, "Gost med brisanjem", 41, "published", { min_age: 0 })).id;
+      const kodaG = (await ins(pool, "promo_codes", { code: "RACEG", label: "tekma gost", club_id: D, created_by: I.admin })).id;
+      const gostTelo = (x) => ({ email: "gost.race@example.com", quantity: 1, accept_terms: true, terms_version: "2026-10-01", ...x });
+      const z3 = await pool.connect();
+      await z3.query("BEGIN"); await z3.query("SELECT id FROM promo_codes WHERE id=$1 FOR UPDATE", [kodaG]);
+      const nakup3 = api("POST", `/guest/events/${evG}/orders`, null, gostTelo({ promo_code: "RACEG" }));
+      await new Promise((r) => setTimeout(r, 800));
+      await z3.query("DELETE FROM promo_codes WHERE id=$1", [kodaG]); await z3.query("COMMIT"); z3.release();
+      const rn3 = await nakup3;
+      assert(rn3.status === 400 && rn3.body && rn3.body.error === "promo_code_invalid", "gost: izbrisana promo koda med nakupom -> 400 promo_code_invalid", [rn3.status, rn3.body]);
+      await pool.query("TRUNCATE omejitve");
+      const z4 = await pool.connect();
+      await z4.query("BEGIN"); await z4.query("SELECT id FROM events WHERE id=$1 FOR UPDATE", [evG]);
+      const nakup4 = api("POST", `/guest/events/${evG}/orders`, null, gostTelo({ email: "gost.race2@example.com" }));
+      await new Promise((r) => setTimeout(r, 800));
+      await z4.query("DELETE FROM events WHERE id=$1", [evG]); await z4.query("COMMIT"); z4.release();
+      const rn4 = await nakup4;
+      assert(rn4.status === 404, "gost: izbrisan dogodek med nakupom -> 404", [rn4.status, rn4.body]);
+      // VIP miza (N6): nakup in rezervacija; zadrzevalec zaklene vrstico mize, izbrise dogodek, nakup/rezervacija pade na tujem kljucu -> 404
+      for (const [opis, pot, telo] of [["nakup mize", "orders", {}], ["rezervacija mize", "reservations", { guest_name: "Race" }]]) {
+        await pool.query("TRUNCATE omejitve");
+        const evV = (await dogodek(pool, D, "VIP med brisanjem " + opis, 42, "published", { vip_enabled: true, vip_payment: pot === "reservations" ? "door" : "app" })).id;
+        const mz = await ins(pool, "club_tables", { club_id: D, label: "R" + evV, x: 1, y: 1, w: 2, h: 2, seats: 4, price_cents: 5000 });
+        await ins(pool, "event_tables", { event_id: evV, table_id: mz.id });
+        const zv = await pool.connect();
+        await zv.query("BEGIN"); await zv.query("SELECT id FROM club_tables WHERE id=$1 FOR UPDATE", [mz.id]);
+        const zahtevek = api("POST", `/events/${evV}/tables/${mz.id}/${pot}`, T.kupec, telo);
+        await new Promise((r) => setTimeout(r, 800));
+        await zv.query("DELETE FROM events WHERE id=$1", [evV]); await zv.query("COMMIT"); zv.release();
+        const rv = await zahtevek;
+        assert(rv.status === 404, `VIP ${opis}: dogodek izbrisan med vpisom -> 404 (ne 500)`, [rv.status, rv.body]);
+      }
     }
 
     // ============================================================

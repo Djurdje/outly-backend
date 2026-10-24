@@ -23,7 +23,8 @@
       case "has_invoices": return `Obstaja ${n} davčnih računov za naročila. Računi so računovodski dokumenti in morajo ostati.`;
       case "has_disputes": return `Obstaja ${n} sporov (chargeback) za prava naročila. Morajo ostati.`;
       case "has_refunds": return `Obstaja ${n} vračil (tudi čakajočih ali neuspelih in Stripovih) za prava naročila: kupec utegne še čakati denar. Morajo ostati.`;
-      case "checkout_may_complete": return `${n} pravih preklicanih ali neuspelih naročil ima Stripovo plačilno sejo, ki jo kupec utegne še plačati (Stripe ponavlja webhooke 3 dni). Počakaj 3 dni po izteku seje.`;
+      case "payment_exists": return `${n} pravih preklicanih ali neuspelih naročil ima plačilo (PaymentIntent ali plačan znesek). Plačilo obstaja, dogodka ni mogoče izbrisati: odpovej ga, da kupci dobijo denar nazaj.`;
+      case "checkout_may_complete": return `${n} pravih preklicanih ali neuspelih naročil ima Stripovo plačilno sejo, ki jo kupec utegne še plačati (webhooki 3 dni, odloženo plačilo SEPA 5–14 dni). Poskusi znova 3 dni po izteku seje ali dogodek odpovej.`;
       case "official_club": return "To je uradni profil Outly (ali klub z imenom Outly). Ni ga mogoče izbrisati.";
       case "venue_in_use": return `${n} neodpovedanih dogodkov drugih klubov ima ta klub za prizorišče. Najprej jih odpovej ali jim spremeni prizorišče.`;
       case "foreign_references": return `${n} naročil drugih dogodkov kaže na mizo, paket, guest listo ali klub, ki bi bil izbrisan.`;

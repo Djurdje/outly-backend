@@ -14,8 +14,9 @@
 //   - PRAVO narocilo (ne testno: SQL_TESTNO_NAROCILO, I39; guest lista je interni vnos brez denarja in se brise), ki ni failed/cancelled (paid, partially_refunded, refunded, pending),
 //   - kakrsen koli davcni racun (`racuni`, za VSA narocila),
 //   - spor (`spori`), Stripovo vracilo (`vracila_iz_stripa`) ali KATERAKOLI vrstica `vracila` za PRAVO narocilo (tudi caka/v_teku/ni_uspelo/rocno: kupec utegne se cakati denar),
-//   - pravo failed/cancelled narocilo s Stripovo sejo, PaymentIntentom ali paid_at (`checkout_may_complete`): kupec ga lahko se placa (I37, preveriPreklicane, webhooki 3 dni), zakljuci()
-//     po brisanju narocila ne bi nasel (denar brez vstopnice in vracila). Izjema: seja dokazano mrtva (brez PI in paid_at, starejsa od 3 dni po checkout_expires_at/cancelled_at/created_at).
+//   - pravo failed/cancelled narocilo s PaymentIntentom ali paid_at (`payment_exists`: placilo obstaja, odpovej dogodek) ali s Stripovo sejo (`checkout_may_complete`): kupec ga lahko se placa
+//     (I37, preveriPreklicane, webhooki 3 dni; odlozeno placilo SEPA 5-14 dni), zakljuci() po brisanju narocila ne bi nasel. Izjema samo za sejo brez PI/paid_at, ki je dokazano mrtva
+//     (GREATEST(checkout_expires_at, cancelled_at, created_at) starejsi od 3 dni) in ni cancelled z odlozenim placilom (checkout_url NULL ob seji).
 //   Prijave (`reports`) se NE brisejo (DECISIONS 2026-10-10 (4)).
 //   Za dogodek je pravilna pot »Odpovej« (vracila gredo kupcem, narocila ostanejo). Testna narocila (lazni nacin test_<uuid>, Stripe sandbox cs_test_) in njihovi spori/vracila se brisejo.
 // Klub dodatno ZAVRNE: uradni profil (`is_official`) in klub z imenom »Outly«; neodpovedan dogodek DRUGEGA kluba, ki ima ta klub za prizorisce (`venue_club_id`);
@@ -81,11 +82,16 @@ function ustvari({ pool, celoId4, zapisiAdminDejanje, omeji, sqlTestno, poBrisan
          (SELECT COUNT(*)::int FROM vracila_iz_stripa WHERE order_id = ANY($2::bigint[])) AS vracila_iz_stripa,
          -- VSAKA vrstica vracila za PRAVO narocilo (caka, v_teku, ni_uspelo, rocno ...): kupec utegne se cakati denar, zato ostane (B2)
          (SELECT COUNT(*)::int FROM vracila WHERE order_id = ANY($2::bigint[])) AS vracila_pravih,
-         -- pravo failed/cancelled narocilo: ce ima Stripe sejo, PI ali paid_at, ga kupec se utegne placati (I37: preveriPreklicane/zakljuci, webhooki 3 dni); zakljuci() po brisanju
-         -- narocila ne bi nasel (denar pobran brez vstopnice in vracila). Izjema: seja dokazano mrtva = brez PI, brez paid_at in starejsa od 3 dni (B1).
+         -- pravo failed/cancelled narocilo, ki ga kupec se utegne placati (I37: preveriPreklicane/zakljuci, webhooki 3 dni); zakljuci() po brisanju narocila ne bi nasel (denar brez vstopnice in vracila).
+         -- (a) PLACILO OBSTAJA: PaymentIntent ali paid_at -> blokira vedno (payment_exists; odpovej dogodek).
          (SELECT COUNT(*)::int FROM orders o WHERE o.id = ANY($2::bigint[]) AND o.guest_list_id IS NULL AND o.status IN ('failed','cancelled')
-            AND (o.stripe_checkout_session_id IS NOT NULL OR o.stripe_payment_intent_id IS NOT NULL OR o.paid_at IS NOT NULL)
-            AND NOT (o.stripe_payment_intent_id IS NULL AND o.paid_at IS NULL AND COALESCE(o.checkout_expires_at, o.cancelled_at, o.created_at) < NOW() - INTERVAL '3 days')) AS odprta_seja,
+            AND (o.stripe_payment_intent_id IS NOT NULL OR o.paid_at IS NOT NULL)) AS placilo_obstaja,
+         -- (b) SEJA BREZ PI/paid_at: blokira, razen ko je dokazano mrtva (GREATEST(checkout_expires_at, cancelled_at, created_at) starejsi od 3 dni). Brez casovne izjeme blokira
+         --     cancelled narocilo z ODLOZENIM placilom (SEPA, 5-14 dni): seja je opravljena, checkout_url NULL (oznaciVObdelavi), narocilo je preklical npr. DELETE /me med placilom (N1).
+         (SELECT COUNT(*)::int FROM orders o WHERE o.id = ANY($2::bigint[]) AND o.guest_list_id IS NULL AND o.status IN ('failed','cancelled')
+            AND o.stripe_payment_intent_id IS NULL AND o.paid_at IS NULL AND o.stripe_checkout_session_id IS NOT NULL
+            AND ((o.status = 'cancelled' AND o.checkout_url IS NULL)
+                 OR NOT (GREATEST(o.checkout_expires_at, o.cancelled_at, o.created_at) < NOW() - INTERVAL '3 days'))) AS odprta_seja,
          (SELECT COUNT(*)::int FROM orders o WHERE o.id = ANY($2::bigint[]) AND o.guest_list_id IS NULL AND o.status IN ('failed','cancelled')) AS pravi_neuspeli,
          (SELECT COUNT(*)::int FROM orders WHERE id <> ALL($1::bigint[]) AND (table_id = ANY($3::int[]) OR package_id = ANY($4::int[]) OR guest_list_id = ANY($5::bigint[]))) AS tuja_narocila,
          (SELECT COUNT(*)::int FROM orders WHERE club_id = ANY($6::int[]) AND event_id <> ALL($7::int[])) AS tuja_narocila_kluba,
@@ -96,8 +102,10 @@ function ustvari({ pool, celoId4, zapisiAdminDejanje, omeji, sqlTestno, poBrisan
     const pravi = b.pravi || {};
     const praviSkupaj = Object.values(pravi).reduce((s, n) => s + Number(n), 0);
     if (b.uradni > 0) blokade.push({ code: "official_club", count: b.uradni, message: "The official Outly profile (or a club named Outly) cannot be deleted." });
+    if (b.placilo_obstaja > 0) blokade.push({ code: "payment_exists", count: b.placilo_obstaja,
+      message: "A payment exists for a real cancelled or failed order (PaymentIntent or paid_at). The event cannot be deleted; cancel it instead so the buyer is refunded." });
     if (b.odprta_seja > 0) blokade.push({ code: "checkout_may_complete", count: b.odprta_seja,
-      message: "A real cancelled or failed order still has a Stripe checkout session (or payment) that may complete (webhooks retry for 3 days). Deleting it could take a payment without a ticket or refund. Wait 3 days after it expired, or cancel the event instead." });
+      message: "A real cancelled or failed order has a Stripe checkout session that may still complete (webhooks retry for 3 days; a delayed payment such as SEPA can arrive after 5-14 days). Deleting it could take a payment without a ticket or refund. Try again 3 days after the session expired, or cancel the event instead." });
     if (praviSkupaj > 0) blokade.push({ code: "has_real_orders", count: praviSkupaj, by_status: pravi,
       message: "There are real (non-test) orders that are not failed or cancelled. Real sales and invoices must stay; cancel the event instead." });
     if (b.racuni > 0) blokade.push({ code: "has_invoices", count: b.racuni, message: "Tax invoices exist for orders of this event. They are accounting documents and must stay; cancel the event instead." });
@@ -106,7 +114,7 @@ function ustvari({ pool, celoId4, zapisiAdminDejanje, omeji, sqlTestno, poBrisan
     if (b.prizorisce > 0) blokade.push({ code: "venue_in_use", count: b.prizorisce, message: "An active event of another club uses this club as its venue. Change or cancel that event first." });
     if (b.tuja_narocila > 0 || b.tuja_narocila_kluba > 0) blokade.push({ code: "foreign_references", count: b.tuja_narocila + b.tuja_narocila_kluba,
       message: "Orders of another event point to a table, package, guest list or club that would be deleted." });
-    return { de, dk, o_, op_, dt, gl, mize, paketi, blokade, pravi_neuspeli: b.pravi_neuspeli - b.odprta_seja };
+    return { de, dk, o_, op_, dt, gl, mize, paketi, blokade, pravi_neuspeli: b.pravi_neuspeli - b.odprta_seja - b.placilo_obstaja };
   }
 
   // Stevila vrstic, ki jih odnese kaskada (v dnevnik in v predogled). Klicati PRED brisanjem.
