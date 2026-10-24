@@ -2510,6 +2510,8 @@ const STOLPCI_DOGODKA = `
         ${VIP_OD_CENTOV} AS vip_from_cents,
         -- Vir razporeda VIP miz (migracija 039): club = tloris kluba, event = razpored tega dogodka. DODANO polje.
         vip_layout_source,
+        -- Placilo VIP mize (067): app = v aplikaciji (narocilo), door = gost mizo v aplikaciji samo rezervira, placa z gotovino na VIP vratih. DODANO polje; ne zavisi od uporabnika (I17).
+        vip_payment,
         -- Pavza prodaje (055, I53). DODANI polji: sales_paused = admin/klub je prodajo ustavil (cena ostane); on_sale = nakup (vstopnic ali miz) je ta trenutek
         -- odprt po stanju, pavzi, zacetku in oknu prodaje (isti pogoji kot napakaProdaje brez cene; zalogo pove availability, ceno ticket_price_cents).
         -- Ne zavisi od uporabnika: sme v javni predpomnilnik (I17), ki zaostane najvec 3 s.
@@ -2573,7 +2575,12 @@ app.get("/business/events", requireAuth, requireClub(), async (req, res) => {
     const top = await popularniDogodkiKluba(req.klub.clubId);
     const r = await pool.query(
       `SELECT e.*, (e.id = ANY($2::int[])) AS recap_allowed
-         FROM (SELECT ${STOLPCI_DOGODKA}, ${sqlKlubStripePripravljen()} FROM events WHERE club_id=$1) e
+         FROM (SELECT ${STOLPCI_DOGODKA}, ${sqlKlubStripePripravljen()},
+                      -- Zasedene VIP mize dogodka (067): aktivna VIP narocila (isti pogoj kot unikatni indeks I13) + rezervacije po telefonu + rezervacije v aplikaciji (table_holds).
+                      -- Ena miza je lahko zasedena samo enkrat (I13), zato se vsota ne podvaja. DODANO polje za poslovno sekcijo Reservations.
+                      (SELECT COUNT(*)::int FROM orders vo WHERE vo.event_id = events.id AND vo.table_id IS NOT NULL AND vo.status IN ${VIP_ZASEDENA_STANJA})
+                      + (SELECT COUNT(*)::int FROM table_holds vh WHERE vh.event_id = events.id) AS vip_reservations
+                 FROM events WHERE club_id=$1) e
         ORDER BY e.start_at DESC LIMIT 500`,
       [req.klub.clubId, top]
     );
@@ -9081,6 +9088,8 @@ const VIP_NAJVEC_PAKETOV = 30;
 const VIP_NAJVEC_CENA_MIZE_CENTOV = 10000000; // 100.000 EUR: strop proti tipkarskim napakam
 // Naročila, ki mizo zasedajo (isti pogoj kot unikatni indeks orders_miza_dogodek_key).
 const VIP_ZASEDENA_STANJA = `('pending','paid','partially_refunded')`;
+// Nacin placila VIP mize pri dogodku (067, events.vip_payment): app = kupec mizo kupi v aplikaciji, door = rezervira jo v aplikaciji, placa z gotovino na VIP vratih.
+const VIP_NACINI_PLACILA = ["app", "door"];
 
 // Besedilo iz vhoda: samo niz; tabulator in novi vrstici -> presledek, rob obrezan; ostali nadzorni znaki
 // so napaka (NUL ne gre v TEXT in JSONB). Vrne obrezan niz ali null (neveljavno).
@@ -9333,7 +9342,7 @@ app.put("/business/vip", requireAuth, requireClub("owner", "manager"), async (re
 // Stanje VIP miz dogodka za klub: tloris, mize s ceno, izjemo in rezervacijo, paketi. db = pool ali odjemalec.
 // Vrne null, ce dogodek ne obstaja ali ni od tega kluba.
 async function vipDogodkaOdgovor(db, klub, eventId) {
-  const e = await db.query("SELECT id, vip_enabled, currency, vip_layout_source, floor_plan FROM events WHERE id = $1 AND club_id = $2", [eventId, klub]);
+  const e = await db.query("SELECT id, vip_enabled, vip_payment, currency, vip_layout_source, floor_plan FROM events WHERE id = $1 AND club_id = $2", [eventId, klub]);
   if (e.rows.length === 0) return null;
   const razporedDogodka = e.rows[0].vip_layout_source === "event";   // 039: tloris in mize dogodka namesto klubskih
   const k = await db.query("SELECT floor_plan FROM clubs WHERE id = $1", [klub]);
@@ -9343,14 +9352,17 @@ async function vipDogodkaOdgovor(db, klub, eventId) {
             ct.price_cents AS default_price_cents,
             COALESCE(et.disabled, FALSE) AS disabled, (ct.archived_at IS NOT NULL) AS archived,
             b.order_id, b.public_ref, b.buyer_username, b.package_name, b.package_description,
-            b.guests, b.checked_in, b.created_at AS booked_at,
-            h.guest_name AS hold_guest_name, h.note AS hold_note, h.created_at AS hold_created_at, (h.id IS NOT NULL) AS hold_je
+            b.guests, b.checked_in, b.created_at AS booked_at, b.total_cents AS booked_total_cents,
+            h.guest_name AS hold_guest_name, h.note AS hold_note, h.created_at AS hold_created_at, (h.id IS NOT NULL) AS hold_je,
+            h.source AS hold_source, hu.username AS hold_username, h.package_name AS hold_package_name,
+            h.package_description AS hold_package_description, h.price_cents AS hold_price_cents
        FROM club_tables ct
        LEFT JOIN event_tables et ON et.event_id = $1 AND et.table_id = ct.id
        LEFT JOIN table_holds h ON h.event_id = $1 AND h.table_id = ct.id
+       LEFT JOIN users hu ON hu.id = h.user_id
        LEFT JOIN LATERAL (
          SELECT o.id AS order_id, o.public_ref, u.username AS buyer_username, o.package_name, o.package_description,
-                o.created_at,
+                o.created_at, o.total_cents,
                 (SELECT COUNT(*)::int FROM tickets t WHERE t.order_id = o.id AND t.status IN ('valid','used')) AS guests,
                 (SELECT COUNT(*)::int FROM tickets t WHERE t.order_id = o.id AND t.status = 'used') AS checked_in
            FROM orders o LEFT JOIN users u ON u.id = o.user_id
@@ -9367,6 +9379,7 @@ async function vipDogodkaOdgovor(db, klub, eventId) {
   return {
     event_id: e.rows[0].id,
     enabled: e.rows[0].vip_enabled,
+    payment: e.rows[0].vip_payment,   // 067: 'app' | 'door' (kako se placa miza pri tem dogodku)
     currency: e.rows[0].currency,
     plan: (razporedDogodka ? e.rows[0].floor_plan : (k.rows[0] && k.rows[0].floor_plan)) || null,
     tables: m.rows.map(r => ({
@@ -9376,9 +9389,15 @@ async function vipDogodkaOdgovor(db, klub, eventId) {
         order_id: r.order_id, public_ref: r.public_ref, buyer_username: r.buyer_username,
         package_name: r.package_name, package_description: r.package_description,
         guests: r.guests, checked_in: r.checked_in, created_at: r.booked_at,
+        total_cents: r.booked_total_cents,   // 067: znesek placanega VIP narocila v centih (sekcija Reservations ga kaze kot ceno mize)
       } : null,
       // Rezervacija po telefonu (032): klub je mizo sam oznacil kot zasedeno. Ime in opomba sta SAMO v poslovnem pogledu.
-      hold: r.hold_je ? { guest_name: r.hold_guest_name, note: r.hold_note, created_at: r.hold_created_at } : null,
+      // 067: source phone = klub vpisal po telefonu | app = gost rezerviral v aplikaciji (placa na vratih); username/paket/cena samo pri app (pri phone null).
+      hold: r.hold_je ? {
+        guest_name: r.hold_guest_name, note: r.hold_note, created_at: r.hold_created_at,
+        source: r.hold_source, username: r.hold_source === "app" ? r.hold_username : null,
+        package_name: r.hold_package_name, package_description: r.hold_package_description, price_cents: r.hold_price_cents,
+      } : null,
     })),
     packages: p.rows,
   };
@@ -9400,8 +9419,9 @@ app.get("/business/events/:id/vip", requireAuth, requireClub("owner", "manager",
 });
 
 // PUT /business/events/:id/vip — vklop VIP miz na dogodku in izjeme po mizah (owner, manager).
-// Telo: { enabled, tables?: [{ table_id, price_cents | null, disabled }] }. Navedene mize prepisejo
+// Telo: { enabled, payment?: "app" | "door", tables?: [{ table_id, price_cents | null, disabled }] }. Navedene mize prepisejo
 // izjeme (price_cents null = privzeta cena kluba); mize, ki jih ni na seznamu, ostanejo, kot so bile.
+// payment (067): kako se placa miza pri tem dogodku; izpusceno = brez spremembe, druga vrednost 400. Ne vpliva na ze obstojeca narocila in rezervacije.
 app.put("/business/events/:id/vip", requireAuth, requireClub("owner", "manager"), async (req, res) => {
   const id = vipId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
@@ -9409,6 +9429,7 @@ app.put("/business/events/:id/vip", requireAuth, requireClub("owner", "manager")
   if (!klub) return res.status(404).send("Club not found.");
   const b = req.body || {};
   if (typeof b.enabled !== "boolean") return res.status(400).send("enabled must be true or false.");
+  if (b.payment !== undefined && !VIP_NACINI_PLACILA.includes(b.payment)) return res.status(400).send('payment must be "app" or "door".');
   const izjeme = [];
   if (b.tables !== undefined) {
     if (!Array.isArray(b.tables)) return res.status(400).send("tables must be an array.");
@@ -9449,7 +9470,7 @@ app.put("/business/events/:id/vip", requireAuth, requireClub("owner", "manager")
       if (v.rows.some(r => r.event_id !== null && r.event_id !== id)) { await c.query("ROLLBACK"); return res.status(404).send("Table not found."); }
       for (let i = izjeme.length - 1; i >= 0; i--) if (mize.get(izjeme[i].table_id)) izjeme.splice(i, 1);
     }
-    await c.query("UPDATE events SET vip_enabled = $2 WHERE id = $1", [id, b.enabled]);
+    await c.query("UPDATE events SET vip_enabled = $2, vip_payment = COALESCE($3::text, vip_payment) WHERE id = $1", [id, b.enabled, b.payment === undefined ? null : b.payment]);
     for (const t of izjeme) {
       if (t.price_cents === null && !t.disabled) {
         await c.query("DELETE FROM event_tables WHERE event_id = $1 AND table_id = $2", [id, t.table_id]);
@@ -9720,7 +9741,7 @@ async function pocistiRezervacije() {
     const r = await pool.query(
       `DELETE FROM table_holds h USING events e
         WHERE e.id = h.event_id AND COALESCE(e.end_at, e.start_at + INTERVAL '12 hours') < NOW() - INTERVAL '24 hours'`);
-    if (r.rowCount > 0) console.log(`[rezervacije] pospravljeno ${r.rowCount} starih rezervacij po telefonu`);
+    if (r.rowCount > 0) console.log(`[rezervacije] pospravljeno ${r.rowCount} starih rezervacij miz`);
   } catch (e) {
     console.error("[rezervacije] pospravljanje ni uspelo:", e && e.message);
   } finally {
@@ -9744,7 +9765,7 @@ app.get("/events/:id/vip", async (req, res) => {
     const id = vipId(req.params.id);
     if (!id) return res.status(400).send("Invalid event id.");
     const er = await pool.query(
-      `SELECT e.id, e.club_id, e.vip_enabled, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.sales_paused, e.min_age,
+      `SELECT e.id, e.club_id, e.vip_enabled, e.vip_payment, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.sales_paused, e.min_age,
               e.vip_layout_source, e.floor_plan, c.is_demo, ${sqlPlacilaPripravljena("c.")} AS club_stripe_ready,
               ${sqlProdajalecSurov("c")} AS seller_raw
          FROM events e JOIN clubs c ON c.id = e.club_id
@@ -9788,6 +9809,8 @@ app.get("/events/:id/vip", async (req, res) => {
     return res.json({
       event_id: e.id,
       enabled,
+      // 067: app = miza se kupi v aplikaciji (POST .../orders); door = samo rezervacija v aplikaciji (POST .../reservations), placilo z gotovino na VIP vratih.
+      vip_payment: e.vip_payment,
       on_sale: napakaProdaje({ ...e, hidden: false }, { zahtevajCeno: false }) === null,
       // kot pri dogodku (#149); #220: ob sk_live_ + nepopolnih podatkih prodajalca (I34) "unavailable", razen ce je kupljiva miza za 0 EUR
       // Demo klub (050): "unavailable" (nakup mize je 409 demo_club, razen vloge admin); `is_demo` = prodajalec (events.club_id) je demo klub. Razloga javno ni (I34).
@@ -9810,7 +9833,7 @@ app.get("/events/:id/vip", async (req, res) => {
 // aktivne pakete; sicer izpusti ali null). Pravila nakupa (testni nacin, okno prodaje, starost) so ista
 // kot pri vstopnicah (napakaProdaje, preveriStarostKupca). Narocilo: quantity 1, cena = cena mize,
 // vstopnic = table_seats; ne steje v sold_count. Ista miza dvakrat: 409 (I13, unikaten indeks).
-app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaNakupaMize), zavrniRazprodanoMizo, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaNakupaMize), zavrniVipNaVratih, zavrniRazprodanoMizo, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
   const id = vipId(req.params.id);
   if (!id) return res.status(400).send("Invalid event id.");
   const mizaId = vipId(req.params.tableId);
@@ -9843,7 +9866,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
       if (obst) { await c.query("ROLLBACK"); return await idemOdgovori(res, c, obst, idemV); }
     }
     const er = await c.query(
-      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_layout_source, e.sales_paused,
+      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_payment, e.vip_layout_source, e.sales_paused,
               e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
          FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
@@ -9856,6 +9879,8 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     if (demo) { await c.query("ROLLBACK"); return res.status(409).json(demo); }
     if (e.status !== "published" || e.hidden) { await c.query("ROLLBACK"); return res.status(409).send("Event is not on sale."); }
     if (!e.vip_enabled) { await c.query("ROLLBACK"); return res.status(404).send("Table not found."); }
+    // 067: dogodek, kjer se miza placa na vratih, se v aplikaciji ne kupuje (rezervacija: POST .../reservations). Dokoncna preverba; zavrniVipNaVratih jo opravi ze pred semaforjem.
+    if (e.vip_payment === "door") { await c.query("ROLLBACK"); return res.status(409).json(NAPAKA_VIP_NA_VRATIH); }
 
     // Miza: aktivna, od kluba dogodka in na tem dogodku ne izklopljena. FOR SHARE: cena in stanje mize se
     // med nakupom ne smeta spremeniti (PUT /business/vip jo posodablja, ta zahteva izkljucni zaklep vrstice).
@@ -9961,6 +9986,191 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     console.error(err);
     return res.status(500).send("Server error.");
   } finally { try { d.sprosti(); } finally { if (req.idem) req.idem.sprosti(); } }
+});
+
+// ---------------------------
+// PLACILO VIP MIZE NA VRATIH + REZERVACIJA V APLIKACIJI (migracija 067, Martin 23. 10. 2026; DECISIONS 23. 10. 2026, ARCHITECTURE »Placilo na vratih in rezervacije v aplikaciji«)
+// ---------------------------
+// Klub pri dogodku izbere events.vip_payment (PUT /business/events/:id/vip { payment }): 'app' = miza se kupi in placa v aplikaciji (narocilo, vstopnice; kot doslej),
+// 'door' = gost mizo v aplikaciji samo REZERVIRA (POST .../reservations), placa z gotovino na VIP vratih. Rezervacija je vrstica v table_holds (source 'app', user_id),
+// NE narocilo: ne steje v prodajo, finance, provizijo, racune, sold_count, ne sprozi strezbe (table_service nastane samo iz skena) in nima vstopnic.
+// Izkljucnost mize (I13) je zato ista kot pri rezervaciji po telefonu: FOR NO KEY UPDATE na vrstici club_tables, nato NOV stavek nad orders, nato vpis (UNIQUE event_id, table_id).
+const NAPAKA_VIP_NA_VRATIH = { error: "vip_pay_at_door", message: "Tables for this event are paid in cash at the door. Update the app to reserve one." };
+const NAPAKA_VIP_V_APLIKACIJI = { error: "vip_pay_in_app", message: "Tables for this event are paid in the app." };
+const NAPAKA_REZERVACIJA_LIMIT = { error: "reservation_limit", message: "You already have a table reserved for this event." };
+// Nevidni in bidi znaki (\p{Cf}: ničelne širine, bidi, mehki vezaj ...; isti nabor kot NEVIDNI v agent_predlogi.js in I60 + U+034F, U+2028/9): ime rezervacije jih NE sme vsebovati
+// (osebje kluba bi videlo prazno ali obrnjeno vrstico) -> 400, ne tiho odstranjevanje.
+const NEVIDNI_IME = /\p{Cf}|[\u034F\u2028\u2029]/u;
+
+// Middleware za POST /events/:id/tables/:tableId/orders (za idempotenco, PRED zavrniRazprodanoMizo, omejevalnikom in semaforjem): dogodek z vip_payment = 'door' je 409 brez
+// porabe nakupnih poskusov (20/uro na IP, ki bi jih sicer pojedli stari odjemalci) in brez mize, zaloge in Stripa. Ponovitev ze obstojecega nakupa (idempotenca) je prej vrnjena.
+// Napaka pri branju ne zavre nakupa: dokoncna preverba je se enkrat v transakciji nakupa (isti pogoj).
+async function zavrniVipNaVratih(req, res, next) {
+  const id = vipId(req.params.id);
+  if (!id) return next();
+  let door = false;
+  try {
+    // Samo objavljen dogodek javnega kluba: za neobstojec, neobjavljen ali skrit dogodek se nastavitev ne razkrije (obstojeca pot vrne 404 / 409).
+    const r = await sCasovnoMejo(pool.query(
+      "SELECT e.vip_payment FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1 AND e.status = 'published' AND NOT c.hidden", [id]), IDEMPOTENCA_PREVERBA_MS);
+    door = !!(r.rows[0] && r.rows[0].vip_payment === "door");
+  } catch (e) { console.error("[vip_payment] preverba pred semaforjem ni uspela:", e && e.message); }
+  if (door) return res.status(409).json(NAPAKA_VIP_NA_VRATIH);
+  next();
+}
+
+// Rezervacija v aplikaciji kot jo vidi kupec (Reservation). Stolpce naštevamo (I4); ime kluba in dogodka sta javna.
+const REZERVACIJA_KUPCU_STOLPCI = `h.id, h.event_id, e.title AS event_title, e.start_at AS event_start_at, e.club_id, c.name AS club_name,
+       h.table_id, ct.label AS table_label, ct.seats, h.package_id, h.package_name, h.package_description, h.price_cents, e.currency, h.guest_name, h.created_at`;
+const REZERVACIJA_KUPCU_IZ = `FROM table_holds h JOIN events e ON e.id = h.event_id JOIN clubs c ON c.id = e.club_id JOIN club_tables ct ON ct.id = h.table_id`;
+function rezervacijaKupcu(r) {
+  return { ...r, currency: String(r.currency).trim() };
+}
+// Telo 409 reservation_limit: {error, message} + obstojeca rezervacija uporabnika na dogodku (samo dodajanje: star odjemalec bere error/message). db je po ROLLBACK-u v samodejni potrditvi.
+async function telesoLimita(db, eventId, userId) {
+  try {
+    const r = await db.query(`SELECT ${REZERVACIJA_KUPCU_STOLPCI} ${REZERVACIJA_KUPCU_IZ} WHERE h.event_id = $1 AND h.user_id = $2 AND h.source = 'app'`, [eventId, userId]);
+    if (r.rows[0]) return { ...NAPAKA_REZERVACIJA_LIMIT, reservation: rezervacijaKupcu(r.rows[0]) };
+  } catch (e) { console.error("[rezervacija] branje obstojece rezervacije ni uspelo:", e && e.message); }
+  return NAPAKA_REZERVACIJA_LIMIT;
+}
+
+// POST /events/:id/tables/:tableId/reservations — kupec (prijavljen racun, ne gost) rezervira VIP mizo na dogodku, kjer se placa na vratih.
+// Telo: { package_id: int | null, guest_name?: string, expected_price_cents?: int }. Pravila kot pri nakupu mize (dogodek objavljen, VIP vklopljen, miza aktivna in ne izklopljena,
+// okno prodaje, pavza prodaje I53, demo klub I41, starost I8), brez placila in vstopnic. Najvec ena aktivna rezervacija na uporabnika na dogodek.
+app.post("/events/:id/tables/:tableId/reservations", requireAuth, zavrniRazprodanoMizo, omeji({ kljuc: "nakup", najvec: 20, oknoSekund: 3600, priNapaki: "lokalno" }), async (req, res) => {
+  const id = vipId(req.params.id);
+  if (!id) return res.status(400).send("Invalid event id.");
+  const mizaId = vipId(req.params.tableId);
+  if (!mizaId) return res.status(400).send("Invalid table id.");
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  let paketId = null;
+  if (b.package_id !== undefined && b.package_id !== null) {
+    paketId = vipId(b.package_id);
+    if (paketId === null) return res.status(400).send("package_id must be a positive integer.");
+  }
+  let pricakovana = null;
+  if (b.expected_price_cents !== undefined && b.expected_price_cents !== null) {
+    if (!Number.isInteger(b.expected_price_cents) || b.expected_price_cents < 0) return res.status(400).send("expected_price_cents must be a non-negative integer (cents).");
+    pricakovana = b.expected_price_cents;
+  }
+  // Ime za rezervacijo: 1-60 znakov po obrezovanju (kot rezervacija po telefonu); izpusceno ali prazno = uporabnisko ime.
+  if (typeof b.guest_name === "string" && NEVIDNI_IME.test(b.guest_name)) return res.status(400).send("guest_name must not contain invisible or direction-control characters.");
+  const vpisanoIme = rezervacijaBesedilo(b.guest_name, 0, 60);
+  if (vpisanoIme === null) return res.status(400).send("guest_name must be at most 60 characters.");
+  // Semafor nakupov varuje glavni pool pred navalom (kot pri nakupu mize): cakalci cakajo v pomnilniku, ne na povezavi.
+  if (!(await nakupDovoljenje(req, res))) return;
+  let c;
+  try { c = await pool.connect(); } catch (err) { nakupIzstopi(); console.error(err); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+  const d = nakupDrzalec(c);
+  try {
+    await nakupZacni(c);
+    const er = await c.query(
+      `SELECT e.id, e.club_id, e.status, e.start_at, e.min_age, e.vip_enabled, e.vip_payment, e.vip_layout_source, e.sales_paused, e.sales_open_at, e.sales_close_at,
+              c.hidden, c.is_demo
+         FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
+    if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
+    const e = er.rows[0];
+    // Demo klub (I41): 409 PRED mizo (izjema vloga admin, kot nakup).
+    const demo = napakaDemoKluba(e, req.user.role);
+    if (demo) { await c.query("ROLLBACK"); return res.status(409).json(demo); }
+    if (e.status !== "published" || e.hidden) { await c.query("ROLLBACK"); return res.status(409).send("Event is not on sale."); }
+    if (!e.vip_enabled) { await c.query("ROLLBACK"); return res.status(404).send("Table not found."); }
+    if (e.vip_payment !== "door") { await c.query("ROLLBACK"); return res.status(409).json(NAPAKA_VIP_V_APLIKACIJI); }
+
+    // Miza (kot pri nakupu: aktivna, od kluba dogodka, na dogodku ne izklopljena, iz veljavnega razporeda 039), a z FOR NO KEY UPDATE kot rezervacija po telefonu:
+    // konflikt z nakupom (FOR SHARE), ne pa z urejanjem cen in nakupi drugih miz (FOR KEY SHARE tujih kljucev).
+    const mr = await c.query(
+      `SELECT ct.id, ct.label, ct.seats, COALESCE(et.price_cents, ct.price_cents) AS price_cents
+         FROM club_tables ct LEFT JOIN event_tables et ON et.event_id = $1 AND et.table_id = ct.id
+        WHERE ct.id = $2 AND ct.club_id = $3 AND ct.archived_at IS NULL AND NOT COALESCE(et.disabled, FALSE)
+          AND (CASE WHEN $4::text = 'event' THEN ct.event_id = $1 ELSE ct.event_id IS NULL END)
+        FOR NO KEY UPDATE OF ct`, [e.id, mizaId, e.club_id, e.vip_layout_source]);
+    if (mr.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Table not found."); }
+    const miza = mr.rows[0];
+
+    // Ena aktivna rezervacija na uporabnika na dogodek (tudi ponovitev iste rezervacije = reservation_limit). Dokoncna resnica je delni unikatni indeks (23505 spodaj).
+    const lr = await c.query("SELECT 1 FROM table_holds WHERE event_id = $1 AND user_id = $2 AND source = 'app'", [e.id, req.user.userId]);
+    if (lr.rows.length > 0) { await c.query("ROLLBACK"); return res.status(409).json(await telesoLimita(c, e.id, req.user.userId)); }
+
+    // Zaklep imamo (I13): aktivna naročila so zdaj dokončna; rezervacijo (po telefonu ali v aplikaciji) ujame INSERT ... ON CONFLICT spodaj.
+    const nr = await c.query(`SELECT 1 FROM orders WHERE event_id = $1 AND table_id = $2 AND status IN ${VIP_ZASEDENA_STANJA} LIMIT 1`, [e.id, miza.id]);
+    if (nr.rows.length > 0) { await c.query("ROLLBACK"); razprodanoOznaci("m:" + id + ":" + mizaId); return res.status(409).send("This table is already booked."); }
+
+    const np = napakaProdaje(e, { zahtevajCeno: false });
+    if (np) { await c.query("ROLLBACK"); return res.status(np[0]).send(np[1]); }
+    if (pricakovana !== null && pricakovana !== miza.price_cents) { await c.query("ROLLBACK"); return res.status(409).send("The table price has changed."); }
+
+    // Paket je obvezen, ce ima klub vsaj en aktiven paket (kot pri nakupu).
+    const pr = await c.query("SELECT id, name, description FROM bottle_packages WHERE club_id = $1 AND archived_at IS NULL", [e.club_id]);
+    let paket = null;
+    if (paketId !== null) {
+      paket = pr.rows.find(p => p.id === paketId) || null;
+      if (!paket) { await c.query("ROLLBACK"); return res.status(400).send("This package does not belong to this club."); }
+    } else if (pr.rows.length > 0) {
+      await c.query("ROLLBACK"); return res.status(400).send("Choose a bottle package.");
+    }
+
+    // Starost (I8): kot nakup mize; miza s paketom pijace zahteva najmanj 18 let.
+    const potrebnaStarost = starostZaPaket(e.min_age, paket !== null);
+    const starost = await preveriStarostKupca(c, req.user.userId, potrebnaStarost,
+      potrebnaStarost > e.min_age ? "a table with a bottle package" : undefined);
+    if (starost.napaka) { await c.query("ROLLBACK"); return res.status(starost.napaka[0]).send(starost.napaka[1]); }
+
+    const ur = await c.query("SELECT username FROM users WHERE id = $1", [req.user.userId]);
+    const ime = vpisanoIme !== "" ? vpisanoIme : ([...String((ur.rows[0] && ur.rows[0].username) || "")].slice(0, 60).join("").trim() || "Guest");
+    const ins = await c.query(
+      `INSERT INTO table_holds (event_id, table_id, guest_name, created_by_user_id, source, user_id, package_id, package_name, package_description, price_cents)
+       VALUES ($1,$2,$3,$4,'app',$4,$5,$6,$7,$8) ON CONFLICT (event_id, table_id) DO NOTHING RETURNING id`,
+      [e.id, miza.id, ime, req.user.userId, paket ? paket.id : null, paket ? paket.name : null, paket ? paket.description : null, miza.price_cents]);
+    if (ins.rows.length === 0) { await c.query("ROLLBACK"); razprodanoOznaci("m:" + id + ":" + mizaId); return res.status(409).send("This table is already booked."); }
+    if (await pavzaPredCommitom(c, e.id)) { await c.query("ROLLBACK"); return res.status(409).send(NAPAKA_PAVZA_PRODAJE); }   // I53: pavza, vklopljena med transakcijo
+    await c.query("COMMIT");
+    console.log(`Rezervacija mize v aplikaciji: dogodek ${e.id}, miza ${miza.id}, uporabnik ${req.user.userId}`);   // brez imena
+    const o = await c.query(`SELECT ${REZERVACIJA_KUPCU_STOLPCI} ${REZERVACIJA_KUPCU_IZ} WHERE h.id = $1`, [ins.rows[0].id]);
+    return res.status(201).json({ reservation: rezervacijaKupcu(o.rows[0]) });
+  } catch (err) {
+    await c.query("ROLLBACK").catch(() => {});
+    if (err && err.code === "23505" && err.constraint === "table_holds_app_uporabnik_key") return res.status(409).json(await telesoLimita(c, id, req.user.userId));
+    if (err && err.code === "23505") { razprodanoOznaci("m:" + id + ":" + mizaId); return res.status(409).send("This table is already booked."); }
+    if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
+    console.error(err);
+    return res.status(500).send("Server error.");
+  } finally { d.sprosti(); }
+});
+
+// DELETE /events/:id/tables/:tableId/reservations — kupec prekliče SVOJO rezervacijo v aplikaciji, do začetka dogodka (miza je spet prosta).
+// Tuja, neobstojeca ali telefonska rezervacija: 404 (ne razkrivamo obstoja). Po zacetku dogodka: 409 event_started (klub jo sprosti sam prek DELETE /business/.../hold).
+app.delete("/events/:id/tables/:tableId/reservations", requireAuth, async (req, res) => {
+  try {
+    const id = vipId(req.params.id);
+    if (!id) return res.status(400).send("Invalid event id.");
+    const mizaId = vipId(req.params.tableId);
+    if (!mizaId) return res.status(400).send("Invalid table id.");
+    const r = await pool.query(
+      `DELETE FROM table_holds h USING events e
+        WHERE h.event_id = e.id AND e.id = $1 AND h.table_id = $2 AND h.user_id = $3 AND h.source = 'app' AND e.start_at > NOW() RETURNING h.id`,
+      [id, mizaId, req.user.userId]);
+    if (r.rows.length === 0) {
+      const ze = await pool.query("SELECT 1 FROM table_holds WHERE event_id = $1 AND table_id = $2 AND user_id = $3 AND source = 'app'", [id, mizaId, req.user.userId]);
+      if (ze.rows.length > 0) return res.status(409).json({ error: "event_started", message: "The event has already started. Ask the club to release the table." });
+      return res.status(404).send("Reservation not found.");
+    }
+    razprodanoPozabi("m:" + id + ":" + mizaId);   // nakup, zavrnjen zaradi rezervacije, je mizo oznacil »zasedena« v pomnilniku
+    return res.json({ ok: true });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
+});
+
+// GET /me/table-reservations — moje rezervacije v aplikaciji (samo objavljen dogodek javnega kluba): prihajajoci dogodki in dogodki, ki so se koncali pred manj kot 24 h (isti izraz konca kot »ended«), najnovejsi zacetek prvi.
+app.get("/me/table-reservations", requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT ${REZERVACIJA_KUPCU_STOLPCI} ${REZERVACIJA_KUPCU_IZ}
+        WHERE h.user_id = $1 AND h.source = 'app' AND e.status = 'published' AND NOT c.hidden
+          AND COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') > NOW() - INTERVAL '24 hours'
+        ORDER BY e.start_at DESC, h.id DESC LIMIT 200`, [req.user.userId]);
+    return res.json({ items: r.rows.map(rezervacijaKupcu) });
+  } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
 // ---------------------------

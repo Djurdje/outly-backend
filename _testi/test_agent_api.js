@@ -342,7 +342,7 @@ function nicOsebnega(ime, tekst) {
     const seznam = odg["/events"].body;
     const idji = seznam.items.map((e) => e.id);
     assert(seznam.items.length === 7 && [E.pub, E.osnutek, E.preklican, E.zlobni, E.demo, E.skrit, E.stara].every((i) => idji.includes(i)), "events: vseh 7 dogodkov (osnutek, preklican, skriti klub, demo, stari)", idji);
-    const KLJUCI = ["id", "club_id", "club_name", "club_hidden", "club_is_demo", "title", "status", "start_at", "end_at", "ticket_price_cents", "currency", "capacity", "sold_count", "sales_paused", "sales_open_at", "sales_close_at", "has_poster", "min_age", "genres", "vip_enabled", "venue_name", "venue_city", "has_ticket_url", "created_at", "prodaja"];
+    const KLJUCI = ["id", "club_id", "club_name", "club_hidden", "club_is_demo", "title", "status", "start_at", "end_at", "ticket_price_cents", "currency", "capacity", "sold_count", "sales_paused", "sales_open_at", "sales_close_at", "has_poster", "min_age", "genres", "vip_enabled", "vip_payment", "venue_name", "venue_city", "has_ticket_url", "created_at", "prodaja"];
     const pub = seznam.items.find((e) => e.id === E.pub);
     assert(re(Object.keys(pub).sort()) === re([...KLJUCI].sort()), "events: natanko nasteti stolpci (brez opisa, ticket_url, koordinat ...)", Object.keys(pub));
     assert(pub.club_name === "Klub Eden" && pub.currency === "EUR" && pub.ticket_price_cents === 1500 && pub.has_ticket_url === true && pub.venue_city === "Ljubljana" && pub.club_hidden === false && pub.club_is_demo === false, "events: polja dogodka", pub);
