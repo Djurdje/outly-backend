@@ -170,7 +170,7 @@ async function narocilo(c, o) {
     await d.click("#dge_izbrisi");
     await cakajDa(d, () => document.querySelector(".dlg-okno.nevarno"));
     const okno = await d.evaluate(() => document.querySelector(".dlg-okno").innerText);
-    preveri(/Izbrišem dogodek za vedno/.test(okno) && /4 naročil|3 naročil|naročil \(testnih/.test(okno) && /Za potrditev vpiši IZBRISI/.test(okno), "dialog brisanja dogodka: naslov, stevila, vpis IZBRISI", okno);
+    preveri(/Izbrišem dogodek za vedno/.test(okno) && /naročil skupaj/.test(okno) && /Za potrditev vpiši IZBRISI/.test(okno), "dialog brisanja dogodka: naslov, stevila, vpis IZBRISI", okno);
     preveri(await d.evaluate(() => document.querySelector(".dlg-gumbi button:last-child").disabled), "gumb »Izbrisi za vedno« je onemogocen, dokler ni vpisa in razloga");
     await posnetek(d, "05-dialog-brisanje-dogodka-1280");
     await d.fill(".dlg-okno input", "izbrisi"); await d.fill(".dlg-okno textarea", "Testni dogodek, ni vec potreben");

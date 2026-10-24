@@ -5922,6 +5922,9 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     // Unikatni indeks po kljucu je dokoncna resnica: zmagovalec je commitan, vrni njegovo narocilo (plast 3 to ze preprecuje).
     if (idemV && err && err.code === "23505" && err.constraint === "orders_idempotency_key" && await idemPoKonfliktu(req, res, c, idemV)) return;
     // Sprožilec: "Ni dovolj vstopnic" pride kot check_violation.
+    // Tuji kljuc (24. 10. 2026, pravo brisanje I63): promo koda ali dogodek je bil izbrisan med branjem in vpisom narocila -> ista napaka kot ob neveljavni kodi / neobstojecem dogodku, ne 500.
+    if (err && err.code === "23503" && err.constraint === "orders_promo_code_fk") return res.status(400).json(NAPAKA_PROMO_KODA);
+    if (err && err.code === "23503" && err.constraint === "orders_event_id_fkey") return res.status(404).send("Event not found.");
     if (err && err.code === "23514") return res.status(409).send(/Ni dovolj/.test(err.message) ? "Not enough tickets left." : "Order rejected: " + (err.constraint || err.message));
     console.error(err);
     return res.status(500).send("Server error.");
@@ -6378,6 +6381,9 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, pro
         return res.status(409).send("You already have an unfinished payment for this event. Please wait up to 30 minutes for it to expire, then try again.");
       }
     }
+    // Tuji kljuc (24. 10. 2026, pravo brisanje I63): promo koda ali dogodek je bil izbrisan med branjem in vpisom narocila -> ista napaka kot ob neveljavni kodi / neobstojecem dogodku, ne 500.
+    if (err && err.code === "23503" && err.constraint === "orders_promo_code_fk") return res.status(400).json(NAPAKA_PROMO_KODA);
+    if (err && err.code === "23503" && err.constraint === "orders_event_id_fkey") return res.status(404).send("Event not found.");
     if (err && err.code === "23514") return res.status(409).send(/Ni dovolj/.test(err.message) ? "Not enough tickets left." : "Order rejected: " + (err.constraint || err.message));
     console.error(err);
     return res.status(500).send("Server error.");

@@ -13,7 +13,10 @@
 // Zakaj je to varno pri denarju: pravi promet in davcni racuni so racunovodski dokumenti, zato brisanje ZAVRNE (409), ce dogodek (ali kateri koli dogodek kluba) ima
 //   - PRAVO narocilo (ne testno: SQL_TESTNO_NAROCILO, I39; guest lista je interni vnos brez denarja in se brise), ki ni failed/cancelled (paid, partially_refunded, refunded, pending),
 //   - kakrsen koli davcni racun (`racuni`, za VSA narocila),
-//   - spor (`spori`), Stripovo vracilo (`vracila_iz_stripa`) ali vracilo z oznako Stripa (`vracila.stripe_vracilo_id` / `provizija_vracilo_id`) za PRAVO narocilo.
+//   - spor (`spori`), Stripovo vracilo (`vracila_iz_stripa`) ali KATERAKOLI vrstica `vracila` za PRAVO narocilo (tudi caka/v_teku/ni_uspelo/rocno: kupec utegne se cakati denar),
+//   - pravo failed/cancelled narocilo s Stripovo sejo, PaymentIntentom ali paid_at (`checkout_may_complete`): kupec ga lahko se placa (I37, preveriPreklicane, webhooki 3 dni), zakljuci()
+//     po brisanju narocila ne bi nasel (denar brez vstopnice in vracila). Izjema: seja dokazano mrtva (brez PI in paid_at, starejsa od 3 dni po checkout_expires_at/cancelled_at/created_at).
+//   Prijave (`reports`) se NE brisejo (DECISIONS 2026-10-10 (4)).
 //   Za dogodek je pravilna pot »Odpovej« (vracila gredo kupcem, narocila ostanejo). Testna narocila (lazni nacin test_<uuid>, Stripe sandbox cs_test_) in njihovi spori/vracila se brisejo.
 // Klub dodatno ZAVRNE: uradni profil (`is_official`) in klub z imenom »Outly«; neodpovedan dogodek DRUGEGA kluba, ki ima ta klub za prizorisce (`venue_club_id`);
 // narocilo, ki ostane (drug dogodek), a kaze na mizo/paket/guest listo kluba ali ima `club_id` tega kluba. Uporabnikov NE brise (lastnik ostane uporabnik).
@@ -76,7 +79,14 @@ function ustvari({ pool, celoId4, zapisiAdminDejanje, omeji, sqlTestno, poBrisan
          (SELECT COUNT(*)::int FROM racuni WHERE order_id = ANY($1::bigint[])) AS racuni,
          (SELECT COUNT(*)::int FROM spori WHERE order_id = ANY($2::bigint[])) AS spori,
          (SELECT COUNT(*)::int FROM vracila_iz_stripa WHERE order_id = ANY($2::bigint[])) AS vracila_iz_stripa,
-         (SELECT COUNT(*)::int FROM vracila WHERE order_id = ANY($2::bigint[]) AND (stripe_vracilo_id IS NOT NULL OR provizija_vracilo_id IS NOT NULL)) AS vracila_stripe,
+         -- VSAKA vrstica vracila za PRAVO narocilo (caka, v_teku, ni_uspelo, rocno ...): kupec utegne se cakati denar, zato ostane (B2)
+         (SELECT COUNT(*)::int FROM vracila WHERE order_id = ANY($2::bigint[])) AS vracila_pravih,
+         -- pravo failed/cancelled narocilo: ce ima Stripe sejo, PI ali paid_at, ga kupec se utegne placati (I37: preveriPreklicane/zakljuci, webhooki 3 dni); zakljuci() po brisanju
+         -- narocila ne bi nasel (denar pobran brez vstopnice in vracila). Izjema: seja dokazano mrtva = brez PI, brez paid_at in starejsa od 3 dni (B1).
+         (SELECT COUNT(*)::int FROM orders o WHERE o.id = ANY($2::bigint[]) AND o.guest_list_id IS NULL AND o.status IN ('failed','cancelled')
+            AND (o.stripe_checkout_session_id IS NOT NULL OR o.stripe_payment_intent_id IS NOT NULL OR o.paid_at IS NOT NULL)
+            AND NOT (o.stripe_payment_intent_id IS NULL AND o.paid_at IS NULL AND COALESCE(o.checkout_expires_at, o.cancelled_at, o.created_at) < NOW() - INTERVAL '3 days')) AS odprta_seja,
+         (SELECT COUNT(*)::int FROM orders o WHERE o.id = ANY($2::bigint[]) AND o.guest_list_id IS NULL AND o.status IN ('failed','cancelled')) AS pravi_neuspeli,
          (SELECT COUNT(*)::int FROM orders WHERE id <> ALL($1::bigint[]) AND (table_id = ANY($3::int[]) OR package_id = ANY($4::int[]) OR guest_list_id = ANY($5::bigint[]))) AS tuja_narocila,
          (SELECT COUNT(*)::int FROM orders WHERE club_id = ANY($6::int[]) AND event_id <> ALL($7::int[])) AS tuja_narocila_kluba,
          (SELECT COUNT(*)::int FROM events WHERE club_id <> ALL($6::int[]) AND venue_club_id = ANY($6::int[]) AND status <> 'cancelled') AS prizorisce,
@@ -86,15 +96,17 @@ function ustvari({ pool, celoId4, zapisiAdminDejanje, omeji, sqlTestno, poBrisan
     const pravi = b.pravi || {};
     const praviSkupaj = Object.values(pravi).reduce((s, n) => s + Number(n), 0);
     if (b.uradni > 0) blokade.push({ code: "official_club", count: b.uradni, message: "The official Outly profile (or a club named Outly) cannot be deleted." });
+    if (b.odprta_seja > 0) blokade.push({ code: "checkout_may_complete", count: b.odprta_seja,
+      message: "A real cancelled or failed order still has a Stripe checkout session (or payment) that may complete (webhooks retry for 3 days). Deleting it could take a payment without a ticket or refund. Wait 3 days after it expired, or cancel the event instead." });
     if (praviSkupaj > 0) blokade.push({ code: "has_real_orders", count: praviSkupaj, by_status: pravi,
       message: "There are real (non-test) orders that are not failed or cancelled. Real sales and invoices must stay; cancel the event instead." });
     if (b.racuni > 0) blokade.push({ code: "has_invoices", count: b.racuni, message: "Tax invoices exist for orders of this event. They are accounting documents and must stay; cancel the event instead." });
     if (b.spori > 0) blokade.push({ code: "has_disputes", count: b.spori, message: "Payment disputes exist for real orders. They must stay." });
-    if (b.vracila_iz_stripa > 0 || b.vracila_stripe > 0) blokade.push({ code: "has_stripe_refunds", count: b.vracila_iz_stripa + b.vracila_stripe, message: "Stripe refunds exist for real orders. They must stay." });
+    if (b.vracila_iz_stripa > 0 || b.vracila_pravih > 0) blokade.push({ code: "has_refunds", count: b.vracila_iz_stripa + b.vracila_pravih, message: "Refunds (including queued or failed ones, or Stripe refunds) exist for real orders; a buyer may still be owed money. They must stay." });
     if (b.prizorisce > 0) blokade.push({ code: "venue_in_use", count: b.prizorisce, message: "An active event of another club uses this club as its venue. Change or cancel that event first." });
     if (b.tuja_narocila > 0 || b.tuja_narocila_kluba > 0) blokade.push({ code: "foreign_references", count: b.tuja_narocila + b.tuja_narocila_kluba,
       message: "Orders of another event point to a table, package, guest list or club that would be deleted." });
-    return { de, dk, o_, op_, dt, gl, mize, paketi, blokade };
+    return { de, dk, o_, op_, dt, gl, mize, paketi, blokade, pravi_neuspeli: b.pravi_neuspeli - b.odprta_seja };
   }
 
   // Stevila vrstic, ki jih odnese kaskada (v dnevnik in v predogled). Klicati PRED brisanjem.
@@ -147,8 +159,7 @@ function ustvari({ pool, celoId4, zapisiAdminDejanje, omeji, sqlTestno, poBrisan
     await brisi("table_service", "DELETE FROM table_service WHERE order_id = ANY($1::bigint[]) OR event_id = ANY($2::int[]) OR club_id = ANY($3::int[])", [z.o_, z.de, z.dk]);
     await brisi("orders", "DELETE FROM orders WHERE id = ANY($1::bigint[])", [z.o_], z.o_.length);
     await brisi("guest_lists", "DELETE FROM guest_lists WHERE id = ANY($1::bigint[])", [z.gl], z.gl.length);
-    // Prijave (reports) nimajo tujega kljuca: kazale bi na izbrisan cilj.
-    await brisi("reports", "DELETE FROM reports WHERE (target_type = 'event' AND target_id = ANY($1::int[])) OR (target_type IN ('club', 'media') AND target_id = ANY($2::int[]))", [z.de, z.dk]);
+    // Prijave (reports) se NE brisejo (DECISIONS 2026-10-10 (4)): prijava o izbrisanem cilju ostane kot dokaz (target_label null; tujega kljuca ni).
     // Odprt predlog agenta za izbrisan dogodek/klub bi v panelu cakal na klik, ki bi padel: potece (kot migracija 066).
     await brisi("predlogi_dejanj_potekli",
       `UPDATE predlogi_dejanj SET stanje = 'potekel', odloceno_at = NOW(), napaka = 'Event or club was deleted by an admin'
@@ -180,10 +191,11 @@ function ustvari({ pool, celoId4, zapisiAdminDejanje, omeji, sqlTestno, poBrisan
       const e = await nalozi(c, id);
       if (!e) { await c.query("ROLLBACK"); return napaka(res, 404, "not_found", "Event not found."); }
       const z = await zberi(c, [id], []);
-      const k = await kaskada(c, z);
+      const lite = req.query.lite === "1";   // samo blokade (panel ob odprtju dogodka); polni predogled s kaskado sele ob kliku »Izbrisi« (P2)
+      const k = lite ? null : await kaskada(c, z);
       await c.query("ROLLBACK");
       return res.json({ can_delete: z.blokade.length === 0, event: { id: e.id, title: e.title, status: e.status, club_name: e.club_name }, blockers: z.blokade,
-        will_delete: { orders: z.o_.length, tickets: z.dt.length, guest_lists: z.gl.length, ...k } });
+        ...(lite ? { lite: true } : { will_delete: { orders: z.o_.length, real_failed_orders: z.pravi_neuspeli, tickets: z.dt.length, guest_lists: z.gl.length, ...k } }) });
     } catch (e) { await c.query("ROLLBACK").catch(() => {}); return napakaBaze(res, e); }
     finally { c.release(); }
   });
@@ -203,11 +215,11 @@ function ustvari({ pool, celoId4, zapisiAdminDejanje, omeji, sqlTestno, poBrisan
       if (z.blokade.length) { await c.query("ROLLBACK"); return odgovorBlokad(res, z); }
       const k = await kaskada(c, z);
       const n = await izbrisiOdvisno(c, z);
-      await zapisiAdminDejanje(c, req, "event.delete_hard", "event", id, prejDogodka(e), { deleted: zaDnevnik({ ...n, ...k }) }, rz.razlog);
+      await zapisiAdminDejanje(c, req, "event.delete_hard", "event", id, prejDogodka(e), { deleted: zaDnevnik({ ...n, ...k }), real_failed_orders: z.pravi_neuspeli }, rz.razlog);
       await c.query("COMMIT");
       poBrisanju({ eventIds: [id] });
       console.log(`Admin ${req.user.userId} je TRAJNO izbrisal dogodek ${id} (${n.orders} testnih/neuspelih narocil, ${n.tickets} vstopnic)`);
-      return res.json({ deleted: true, event_id: id, counts: zaDnevnik({ ...n, ...k }) });
+      return res.json({ deleted: true, event_id: id, real_failed_orders: z.pravi_neuspeli, counts: zaDnevnik({ ...n, ...k }) });
     } catch (e) { await c.query("ROLLBACK").catch(() => {}); return napakaBaze(res, e); }
     finally { c.release(); }
   });
@@ -231,11 +243,12 @@ function ustvari({ pool, celoId4, zapisiAdminDejanje, omeji, sqlTestno, poBrisan
       if (!k) { await c.query("ROLLBACK"); return napaka(res, 404, "not_found", "Club not found."); }
       const dog = await dogodkiKluba(c, id);
       const z = await zberi(c, dog.map((x) => x.id), [id]);
-      const kas = await kaskada(c, z);
+      const lite = req.query.lite === "1";
+      const kas = lite ? null : await kaskada(c, z);
       await c.query("ROLLBACK");
       return res.json({ can_delete: z.blokade.length === 0, club: { id: k.id, name: k.name, city: k.city, is_official: k.is_official }, blockers: z.blokade,
         events: dog.slice(0, 50).map((x) => ({ id: x.id, title: x.title, status: x.status, start_at: x.start_at })), events_total: dog.length,
-        will_delete: { events: dog.length, orders: z.o_.length, tickets: z.dt.length, guest_lists: z.gl.length, ...kas } });
+        ...(lite ? { lite: true } : { will_delete: { events: dog.length, orders: z.o_.length, real_failed_orders: z.pravi_neuspeli, tickets: z.dt.length, guest_lists: z.gl.length, ...kas } }) });
     } catch (e) { await c.query("ROLLBACK").catch(() => {}); return napakaBaze(res, e); }
     finally { c.release(); }
   });
@@ -264,7 +277,7 @@ function ustvari({ pool, celoId4, zapisiAdminDejanje, omeji, sqlTestno, poBrisan
       if (cr.rowCount !== 1) throw Object.assign(new Error("brisanje: klub"), { code: "BRISANJE_NESKLADJE" });
       await zapisiAdminDejanje(c, req, "club.delete", "club", id,
         { name: k.name, city: k.city, hidden: k.hidden, is_demo: k.is_demo, is_organizer: k.is_organizer, events: dog.slice(0, 100).map((x) => ({ id: x.id, title: x.title, status: x.status })), events_total: dog.length },
-        { deleted: zaDnevnik({ events: n.events, ...n, ...kas, clubs: 1 }) }, rz.razlog);
+        { deleted: zaDnevnik({ events: n.events, ...n, ...kas, clubs: 1 }), real_failed_orders: z.pravi_neuspeli }, rz.razlog);
       await c.query("COMMIT");
       poBrisanju({ eventIds: z.de, clubId: id });
       console.log(`Admin ${req.user.userId} je TRAJNO izbrisal klub ${id} (${dog.length} dogodkov, ${n.orders} testnih/neuspelih narocil)`);

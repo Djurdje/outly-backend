@@ -8,7 +8,7 @@
   const cele = (n) => (Number.isSafeInteger(Number(n)) ? Number(n) : 0);
   const VPIS = "IZBRISI";
   const IMENA = {
-    events: "dogodkov", orders: "naročil (testnih ali neuspelih)", tickets: "vstopnic", guest_lists: "guest list", guest_list_members: "povabljenih na guest listah",
+    events: "dogodkov", orders: "naročil skupaj (testnih, neuspelih ali preklicanih)", real_failed_orders: "od tega pravih preklicanih/neuspelih brez plačila (seja potekla)", tickets: "vstopnic", guest_lists: "guest list", guest_list_members: "povabljenih na guest listah",
     club_tables: "miz", table_holds: "rezervacij miz", table_service: "strežb", vracila: "vračil (testnih)", spori: "sporov (testnih)", vracila_iz_stripa: "Stripovih vračil (testnih)",
     gost_zetoni: "žetonov gostov", ticket_transfers: "prenosov vstopnic", event_favorites: "priljubljenih", event_interest: "zanimanj", view_counts: "dnevnih ogledov",
     club_event_notifications: "obvestil", promo_code_events: "povezav s promo kodami", odpovedi_dogodkov: "zapisov o odpovedi", bottle_packages: "paketov steklenic",
@@ -22,7 +22,8 @@
       case "has_real_orders": return `Ima ${n} pravih naročil (plačanih, v teku ali vrnjenih). Pravi promet mora ostati, zato ga ni mogoče izbrisati.`;
       case "has_invoices": return `Obstaja ${n} davčnih računov za naročila. Računi so računovodski dokumenti in morajo ostati.`;
       case "has_disputes": return `Obstaja ${n} sporov (chargeback) za prava naročila. Morajo ostati.`;
-      case "has_stripe_refunds": return `Obstaja ${n} Stripovih vračil za prava naročila. Morajo ostati.`;
+      case "has_refunds": return `Obstaja ${n} vračil (tudi čakajočih ali neuspelih in Stripovih) za prava naročila: kupec utegne še čakati denar. Morajo ostati.`;
+      case "checkout_may_complete": return `${n} pravih preklicanih ali neuspelih naročil ima Stripovo plačilno sejo, ki jo kupec utegne še plačati (Stripe ponavlja webhooke 3 dni). Počakaj 3 dni po izteku seje.`;
       case "official_club": return "To je uradni profil Outly (ali klub z imenom Outly). Ni ga mogoče izbrisati.";
       case "venue_in_use": return `${n} neodpovedanih dogodkov drugih klubov ima ta klub za prizorišče. Najprej jih odpovej ali jim spremeni prizorišče.`;
       case "foreign_references": return `${n} naročil drugih dogodkov kaže na mizo, paket, guest listo ali klub, ki bi bil izbrisan.`;
@@ -108,7 +109,7 @@
     const g = h("button", { type: "button", id: "dge_izbrisi", class: "nevarno mali" }, "Izbriši dogodek");
     g.onclick = () => dogodek(e, { odpovej, po });
     mesto.append(g);
-    klic("GET", `/admin/api/events/${id}/delete-check`).then((r) => {
+    klic("GET", `/admin/api/events/${id}/delete-check?lite=1`).then((r) => {
       if (r && r.can_delete === false && mesto.isConnected !== false) {
         mesto.replaceChildren(h("span", { class: "br-opomba", id: "dge_izbris_ni" }, "Izbris ni mogoč: " + prazniBlokad(r).map(razlogBlokade).join(" ") + (e.status === "cancelled" ? "" : " Uporabi »Odpovej dogodek«.")));
       }
