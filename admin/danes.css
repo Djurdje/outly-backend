@@ -1,7 +1,6 @@
 /* Admin panel: nadzorna plosca »Danes« (admin/danes.js), zavihek »Opozorila« (admin/opozorila.js), #326, in zavihek »Agent« (admin/agent.js), #330, 23. 10. 2026.
-   Isti zetoni kot index.html (--bg, --panel, --ink ...); svetla tema sledi sistemski nastavitvi (kot dogodki.css). Brez ogrodja in brez gradnje. */
+   Isti zetoni kot osnova.css (--bg, --panel, --ink ...); samo temna tema. Brez ogrodja in brez gradnje. */
 :root { --rumena:#E3C547; --rumena-soft:#2A2610 }
-@media (prefers-color-scheme: light) { :root { --rumena:#8A6D00; --rumena-soft:#F7F0CF } }
 
 /* --- Danes --- */
 .dn-kartice { grid-template-columns:repeat(auto-fill,minmax(180px,1fr)) }
@@ -12,7 +11,7 @@
 .dn-podnaslov { margin:18px 0 8px; font-size:12px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); display:flex; gap:8px; align-items:center }
 .dn-cas { font-size:12px; color:var(--faint); font-weight:400; text-transform:none; letter-spacing:0 }
 .dn-nocoj-seznam { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:10px }
-.dn-nocoj { display:flex; flex-direction:column; gap:6px; padding:12px 14px; background:var(--panel2); border:1px solid var(--line); border-radius:8px; color:var(--ink); text-decoration:none; min-width:0 }
+.dn-nocoj { display:flex; flex-direction:column; gap:8px; padding:16px; background:var(--panel2); border:1px solid var(--line); border-radius:14px; color:var(--ink); text-decoration:none; min-width:0 }
 .dn-nocoj:hover, .dn-nocoj:focus-visible { border-color:var(--modra); outline:none }
 .dn-nocoj-glava { display:flex; gap:10px; align-items:flex-start; justify-content:space-between }
 .dn-nocoj-glava b { overflow-wrap:anywhere; font-size:15px }
@@ -22,7 +21,7 @@
 .dn-nocoj-stevila b { color:var(--ink); font-size:15px }
 
 /* --- Opozorila --- */
-.op-seznam { display:flex; flex-direction:column; border:1px solid var(--line); border-radius:8px; overflow:hidden }
+.op-seznam { display:flex; flex-direction:column; border:1px solid var(--line); border-radius:14px; overflow:hidden }
 .op-vrstica { display:grid; grid-template-columns:12px 1fr auto; gap:10px; align-items:start; padding:11px 14px; border-bottom:1px solid var(--line); color:var(--ink); text-decoration:none; background:var(--panel) }
 .op-vrstica:last-child { border-bottom:0 }
 a.op-vrstica:hover, a.op-vrstica:focus-visible { background:var(--panel2); outline:none }
@@ -34,7 +33,7 @@ a.op-vrstica:hover, a.op-vrstica:focus-visible { background:var(--panel2); outli
 .op-pika.rumena { background:var(--rumena) }
 .telo-opomba { font-size:12.5px; color:var(--faint); margin:0 0 12px }
 .rc-seznam { display:flex; flex-direction:column; gap:10px }
-.rc-kartica { padding:12px 14px; background:var(--panel2); border:1px solid var(--line); border-radius:8px; min-width:0 }
+.rc-kartica { padding:16px; background:var(--panel2); border:1px solid var(--line); border-radius:14px; min-width:0 }
 .rc-glava { display:flex; flex-wrap:wrap; gap:8px 12px; align-items:center; margin-bottom:8px }
 .rc-polja { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:8px 14px; font-size:13px }
 .rc-polja span { min-width:0; overflow-wrap:anywhere }
@@ -42,7 +41,7 @@ a.op-vrstica:hover, a.op-vrstica:focus-visible { background:var(--panel2); outli
 .rc-napaka { margin-top:8px; padding:8px 10px; border-radius:6px; background:var(--napaka-soft); color:var(--napaka); font-size:12.5px; overflow-wrap:anywhere; white-space:pre-wrap }
 
 /* --- Agent (zetoni) --- */
-.ag-nov { margin:0 0 14px; padding:12px 14px; border:1px solid var(--ok); border-left-width:3px; border-radius:8px; background:var(--panel2); display:flex; flex-direction:column; gap:10px }
+.ag-nov { margin:0 0 14px; padding:12px 14px; border:1px solid var(--ok); border-left-width:3px; border-radius:12px; background:var(--panel2); display:flex; flex-direction:column; gap:10px }
 .ag-nov p { margin:0; font-size:12.5px; color:var(--muted) }
 .ag-vrstica { display:flex; gap:8px; align-items:stretch; flex-wrap:wrap }
 .ag-zeton { flex:1 1 260px; min-width:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px }
