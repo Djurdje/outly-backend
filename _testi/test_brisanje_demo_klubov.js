@@ -395,8 +395,9 @@ async function poskusi(c, pripravi, preveri) {
 
     // ------------------------------------------------------------ pravi zagon prek migrate.js
     console.log("\n# 3. Pravi zagon: db/migrate.js uporabi 066");
-    const mig = migrate(urlBaze(IME_BAZE));
-    assert(mig.koda === 0 && /066_brisanje_demo_klubov\.sql \.\.\. v redu/.test(mig.izpis), "migrate.js -> 0, 066 v redu", mig.izpis.slice(-600));
+    // --do 066: poznejse migracije (npr. 067 doda stolpce v events/table_holds) bi spremenile md5 vrstic, ki ga primerjamo spodaj.
+    const mig = migrate(urlBaze(IME_BAZE), ["--do", "066"]);
+    assert(mig.koda === 0 && /066_brisanje_demo_klubov\.sql \.\.\. v redu/.test(mig.izpis), "migrate.js --do 066 -> 0, 066 v redu", mig.izpis.slice(-600));
     for (const vzorec of [/066: demo klubov 5, dogodkov 15, narocil 12, vstopnic \d+/, /066: orders 12 \(od tega guest lista 1\)/, /066: tickets \d+/, /066: clubs 5/, /066: events 15/,
       /066: predlogi_dejanj poteceni 2/, /066: spori \(testni\) 1/, /066: vracila_iz_stripa \(testna\) 1/, /066: reports 2/, /uporabniki brez kluba po brisanju \(niso izbrisani\): \{/, /066: ostal klub id=\d+ ime=Outly/]) {
       assert(vzorec.test(mig.izpis), `dnevnik deploya vsebuje ${vzorec}`, mig.izpis.slice(-1500));
@@ -443,8 +444,12 @@ async function poskusi(c, pripravi, preveri) {
     assert(!znova.napaka && znova.obvestila.some((m) => /ni demo klubov, nic za brisanje/.test(m)), "066 brez demo klubov: obvestilo in nobene napake", znova.napaka && znova.napaka.message);
     const po2 = await posnetek(c, par);
     assert(Object.keys(pred).every((t) => po2[t].h === po[t].h && po2[t].n === po[t].n), "po ponovnem zagonu je vse enako");
-    const mig2 = migrate(urlBaze(IME_BAZE));
-    assert(mig2.koda === 0 && /Baza je usklajena/.test(mig2.izpis), "migrate.js drugic: baza je usklajena", mig2.izpis.slice(-200));
+    const mig2 = migrate(urlBaze(IME_BAZE), ["--do", "066"]);
+    assert(mig2.koda === 0 && /Baza je usklajena|ustavljam se pred 06[7-9]/.test(mig2.izpis) && !/066_brisanje_demo_klubov\.sql \.\.\. v redu/.test(mig2.izpis),
+      "migrate.js drugic: 066 se ne ponovi", mig2.izpis.slice(-200));
+    // Ostale (poznejse) migracije, da backend spodaj tece na shemi, ki jo pricakuje koda.
+    const mig3 = migrate(urlBaze(IME_BAZE));
+    assert(mig3.koda === 0 && !/066_brisanje_demo_klubov\.sql \.\.\. v redu/.test(mig3.izpis), "migrate.js do konca -> 0, 066 se ne ponovi", mig3.izpis.slice(-300));
 
     // ------------------------------------------------------------ API po brisanju
     console.log("\n# 6. Javni API in GET /me po brisanju");
