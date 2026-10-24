@@ -173,7 +173,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
   assert(trsS.map(t => gumbov(t.children[t.children.length - 1])).join() === "1,1,0,0,0", "spori: gumb samo pri povrnitvi ni_uspelo/rocno", trsS.map(t => gumbov(t)));
 
   // --- 5. moduli panela (faza 1, 21. 10. 2026: admin/dialog.js, admin/dogodki.js) in brez window.confirm ---
-  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js", "agent.js", "predlogi.js", "nujno.js", "promo.js", "navigacija.js", "mnozicno.js"]) {
+  for (const ime of ["dialog.js", "dogodki.js", "danes.js", "opozorila.js", "nov-dogodek.js", "agent.js", "predlogi.js", "nujno.js", "promo.js", "brisanje.js", "navigacija.js", "mnozicno.js"]) {
     const kod = fs.readFileSync(path.join(__dirname, "..", "admin", ime), "utf8");
     const k5 = [];
     for (const m of kod.matchAll(NEVARNO)) {
@@ -186,7 +186,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     assert(!/\bon[a-z]+\s*=\s*["'`]/i.test(kod.replace(/\bon[a-z]+\s*=\s*\(/g, "")), `admin/${ime}: brez onclick="..." / onchange="..." nizov`);
   }
   assert(!/\bconfirm\s*\(/.test(skripta), "admin/index.html: brez window.confirm (vse potrditve prek potrdi() iz dialog.js)");
-  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script src="agent\.js"><\/script>\s*<script src="predlogi\.js"><\/script>\s*<script src="nujno\.js"><\/script>\s*<script src="promo\.js"><\/script>\s*<script src="navigacija\.js"><\/script>\s*<script src="mnozicno\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
+  assert(/<script src="dialog\.js"><\/script>\s*<script src="dogodki\.js"><\/script>\s*<script src="danes\.js"><\/script>\s*<script src="opozorila\.js"><\/script>\s*<script src="nov-dogodek\.js"><\/script>\s*<script src="agent\.js"><\/script>\s*<script src="predlogi\.js"><\/script>\s*<script src="nujno\.js"><\/script>\s*<script src="promo\.js"><\/script>\s*<script src="brisanje\.js"><\/script>\s*<script src="navigacija\.js"><\/script>\s*<script src="mnozicno\.js"><\/script>\s*<script>/.test(html), "moduli se naložijo pred glavno skripto");
   assert(/<link rel="stylesheet" href="danes\.css">/.test(html), "danes.css je vezan v index.html");
   assert(/<link rel="stylesheet" href="mnozicno\.css">/.test(html), "mnozicno.css je vezan v index.html");
   assert(!/<link[^>]+(?:https?:)?\/\//.test(html) && !/<script[^>]+src="(?:https?:)?\/\//.test(html), "panel ne nalaga tujih skript ali stilov");
@@ -739,7 +739,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
       assert(post10 && post10.pot === "/admin/api/predlogi/1/nujno-pregledano" && post10.telo.reason === "res sem potrdil" && klici10.some((k) => k.metoda === "GET"), "nujno.js: Pregledal sem -> POST /:id/nujno-pregledano, nato osvežitev", klici10);
       assert($10("nujno_pas").skrit === true, "nujno.js: ko ni več nepregledanih, pas izgine");
       // index.html: pas je na vrhu panela (pred meniji), naloži se ob Pregledu
-      assert(/<div id="panel" class="skrito">\s*<!--[^>]*-->\s*<div id="nujno_pas" class="skrito"><\/div>\s*<nav>/.test(html), "index.html: rdeč pas na vrhu panela, pred menijem");
+      assert(/<div id="panel" class="skrito">\s*<!--[^>]*-->\s*<div id="nujno_pas" class="skrito"><\/div>\s*<!--[^>]*-->\s*<div id="nacin_pas" class="skrito" role="alert"><\/div>\s*<nav>/.test(html), "index.html: rdeč pas na vrhu panela, pred menijem");
       assert(/window\.naloziNujnoPas\(\)/.test(skripta), "index.html: Pregled naloži rdeč pas");
     }
   }
@@ -1050,7 +1050,7 @@ const DOVOLJENI = new Set(["div", "table", "thead", "tbody", "tr", "th", "td", "
     await gumb10("Statistika").onclick();
     p10 = pregled(koren10); bes10 = p10.besedila.join("\n");
     assert(klici10.some((k) => k[1] === "/admin/api/promo-codes/1/stats") && p10.elementi.every((t) => DOV10.has(t)) && !p10.elementi.some((t) => t.startsWith("atribut:")), "promo.js: statistika: GET .../stats, brez elementov iz podatkov");
-    assert(bes10.includes(ZLO10[2]) && bes10.includes(ZLO10[3]) && bes10.includes("Skupaj") && bes10.includes("80,00 €") && bes10.includes("testni nakupi") && bes10.includes("1 kart v 1 naročilih"), "promo.js: tabela po dogodkih (besedilo iz podatkov), skupaj, bruto v evrih, testni loceno", bes10);
+    assert(bes10.includes(ZLO10[2]) && bes10.includes(ZLO10[3]) && bes10.includes("Skupaj") && bes10.includes("80,00 €") && !/testn/i.test(bes10), "promo.js: tabela po dogodkih (besedilo iz podatkov), skupaj, bruto v evrih, brez testnih prikazov (24. 10. 2026)", bes10);
     await gumb10("Statistika").onclick();
     assert(!pregled(koren10).besedila.join("\n").includes("Skupaj\n"), "promo.js: drugi klik zapre statistiko");
 

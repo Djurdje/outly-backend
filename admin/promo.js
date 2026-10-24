@@ -163,7 +163,6 @@
           h("div", { class: "pk-gumbi" }, h("button", { type: "button", onclick: () => shrani(k) }, "Shrani"), h("button", { type: "button", class: "tih", onclick: () => { odprta = null; narisi(); } }, "Zapri"))));
     }
     const s = odprta.stats, ev = Array.isArray(s.events) ? s.events : [], t = s.total || {};
-    const testno = cele(t.test_orders) > 0;
     const vrstica = (x) => h("tr", {},
       h("td", {}, besedilo(x.title)), h("td", {}, datum(x.start_at)), h("td", {}, besedilo(x.club_name)),
       h("td", { class: "pk-st" }, String(cele(x.tickets_sold))), h("td", { class: "pk-st" }, String(cele(x.orders))), h("td", { class: "pk-st" }, evriCelo(cele(x.gross_cents))));
@@ -173,8 +172,7 @@
           h("tr", { class: "pk-skupaj" }, h("td", {}, "Skupaj"), h("td", {}), h("td", {}),
             h("td", { class: "pk-st" }, String(cele(t.tickets_sold))), h("td", { class: "pk-st" }, String(cele(t.orders))), h("td", { class: "pk-st" }, evriCelo(cele(t.gross_cents))))))
         : h("div", { class: "prazno" }, "Ni dogodkov ali prodaje s to kodo."),
-      h("p", { class: "telo-opomba" }, "Šteje samo plačana naročila navadnih vstopnic; v celoti vrnjena naročila v kartah ne štejejo (kot v Financah). Brez popusta: koda ne spremeni cene."),
-      testno ? h("p", { class: "telo-opomba" }, `Poleg tega testni nakupi (lazni način, Stripe sandbox): ${cele(t.test_tickets_sold)} kart v ${cele(t.test_orders)} naročilih (niso v zgornjih številkah).`) : null);
+      h("p", { class: "telo-opomba" }, "Šteje samo plačana naročila navadnih vstopnic; v celoti vrnjena naročila v kartah ne štejejo (kot v Financah). Brez popusta: koda ne spremeni cene."));
   }
 
   function vrsticaKode(k) {
@@ -186,7 +184,8 @@
         h("span", { class: "desno" },
           h("button", { type: "button", class: "tih mali", onclick: () => pokaziStatistiko(k) }, "Statistika"),
           h("button", { type: "button", class: "tih mali", onclick: () => odpriUrejanje(k) }, "Uredi"),
-          h("button", { type: "button", class: (k.active ? "nevarno" : "dobro") + " mali", onclick: () => preklopi(k) }, k.active ? "Izklopi" : "Vklopi"))),
+          h("button", { type: "button", class: (k.active ? "nevarno" : "dobro") + " mali", onclick: () => preklopi(k) }, k.active ? "Izklopi" : "Vklopi"),
+          window.brisanje ? h("button", { type: "button", class: "nevarno mali", onclick: () => window.brisanje.promo(k, { po: osvezi }) }, "Izbriši") : null)),
       h("div", { class: "rc-polja" },
         h("span", {}, h("small", {}, "velja za"), obseg(k)),
         h("span", {}, h("small", {}, "prodanih kart"), String(cele(k.tickets_sold))),

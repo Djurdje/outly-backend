@@ -184,7 +184,7 @@ let sa = null;
   assert(/pomoc: naloziPomoc/.test(html), "zavihek je v tabeli nalozi");
   const fn = html.slice(html.indexOf("async function naloziPomoc"), html.indexOf("$(\"po_osvezi\").onclick"));
   assert(fn.length > 100 && fn.includes("/admin/api/help-feedback") && !/innerHTML/.test(fn), "naloziPomoc ne rabi innerHTML (podatki prek h() = textContent)");
-  for (const g of ["Članek", "👍", "👎", "Delež koristnih", "Zadnji glas"]) assert(fn.includes(g), `stolpec »${g}«`);
+  for (const g of ["Članek", "Koristno", "Ni koristno", "Delež koristnih", "Zadnji glas"]) assert(fn.includes(g), `stolpec »${g}«`);
 
   // ====================================================================================================
   console.log("\n# 7. Omejevalnik POST /help/feedback");

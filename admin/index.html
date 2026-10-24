@@ -5,110 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>Outly — admin</title>
-<style>
-  :root{
-    --bg:#0A0A0B; --panel:#131316; --panel2:#1A1A1F; --line:#26262E;
-    --ink:#F2F3F7; --muted:#9096A6; --faint:#5F6575;
-    --modra:#4C76FF; --modra-soft:#16203F;
-    --ok:#3DD68C; --ok-soft:#0F2A1E;
-    --napaka:#FF5C7A; --napaka-soft:#2E1219;
-    --opoz:#F5A742; --opoz-soft:#2C2113;
-  }
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);font:14.5px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif}
-  code,.mono,input,textarea,select,pre{font-family:"SF Mono",Menlo,Consolas,monospace}
-  a{color:var(--modra)}
-  .wrap{max-width:1320px;margin:0 auto;padding:20px 20px 60px}
-  header{display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between;
-    padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:16px}
-  .brand{display:flex;align-items:baseline;gap:11px}
-  .brand h1{margin:0;font-size:21px;font-weight:700;letter-spacing:-.02em}
-  .brand span{font-size:12px;color:var(--faint);text-transform:uppercase;letter-spacing:.1em}
-  .jaz{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted)}
-  .znacka{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
-    padding:2px 7px;border-radius:4px;background:var(--modra-soft);color:var(--modra)}
-  .znacka.ok{background:var(--ok-soft);color:var(--ok)}
-  .znacka.opoz{background:var(--opoz-soft);color:var(--opoz)}
-  .znacka.slabo{background:var(--napaka-soft);color:var(--napaka)}
-  .znacka.siva{background:var(--panel2);color:var(--muted)}
-
-  label{display:block;font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);margin-bottom:4px}
-  input,select,textarea{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
-    border-radius:6px;padding:8px 10px;font-size:13px}
-  input:focus,select:focus,textarea:focus{outline:2px solid var(--modra);outline-offset:-1px}
-  textarea{resize:vertical;min-height:56px}
-  button{background:var(--modra);color:#fff;border:0;border-radius:6px;padding:8px 14px;
-    font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;font-family:inherit}
-  button:hover{filter:brightness(1.12)}
-  button:disabled{opacity:.45;cursor:default}
-  button.tih{background:var(--panel2);color:var(--ink);border:1px solid var(--line)}
-  button.nevarno{background:var(--napaka-soft);color:var(--napaka);border:1px solid #4A2029}
-  button.dobro{background:var(--ok-soft);color:var(--ok);border:1px solid #1E4A34}
-  button.mali{padding:5px 9px;font-size:12px}
-
-  .prijava{max-width:380px;margin:60px auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:24px}
-  .prijava h2{margin:0 0 16px;font-size:18px}
-  .prijava .polje{margin-bottom:12px}
-  .prijava .zapomni{margin-bottom:4px}
-  .prijava .zapomni label{display:flex;align-items:center;gap:8px;margin:0;text-transform:none;letter-spacing:0;
-    font-size:13px;font-weight:500;color:var(--ink);cursor:pointer}
-  .prijava .zapomni input{width:auto;margin:0;accent-color:var(--modra)}
-  .prijava .zapomni-pomoc{font-size:12px;color:var(--faint);margin:2px 0 0 24px}
-  .napaka-vrstica{color:var(--napaka);font-size:13px;min-height:18px;margin:8px 0}
-
-  nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
-  nav button{background:var(--panel);color:var(--muted);border:1px solid var(--line)}
-  nav button.aktiven{background:var(--modra-soft);color:var(--modra);border-color:#2B3D7A}
-  nav button .n{margin-left:6px;background:var(--napaka);color:#fff;border-radius:9px;padding:0 6px;font-size:11px}
-
-  .skupina{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-bottom:16px}
-  .skupina>h2{margin:0;font-size:12px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;
-    padding:11px 15px;border-bottom:1px solid var(--line);color:var(--muted);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .skupina>h2 .desno{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  .telo{padding:14px 15px}
-  .polja{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:12px}
-  .polja .siroko{grid-column:1/-1}
-  .vrsta{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th{font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);
-    text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
-  td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
-  tr:last-child td{border-bottom:0}
-  tr:hover td{background:rgba(255,255,255,.015)}
-  td.mono{font-size:12px;color:var(--muted)}
-  td .drobno{display:block;font-size:11.5px;color:var(--faint)}
-  .tabela{overflow-x:auto}
-  .prazno{padding:36px 15px;text-align:center;color:var(--faint);font-size:13px}
-  .stevilke{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
-  .stevilka{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
-  .stevilka b{display:block;font-size:26px;font-weight:700;letter-spacing:-.02em}
-  .stevilka span{font-size:11.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
-  .stevilka small{display:block;font-size:11.5px;color:var(--faint);margin-top:2px}
-  .stevilka.pozor{background:var(--napaka-soft);border-color:#4A2029}
-  .stevilka.pozor b{color:var(--napaka)}
-  .stevilka.opoz{background:var(--opoz-soft);border-color:#4A3A1C}
-  .stevilka.opoz b{color:var(--opoz)}
-  .graf{display:flex;align-items:flex-end;gap:3px;height:140px;padding-top:18px}
-  .graf .stolpec{flex:1;min-width:6px;height:100%;background:var(--panel2);border-radius:3px 3px 0 0;position:relative;display:flex;flex-direction:column;justify-content:flex-end}
-  .graf .stolpec i{display:block;background:#4C76FF;border-radius:3px 3px 0 0;width:100%}
-  .graf .stolpec:hover::after{content:attr(data-o);position:absolute;bottom:100%;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:11.5px;white-space:nowrap;z-index:2}
-  .graf-osi{display:flex;justify-content:space-between;font-size:11px;color:var(--faint);margin-top:6px}
-  .opozorilo{background:var(--opoz-soft);border:1px solid #4A3A1C;border-left:3px solid var(--opoz);
-    border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#F0DCC0}
-
-  #obvestila{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;max-width:420px;z-index:9}
-  .obv{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--modra);border-radius:6px;
-    padding:10px 14px;font-size:13px;box-shadow:0 8px 30px rgba(0,0,0,.5)}
-  .obv.ok{border-left-color:var(--ok)} .obv.slabo{border-left-color:var(--napaka)}
-  .skrito{display:none!important}
-  img.mini{width:34px;height:34px;border-radius:6px;object-fit:cover;background:var(--panel2);vertical-align:middle}
-</style>
+<link rel="stylesheet" href="osnova.css">
 <link rel="stylesheet" href="dogodki.css">
 <link rel="stylesheet" href="danes.css">
 <link rel="stylesheet" href="telefon.css">
 <link rel="stylesheet" href="mnozicno.css">
 <link rel="stylesheet" href="promo.css">
+<link rel="stylesheet" href="brisanje.css">
 </head>
 <body>
 <div class="wrap">
@@ -133,6 +36,8 @@
   <div id="panel" class="skrito">
     <!-- RDEČ PAS (admin/nujno.js, #330 3. del): nujna dejanja agenta, dokler jih admin ne označi z »Pregledal sem« -->
     <div id="nujno_pas" class="skrito"></div>
+    <!-- VAROVALO: placila niso v zivem nacinu (payments_mode iz GET /admin/api/summary); ni statistika testnega prometa -->
+    <div id="nacin_pas" class="skrito" role="alert"></div>
     <nav>
       <button data-z="pregled" class="aktiven">Pregled</button>
       <button data-z="opozorila">Opozorila <span class="n skrito" id="nOpozorila"></span></button>
@@ -201,12 +106,6 @@
         <div class="telo">
           <div class="stevilke" id="fStevilke"></div>
           <div id="fOpomba" style="font-size:12.5px;color:var(--faint);margin-top:10px"></div>
-        </div>
-      </div>
-      <div class="skupina"><h2>Testni promet (sandbox / testni način, ni pravi denar)</h2>
-        <div class="telo">
-          <div class="stevilke" id="fTestStevilke"></div>
-          <div id="fTestOpomba" style="font-size:12.5px;color:var(--faint);margin-top:10px"></div>
         </div>
       </div>
       <div class="skupina"><h2>Po dnevih</h2><div class="telo"><div id="fGraf" class="graf"></div><div class="graf-osi" id="fOsi"></div></div></div>
@@ -373,6 +272,7 @@
 <script src="predlogi.js"></script>
 <script src="nujno.js"></script>
 <script src="promo.js"></script>
+<script src="brisanje.js"></script>
 <script src="navigacija.js"></script>
 <script src="mnozicno.js"></script>
 <script>
@@ -484,7 +384,8 @@ async function klic(metoda, pot, telo, ponovno = true, signal) {   // signal: ne
   let podatki = bes; try { podatki = JSON.parse(bes); } catch (_) {}
   if (!r.ok) {
     const sporocilo = typeof podatki === "string" ? podatki : (podatki.message || podatki.error || bes);
-    throw Object.assign(new Error(`${r.status}: ${sporocilo}`), { status: r.status });   // status: panel ob 503 podaljsa premor (danes.js)
+    // status: panel ob 503 podaljsa premor (danes.js); koda/telo: strezniski `error` in celoten odgovor (brisanje.js bere blokade 409)
+    throw Object.assign(new Error(`${r.status}: ${sporocilo}`), { status: r.status, koda: podatki && typeof podatki === "object" ? podatki.error : undefined, telo: podatki });
   }
   return podatki;
 }
@@ -519,7 +420,7 @@ async function prijava() {
 function odjava(sporocilo) {
   const t = seja.token;
   if (t) supabaseAuth("/logout", {}, t).catch(() => {});
-  seja.pocisti(); $("panel").classList.add("skrito"); $("prijava").classList.remove("skrito"); $("jaz").innerHTML = "";
+  seja.pocisti(); $("panel").classList.add("skrito"); $("prijava").classList.remove("skrito"); $("jaz").innerHTML = ""; $("nacin_pas").classList.add("skrito");
   $("pGeslo").value = ""; $("pZapomni").checked = false;   // skupni racunalnik: geslo in kljukica ne ostaneta za naslednjega
   if (sporocilo) $("pNapaka").textContent = sporocilo;
 }
@@ -556,6 +457,7 @@ async function naloziPregled() {
   if (window.danesOsvezi) window.danesOsvezi(false);   // »Danes« (danes.js): lasten klic in lasten casovnik, ne ovira stevcev spodaj
   await varno(async () => {
     const s = await klic("GET", "/admin/api/summary");
+    if (typeof s.payments_mode === "string") pokaziNacin(s.payments_mode);   // DODANO polje (24. 10. 2026); star backend ga nima
     const kos = (n, ime) => `<div class="stevilka"><b>${ubezi(n)}</b><span>${ubezi(ime)}</span></div>`;
     // Števci vračil/sporov: številka je vedno Number (polja lahko manjkajo na starem backendu); > 0 = poudarjeno.
     const kosPozor = (n, ime, vrsta) => { const x = Number(n) || 0; return `<div class="stevilka${x > 0 ? " " + vrsta : ""}"><b>${x}</b><span>${ime}</span></div>`; };
@@ -578,6 +480,15 @@ async function naloziPregled() {
   });
 }
 
+// ---------- način plačil (varovalo) ----------
+// Rdeč pas samo, če backend NI v živem načinu (fake = brez Stripa, sandbox = sk_test_). V živem načinu pasu ni. Besedilo je fiksno (nič iz podatkov).
+function pokaziNacin(nacin) {
+  const el = $("nacin_pas"); if (!el) return;
+  const ni = nacin === "fake" || nacin === "sandbox";
+  el.replaceChildren(...(ni ? [h("b", {}, "Plačila niso v živem načinu."), " Nakupi niso pravi denar (vstopnice se izdajo brez pravega plačila ali v Stripe sandboxu). Pred prodajo preveri nastavitve plačil na Renderju."] : []));
+  el.classList.toggle("skrito", !ni);
+}
+
 // ---------- finance ----------
 let fPodatki = null;
 function fObdobje(dni) {
@@ -591,13 +502,14 @@ async function naloziFinance() {
     const f = await klic("GET", `/admin/api/finance?from=${$("fOd").value}&to=${$("fDo").value}`);
     fPodatki = f;
     const s = f.summary, v = f.all_time;
-    // Način plačil (#230): payments_mode fake | sandbox | live; star backend ga nima -> mode (test | live).
+    // Način plačil: v živo = brez opozorila; fake/sandbox = rdeč pas (varovalo, ne statistika testnega prometa); star backend: mode (test | live).
     const nacin = f.payments_mode || (f.mode === "test" ? "fake" : "live");
-    $("fNacin").textContent = nacin === "fake" ? "TESTNI NAČIN – brez pravega denarja" : nacin === "sandbox" ? "Stripe SANDBOX – ni pravi denar" : "v živo";
-    $("fNacin").className = "znacka " + (nacin === "live" ? "ok" : "opoz");
+    $("fNacin").textContent = nacin === "fake" ? "NI V ŽIVEM NAČINU" : nacin === "sandbox" ? "NI V ŽIVEM NAČINU" : "v živo";
+    $("fNacin").className = "znacka " + (nacin === "live" ? "ok" : "slabo");
+    pokaziNacin(nacin);
     const kos = (n, ime, pod) => `<div class="stevilka"><b>${ubezi(n)}</b><span>${ubezi(ime)}</span>${pod ? `<small>${ubezi(pod)}</small>` : ""}</div>`;
     $("fStevilke").innerHTML =
-      kos(evri(s.gross_cents), "bruto prodaja (pravi)", `od začetka ${evri(v.gross_cents)}`) +
+      kos(evri(s.gross_cents), "bruto prodaja", `od začetka ${evri(v.gross_cents)}`) +
       kos(evri(s.fee_cents), `prihodek Outlyja (${f.fee_percent} %)`, `od začetka ${evri(v.fee_cents)}`) +
       kos(evri(s.clubs_net_cents), "za klube (neto)", `bruto − provizija − vračila`) +
       kos(evri(s.own_sales_cents || 0), "lastna prodaja Outly (neto)", `bruto − vračila, brez provizije`) +
@@ -605,20 +517,7 @@ async function naloziFinance() {
       kos(evri(s.refunded_cents), "vračila", `${s.refunded_orders || 0} v celoti vrnjenih naročil`) +
       kos(s.tickets_sold, "vstopnic (neto)", `od začetka ${v.tickets_sold}`) +
       kos(s.orders, "naročil", `${s.refunded_orders ? `od tega ${s.refunded_orders} vrnjenih · ` : ""}${s.buyers} kupcev · ${s.clubs_with_sales} klubov`);
-    // Zgoraj je SAMO pravi promet; testna naročila (lažni način brez Stripa: test_…, Stripe sandbox: seja cs_test_…) so v ločenem bloku (#230).
-    $("fOpomba").textContent = "Zgoraj, po klubih, dogodkih in dnevih je samo pravi promet (vključno z brezplačnimi naročili brez Stripa). Testna naročila so šteta posebej, v bloku spodaj."
-      + " V celoti vrnjena naročila so v bruto, vračilih in številu naročil; v proviziji in vstopnicah niso (neto zanje je 0). Stripove pristojbine vrnjenih plačil tu ni."
-      + (nacin === "fake" ? " Backend je zdaj v testnem načinu: nova naročila so testna."
-        : nacin === "sandbox" ? " Backend je zdaj v Stripe sandboxu (sk_test_): nova plačana naročila so testna, ni pravi denar." : "");
-    const t = f.test_summary || { orders: 0, gross_cents: 0, fee_cents: 0, refunded_cents: 0, tickets_sold: 0 }, vt = f.all_time_test || { orders: 0, gross_cents: 0 };
-    const kosT = (n, ime, pod) => `<div class="stevilka opoz"><b>${ubezi(n)}</b><span>${ubezi(ime)}</span>${pod ? `<small>${ubezi(pod)}</small>` : ""}</div>`;
-    $("fTestStevilke").innerHTML =
-      kosT(t.orders, "testnih naročil", `od začetka ${vt.orders}`) +
-      kosT(evri(t.gross_cents), "testni bruto", `od začetka ${evri(vt.gross_cents)}`) +
-      kosT(evri(t.fee_cents), "testna provizija") +
-      kosT(evri(t.refunded_cents), "testna vračila", `${t.refunded_orders || 0} v celoti vrnjenih`) +
-      kosT(t.tickets_sold, "testnih vstopnic");
-    $("fTestOpomba").textContent = "Ni pravi denar in ni v zgornjih številkah: lažni način (brez Stripa) in Stripe sandbox. Za obračun s klubi se ne upošteva.";
+    $("fOpomba").textContent = "V celoti vrnjena naročila so v bruto, vračilih in številu naročil; v proviziji in vstopnicah niso (neto zanje je 0). Stripove pristojbine vrnjenih plačil tu ni.";
     // graf po dnevih (bruto; provizija temnejši del)
     const maks = Math.max(1, ...f.by_day.map(d => d.gross_cents));
     $("fGraf").innerHTML = f.by_day.map(d => {
@@ -637,8 +536,8 @@ async function naloziFinance() {
       <td class="mono">${ubezi(e.tickets_sold)}${e.capacity ? " / " + ubezi(e.capacity) : ""}</td><td class="mono">${ubezi(e.checked_in)}</td>
       <td class="mono">${evri(e.gross_cents)}</td><td class="mono">${evri(e.fee_cents)}</td><td class="mono">${evri(e.refunded_cents || 0)}</td></tr>`), "V tem obdobju ni prodaje.");
     const st = { paid: '<span class="znacka ok">plačano</span>', partially_refunded: '<span class="znacka opoz">delno vrnjeno</span>', refunded: '<span class="znacka slabo">vrnjeno</span>', cancelled: '<span class="znacka slabo">preklicano</span>', pending: '<span class="znacka">v teku</span>' };
-    tabela($("fNarocila"), ["Ref", "Kdaj", "Dogodek", "Klub", "Kupec", "Kol.", "Znesek", "Provizija", "Stanje"], f.recent_orders.map(o => `
-      <tr><td class="mono">${ubezi(o.public_ref)}${o.is_test ? ' <span class="znacka opoz">test</span>' : ""}</td><td class="mono">${datum(o.created_at)}</td>
+    tabela($("fNarocila"), ["Ref", "Kdaj", "Dogodek", "Klub", "Kupec", "Kol.", "Znesek", "Provizija", "Stanje"], f.recent_orders.filter(o => !o.is_test).map(o => `
+      <tr><td class="mono">${ubezi(o.public_ref)}</td><td class="mono">${datum(o.created_at)}</td>
       <td>${ubezi(o.event_title)}</td><td>${ubezi(o.club_name)}</td><td>${ubezi(o.buyer_username || "")}<span class="drobno">${ubezi(o.buyer_email)}</span></td>
       <td class="mono">${ubezi(o.quantity)}</td><td class="mono">${evri(o.total_cents)}</td><td class="mono">${evri(o.application_fee_cents)}</td>
       <td>${st[o.status] || ubezi(o.status)}${o.refunded_cents ? `<span class="drobno">vrnjeno ${evri(o.refunded_cents)}</span>` : ""}</td></tr>`), "V tem obdobju ni naročil.");
@@ -646,9 +545,9 @@ async function naloziFinance() {
 }
 function fIzvoz() {
   if (!fPodatki) { obvesti("Najprej naloži podatke.", "slabo"); return; }
-  const g = ["ref", "datum", "dogodek", "klub", "kupec", "e-naslov", "kolicina", "znesek_eur", "provizija_eur", "vracilo_eur", "stanje", "test"];
-  const v = fPodatki.recent_orders.map(o => [o.public_ref, o.created_at, o.event_title, o.club_name, o.buyer_username || "", o.buyer_email, o.quantity,
-    (o.total_cents / 100).toFixed(2), (o.application_fee_cents / 100).toFixed(2), (o.refunded_cents / 100).toFixed(2), o.status, o.is_test ? "da" : "ne"]);
+  const g = ["ref", "datum", "dogodek", "klub", "kupec", "e-naslov", "kolicina", "znesek_eur", "provizija_eur", "vracilo_eur", "stanje"];
+  const v = fPodatki.recent_orders.filter(o => !o.is_test).map(o => [o.public_ref, o.created_at, o.event_title, o.club_name, o.buyer_username || "", o.buyer_email, o.quantity,
+    (o.total_cents / 100).toFixed(2), (o.application_fee_cents / 100).toFixed(2), (o.refunded_cents / 100).toFixed(2), o.status]);
   const csv = [g, ...v].map(r => r.map(x => `"${String(x ?? "").replace(/"/g, '""')}"`).join(";")).join("\n");
   const b = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = `outly-narocila-${fPodatki.from}-${fPodatki.to}.csv`; document.body.appendChild(a); a.click();
@@ -761,7 +660,7 @@ async function naloziKlube() {
         <td class="mono">${k.lat !== null ? k.lat.toFixed(4) + ", " + k.lng.toFixed(4) : '<span class="znacka opoz">brez</span>'}</td>
         <td class="mono">${ubezi(k.event_count)}</td>
         <td>${k.hidden ? '<span class="znacka slabo">skrit</span>' : '<span class="znacka ok">viden</span>'}${k.is_demo ? ' <span class="znacka opoz">demo</span>' : ""}${k.stripe_charges_enabled ? ' <span class="znacka">stripe</span>' : ""}</td>
-        <td><div class="vrsta"><button class="tih mali" onclick="kUredi(${cel(k.id)})">Uredi</button><button class="tih mali" onclick="kDemo(${cel(k.id)},${k.is_demo ? "false" : "true"})">${k.is_demo ? "Ni demo" : "Demo"}</button>${k.hidden ? `<button class="dobro mali" onclick="kSkrij(${cel(k.id)},false)">Pokaži</button>` : `<button class="nevarno mali" onclick="kSkrij(${cel(k.id)},true)">Skrij</button>`}</div></td>
+        <td><div class="vrsta"><button class="tih mali" onclick="kUredi(${cel(k.id)})">Uredi</button><button class="tih mali" onclick="kDemo(${cel(k.id)},${k.is_demo ? "false" : "true"})">${k.is_demo ? "Ni demo" : "Demo"}</button>${k.hidden ? `<button class="dobro mali" onclick="kSkrij(${cel(k.id)},false)">Pokaži</button>` : `<button class="nevarno mali" onclick="kSkrij(${cel(k.id)},true)">Skrij</button>`}${k.is_official ? "" : `<button class="nevarno mali" onclick="kIzbrisi(${cel(k.id)})">Izbriši</button>`}</div></td>
       </tr>`), "Ni klubov. Ustvari prvega z gumbom »Nov klub«.");
   });
 }
@@ -909,7 +808,7 @@ async function naloziGuestListe() {
           ? h("div", { class: "vrsta" }, h("input", { id: "g_m" + x.id, type: "number", min: 0, max: 20, step: 1, value: x.spots, style: "width:70px" }), h("span", { class: "drobno" }, `${x.remaining} prostih`))
           : h("span", { class: "mono" }, `${x.spots}`)),
         h("td", {}, aktivna ? h("input", { id: "g_o" + x.id, maxlength: 200, value: x.note, style: "min-width:160px" }) : h("span", {}, x.note)),
-        h("td", {}, x.invited.length ? x.invited.map(i => `${i.username}${i.status === "used" ? " ✓" : ""}`).join(", ") : "—"),
+        h("td", {}, x.invited.length ? x.invited.map(i => `${i.username}${i.status === "used" ? " (vstopil)" : ""}`).join(", ") : "—"),
         h("td", {}, aktivna ? h("span", { class: "znacka ok" }, "aktivna") : h("span", { class: "znacka slabo" }, "preklicana"),
           h("span", { class: "drobno" }, x.event.status !== "published" ? x.event.status : "")),
         h("td", {}, aktivna ? h("div", { class: "vrsta" },
@@ -917,7 +816,7 @@ async function naloziGuestListe() {
           h("button", { class: "nevarno mali", type: "button", onclick: () => gPreklici(x.id, x.host.username || "") }, "Prekliči")) : ""));
     };
     el.replaceChildren(h("table", {},
-      h("thead", {}, h("tr", {}, ["#", "Dogodek", "Gostitelj", "Mesta", "Opomba", "Povabljeni (✓ = vstopil)", "Stanje", ""].map(g => h("th", {}, g)))),
+      h("thead", {}, h("tr", {}, ["#", "Dogodek", "Gostitelj", "Mesta", "Opomba", "Povabljeni (vstopil)", "Stanje", ""].map(g => h("th", {}, g)))),
       h("tbody", {}, d.guest_lists.map(vrstica))));
   });
 }
@@ -987,7 +886,7 @@ async function naloziPomoc() {
         h("td", {}, datum(x.last_at)));
     };
     el.replaceChildren(h("table", {},
-      h("thead", {}, h("tr", {}, ["Članek", "👍", "👎", "Delež koristnih", "Zadnji glas"].map(g => h("th", {}, g)))),
+      h("thead", {}, h("tr", {}, ["Članek", "Koristno", "Ni koristno", "Delež koristnih", "Zadnji glas"].map(g => h("th", {}, g)))),
       h("tbody", {}, d.articles.map(vrstica))));
   });
 }
@@ -1052,7 +951,7 @@ async function naloziVracilaSeznam() {
       h("td", { class: "mono" }, evriCelo(x.amount_cents, x.currency_paid || x.currency),
         x.amount_cents === null || x.amount_cents === undefined ? h("span", { class: "drobno" }, "se določi ob prvem poskusu") : null,
         Number.isSafeInteger(x.fee_refund_cents) && x.fee_refund_cents > 0 ? h("span", { class: "drobno" }, "provizija: " + evriCelo(x.fee_refund_cents, x.currency)) : null),
-      h("td", {}, V_RAZLOGI[x.reason] || x.reason || "—", x.no_stripe ? h("span", { class: "drobno" }, "brez Stripa (test/0 €)") : null),
+      h("td", {}, V_RAZLOGI[x.reason] || x.reason || "—", x.no_stripe ? h("span", { class: "drobno" }, "brez Stripa (0 €)") : null),
       h("td", {}, znackaIz(V_STANJA, x.state), h("span", { class: "drobno" }, "poskusov: " + (Number(x.attempts) || 0))),
       h("td", { style: V_NAPAKA_STIL }, x.error ? brezMaila(x.error) : "—"),
       h("td", { class: "mono" }, datum(x.created_at),

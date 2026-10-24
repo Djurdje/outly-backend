@@ -3760,7 +3760,8 @@ admin.get("/summary", async (req, res) => {
         (SELECT COUNT(*)::int FROM racuni WHERE stanje='napaka')             AS racuni_napaka,
         (SELECT COUNT(*)::int FROM predlogi_dejanj WHERE stanje='caka' AND velja_do > NOW()) AS predlogi_caka,
         (SELECT COUNT(*)::int FROM predlogi_dejanj WHERE nujno_at IS NOT NULL AND nujno_pregledano_at IS NULL) AS nujno_nepregledanih`);
-    return res.json({ ...r.rows[0], warnings_red: adminNadzor.rdeceStevilo() });
+    // payments_mode (DODANO 24. 10. 2026): "fake" | "sandbox" | "live" (kot v GET /admin/api/finance); panel kaze rdec pas »Placila niso v zivem nacinu«, ce ni "live".
+    return res.json({ ...r.rows[0], warnings_red: adminNadzor.rdeceStevilo(), payments_mode: placilaStripe.testniNacin() ? "fake" : (placilaStripe.jeSandbox() ? "sandbox" : "live") });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
@@ -4809,6 +4810,18 @@ admin.get("/promo-codes/:id/stats", async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
+// --- pravo brisanje: dogodek, klub, promo koda (Martin 24. 10. 2026, I63; admin_brisanje.js) ---
+// DELETE /admin/api/events/:id | /clubs/:id | /promo-codes/:id { reason } + GET .../delete-check (predogled). SAMO vloga admin (zeton agenta 403, I56; poti niso v agent API-ju in ne na
+// belem seznamu predlogov). Dogodek/klub s pravim prometom, racuni, spori ali Stripovimi vracili se NE izbrise (409), uradni profil Outly tudi ne. Omejevalnik: 20 klicev/min/admin.
+admin.use(require("./admin_brisanje").ustvari({
+  pool, celoId4, zapisiAdminDejanje, sqlTestno: SQL_TESTNO_NAROCILO,
+  omeji: omeji({ kljuc: "admin-brisanje", najvec: 20, oknoSekund: 60, poUporabniku: true, priNapaki: "lokalno" }),
+  poBrisanju: ({ eventIds = [] }) => {   // proces pozabi razprodane kljuce izbrisanih dogodkov; javni predpomnilnik izprazni tudi middleware (DELETE brez 4xx), a ne cakamo nanj
+    for (const id of eventIds) for (const k of [...razprodano.keys()]) if (k === "v:" + id || k.startsWith("m:" + id + ":")) razprodano.delete(k);
+    javniPredpomnilnik.razveljavi();
+  },
+}));
+
 // --- varnostna kopija ---
 // GET /admin/api/export — logični izvoz VSEH tabel v shemi public kot JSON
 // (vrstice + trenutne vrednosti zaporedij), v enem posnetku (REPEATABLE READ),
@@ -5563,6 +5576,17 @@ function pricakovanaCenaIzTela(b) {
 // (kot expected_price_cents): ponovitev z istim kljucem vrne prvo narocilo ze v idempotenca() / gostIdemPreveri, PRED preverbo kode. VIP poti polja ne berejo (ignorirajo ga, ne zavrnejo).
 const PROMO_KODA_VNOS = /^[A-Za-z0-9_-]{3,32}$/;   // pred toUpperCase: Unicode velike crke (ß, ı, ſ) ne smejo postati ASCII
 const NAPAKA_PROMO_KODA = { error: "promo_code_invalid", message: "This promo code is not valid for this event." };
+// Tuji kljuc ob vpisu narocila/rezervacije (23503): dogodek, klub, miza, paket ali promo koda je bila izbrisana (admin, pravo brisanje I63) med branjem in vpisom.
+// Promo koda -> isto kot neveljavna koda (400), vse ostalo -> 404 namesto 500. Vrne true, ce je odgovor ze poslan.
+function tujiKljucNakupa(err, res) {
+  if (!err || err.code !== "23503") return false;
+  const k = String(err.constraint || "");
+  if (k === "orders_promo_code_fk") { res.status(400).json(NAPAKA_PROMO_KODA); return true; }
+  if (k === "orders_event_id_fkey" || k === "orders_club_id_fkey" || k === "table_holds_event_id_fkey") { res.status(404).send("Event not found."); return true; }
+  if (k === "orders_table_id_fkey" || k === "table_holds_table_id_fkey") { res.status(404).send("Table not found."); return true; }
+  if (k === "orders_package_id_fkey" || k === "table_holds_package_id_fkey") { res.status(404).send("Package not found."); return true; }
+  return false;
+}
 // Vrne { koda: null } (brez kode) | { koda: "MAX12" } | { napaka: true }.
 function promoKodaIzTela(b) {
   const v = b && typeof b === "object" ? b.promo_code : undefined;
@@ -5909,6 +5933,8 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
     // Unikatni indeks po kljucu je dokoncna resnica: zmagovalec je commitan, vrni njegovo narocilo (plast 3 to ze preprecuje).
     if (idemV && err && err.code === "23505" && err.constraint === "orders_idempotency_key" && await idemPoKonfliktu(req, res, c, idemV)) return;
     // Sprožilec: "Ni dovolj vstopnic" pride kot check_violation.
+    // Tuji kljuc (24. 10. 2026, pravo brisanje I63): promo koda ali dogodek je bil izbrisan med branjem in vpisom narocila -> ista napaka kot ob neveljavni kodi / neobstojecem dogodku, ne 500.
+    if (tujiKljucNakupa(err, res)) return;
     if (err && err.code === "23514") return res.status(409).send(/Ni dovolj/.test(err.message) ? "Not enough tickets left." : "Order rejected: " + (err.constraint || err.message));
     console.error(err);
     return res.status(500).send("Server error.");
@@ -6365,6 +6391,8 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, pro
         return res.status(409).send("You already have an unfinished payment for this event. Please wait up to 30 minutes for it to expire, then try again.");
       }
     }
+    // Tuji kljuc (24. 10. 2026, pravo brisanje I63): promo koda ali dogodek je bil izbrisan med branjem in vpisom narocila -> ista napaka kot ob neveljavni kodi / neobstojecem dogodku, ne 500.
+    if (tujiKljucNakupa(err, res)) return;
     if (err && err.code === "23514") return res.status(409).send(/Ni dovolj/.test(err.message) ? "Not enough tickets left." : "Order rejected: " + (err.constraint || err.message));
     console.error(err);
     return res.status(500).send("Server error.");
@@ -9704,6 +9732,7 @@ app.post("/business/events/:id/tables/:tableId/hold", requireAuth, requireClub("
     return res.status(201).json(await vipDogodkaOdgovor(c, klub, id));
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});
+    if (tujiKljucNakupa(err, res)) return;   // dogodek/miza/paket izbrisan med vpisom (I63)
     if (err && err.code === "23505") return res.status(409).send("This table is already booked.");
     if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }
     console.error(err);
@@ -9975,6 +10004,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
     return res.status(201).json(telo);
   } catch (err) {
     if (d.drzi) await c.query("ROLLBACK").catch(() => {});   // po sprostitvi (nakupStripeSeja, #274) c ni vec nas
+    if (tujiKljucNakupa(err, res)) return;   // dogodek/miza/paket izbrisan med nakupom (I63): 404 namesto 500
     // Kljuc ima prednost pred »miza ze zasedena«: ce je mizo zasedlo ravno narocilo s TEM kljucem, je to ponovitev (ne 409, ne oznaka razprodano).
     if (idemV && err && err.code === "23505" && (err.constraint === "orders_idempotency_key" || err.constraint === "orders_miza_dogodek_key")
         && await idemPoKonfliktu(req, res, c, idemV)) return;
@@ -10131,6 +10161,7 @@ app.post("/events/:id/tables/:tableId/reservations", requireAuth, zavrniRazproda
     return res.status(201).json({ reservation: rezervacijaKupcu(o.rows[0]) });
   } catch (err) {
     await c.query("ROLLBACK").catch(() => {});
+    if (tujiKljucNakupa(err, res)) return;   // dogodek/miza izbrisana med rezervacijo (I63): 404 namesto 500
     if (err && err.code === "23505" && err.constraint === "table_holds_app_uporabnik_key") return res.status(409).json(await telesoLimita(c, id, req.user.userId));
     if (err && err.code === "23505") { razprodanoOznaci("m:" + id + ":" + mizaId); return res.status(409).send("This table is already booked."); }
     if (napakaZasedenosti(err)) { console.error(err.message); return res.status(503).set("Retry-After", "5").send(NAKUP_ZASEDEN); }

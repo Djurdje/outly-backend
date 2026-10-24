@@ -5,39 +5,47 @@
 
 @media (max-width: 640px) {
   nav { display:none }
-  .wrap { padding:12px 12px calc(88px + env(safe-area-inset-bottom)) }
+  header { padding-bottom:8px }
+  .brand h1 { font-size:22px }
+  .wrap { padding:12px 12px calc(96px + env(safe-area-inset-bottom)) }
   header { gap:8px }
   .jaz { flex-wrap:wrap; max-width:100% }
   .jaz > span { overflow-wrap:anywhere; min-width:0 }
-  #obvestila { left:12px; right:12px; max-width:none; bottom:calc(72px + env(safe-area-inset-bottom)) }
+  #obvestila { left:12px; right:12px; max-width:none; bottom:calc(86px + env(safe-area-inset-bottom)) }
   /* rdeci pas nujnih dejanj (nujno.js) je na vrhu vsakega zavihka; ko ga drsenje odnese iz zaslona, ostane viden ozek rdec trak (navigacija.js) */
   #nujno_trak { display:none; position:fixed; top:6px; left:12px; right:12px; z-index:12; width:auto; border-radius:8px; box-shadow:0 4px 18px rgba(0,0,0,.4); background:var(--napaka); color:#fff; text-align:left;
     white-space:normal; font-size:13px; padding:9px 12px; min-height:40px; border:0 }
   #nujno_trak.vidno { display:block }
   #nujno_trak:hover { filter:none }
 
-  #spodnja_vrstica { display:grid; grid-template-columns:repeat(5, minmax(0, 1fr)); position:fixed; left:0; right:0; bottom:0; z-index:14;
-    background:var(--panel); border-top:1px solid var(--line); padding-bottom:env(safe-area-inset-bottom) }
-  #spodnja_vrstica button { background:none; border:0; border-radius:0; color:var(--muted); min-height:58px; padding:6px 2px; font-size:11.5px; font-weight:600;
+  #spodnja_vrstica { display:grid; grid-template-columns:repeat(5, minmax(0, 1fr)); position:fixed; left:12px; right:12px; bottom:calc(10px + env(safe-area-inset-bottom)); z-index:14;
+    background:rgba(24,24,26,.96); border:1px solid var(--line); border-radius:22px; box-shadow:0 12px 32px rgba(0,0,0,.5); padding:4px }
+  #spodnja_vrstica button { background:none; border:0; border-radius:16px; color:var(--muted); min-height:56px; padding:6px 2px; font-size:11.5px; font-weight:600;
     display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; position:relative; white-space:normal; overflow-wrap:anywhere }
   #spodnja_vrstica button:hover { filter:none; color:var(--ink) }
   #spodnja_vrstica button:focus-visible { outline:2px solid var(--modra); outline-offset:-3px }
-  #spodnja_vrstica button .ikona { font-size:17px; line-height:1; font-weight:700 }
-  #spodnja_vrstica button.aktiven { color:var(--modra); background:var(--modra-soft) }
-  #spodnja_vrstica button.aktiven::before { content:""; position:absolute; top:0; left:20%; right:20%; height:3px; border-radius:0 0 3px 3px; background:var(--modra) }
+  /* Ikone: preproste crtne (stroke) maske v enem slogu; barva = currentColor (aktivna: bela besedilo, modra ikona kot v aplikaciji). */
+  #spodnja_vrstica button .ikona { display:block; width:24px; height:24px; background:currentColor; -webkit-mask-repeat:no-repeat; mask-repeat:no-repeat; -webkit-mask-position:center; mask-position:center; -webkit-mask-size:contain; mask-size:contain }
+  #spodnja_vrstica button.aktiven { color:#fff }
+  #spodnja_vrstica button.aktiven .ikona { background:var(--modra) }
   #spodnja_vrstica .n, #lista .n { background:var(--napaka); color:#fff; border-radius:9px; padding:0 6px; font-size:11px; line-height:16px; font-weight:700 }
   #spodnja_vrstica .n { position:absolute; top:4px; left:calc(50% + 6px) }
   #spodnja_vrstica .n.skrito, #lista .n.skrito { display:none }
+#spodnja_vrstica .ikona.i-danes { -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 11.5 12 4l9 7.5'/%3E%3Cpath d='M5.5 10v10h13V10'/%3E%3Cpath d='M10 20v-5.5h4V20'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 11.5 12 4l9 7.5'/%3E%3Cpath d='M5.5 10v10h13V10'/%3E%3Cpath d='M10 20v-5.5h4V20'/%3E%3C/svg%3E") }
+#spodnja_vrstica .ikona.i-dogodki { -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.5' y='5' width='17' height='15.5' rx='3'/%3E%3Cpath d='M3.5 10h17M8 3v4M16 3v4'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.5' y='5' width='17' height='15.5' rx='3'/%3E%3Cpath d='M3.5 10h17M8 3v4M16 3v4'/%3E%3C/svg%3E") }
+#spodnja_vrstica .ikona.i-opozorila { -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 4 21 19.5H3z'/%3E%3Cpath d='M12 10v4.2M12 16.9v.2'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 4 21 19.5H3z'/%3E%3Cpath d='M12 10v4.2M12 16.9v.2'/%3E%3C/svg%3E") }
+#spodnja_vrstica .ikona.i-ljudje { -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='9' cy='8' r='3.2'/%3E%3Cpath d='M3 20c0-3.6 2.7-6 6-6s6 2.4 6 6'/%3E%3Ccircle cx='17' cy='9' r='2.4'/%3E%3Cpath d='M17.6 14.3c2.2.4 3.4 2.3 3.4 5.7'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='9' cy='8' r='3.2'/%3E%3Cpath d='M3 20c0-3.6 2.7-6 6-6s6 2.4 6 6'/%3E%3Ccircle cx='17' cy='9' r='2.4'/%3E%3Cpath d='M17.6 14.3c2.2.4 3.4 2.3 3.4 5.7'/%3E%3C/svg%3E") }
+#spodnja_vrstica .ikona.i-vec { -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 7h16M4 12h16M4 17h16'/%3E%3C/svg%3E"); mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 7h16M4 12h16M4 17h16'/%3E%3C/svg%3E") }
 
-  #lista_ozadje { display:block; position:fixed; inset:0; z-index:12; background:rgba(5,6,8,.55) }
-  #lista { display:block; position:fixed; left:0; right:0; bottom:calc(58px + env(safe-area-inset-bottom)); z-index:13; max-height:min(60vh, 420px); overflow-y:auto;
-    background:var(--panel); border-top:1px solid var(--line); border-radius:14px 14px 0 0; padding:14px 12px 12px; box-shadow:0 -8px 30px rgba(0,0,0,.45) }
+  #lista_ozadje { display:block; position:fixed; inset:0; z-index:12; background:rgba(0,0,0,.6) }
+  #lista { display:block; position:fixed; left:12px; right:12px; bottom:calc(86px + env(safe-area-inset-bottom)); z-index:13; max-height:min(60vh, 420px); overflow-y:auto;
+    background:var(--panel); border:1px solid var(--line); border-radius:20px; padding:16px; box-shadow:0 16px 40px rgba(0,0,0,.55) }
   #lista_ozadje.skrito, #lista.skrito { display:none !important }
-  #lista h2 { margin:0 0 10px; font-size:12px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:var(--muted) }
+  #lista h2 { margin:0 0 12px; font-size:12px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:var(--muted) }
   #lista .izbire { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px }
-  #lista .izbire button { background:var(--panel2); color:var(--ink); border:1px solid var(--line); min-height:48px; text-align:left; white-space:normal;
-    overflow-wrap:anywhere; display:flex; align-items:center; justify-content:space-between; gap:8px }
-  #lista .izbire button.aktiven { background:var(--modra-soft); color:var(--modra); border-color:#2B3D7A }
+  #lista .izbire button { background:rgba(255,255,255,.08); color:var(--ink); min-height:48px; text-align:left; white-space:normal;
+    overflow-wrap:anywhere; display:flex; align-items:center; justify-content:space-between; gap:8px; border-radius:14px }
+  #lista .izbire button.aktiven { background:rgba(255,255,255,.16); color:#fff }
 
   /* --- Klubi: kartica namesto tabele --- */
   #kTabela table, #kTabela tbody, #uTabela table, #uTabela tbody { display:block }
@@ -78,5 +86,7 @@
   .skupina > h2 .desno { margin-left:0; width:100% }
   .skupina > h2 .desno input { flex:1 1 140px; width:auto !important }
   .stevilke { grid-template-columns:repeat(2, minmax(0, 1fr)) }
+  input, select, textarea { font-size:16px }   /* iOS ne povecuje strani ob fokusu */
+  .skupina > h2 { padding:14px 16px }
   .polja { grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)) }
 }

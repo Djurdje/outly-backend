@@ -1,4 +1,4 @@
-// Admin panel, nadzorna plosca »Danes« na vrhu zavihka Pregled (#326, 23. 10. 2026): prodaja danes / 7 dni / testno, racuni, nocojsnji dogodki z vstopi,
+// Admin panel, nadzorna plosca »Danes« na vrhu zavihka Pregled (#326, 23. 10. 2026): prodaja danes / 7 dni, racuni, nocojsnji dogodki z vstopi,
 // rdeca opozorila. Podatke da GET /admin/api/danes (admin_nadzor.js; strezniski predpomnilnik 10 s, READ ONLY, nikoli skenPool).
 // Osvezevanje vsakih 20 s SAMO, ko je zavihek brskalnika viden IN je odprt zavihek Pregled; ob 503 (strezniku je rok potekel) premor 60 s in napis »podatki zastareli«.
 // Brez ogrodja in brez gradnje (DECISIONS 21. 10. 2026). Uporablja globalne funkcije iz index.html: klic, h, datum, $, obvesti, pokaziZavihek.
@@ -67,7 +67,6 @@
       telo.push(h("div", { class: "stevilke dn-kartice" },
         prodajaKartica(d.prodaja && d.prodaja.danes, "prodaja danes"),
         prodajaKartica(d.prodaja && d.prodaja.dni7, "zadnjih 7 dni"),
-        prodajaKartica(d.prodaja && d.prodaja.testno_danes, "testno danes (ni pravi denar)", "opoz"),
         kartica(cele(d.racuni && d.racuni.izdani_danes), "računov izdanih danes", `čaka ${cele(d.racuni && d.racuni.caka)} · napaka ${cele(d.racuni && d.racuni.napaka)}`,
           cele(d.racuni && d.racuni.napaka) > 0 ? "pozor" : (cele(d.racuni && d.racuni.caka) > 0 ? "opoz" : "")),
         h("button", { class: "stevilka dn-klik " + (imaRdeca && rdeca > 0 ? "pozor" : ""), type: "button", onclick: () => pokaziZavihek("opozorila") },
