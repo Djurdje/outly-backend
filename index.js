@@ -6592,7 +6592,7 @@ const SQL_PRODAJALEC_MAIL = "cl.legal_name, cl.legal_address, cl.registration_nu
 const FIRMA_PLATFORME = "NEXT DIMENSIONS, družba za marketing, d.o.o.", SEDEZ_PLATFORME = "Trebče 81, 3256 Bistrica ob Sotli";
 const POSREDNIK_VRSTICA = `${FIRMA_PLATFORME}, ${SEDEZ_PLATFORME}, luka@outly.si`;
 const NOGA_MAILA = `Pošiljatelj / Sender: ${FIRMA_PLATFORME}, ${SEDEZ_PLATFORME}`;
-// Noga z imenom firme in sedezem na koncu VSAKEGA maila (besedilo in HTML; 12 px, #555). Brez HTML-ja (samo besedilo) vrne samo besedilo.
+// Noga z imenom firme in sedezem na koncu VSAKEGA maila (besedilo in HTML; 12 px, #555 na beli; v mailih s karto #A1A1A6 na crni, mail_karta.js). Brez HTML-ja (samo besedilo) vrne samo besedilo.
 function nogaMaila({ html, text }) {
   const n = NOGA_MAILA.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   return {
@@ -6925,7 +6925,7 @@ const potrdiloIzcrpaj = (oid) => pool.query("UPDATE orders SET receipt_mail_atte
 // Vsebina potrdila kupcu (#95, kratka oblika od 20. 10. 2026: Martin je obrnil »brez QR«, DECISIONS 2026-10-20; besedilo po pravniku
 // outly-hq/pravno/2026-10-20-potrdilo-nakupa-kratko.md, razdelek 6A platforma / 6B klub). Dvojezicno: slovenski blok (obvezen, ZVPot-1 7/1), locilo, angleski blok.
 // Vsak blok: VRH (dogodek, datum, prizorisce, kolicina · znesek · plačano, starost + osebni dokument, kje je QR, stavek o prenosu, gumb, stevilka narocila) in
-// DROBNI TISK (en odstavek, >= 12 px, #555 ali temneje, ni zlozen; isto besedilo v text/plain): neobstoj odstopa PRVI, zakonsko jamstvo, prodajalec (firma, sedez,
+// DROBNI TISK (en odstavek, >= 12 px, #555 ali temneje na beli oz. #A1A1A6 na crni od 24. 10., ni zlozen; isto besedilo v text/plain): neobstoj odstopa PRVI, zakonsko jamstvo, prodajalec (firma, sedez,
 // telefon, e-naslov, maticna, davcna; stavek o DDV), pri klubu Outly kot posrednik, pritozbe, pogoji z razlicico. Nic pravnega ni samo na povezavi ali samo v PDF.
 // pril = { kode: [{ cid }], vse: N vstopnic narocila, pdf: true|false } — PDF in vgrajena koda samo, ce je priprava uspela (sicer »vstopnice so v aplikaciji«, T4).
 // T9: pri prodajalcu platformi (I50) besedilo ne govori o klubu (»organizator« / »prodajalec«).
@@ -6993,7 +6993,7 @@ function kupecPotrdiloBloki(o, povezava, pril) {
     const karta = {
       jez, vrsta: jeMiza ? T("VIP miza", "VIP table") : T("Vstopnica", "Ticket"), naslov: o.event_title,
       vrstice: [[T("Datum", "Date"), mailKarta.datumKarta(o.start_at, jez)], [T("Prizorišče", "Venue"), prizoriscePodatki(o)], [T("Nakup", "Purchase"), vrh[2], true],
-        meja > 0 ? [T("Starost", "Age"), T(`${meja}+ · osebni dokument`, `${meja}+ · photo ID`)] : null],
+        meja > 0 ? [T("Starost", "Age"), T(`${meja}+${paket ? " (miza s paketom pijače)" : ""} · osebni dokument`, `${meja}+${paket ? " (table with a drinks package)" : ""} · photo ID`)] : null],
       qr: pril.pdf && n ? { cid: pril.kode[0].cid, alt: T("Koda QR vstopnice", "Ticket QR code"), oznaka: n > 1 ? T(`Vstopnica 1 od ${n}`, `Ticket 1 of ${n}`) : "" } : null,
       brezQr: T("Kode QR so v aplikaciji Outly", "Your QR codes are in the Outly app"), pod: [o.public_ref, T("Pokažite pri vhodu", "Show at the door")],
     };
@@ -7041,7 +7041,7 @@ async function posljiPotrdiloKupcu(oid) {
   } finally { potrdiloVTeku.delete(kljuc); }
 }
 // Vrstni red (#95 s PDF, 20. 10. 2026): preverbe -> podatki dogodka in TRENUTNE vstopnice kupca -> priprava QR/PDF (asinhrona, vstopnica_priloge.js; ob napaki POZOR in mail
-// BREZ priloge, T4) -> rezervacija poskusa (claim) -> Resend. Priloga nastane PRED claimom: rok ponovnega prevzema (GOST_POSTA_TIMEOUT_MS + rezerva) tako pokriva samo klic
+// BREZ priloge, T4) -> plakat (mail_karta.js, rok 3 s, I64) -> rezervacija poskusa (claim) -> Resend. Priloga nastane PRED claimom: rok ponovnega prevzema (GOST_POSTA_TIMEOUT_MS + rezerva) tako pokriva samo klic
 // Resenda, ne priprave PDF ob navali (sicer bi druga instanca narocilo prevzela med pripravo in poslala drugic). Vse to tece po COMMIT-u nakupa/webhooka, brez povezave
 // iz poola med pripravo in pod semaforjem potrdil (2 socasni), zato nakup, webhook in sken ne cakajo nanj (I16).
 // Kode QR: samo vstopnice, ki so se veljavne in KUPCEVE (holder NULL ali kupec, ne gost), s serialom ob posiljanju: prenesena vstopnica (nov serial je prejemnikov)

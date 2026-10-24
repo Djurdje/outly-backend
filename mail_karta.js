@@ -8,9 +8,9 @@
  *   - postavitev s tabelami in vrsticnimi slogi (Outlook, Gmail); brez flex/grid, brez skriptov, brez zunanjih slik in pisav (sledenje: samo cid:);
  *   - vse slike so vgrajene priloge (CID): koda QR (ticket-qr-N), logotip (outly-logo), plakat (event-poster);
  *   - vsak podatek iz baze gre skozi `ubezi` (I43);
- *   - drobni tisk >= 13 px, kontrast na crni >= kontrast #555 na beli (7,5 : 1): #A1A1A6 na #000000 je 8,2 : 1;
+ *   - drobni tisk >= 13 px in noga s firmo 12 px: kontrast na crni >= kontrast #555 na beli (7,5 : 1): #A1A1A6 na #000000 je 8,2 : 1;
  *   - plakat: prenese ga streznik (ne prejemnikov odjemalec), samo z NASEGA Cloudinaryja (SSRF), z rokom, omejeno velikostjo in predpomnilnikom
- *     (ob navali nakupov za isti dogodek en prenos); ob kakrsnikoli napaki mail gre brez plakata (srednji stolpec se razsiri).
+ *     in zdruzevanjem hkratnih klicev (ob navali nakupov za isti dogodek en prenos); ob kakrsnikoli napaki mail gre brez plakata (srednji stolpec se razsiri).
  */
 const fs = require("fs");
 const path = require("path");
@@ -18,7 +18,7 @@ const path = require("path");
 const ubezi = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const PISAVA = "Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 const B = {   // barve
-  ozadje: "#000000", besedilo: "#FFFFFF", svetlo: "#D1D1D6", drobno: "#A1A1A6", noga: "#8E8E93", crta: "#2C2C30", oznaka: "#8FA8FF",
+  ozadje: "#000000", besedilo: "#FFFFFF", svetlo: "#D1D1D6", drobno: "#A1A1A6", noga: "#A1A1A6", crta: "#2C2C30", oznaka: "#8FA8FF",
   gumb: "#4C76FF", karta: "#FFFFFF", krtica: "#F4F4F6", karta_besedilo: "#111111", karta_sivo: "#555555", perforacija: "#D0D0D6", modra_temna: "#3358E0", plakat_ozadje: "#141416",
 };
 const SLOG_DROBNO = `margin:20px 0 0;font-size:13px;line-height:1.5;color:${B.drobno}`;
@@ -30,23 +30,36 @@ const prilogaLogo = () => ({ filename: "outly.png", content: LOGO_B64, content_t
 const prilogaPlakat = (buf) => ({ filename: "event.jpg", content: buf.toString("base64"), content_type: "image/jpeg", content_id: CID_PLAKAT });
 
 // --- plakat ---
-const PLAKAT_ROK_MS = 3000, PLAKAT_NAJVEC_B = 400 * 1024, PLAKAT_PREDPOMNILNIK = 50, PLAKAT_OK_MS = 6 * 3600 * 1000, PLAKAT_NAPAKA_MS = 5 * 60 * 1000;
+const PLAKAT_ROK_MS = 3000, PLAKAT_NAJVEC_B = 400 * 1024, PLAKAT_PREDPOMNILNIK = 50, PLAKAT_OK_MS = 6 * 3600 * 1000, PLAKAT_NAPAKA_MS = 60 * 1000;
 const plakati = new Map();   // url -> { buf | null, do }
+const plakatiVTeku = new Map();   // url -> Promise: hkratni klici za isti plakat (naval nakupov) cakajo na en prenos
 // Iz shranjenega URL-ja naredi URL za mail (ozek pokoncni izrez 1 : 2, JPEG, ~30-60 KB) ali null, ce ni z nasega Cloudinaryja.
+// `%` je prepovedan: fetch normalizira `%2e%2e` v `..` (pregled 24. 10.: .../upload/v1/%2e%2e/.../tujracun/image/fetch/... bi sel na tuj racun).
+// Za vsak primer se preveri se normaliziran URL (kot ga poslje fetch): isti gostitelj, pot se zacne z nasim racunom in izrezom.
 function plakatUrlZaMail(url, cloudName = process.env.CLOUDINARY_CLOUD_NAME) {
-  if (!cloudName || typeof url !== "string" || url.length > 500) return null;
+  if (!cloudName || !/^[A-Za-z0-9_-]+$/.test(cloudName) || typeof url !== "string" || url.length > 500) return null;
   const predpona = `https://res.cloudinary.com/${cloudName}/image/upload/`;
   if (!url.startsWith(predpona)) return null;
   const ostanek = url.slice(predpona.length);
-  if (!ostanek || /[\s"'<>\\]|\.\.|^\/|[?#]/.test(ostanek)) return null;
-  return `${predpona}c_fill,g_auto,w_300,h_600,f_jpg,q_70/${ostanek}`;
+  if (!ostanek || !/^[A-Za-z0-9_\-.,/]+$/.test(ostanek) || /\.\.|\/\.\/|^\.?\/|\/\//.test(ostanek)) return null;
+  const izrez = `${predpona}c_fill,g_auto,w_300,h_600,f_jpg,q_70/`;
+  const u = izrez + ostanek;
+  let n;
+  try { n = new URL(u); } catch (e) { return null; }
+  if (n.origin !== "https://res.cloudinary.com" || n.username || n.password || n.search || n.hash || n.href !== u || !n.href.startsWith(izrez)) return null;
+  return u;
 }
 async function plakatZaMail(url) {
   const u = plakatUrlZaMail(url);
   if (!u) return null;
-  const zdaj = Date.now();
   const v = plakati.get(u);
-  if (v && v.do > zdaj) return v.buf;
+  if (v && v.do > Date.now()) return v.buf;
+  if (plakatiVTeku.has(u)) return plakatiVTeku.get(u);
+  const p = prenesiPlakat(u).finally(() => plakatiVTeku.delete(u));
+  plakatiVTeku.set(u, p);
+  return p;
+}
+async function prenesiPlakat(u) {
   let buf = null;
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), PLAKAT_ROK_MS);
@@ -60,7 +73,7 @@ async function plakatZaMail(url) {
   } catch (e) { buf = null; }
   finally { clearTimeout(t); }
   if (plakati.size >= PLAKAT_PREDPOMNILNIK) plakati.delete(plakati.keys().next().value);
-  plakati.set(u, { buf, do: zdaj + (buf ? PLAKAT_OK_MS : PLAKAT_NAPAKA_MS) });
+  plakati.set(u, { buf, do: Date.now() + (buf ? PLAKAT_OK_MS : PLAKAT_NAPAKA_MS) });
   return buf;
 }
 
