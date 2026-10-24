@@ -11,6 +11,7 @@ const { jePrepovedanoIme } = require("./prepovedana_imena");   // filter neprime
 const { NAJMANJ_LET_RACUN, danesLjubljana, polnaLeta } = require("./starost_racuna");   // najnizja starost racuna 18 let, po ljubljanskem koledarju
 const { preveriUrlPolja } = require("./url_polja");   // URL polja kluba/dogodka: samo http(s) (#269)
 const { qrPng, pdfVstopnice } = require("./vstopnica_priloge");   // QR (PNG, vgrajen v mail) in PDF vstopnice (priloga); migracija 034
+const mailKarta = require("./mail_karta");   // HTML maila z vstopnico v obliki karte (24. 10. 2026): kupec z racunom, gost, prenos gostu
 const path = require("path");
 // Express 4 ne ujame zavrnjenih obljub asinhronih rocnikov: neujet `await pool.connect()` je sesul CEL proces (issue #129).
 // Ovoj (asinhroni_rocniki.js) zavrnitev preusmeri v next(err); napakaRocnik na koncu datoteke jo prevede v 503/500.
@@ -6591,11 +6592,13 @@ const SQL_PRODAJALEC_MAIL = "cl.legal_name, cl.legal_address, cl.registration_nu
 const FIRMA_PLATFORME = "NEXT DIMENSIONS, družba za marketing, d.o.o.", SEDEZ_PLATFORME = "Trebče 81, 3256 Bistrica ob Sotli";
 const POSREDNIK_VRSTICA = `${FIRMA_PLATFORME}, ${SEDEZ_PLATFORME}, luka@outly.si`;
 const NOGA_MAILA = `Pošiljatelj / Sender: ${FIRMA_PLATFORME}, ${SEDEZ_PLATFORME}`;
-// Noga z imenom firme in sedezem na koncu VSAKEGA maila (besedilo in HTML; 12 px, #555). Brez HTML-ja (samo besedilo) vrne samo besedilo.
+// Noga z imenom firme in sedezem na koncu VSAKEGA maila (besedilo in HTML; 12 px, #555 na beli; v mailih s karto #A1A1A6 na crni, mail_karta.js). Brez HTML-ja (samo besedilo) vrne samo besedilo.
 function nogaMaila({ html, text }) {
   const n = NOGA_MAILA.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   return {
-    html: html === undefined ? undefined : `${html}<p style="margin:24px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;color:#555">${n}</p>`,
+    // Maili v obliki karte (mail_karta.js, temno ozadje) imajo oznako <!--noga--> znotraj ovoja: noga gre tja v temnem slogu; ostali dobijo nogo na konec.
+    html: html === undefined ? undefined : html.includes("<!--noga-->") ? html.replace("<!--noga-->", () => mailKarta.nogaHtml(n))
+      : `${html}<p style="margin:24px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;color:#555">${n}</p>`,
     text: text === undefined ? undefined : `${String(text).replace(/\s+$/, "")}\n\n${NOGA_MAILA}\n`,
   };
 }
@@ -6648,24 +6651,37 @@ function sellerVrstice(o, jez = "en") {
 }
 // Slovnicno stevilo za »sedez« (1 sedez, 2 sedeza, 3-4 sedezi, 5+ sedezev; 101 = sedez, 102 = sedeza ...).
 const sedezSl = (n) => (n % 100 === 1 ? "sedež" : n % 100 === 2 ? "sedeža" : n % 100 === 3 || n % 100 === 4 ? "sedeži" : "sedežev");
-// Izris dvojezicnega maila. zgradi(jez) -> { naslovBesedila, naslovHtml, razdelki: [{ naslov, vrstice[], krepko?, slika?: [{cid, oznaka, alt}] }] }.
+// Izris dvojezicnega maila. zgradi(jez) -> { naslovBesedila, naslovHtml, razdelki: [{ naslov, vrstice[], krepko? }] }.
 // Besedilo: blok sl, locilo, blok en. HTML: vsak blok v svojem <div lang>, vse prek GOST_POSTA_NIZ (podatki iz baze so escapani); povezava se zavije v <a>.
-// Koda QR (slika) je v obeh blokih (ista priloga CID, dve sklicevanji), da jo bralec vsakega jezika vidi tam, kjer jo besedilo omenja.
+const besediloDvojezicno = (bloki) => bloki.map((b) => `${b.naslovBesedila}\n\n` + b.razdelki.map((r) => `${r.naslov.toUpperCase()}\n${r.vrstice.join("\n")}`).join("\n\n")).join(`\n\n${LOCILO_MAILA}\n\n`) + "\n";
+const zPovezavo = (v, povezava, slog = "") => {
+  const e = GOST_POSTA_NIZ(v);
+  return povezava && v.includes(povezava) ? e.replace(GOST_POSTA_NIZ(povezava), () => `<a href="${GOST_POSTA_NIZ(povezava)}"${slog ? ` style="${slog}"` : ""}>${GOST_POSTA_NIZ(povezava)}</a>`) : e;
+};
 function izrisiDvojezicno(zgradi, povezava) {
   const bloki = JEZIKI_MAILA.map((j) => zgradi(j));
-  const besedilo = bloki.map((b) => `${b.naslovBesedila}\n\n` + b.razdelki.map((r) => `${r.naslov.toUpperCase()}\n${r.vrstice.join("\n")}`).join("\n\n")).join(`\n\n${LOCILO_MAILA}\n\n`) + "\n";
   const html = `<div style="font-family: Arial, sans-serif; line-height:1.5">` + bloki.map((b, i) =>
     (i ? `<hr style="margin:24px 0;border:0;border-top:1px solid #ccc">` : "") + `<div lang="${JEZIKI_MAILA[i]}"><h2>${GOST_POSTA_NIZ(b.naslovHtml)}</h2>` + b.razdelki.map((r) =>
-      `<h3>${GOST_POSTA_NIZ(r.naslov)}</h3>` + r.vrstice.map((v) => {
-        const e = GOST_POSTA_NIZ(v);
-        const z = povezava && v.includes(povezava) ? e.replace(GOST_POSTA_NIZ(povezava), () => `<a href="${GOST_POSTA_NIZ(povezava)}">${GOST_POSTA_NIZ(povezava)}</a>`) : e;
-        return `<p>${r.krepko ? `<strong>${z}</strong>` : z}</p>`;
-      }).join("") + (r.slika || []).map((k) => qrSlikaHtml(k.cid, k.oznaka, k.alt)).join("")).join("") + `</div>`).join("") + `</div>`;
-  return { besedilo, html };
+      `<h3>${GOST_POSTA_NIZ(r.naslov)}</h3>` + r.vrstice.map((v) => `<p>${r.krepko ? `<strong>${zPovezavo(v, povezava)}</strong>` : zPovezavo(v, povezava)}</p>`).join("")).join("") + `</div>`).join("") + `</div>`;
+  return { besedilo: besediloDvojezicno(bloki), html };
+}
+// Isto v obliki karte (mail z vstopnicami gostu in prenos gostu; mail_karta.js, 24. 10. 2026): zgradi(jez) vrne poleg razdelkov `karta` (podatki za karto) in `gumb`.
+// Karta je v VSAKEM jezikovnem bloku (svoje oznake; koda QR = ista priloga CID dvakrat), da jo bralec vsakega jezika vidi na vrhu svojega bloka (kot prej slika QR).
+// Besedilo (text/plain) je enako kot pri izrisiDvojezicno. `plakat`: vgrajen plakat dogodka (CID).
+function izrisiDvojezicnoKarta(zgradi, povezava, plakat = false) {
+  const bloki = JEZIKI_MAILA.map((j) => zgradi(j));
+  const N = GOST_POSTA_NIZ, K = mailKarta, Bv = K.B;
+  const html = K.ovoj("sl", bloki.map((b, i) => (i ? K.locilo : "") + `<div lang="${JEZIKI_MAILA[i]}">`
+    + `<h2 style="margin:0 0 16px;font-size:22px;line-height:1.25;font-weight:800;color:${Bv.besedilo}">${N(b.naslovHtml)}</h2>`
+    + K.karta({ ...b.karta, plakat }) + K.gumb(povezava, b.gumb)
+    + b.razdelki.map((r) => `<p style="margin:24px 0 6px;font-size:12px;line-height:1.3;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${Bv.oznaka}">${N(r.naslov)}</p>`
+      + r.vrstice.map((v) => `<p style="margin:0 0 6px;font-size:14px;line-height:1.5;color:${r.krepko ? Bv.besedilo : Bv.svetlo}">${r.krepko ? `<strong>${zPovezavo(v, povezava, `color:${Bv.besedilo};word-break:break-all`)}</strong>` : zPovezavo(v, povezava, `color:${Bv.besedilo};word-break:break-all`)}</p>`).join("")).join("")
+    + `</div>`).join(""));
+  return { besedilo: besediloDvojezicno(bloki), html };
 }
 // Vsebina potrdila kot razdelki { naslov, vrstice[] } za EN jezik `jez`; iz njih nastaneta besedilo in HTML (isto besedilo, brez oglasov).
-function gostPotrdilo(o, povezava, prevzeto, kode = []) {
-  return izrisiDvojezicno((jez) => {
+function gostPotrdilo(o, povezava, prevzeto, kode = [], plakat = false) {
+  return izrisiDvojezicnoKarta((jez) => {
     const T = (sl, en) => (jez === "sl" ? sl : en);
     // T9 (pravnik 2026-10-20): pri prodajalcu platformi (I50) ni kluba, je organizator (NEXT DIMENSIONS)
     const klub = o.stripe_account_id === placilaStripe.PLATFORMNI_RACUN ? T("organizator", "organiser") : T("klub", "club");
@@ -6673,10 +6689,11 @@ function gostPotrdilo(o, povezava, prevzeto, kode = []) {
       ? T(`Starostna meja: ${o.min_age}+. Vsak obiskovalec mora izpolnjevati starostno mejo. Pri vhodu se preverja osebni dokument; ${klub} vam lahko zavrne vstop, če je ne izpolnjujete.`,
           `Age limit: ${o.min_age}+. Every visitor must meet the age limit. ID is checked at the door; the ${klub} may refuse entry if you don't meet it.`)
       : T("Brez starostne omejitve.", "No age limit.");
+    // Koda QR je na karti na vrhu bloka (24. 10. 2026; prej slika pod besedilom, »spodaj«).
     const kodeVrstice = kode.length > 1
-      ? [T("Prva koda QR je spodaj, vse vaše kode QR (ena na stran) so v priloženem PDF (outly-tickets.pdf). Pri vhodu pokažite eno kodo na osebo.",
-           "The first QR code is below; all your QR codes (one per page) are in the attached PDF (outly-tickets.pdf). Show one code per person at the door.")]
-      : kode.length ? [T("Koda QR je spodaj in v priloženem PDF (outly-tickets.pdf). Pokažite jo pri vhodu.", "The QR code is below and in the attached PDF (outly-tickets.pdf). Show it at the door.")] : [];
+      ? [T("Prva koda QR je na vstopnici v tem sporočilu, vse vaše kode QR (ena na stran) so v priloženem PDF (outly-tickets.pdf). Pri vhodu pokažite eno kodo na osebo.",
+           "The first QR code is on the ticket in this email; all your QR codes (one per page) are in the attached PDF (outly-tickets.pdf). Show one code per person at the door.")]
+      : kode.length ? [T("Koda QR je na vstopnici v tem sporočilu in v priloženem PDF (outly-tickets.pdf). Pokažite jo pri vhodu.", "The QR code is on the ticket in this email and in the attached PDF (outly-tickets.pdf). Show it at the door.")] : [];
     const razdelki = [
       { naslov: T("Naročilo", "Order"), vrstice: [T(`Naročilo ${o.public_ref}. Čas naročila: ${ljDatum(o.paid_at || o.created_at, jez)}.`, `Order ${o.public_ref}, placed on ${ljDatum(o.paid_at || o.created_at, jez)}.`)] },
       { naslov: T("Dogodek", "Event"), vrstice: [o.event_title, ljDatum(o.start_at, jez), prizoriscePodatki(o), starost] },
@@ -6691,21 +6708,29 @@ function gostPotrdilo(o, povezava, prevzeto, kode = []) {
         : [T(`Odprite vstopnice (kodo QR pokažite pri vhodu): ${povezava}`, `Open your tickets (show the QR code at the door): ${povezava}`),
            T("Ta povezava je vaša vstopnica. Ne delite je z nikomer, razen z osebami, ki pridejo z vami.", "This link is your ticket. Don't share it except with people coming with you."),
            T("Če z istim e-naslovom ustvarite račun Outly, se bodo vstopnice pojavile tam.", "If you create an Outly account with this email, your tickets will appear there.")])
-        .concat(kodeVrstice),
-        slika: kode.slice(0, 1).map((k) => ({ cid: k.cid, oznaka: oznakaKode(k, jez), alt: T("Koda QR vstopnice", "Ticket QR code") })) },
+        .concat(kodeVrstice) },
       { naslov: T("Pritožbe", "Complaints"), vrstice: [T(`Glede dogodka: obrnite se na ${klub === "klub" ? "klub" : "organizatorja"} (podatki zgoraj). Glede nakupa ali plačila: obrnite se na Outly na ${POSTA_ODGOVOR}.`,
         `About the event: contact the ${klub} (details above). About the purchase or the payment: contact Outly at ${POSTA_ODGOVOR}.`)] },
       { naslov: T("Vprašanja", "Questions"), vrstice: [T(`Odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`, `Reply to this email or write to ${POSTA_ODGOVOR}.`)] },
     ];
-    return { naslovBesedila: T(`Vaše vstopnice Outly - naročilo ${o.public_ref}`, `Your Outly tickets - order ${o.public_ref}`), naslovHtml: T("Vaše vstopnice Outly", "Your Outly tickets"), razdelki };
-  }, povezava);
+    const k = kode[0];
+    const karta = {
+      jez, vrsta: T("Vstopnica · Standard", "Ticket · Standard"), naslov: o.event_title,
+      vrstice: [[T("Datum", "Date"), mailKarta.datumKarta(o.start_at, jez)], [T("Prizorišče", "Venue"), prizoriscePodatki(o)],
+        [T("Vstopnice", "Tickets"), `${o.quantity} × ${znesek(o.unit_price_cents, o.currency, jez)} = ${znesek(o.total_cents, o.currency, jez)}`, true],
+        o.min_age > 0 ? [T("Starost", "Age"), T(`${o.min_age}+ · osebni dokument`, `${o.min_age}+ · photo ID`)] : null],
+      qr: k ? { cid: k.cid, alt: T("Koda QR vstopnice", "Ticket QR code"), oznaka: oznakaKode(k, jez) } : null,
+      brezQr: T("Vstopnice odprite s povezavo spodaj", "Open your tickets with the link below"), pod: [o.public_ref, T("Pokažite pri vhodu", "Show at the door")],
+    };
+    return { naslovBesedila: T(`Vaše vstopnice Outly - naročilo ${o.public_ref}`, `Your Outly tickets - order ${o.public_ref}`), naslovHtml: T("Vaše vstopnice Outly", "Your Outly tickets"), razdelki,
+      karta, gumb: prevzeto ? T("Odpri v aplikaciji", "Open in the app") : T("Odpri vstopnice", "Open your tickets") };
+  }, povezava, plakat);
 }
 // Oznaka kode QR v mailu (»Ticket 2 of 3«) po jeziku; k.n / k.skupaj postavi klicalec. PDF ima angleski k.oznaka.
 const oznakaKode = (k, jez) => (k.skupaj > 1 ? (jez === "sl" ? `Vstopnica ${k.n} od ${k.skupaj}` : `Ticket ${k.n} of ${k.skupaj}`) : "");
 // --- priloge: QR kot vgrajena slika (CID) + PDF (migracija 034, vstopnica_priloge.js) ---
 const QR_STAVEK = "This email and the attached PDF are your ticket. The QR code is valid for one entry: whoever shows it first gets in. Don't forward this email, post the code or share the link.";
 const QR_STAVEK_SL = "To sporočilo in priloženi PDF sta vaša vstopnica. Koda QR velja za en vstop: vstopi tisti, ki jo pokaže prvi. Sporočila ne posredujte naprej, kode ne objavljajte in povezave ne delite z drugimi.";
-const qrSlikaHtml = (cid, oznaka, alt = "Ticket QR code") => `<div style="margin:12px 0">${oznaka ? `<p style="margin:0 0 4px">${GOST_POSTA_NIZ(oznaka)}</p>` : ""}<img src="cid:${cid}" width="228" height="228" alt="${GOST_POSTA_NIZ(alt)}" style="display:block;width:228px;height:228px;border:1px solid #ccc"></div>`;
 // Resend 3.5 posreduje telo strezniku neprepisano (JSON, kljuci snake_case: content_type, content_id): vsebina priloge je BASE64 niz (Buffer bi se serializiral
 // napacno), `content_id` vgradi sliko (cid:). SDK tega NE tipizira in ne preverja (verzija 3.5.0): PREVERI ob vsaki nadgradnji SDK (npr. 4.x je prepisal polja v camelCase).
 // Inline slika SAMO za prvo kodo (zanesljivost: sestavljanje je CPU na glavni niti; ostale kode so v PDF, ena na stran); sestavljanje je asinhrono in prepusca zanko (vstopnica_priloge.js).
@@ -6822,7 +6847,7 @@ async function gostPosljiEnoPosto(oid) {
   if (!k.rows.length) return false;
   const o = k.rows[0];
   const ev = await pool.query(
-    `SELECT e.title AS event_title, e.start_at, e.min_age, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
+    `SELECT e.title AS event_title, e.start_at, e.min_age, e.poster_url, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
             cl.contact_phone AS club_phone, cl.contact_email AS club_email, ${SQL_PRODAJALEC_MAIL}, ${PRIZORISCE_MAIL_STOLPCI}
        FROM events e JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN} WHERE e.id = $1`, [o.event_id]);
   if (!ev.rows.length) return false;
@@ -6835,10 +6860,12 @@ async function gostPosljiEnoPosto(oid) {
   const kv = (await pool.query(
     `SELECT t.serial, t.event_id, t.created_at FROM tickets t WHERE t.order_id = $1 AND t.status = 'valid' AND t.holder_user_id IS NULL AND NOT t.holder_is_guest ORDER BY t.id`, [oid])).rows;
   const kode = kv.map((t, i) => ({ cid: `ticket-qr-${i + 1}`, oznaka: kv.length > 1 ? `Ticket ${i + 1} of ${kv.length}` : "", n: i + 1, skupaj: kv.length, koda: qrVstopnice(t) }));
-  const { besedilo, html } = gostPotrdilo(x, povezava, prevzeto, kode);
+  const plakat = await mailKarta.plakatZaMail(x.poster_url);   // najvec ~3 s (rok), v rezervi GOST_POSTA_REZERVA_MS; ob napaki brez plakata
+  const { besedilo, html } = gostPotrdilo(x, povezava, prevzeto, kode, !!plakat);
   const priloge = await prilogeVstopnic(x, kode.map(k => ({ ...k, vrsta: "Standard ticket" })), "outly-tickets.pdf");
   const r = await gostResendPosli({
-    to: o.guest_email, subject: `Vaše vstopnice / Your tickets: ${x.event_title} (order ${o.public_ref})`.slice(0, 200), html, text: besedilo, attachments: priloge,
+    to: o.guest_email, subject: `Vaše vstopnice / Your tickets: ${x.event_title} (order ${o.public_ref})`.slice(0, 200), html, text: besedilo,
+    attachments: [...priloge, mailKarta.prilogaLogo(), ...(plakat ? [mailKarta.prilogaPlakat(plakat)] : [])],
   });
   if (r && r.error) {
     console.error(`Resend napaka (gost, vstopnice, ${o.public_ref}, poskus ${o.guest_mail_attempts}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
@@ -6898,7 +6925,7 @@ const potrdiloIzcrpaj = (oid) => pool.query("UPDATE orders SET receipt_mail_atte
 // Vsebina potrdila kupcu (#95, kratka oblika od 20. 10. 2026: Martin je obrnil »brez QR«, DECISIONS 2026-10-20; besedilo po pravniku
 // outly-hq/pravno/2026-10-20-potrdilo-nakupa-kratko.md, razdelek 6A platforma / 6B klub). Dvojezicno: slovenski blok (obvezen, ZVPot-1 7/1), locilo, angleski blok.
 // Vsak blok: VRH (dogodek, datum, prizorisce, kolicina · znesek · plačano, starost + osebni dokument, kje je QR, stavek o prenosu, gumb, stevilka narocila) in
-// DROBNI TISK (en odstavek, >= 12 px, #555 ali temneje, ni zlozen; isto besedilo v text/plain): neobstoj odstopa PRVI, zakonsko jamstvo, prodajalec (firma, sedez,
+// DROBNI TISK (en odstavek, >= 12 px, #555 ali temneje na beli oz. #A1A1A6 na crni od 24. 10., ni zlozen; isto besedilo v text/plain): neobstoj odstopa PRVI, zakonsko jamstvo, prodajalec (firma, sedez,
 // telefon, e-naslov, maticna, davcna; stavek o DDV), pri klubu Outly kot posrednik, pritozbe, pogoji z razlicico. Nic pravnega ni samo na povezavi ali samo v PDF.
 // pril = { kode: [{ cid }], vse: N vstopnic narocila, pdf: true|false } — PDF in vgrajena koda samo, ce je priprava uspela (sicer »vstopnice so v aplikaciji«, T4).
 // T9: pri prodajalcu platformi (I50) besedilo ne govori o klubu (»organizator« / »prodajalec«).
@@ -6962,31 +6989,40 @@ function kupecPotrdiloBloki(o, povezava, pril) {
       o.terms_version ? T(`Pogoji uporabe Outly, različica ${o.terms_version}: https://outly.si/terms`, `Outly terms of use, version ${o.terms_version}: https://outly.si/terms`)
         : T("Pogoji uporabe Outly: https://outly.si/terms", "Outly terms of use: https://outly.si/terms"),
     ].join(" ");
+    // Karta (mail_karta.js): isti podatki kot `vrh`, razporejeni po stolpcih; koda QR prve vstopnice samo, ce je PDF nastal.
+    const karta = {
+      jez, vrsta: jeMiza ? T("VIP miza", "VIP table") : T("Vstopnica", "Ticket"), naslov: o.event_title,
+      vrstice: [[T("Datum", "Date"), mailKarta.datumKarta(o.start_at, jez)], [T("Prizorišče", "Venue"), prizoriscePodatki(o)], [T("Nakup", "Purchase"), vrh[2], true],
+        meja > 0 ? [T("Starost", "Age"), T(`${meja}+${paket ? " (miza s paketom pijače)" : ""} · osebni dokument`, `${meja}+${paket ? " (table with a drinks package)" : ""} · photo ID`)] : null],
+      qr: pril.pdf && n ? { cid: pril.kode[0].cid, alt: T("Koda QR vstopnice", "Ticket QR code"), oznaka: n > 1 ? T(`Vstopnica 1 od ${n}`, `Ticket 1 of ${n}`) : "" } : null,
+      brezQr: T("Kode QR so v aplikaciji Outly", "Your QR codes are in the Outly app"), pod: [o.public_ref, T("Pokažite pri vhodu", "Show at the door")],
+    };
     return {
-      jez, naslov: T(`Vaše vstopnice za ${o.event_title}`, `Your tickets for ${o.event_title}`), vrh, kode, prenos,
-      slika: jez === "sl" && pril.pdf && n ? { cid: pril.kode[0].cid, alt: T("Koda QR vstopnice", "Ticket QR code") } : null,
+      jez, naslov: T(`Vaše vstopnice za ${o.event_title}`, `Your tickets for ${o.event_title}`), vrh, kode, prenos, karta,
       gumb: T("Odpri v aplikaciji", "Open in the app"),
       narocilo: T(`Naročilo ${o.public_ref}, ${ljDatum(o.paid_at || o.created_at, jez)}.`, `Order ${o.public_ref}, ${ljDatum(o.paid_at || o.created_at, jez)}.`),
       drobni, brezTelefona: p.brezTelefona,
     };
   });
 }
-function kupecPotrdilo(o, povezava, pril = { kode: [], vse: 0, pdf: false }) {
+// HTML (24. 10. 2026, mail_karta.js): temen ovoj, na vrhu karta v slovenscini (koda QR prve vstopnice SAMO enkrat, kot doslej v slovenskem bloku), nato slovenski blok
+// (kje so kode, prenos, gumb, narocilo, drobni tisk) in angleski blok s polnimi podatki (vrh). Besedilo (text/plain) je nespremenjeno. `plakat`: vgrajen plakat dogodka (CID).
+function kupecPotrdilo(o, povezava, pril = { kode: [], vse: 0, pdf: false }, plakat = false) {
   const bloki = kupecPotrdiloBloki(o, povezava, pril);
   const besedilo = bloki.map((b) => [b.naslov, "", ...b.vrh, "", ...b.kode, ...(b.prenos ? [b.prenos] : []), "", b.narocilo, "", b.drobni].join("\n")).join(`\n\n${LOCILO_MAILA}\n\n`) + "\n";
-  const N = GOST_POSTA_NIZ;
-  const zLinkom = (v) => { const e = N(v); return v.includes(povezava) ? e.replace(N(povezava), () => `<a href="${N(povezava)}" style="color:#111">${N(povezava)}</a>`) : e; };
-  const html = `<div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111;max-width:600px">` + bloki.map((b, i) =>
-    (i ? `<hr style="margin:28px 0;border:0;border-top:1px solid #ccc">` : "") + `<div lang="${b.jez}">`
-    + `<h2 style="margin:0 0 8px;font-size:20px">${N(b.naslov)}</h2>`
-    + `<p style="margin:0 0 12px">${b.vrh.map((v, j) => (j === 2 ? `<strong>${N(v)}</strong>` : N(v))).join("<br>")}</p>`
-    + (b.slika ? `<div style="margin:12px 0"><img src="cid:${b.slika.cid}" width="228" height="228" alt="${N(b.slika.alt)}" style="display:block;width:228px;height:228px;border:1px solid #ccc"></div>` : "")
-    + b.kode.map((v) => `<p style="margin:0 0 6px">${zLinkom(v)}</p>`).join("")
-    + (b.prenos ? `<p style="margin:0 0 6px"><strong>${N(b.prenos)}</strong></p>` : "")
-    + `<p style="margin:16px 0"><a href="${N(povezava)}" style="display:inline-block;background:#111;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:bold">${N(b.gumb)}</a></p>`
-    + `<p style="margin:0 0 12px">${N(b.narocilo)}</p>`
-    + `<p style="margin:16px 0 0;font-size:13px;line-height:1.5;color:#555">${N(b.drobni)}</p>`
-    + `</div>`).join("") + `</div>`;
+  const N = GOST_POSTA_NIZ, K = mailKarta, Bv = K.B;
+  const zLinkom = (v) => { const e = N(v); return v.includes(povezava) ? e.replace(N(povezava), () => `<a href="${N(povezava)}" style="color:${Bv.besedilo}">${N(povezava)}</a>`) : e; };
+  const p = (v, slog = "") => `<p style="margin:0 0 8px;font-size:14px;line-height:1.5;color:${Bv.svetlo};${slog}">${v}</p>`;
+  const html = K.ovoj("sl", K.glava("Potrdilo o nakupu", bloki[0].naslov) + K.karta({ ...bloki[0].karta, plakat })
+    + bloki.map((b, i) => (i ? K.locilo : "") + `<div lang="${b.jez}">`
+      + (i ? `<h2 style="margin:0 0 10px;font-size:20px;line-height:1.25;font-weight:800;color:${Bv.besedilo}">${N(b.naslov)}</h2>`
+           + p(b.vrh.map((v, j) => (j === 2 ? `<strong style="color:${Bv.besedilo}">${N(v)}</strong>` : N(v))).join("<br>"), "margin:0 0 12px") : `<div style="height:20px;line-height:20px;font-size:1px">&nbsp;</div>`)
+      + b.kode.map((v) => p(zLinkom(v))).join("")
+      + (b.prenos ? p(`<strong>${N(b.prenos)}</strong>`, `color:${Bv.besedilo}`) : "")
+      + K.gumb(povezava, b.gumb)
+      + `<p style="margin:16px 0 0;font-size:13px;line-height:1.5;color:${Bv.drobno}">${N(b.narocilo)}</p>`
+      + `<p style="${K.SLOG_DROBNO}">${N(b.drobni)}</p>`
+      + `</div>`).join(""));
   return { besedilo, html, brezTelefona: bloki[0].brezTelefona };
 }
 // Varnostni stavek v PDF kupca z racunom (angleski kot ves PDF; pravnik 2026-10-20, razdelek 5): prenos razveljavi kodo v PDF.
@@ -7005,7 +7041,7 @@ async function posljiPotrdiloKupcu(oid) {
   } finally { potrdiloVTeku.delete(kljuc); }
 }
 // Vrstni red (#95 s PDF, 20. 10. 2026): preverbe -> podatki dogodka in TRENUTNE vstopnice kupca -> priprava QR/PDF (asinhrona, vstopnica_priloge.js; ob napaki POZOR in mail
-// BREZ priloge, T4) -> rezervacija poskusa (claim) -> Resend. Priloga nastane PRED claimom: rok ponovnega prevzema (GOST_POSTA_TIMEOUT_MS + rezerva) tako pokriva samo klic
+// BREZ priloge, T4) -> plakat (mail_karta.js, rok 3 s, I64) -> rezervacija poskusa (claim) -> Resend. Priloga nastane PRED claimom: rok ponovnega prevzema (GOST_POSTA_TIMEOUT_MS + rezerva) tako pokriva samo klic
 // Resenda, ne priprave PDF ob navali (sicer bi druga instanca narocilo prevzela med pripravo in poslala drugic). Vse to tece po COMMIT-u nakupa/webhooka, brez povezave
 // iz poola med pripravo in pod semaforjem potrdil (2 socasni), zato nakup, webhook in sken ne cakajo nanj (I16).
 // Kode QR: samo vstopnice, ki so se veljavne in KUPCEVE (holder NULL ali kupec, ne gost), s serialom ob posiljanju: prenesena vstopnica (nov serial je prejemnikov)
@@ -7033,7 +7069,7 @@ async function potrdiloPosljiEno(oid) {
     }
   }
   const ev = (await pool.query(
-    `SELECT e.title AS event_title, e.start_at, e.min_age, e.club_id, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
+    `SELECT e.title AS event_title, e.start_at, e.min_age, e.club_id, e.poster_url, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
             cl.contact_phone AS club_phone, cl.contact_email AS club_email, ${SQL_PRODAJALEC_MAIL}, ${PRIZORISCE_MAIL_STOLPCI}
        FROM events e JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN} WHERE e.id = $1`, [pre.event_id])).rows[0];
   if (!ev) return false;
@@ -7053,6 +7089,8 @@ async function potrdiloPosljiEno(oid) {
       console.error(`[potrdilo] POZOR: priprava QR/PDF za narocilo ${pre.public_ref} ni uspela (${e && e.message}); potrdilo gre BREZ priloge (vstopnice so v aplikaciji)`);
     }
   }
+  // Plakat dogodka (vgrajen, CID; mail_karta.js): pred rezervacijo poskusa kot PDF; ob napaki ali tujem URL-ju mail brez plakata.
+  const plakat = await mailKarta.plakatZaMail(ev.poster_url);
   const k = await pool.query(
     `UPDATE orders SET receipt_mail_attempts = receipt_mail_attempts + 1, receipt_mail_claimed_at = NOW()
       WHERE id = $1 AND user_id IS NOT NULL AND guest_list_id IS NULL AND status = 'paid' AND receipt_mail_sent_at IS NULL
@@ -7065,11 +7103,11 @@ async function potrdiloPosljiEno(oid) {
   const o = k.rows[0];
   const x = { ...o, ...ev };
   const zPdf = priloge.length > 0;
-  const { besedilo, html, brezTelefona } = kupecPotrdilo(x, `${placilaStripe.osnovaSpleta()}/app/tickets`, { kode: zPdf ? kode : [], vse: vs.length, pdf: zPdf });
+  const { besedilo, html, brezTelefona } = kupecPotrdilo(x, `${placilaStripe.osnovaSpleta()}/app/tickets`, { kode: zPdf ? kode : [], vse: vs.length, pdf: zPdf }, !!plakat);
   // T2 (pravnik 20. 10. 2026, ZVPot-1 130/1-1): telefon prodajalca je obvezen, I34 pa pusti nakup tudi samo z e-naslovom. Ne izpuscamo tiho: alarm (najvec 1/h).
   if (brezTelefona) gostPostaDnevnik("potrdilo-brez-telefona", `[potrdilo] POZOR: prodajalec (klub ${ev.club_id}) nima telefona: potrdilo narocila ${o.public_ref} je brez telefona prodajalca (ZVPot-1 130/1-1); vpisi telefon v podatke prodajalca`);
   const r = await gostResendPosli({ to: o.buyer_email, subject: `Vaše vstopnice / Your tickets: ${x.event_title}, ${LJ_KRATKO.format(new Date(x.start_at))} (${o.public_ref})`.slice(0, 200),
-    html, text: besedilo, attachments: zPdf ? priloge : undefined });
+    html, text: besedilo, attachments: [...(zPdf ? priloge : []), mailKarta.prilogaLogo(), ...(plakat ? [mailKarta.prilogaPlakat(plakat)] : [])] });
   if (r && r.error) {
     console.error(`Resend napaka (potrdilo kupcu, ${o.public_ref}, poskus ${o.receipt_mail_attempts}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
     if (o.receipt_mail_attempts >= GOST_POSTA_POSKUSOV) console.error(`[potrdilo] POZOR: potrdilo za narocilo ${o.public_ref} NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov); kupec ima vstopnice v aplikaciji, potrdila po e-posti pa ne`);
@@ -7752,8 +7790,8 @@ app.get("/guest/ticket", async (req, res) => {
 // Vsebina po pravni presoji (outly-hq pravno/2026-10-05-prenos-brez-racuna.md, razdelki 1.3, 3, 5): obvestilo po GDPR 14 v CELOTI v mailu (politika prenosa brez racuna
 // ne opisuje), pravica do ugovora (21(4)) v LOCENEM odstavku, varnostno besedilo, en nevtralen stavek o prevzemu v racun (ne trzenje, ZEKom-2 226), brez oglasov.
 // Pošiljatelj = uporabniško ime (nikoli e-naslov). Brez sledenja (to nastavlja Resend na domeni). E-naslova prejemnika ni v PDF.
-function prenosPotrdilo(x, povezava, kode) {
-  return izrisiDvojezicno((jez) => {
+function prenosPotrdilo(x, povezava, kode, plakat = false) {
+  return izrisiDvojezicnoKarta((jez) => {
     const T = (sl, en) => (jez === "sl" ? sl : en);
     const klubKontakt = [x.club_phone, x.club_email].filter(Boolean).join(", ");
     const meja = starostZaPaket(x.min_age, x.package_id !== null && x.package_id !== undefined);
@@ -7772,8 +7810,7 @@ function prenosPotrdilo(x, povezava, kode) {
       { naslov: T("Dogodek", "Event"), vrstice: [x.event_title, ljDatum(x.start_at, jez), prizoriscePodatki(x),
           T(`Organizator: ${x.club_name}${klubKontakt ? ` (${klubKontakt})` : ""}. Glede samega dogodka se obrnite na organizatorja.`,
             `Organiser: ${x.club_name}${klubKontakt ? ` (${klubKontakt})` : ""}. Contact the organiser about the event itself.`), starost] },
-      { naslov: T("Vaša vstopnica", "Your ticket"), vrstice: [vrsta, T(`Kodo QR pokažite pri vhodu (je tudi v priloženem PDF, outly-ticket.pdf): ${povezava}`, `Show this QR code at the door (it is also in the attached PDF, outly-ticket.pdf): ${povezava}`)],
-        slika: kode.map((k) => ({ cid: k.cid, oznaka: oznakaKode(k, jez), alt: T("Koda QR vstopnice", "Ticket QR code") })) },
+      { naslov: T("Vaša vstopnica", "Your ticket"), vrstice: [vrsta, T(`Kodo QR pokažite pri vhodu (je tudi v priloženem PDF, outly-ticket.pdf): ${povezava}`, `Show this QR code at the door (it is also in the attached PDF, outly-ticket.pdf): ${povezava}`)] },
       { naslov: T("Pravila vstopnice", "Ticket rules"), vrstice: T(
           ["En vstop na kodo.", "Organizator vam lahko zavrne vstop na podlagi hišnega reda ali zakona.", "Preprodaja vstopnice ni dovoljena.",
            "Če je dogodek odpovedan, se vračilo izplača osebi, ki je vstopnico kupila, ne vam.", "Če z istim e-naslovom ustvarite račun Outly, se bo vstopnica pojavila tam."],
@@ -7802,9 +7839,17 @@ function prenosPotrdilo(x, povezava, kode) {
           "Don't want us to process your email address? You have the right to object at any time: reply to this email and we will delete your address.")] },
       { naslov: T("Vprašanja", "Questions"), vrstice: [T(`Odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`, `Reply to this email or write to ${POSTA_ODGOVOR}.`)] },
     ];
+    const k = kode[0];
+    const karta = {
+      jez, vrsta: x.table_label ? T("VIP miza", "VIP table") : T("Vstopnica · Standard", "Ticket · Standard"), naslov: x.event_title,
+      vrstice: [[T("Datum", "Date"), mailKarta.datumKarta(x.start_at, jez)], [T("Prizorišče", "Venue"), prizoriscePodatki(x)], [T("Vstopnica", "Ticket"), vrsta, true],
+        [T("Pošiljatelj", "From"), posiljatelj], meja > 0 ? [T("Starost", "Age"), T(`${meja}+ · osebni dokument`, `${meja}+ · photo ID`)] : null],
+      qr: k ? { cid: k.cid, alt: T("Koda QR vstopnice", "Ticket QR code"), oznaka: oznakaKode(k, jez) } : null,
+      brezQr: T("Vstopnico odprite s povezavo spodaj", "Open your ticket with the link below"), pod: [T("Pokažite pri vhodu", "Show at the door")],
+    };
     return { naslovBesedila: T(`${posiljatelj} vam je poslal(-a) vstopnico za ${x.event_title}`, `${posiljatelj} sent you a ticket for ${x.event_title}`),
-      naslovHtml: T(`${posiljatelj} vam je poslal(-a) vstopnico`, `${posiljatelj} sent you a ticket`), razdelki };
-  }, povezava);
+      naslovHtml: T(`${posiljatelj} vam je poslal(-a) vstopnico`, `${posiljatelj} sent you a ticket`), razdelki, karta, gumb: T("Odpri vstopnico", "Open your ticket") };
+  }, povezava, plakat);
 }
 
 // Meje maila (zloraba: mail na tuj naslov) so v transakciji prenosa (POST /tickets/:id/transfer): GOST_PRENOS_NA_DAN na posiljatelja, GOST_PRENOS_NA_NASLOV na naslov.
@@ -7830,7 +7875,7 @@ async function prenosPosljiEnoPosto(tid) {
   if (!k.rows.length) return false;
   const t = k.rows[0];
   const ev = await pool.query(
-    `SELECT e.title AS event_title, e.start_at, e.min_age, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
+    `SELECT e.title AS event_title, e.start_at, e.min_age, e.poster_url, cl.name AS club_name, cl.address AS club_address, cl.city AS club_city,
             cl.contact_phone AS club_phone, cl.contact_email AS club_email, o.package_id, o.table_label, o.package_name, ${PRIZORISCE_MAIL_STOLPCI},
             (SELECT u.username FROM ticket_transfers tt JOIN users u ON u.id = tt.from_user_id WHERE tt.ticket_id = t.id AND tt.to_guest ORDER BY tt.id DESC LIMIT 1) AS from_username
        FROM tickets t JOIN orders o ON o.id = t.order_id JOIN events e ON e.id = t.event_id JOIN clubs cl ON cl.id = e.club_id ${PRIZORISCE_JOIN} WHERE t.id = $1`, [tid]);
@@ -7842,9 +7887,11 @@ async function prenosPosljiEnoPosto(tid) {
   const meja = starostZaPaket(x.min_age, x.package_id !== null);
   const vrsta = x.table_label ? `VIP table ${x.table_label}${x.package_name ? ` - ${x.package_name}` : ""}` : "Standard ticket";
   const povezava = gostVstopnicaPovezava(zeton);
-  const { besedilo, html } = prenosPotrdilo(x, povezava, kode);
+  const plakat = await mailKarta.plakatZaMail(x.poster_url);   // najvec ~3 s (rok), v rezervi GOST_POSTA_REZERVA_MS; ob napaki brez plakata
+  const { besedilo, html } = prenosPotrdilo(x, povezava, kode, !!plakat);
   const priloge = await prilogeVstopnic({ ...x, starostPdf: meja > 0 ? `Age ${meja}+ - bring a valid photo ID` : "" }, kode.map(c => ({ ...c, vrsta })), "outly-ticket.pdf");
-  const r = await gostResendPosli({ to: t.holder_guest_email, subject: `${x.from_username || "An Outly user"} vam je poslal(-a) vstopnico / sent you a ticket: ${x.event_title}`.slice(0, 200), html, text: besedilo, attachments: priloge });
+  const r = await gostResendPosli({ to: t.holder_guest_email, subject: `${x.from_username || "An Outly user"} vam je poslal(-a) vstopnico / sent you a ticket: ${x.event_title}`.slice(0, 200), html, text: besedilo,
+    attachments: [...priloge, mailKarta.prilogaLogo(), ...(plakat ? [mailKarta.prilogaPlakat(plakat)] : [])] });
   if (r && r.error) {
     console.error(`Resend napaka (prenos gostu, vstopnica ${tid}, poskus ${t.holder_guest_mail_attempts}/${GOST_POSTA_POSKUSOV}):`, JSON.stringify(r.error));
     if (t.holder_guest_mail_attempts >= GOST_POSTA_POSKUSOV) console.error(`[gost] POZOR: mail s prenesene vstopnice ${tid} NI mogoce poslati (izcrpanih ${GOST_POSTA_POSKUSOV} poskusov); prejemnik vstopnice ni dobil`);

@@ -209,9 +209,9 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(!/<script|pixel|track/i.test(m0.html || "") && !/<img[^>]+src="(?!cid:)/i.test(m0.html || ""), "mail: brez sledilnikov in zunanjih slik (samo vgrajene cid:)");
     // QR inline + PDF (migracija 034): 2 vstopnici -> vgrajena slika PNG SAMO za prvo kodo (content_id) + 1 PDF z 2 stranema (vse kode)
     const pr = m0.attachments || [];
-    const slike = pr.filter(x => x.content_type === "image/png");
+    const slike = pr.filter(x => x.content_type === "image/png" && x.content_id !== "outly-logo");   // logotip karte (24. 10. 2026) ni koda QR
     assert(slike.length === 1 && slike[0].content_id === "ticket-qr-1" && Buffer.from(slike[0].content, "base64").subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])), "mail: ena vgrajena slika QR (prva koda; PNG, content_id)", pr.map(x => [x.filename, x.content_type, x.content_id]));
-    assert(/src="cid:ticket-qr-1"/.test(m0.html || "") && !/cid:ticket-qr-2/.test(m0.html || "") && /first QR code is below; all your QR codes \(one per page\) are in the attached PDF/.test(m0.text || ""), "mail: HTML kaze prvo sliko (cid:), besedilo pove, da so vse kode v PDF");
+    assert(/src="cid:ticket-qr-1"/.test(m0.html || "") && !/cid:ticket-qr-2/.test(m0.html || "") && /first QR code is on the ticket in this email; all your QR codes \(one per page\) are in the attached PDF/.test(m0.text || ""), "mail: HTML kaze prvo sliko (cid:), besedilo pove, da so vse kode v PDF");
     const pdfP = pr.find(x => x.content_type === "application/pdf");
     const pdfB = pdfP ? Buffer.from(pdfP.content, "base64") : Buffer.alloc(0);
     assert(pdfP && pdfP.filename === "outly-tickets.pdf" && pdfB.subarray(0, 5).toString() === "%PDF-" && pdfB.toString("latin1").includes("%%EOF") && (pdfB.toString("latin1").match(/\/Type \/Page /g) || []).length === 2, "mail: priloga PDF (2 strani, vse kode)", pdfP && pdfP.filename);
@@ -240,7 +240,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(/Gost Noc\n.*\(ljubljanski čas\)\nPure Club, .*Ljubljana\nBrez starostne omejitve\./s.test(slG), "sl: dogodek, datum, kraj, starostna meja");
     assert(slG.includes("2 x 15,00 EUR = 30,00 EUR. DDV se obračuna v skladu s statusom prodajalca."), "sl: znesek z vejico + DDV stavek (vat_rate NULL, vat_payer null)");
     assert(/Vstopnico prodaja klub: Pure Club/.test(slG) && /Outly je samo posrednik: NEXT DIMENSIONS/.test(slG) && /pravice do odstopa od pogodbe ni \(Zakon o varstvu potrošnikov ZVPot-1, 135\. člen, 12\. točka\)/.test(slG), "sl: prodajalec, posrednik, izjema od odstopa");
-    assert(/Sprejeli ste pogoje uporabe Outly, različica 2026-10-01: https:\/\/outly\.si\/terms/.test(slG) && /Ta povezava je vaša vstopnica\./.test(slG) && /Prva koda QR je spodaj, vse vaše kode QR/.test(slG), "sl: pogoji z razlicico, skrivna povezava, koda QR");
+    assert(/Sprejeli ste pogoje uporabe Outly, različica 2026-10-01: https:\/\/outly\.si\/terms/.test(slG) && /Ta povezava je vaša vstopnica\./.test(slG) && /Prva koda QR je na vstopnici v tem sporočilu, vse vaše kode QR/.test(slG), "sl: pogoji z razlicico, skrivna povezava, koda QR");
     assert(/Pritožbe\n/i.test(slG) && slG.includes(`https://outly.test/app/guest/order#t=${zetonIzMaila(m0)}`), "sl: pritozbe in povezava z zetonom");
     assert((m0.html.match(/cid:ticket-qr-1/g) || []).length === 2 && m0.html.includes("Vstopnica 1 od 2") && m0.html.includes("Ticket 1 of 2") && m0.html.includes('alt="Koda QR vstopnice"') && !/cid:ticket-qr-2/.test(m0.html), "HTML: koda QR v obeh blokih z oznako po jeziku (ista priloga)");
     assert((m0.html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="sl">,<div lang="en">', "HTML: bloka sl in en");
