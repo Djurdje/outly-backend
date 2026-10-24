@@ -4809,6 +4809,18 @@ admin.get("/promo-codes/:id/stats", async (req, res) => {
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 
+// --- pravo brisanje: dogodek, klub, promo koda (Martin 24. 10. 2026, I63; admin_brisanje.js) ---
+// DELETE /admin/api/events/:id | /clubs/:id | /promo-codes/:id { reason } + GET .../delete-check (predogled). SAMO vloga admin (zeton agenta 403, I56; poti niso v agent API-ju in ne na
+// belem seznamu predlogov). Dogodek/klub s pravim prometom, racuni, spori ali Stripovimi vracili se NE izbrise (409), uradni profil Outly tudi ne. Omejevalnik: 20 klicev/min/admin.
+admin.use(require("./admin_brisanje").ustvari({
+  pool, celoId4, zapisiAdminDejanje, sqlTestno: SQL_TESTNO_NAROCILO,
+  omeji: omeji({ kljuc: "admin-brisanje", najvec: 20, oknoSekund: 60, poUporabniku: true, priNapaki: "lokalno" }),
+  poBrisanju: ({ eventIds = [] }) => {   // proces pozabi razprodane kljuce izbrisanih dogodkov; javni predpomnilnik izprazni tudi middleware (DELETE brez 4xx), a ne cakamo nanj
+    for (const id of eventIds) for (const k of [...razprodano.keys()]) if (k === "v:" + id || k.startsWith("m:" + id + ":")) razprodano.delete(k);
+    javniPredpomnilnik.razveljavi();
+  },
+}));
+
 // --- varnostna kopija ---
 // GET /admin/api/export — logični izvoz VSEH tabel v shemi public kot JSON
 // (vrstice + trenutne vrednosti zaporedij), v enem posnetku (REPEATABLE READ),
