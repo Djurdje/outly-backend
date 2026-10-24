@@ -3760,7 +3760,8 @@ admin.get("/summary", async (req, res) => {
         (SELECT COUNT(*)::int FROM racuni WHERE stanje='napaka')             AS racuni_napaka,
         (SELECT COUNT(*)::int FROM predlogi_dejanj WHERE stanje='caka' AND velja_do > NOW()) AS predlogi_caka,
         (SELECT COUNT(*)::int FROM predlogi_dejanj WHERE nujno_at IS NOT NULL AND nujno_pregledano_at IS NULL) AS nujno_nepregledanih`);
-    return res.json({ ...r.rows[0], warnings_red: adminNadzor.rdeceStevilo() });
+    // payments_mode (DODANO 24. 10. 2026): "fake" | "sandbox" | "live" (kot v GET /admin/api/finance); panel kaze rdec pas »Placila niso v zivem nacinu«, ce ni "live".
+    return res.json({ ...r.rows[0], warnings_red: adminNadzor.rdeceStevilo(), payments_mode: placilaStripe.testniNacin() ? "fake" : (placilaStripe.jeSandbox() ? "sandbox" : "live") });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });
 

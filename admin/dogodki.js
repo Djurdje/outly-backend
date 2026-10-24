@@ -249,13 +249,12 @@
     let ok;
     if (novo === "published" && window.novDogodek && window.novDogodek.objavaBlokirana(cele(e.id))) return obvesti("Objava je onemogočena: preveri seznam »Pred objavo«.", "slabo");
     if (novo === "cancelled") {
-      const n = cele(s.paid_orders), nt = cele(s.test_paid_orders);
+      const n = cele(s.paid_orders);
       ok = await potrdi({
         naslov: "Odpovem dogodek?", nevarno: true, potrdiBesedilo: "Odpovej dogodek", vpis: "ODPOVEJ", razlog: "obvezen",
         vsebina: [h("p", {}, `»${e.title}« bo odpovedan in ne bo več viden v aplikaciji.`),
           n > 0 ? h("p", {}, h("b", {}, `${n} plačanih naročil (${cena(s.paid_cents)})`), " dobi denar samodejno v celoti nazaj, vstopnice prenehajo veljati, kupci dobijo e-pošto. Vračil po izvedbi ni mogoče preklicati.")
-            : h("p", {}, "Pravih plačanih naročil ni, zato noben kupec ne dobi vračila."),
-          nt > 0 ? h("p", {}, `Še ${nt} testnih naročil (${cena(s.test_paid_cents)}, ni pravi denar).`) : null],
+            : h("p", {}, "Plačanih naročil ni, zato noben kupec ne dobi vračila.")],
       });
       if (!ok) return;
       await varno(async () => { await klic("PATCH", "/admin/api/events/" + cele(e.id), { status: "cancelled", reason: ok.razlog }); obvesti(`»${e.title}« odpovedan.`, "ok"); naloziPregled(); });
@@ -377,6 +376,8 @@
       if (e.status !== "published") { const g = h("button", { type: "button", id: "dge_objavi", class: "dobro mali" }, "Objavi"); g.onclick = () => spremeniStanje("published"); gumbi.push(g); }
       if (e.status === "published") { const g = h("button", { type: "button", class: "tih mali" }, "Med osnutke"); g.onclick = () => spremeniStanje("draft"); gumbi.push(g); }
       if (e.status !== "cancelled") { const g = h("button", { type: "button", class: "nevarno mali" }, "Odpovej dogodek"); g.onclick = () => spremeniStanje("cancelled"); gumbi.push(g); }
+      // Pravo brisanje (brisanje.js, I63): samo ce dogodek nima pravega prometa; sicer razlaga in »Odpovej dogodek« zgoraj.
+      if (window.brisanje) gumbi.push(window.brisanje.dogodekGumb(e, { odpovej: () => spremeniStanje("cancelled"), po: () => pojdi(null) }));
 
       const zanriPolje = h("div", { id: "dge_genres", class: "vrsta", role: "group", "aria-label": "Žanri" },
         [...new Set([...zanri, ...(e.genres || [])])].map((z) => {
@@ -419,8 +420,7 @@
             h("div", {}, h("b", {}, e.capacity ? `${cele(e.sold_count)} / ${cele(e.capacity)}` : String(cele(e.sold_count))), h("span", {}, "prodanih vstopnic")),
             h("div", {}, h("b", {}, String(cele(s.checked_in))), h("span", {}, "na vratih")),
             h("div", {}, h("b", {}, cena(s.paid_cents)), h("span", {}, `${cele(s.paid_orders)} plačanih naročil`)),
-            h("div", {}, h("b", {}, String(cele(s.pending_orders))), h("span", {}, "odprtih plačil")),
-            cele(s.test_paid_orders) ? h("div", {}, h("b", {}, cena(s.test_paid_cents)), h("span", {}, `${cele(s.test_paid_orders)} testnih (ni pravi denar)`)) : null)),
+            h("div", {}, h("b", {}, String(cele(s.pending_orders))), h("span", {}, "odprtih plačil")))),
         h("div", { id: "dge_razsiritve" }),   // pregled pred objavo, seznam podvojenih osnutkov (nov-dogodek.js)
         h("div", { class: "skupina dg-obrazec" }, h("h2", {}, "Podatki dogodka"),
           h("div", { class: "telo" },

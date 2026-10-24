@@ -16,7 +16,8 @@
   const LJUDJE = [["prosnje", "Prošnje", ["nProsenj"]], ["klubi", "Klubi", []], ["uporabniki", "Uporabniki", []]];
   const VEC = [["predlogi", "Čaka potrditev", ["nPredlogov"]], ["agent", "Agent", []], ["prijave", "Reports", ["nPrijav"]], ["vracila", "Vračila in spori", ["nVracil"]],
     ["finance", "Finance", []], ["promo", "Promo kode", []], ["guest", "Guest lists", []], ["pomoc", "Pomoč – odzivi", []]];
-  const GLAVNI = [["pregled", "Danes", "◉", ["pregled"]], ["dogodki", "Dogodki", "▦", ["dogodki"]], ["opozorila", "Opozorila", "!", ["opozorila"], ["nOpozorila"]]];
+  // Ikone so CSS maske (telefon.css, .ikona.i-<ime>): v kodi ni znakov ali SVG nizov, samo ime ikone.
+  const GLAVNI = [["pregled", "Danes", "danes", ["pregled"]], ["dogodki", "Dogodki", "dogodki", ["dogodki"]], ["opozorila", "Opozorila", "opozorila", ["opozorila"], ["nOpozorila"]]];
   const kljuci = (s) => s.map((x) => x[0]);
 
   const gumbNav = (z) => nav.querySelector(`button[data-z="${z}"]`);
@@ -32,7 +33,7 @@
   const tipke = {};   // ime -> { gumb, znacka, skupina }
   function dodajTipko(ime, besedilo, ikona, skupina, ids, izbira) {
     const zn = znacka();
-    const g = h("button", { type: "button", "data-t": ime, "aria-label": besedilo }, h("span", { class: "ikona", "aria-hidden": "true" }, ikona), h("span", {}, besedilo), zn);
+    const g = h("button", { type: "button", "data-t": ime, "aria-label": besedilo }, h("span", { class: "ikona i-" + ikona, "aria-hidden": "true" }), h("span", {}, besedilo), zn);
     g.onclick = izbira;
     tipke[ime] = { gumb: g, znacka: zn, skupina, ids };
     vrstica.append(g);
@@ -71,8 +72,8 @@
   }
 
   for (const [z, besedilo, ikona, , ids] of GLAVNI) dodajTipko(z, besedilo, ikona, [z], ids || [], () => pojdi(z));
-  dodajTipko("ljudje", "Ljudje", "☺", kljuci(LJUDJE), LJUDJE.flatMap((x) => x[2]), () => odpri("ljudje"));
-  dodajTipko("vec", "Več", "≡", kljuci(VEC), VEC.flatMap((x) => x[2]), () => odpri("vec"));
+  dodajTipko("ljudje", "Ljudje", "ljudje", kljuci(LJUDJE), LJUDJE.flatMap((x) => x[2]), () => odpri("ljudje"));
+  dodajTipko("vec", "Več", "vec", kljuci(VEC), VEC.flatMap((x) => x[2]), () => odpri("vec"));
   tipke.ljudje.gumb.setAttribute("aria-haspopup", "dialog"); tipke.vec.gumb.setAttribute("aria-haspopup", "dialog");
 
   function osvezi() {

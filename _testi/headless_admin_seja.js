@@ -334,7 +334,7 @@ async function vpisi(page, origin, zapomni) {
       const page = await ctx.newPage(); const k = [];
       page.on("pageerror", (e) => k.push("pageerror: " + e.message));
       await vpisi(page, origin, false);
-      for (const [zavihek, tabela] of [["pregled", "#stevilke"], ["klubi", "#kTabela"], ["dogodki", "#dTabela"], ["uporabniki", "#uTabela"], ["prosnje", "#prTabela"], ["finance", "#fStevilke"]]) {
+      for (const [zavihek, tabela] of [["pregled", "#stevilke"], ["klubi", "#kTabela"], ["dogodki", "#dTabela table"], ["uporabniki", "#uTabela"], ["prosnje", "#prTabela"], ["finance", "#fStevilke"]]) {
         await page.click(`nav button[data-z="${zavihek}"]`);
         await page.waitForSelector(`${tabela} *`, { timeout: 5000 });
         if (zavihek === "finance") await page.waitForSelector("#fNarocila table", { timeout: 5000 });
