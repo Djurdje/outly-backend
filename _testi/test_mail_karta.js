@@ -87,6 +87,9 @@ global.fetch = async (url, opt) => { klici.push({ url: String(url), opt }); retu
     assert(/@media \(max-width:480px\)/.test(ov) && /\.k-vrednost\{font-size:11px/.test(ov), "telefon: manjse pisave na karti (stolpci ostanejo vodoravni)");
     assert(K.nogaHtml("X").includes("color:#A1A1A6") && K.SLOG_DROBNO.includes("font-size:13px") && K.SLOG_DROBNO.includes("color:#A1A1A6"), "noga in drobni tisk: berljiva siva na crni (13 px)");
     const lg = K.prilogaLogo();
+    const lgB = Buffer.from(lg.content, "base64");
+    assert(lgB.readUInt32BE(16) === 192 && lgB.readUInt32BE(20) === 74 && /src="cid:outly-logo" width="96" alt="Outly"/.test(h3) && !/>Outly<\/td>/.test(h3),
+      "logotip je napis Outly (192 x 74, prikaz 96 px), ne ikona z besedilom (Martin 25. 10.)", [lgB.readUInt32BE(16), lgB.readUInt32BE(20)]);
     assert(lg.content_id === "outly-logo" && lg.content_type === "image/png" && Buffer.from(lg.content, "base64").subarray(1, 4).toString() === "PNG", "logotip: PNG priloga (CID)");
   } catch (e) {
     fail++; console.log("  ✗ IZJEMA v testu:", e && e.stack || e);
