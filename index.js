@@ -6665,18 +6665,28 @@ function izrisiDvojezicno(zgradi, povezava) {
       `<h3>${GOST_POSTA_NIZ(r.naslov)}</h3>` + r.vrstice.map((v) => `<p>${r.krepko ? `<strong>${zPovezavo(v, povezava)}</strong>` : zPovezavo(v, povezava)}</p>`).join("")).join("") + `</div>`).join("") + `</div>`;
   return { besedilo: besediloDvojezicno(bloki), html };
 }
-// Isto v obliki karte (mail z vstopnicami gostu in prenos gostu; mail_karta.js, 24. 10. 2026): zgradi(jez) vrne poleg razdelkov `karta` (podatki za karto) in `gumb`.
-// Karta je v VSAKEM jezikovnem bloku (svoje oznake; koda QR = ista priloga CID dvakrat), da jo bralec vsakega jezika vidi na vrhu svojega bloka (kot prej slika QR).
-// Besedilo (text/plain) je enako kot pri izrisiDvojezicno. `plakat`: vgrajen plakat dogodka (CID).
+// HTML maila z vstopnico (Martin 25. 10. 2026: »izberiva tistega, ki je v angleščini, naj bo navpičen«; DECISIONS): angleški videz (oznaka, naslov, navpična
+// karta v angleščini, gumb, kratke vrstice), nato OBVEZNI slovenski blok v drobnem tisku (ZVPot-1 7/1: slovenščina obvezna in popolna; pravnik 20. 10.: drugi
+// jezik je dovoljen, SL na prvem mestu bi bil boljši dokaz, odločil je Martin). Besedilo (text/plain) ostane dvojezično (SL, nato EN) kot doslej.
+//   en: kratke vrstice; enRazdelki: angleški razdelki, ki ostanejo v celoti (prenos: GDPR 14 in ugovor); sl: nizi ali { html } ali { naslov, vrstice }.
+function izrisiAngleskoKarta({ oznaka, naslov, karta, povezava, gumb, en = [], enRazdelki = [], sl = [] }) {
+  const N = GOST_POSTA_NIZ, K = mailKarta, Bv = K.B;
+  const drobno = (v, slog = "") => `<p style="margin:12px 0 0;font-size:13px;line-height:1.5;color:${Bv.drobno}${slog ? `;${slog}` : ""}">${v}</p>`;
+  const zP = (v) => zPovezavo(v, povezava, `color:${Bv.svetlo};word-break:break-all`);
+  const stavek = (v) => (/[.!?]$/.test(String(v).trim()) ? v : `${v}.`);   // vrstice razdelka (npr. naslov dogodka, datum) v enem odstavku locene s piko
+  const razdelek = (r) => drobno(`<strong style="color:${Bv.svetlo}">${N(r.naslov)}.</strong> ` + r.vrstice.map((v) => zP(stavek(v))).join(" "));
+  return K.ovoj("en", K.glava(oznaka, naslov) + K.karta(karta) + K.gumb(povezava, gumb)
+    + `<div lang="en">` + en.map((v) => drobno(zP(v))).join("") + enRazdelki.map(razdelek).join("") + `</div>`
+    + `<div lang="sl"><p style="margin:24px 0 0;padding-top:16px;border-top:1px solid ${Bv.crta};font-size:13px;line-height:1.5;color:${Bv.svetlo}"><strong>Slovensko</strong></p>`
+    + sl.map((v) => (typeof v === "string" ? drobno(zP(v)) : v.html !== undefined ? v.html : razdelek(v))).join("") + `</div>`);
+}
+// Mail z vstopnicami gostu in prenos gostu: zgradi(jez) vrne poleg razdelkov `karta`, `gumb`, `kratko` (kratke angleške vrstice) in pri razdelkih oznako
+// `enPolno` (angleški razdelek ostane v celoti: GDPR 14 in ugovor pri prenosu). Slovenski blok ima VSE razdelke. `plakat`: vgrajen plakat dogodka (CID).
 function izrisiDvojezicnoKarta(zgradi, povezava, plakat = false) {
   const bloki = JEZIKI_MAILA.map((j) => zgradi(j));
-  const N = GOST_POSTA_NIZ, K = mailKarta, Bv = K.B;
-  const html = K.ovoj("sl", bloki.map((b, i) => (i ? K.locilo : "") + `<div lang="${JEZIKI_MAILA[i]}">`
-    + `<h2 style="margin:0 0 16px;font-size:22px;line-height:1.25;font-weight:800;color:${Bv.besedilo}">${N(b.naslovHtml)}</h2>`
-    + K.karta({ ...b.karta, plakat }) + K.gumb(povezava, b.gumb)
-    + b.razdelki.map((r) => `<p style="margin:24px 0 6px;font-size:12px;line-height:1.3;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${Bv.oznaka}">${N(r.naslov)}</p>`
-      + r.vrstice.map((v) => `<p style="margin:0 0 6px;font-size:14px;line-height:1.5;color:${r.krepko ? Bv.besedilo : Bv.svetlo}">${r.krepko ? `<strong>${zPovezavo(v, povezava, `color:${Bv.besedilo};word-break:break-all`)}</strong>` : zPovezavo(v, povezava, `color:${Bv.besedilo};word-break:break-all`)}</p>`).join("")).join("")
-    + `</div>`).join(""));
+  const [sl, en] = bloki;
+  const html = izrisiAngleskoKarta({ oznaka: en.oznakaHtml, naslov: en.naslovHtml, karta: { ...en.karta, plakat }, povezava, gumb: en.gumb,
+    en: en.kratko, enRazdelki: en.razdelki.filter((r) => r.enPolno), sl: sl.razdelki });
   return { besedilo: besediloDvojezicno(bloki), html };
 }
 // Vsebina potrdila kot razdelki { naslov, vrstice[] } za EN jezik `jez`; iz njih nastaneta besedilo in HTML (isto besedilo, brez oglasov).
@@ -6722,7 +6732,11 @@ function gostPotrdilo(o, povezava, prevzeto, kode = [], plakat = false) {
       qr: k ? { cid: k.cid, alt: T("Koda QR vstopnice", "Ticket QR code"), oznaka: oznakaKode(k, jez) } : null,
       brezQr: T("Vstopnice odprite s povezavo spodaj", "Open your tickets with the link below"), pod: [o.public_ref, T("Pokažite pri vhodu", "Show at the door")],
     };
-    return { naslovBesedila: T(`Vaše vstopnice Outly - naročilo ${o.public_ref}`, `Your Outly tickets - order ${o.public_ref}`), naslovHtml: T("Vaše vstopnice Outly", "Your Outly tickets"), razdelki,
+    return { naslovBesedila: T(`Vaše vstopnice Outly - naročilo ${o.public_ref}`, `Your Outly tickets - order ${o.public_ref}`), oznakaHtml: T("Potrdilo o nakupu", "Order confirmed"),
+      naslovHtml: T(`Vaše vstopnice za ${o.event_title}`, `Your tickets for ${o.event_title}`), razdelki,
+      kratko: [prevzeto ? `Your tickets are in your Outly account: ${povezava}`
+        : `Open your tickets: ${povezava} This link is your ticket. Don't share it except with people coming with you. All QR codes are also in the attached PDF.`,
+        "There is no right of withdrawal for tickets to an event on a fixed date (Slovenian Consumer Protection Act ZVPot-1, Article 135, point 12). Terms: https://outly.si/terms"],
       karta, gumb: prevzeto ? T("Odpri v aplikaciji", "Open in the app") : T("Odpri vstopnice", "Open your tickets") };
   }, povezava, plakat);
 }
@@ -7005,24 +7019,19 @@ function kupecPotrdiloBloki(o, povezava, pril) {
     };
   });
 }
-// HTML (24. 10. 2026, mail_karta.js): temen ovoj, na vrhu karta v slovenscini (koda QR prve vstopnice SAMO enkrat, kot doslej v slovenskem bloku), nato slovenski blok
-// (kje so kode, prenos, gumb, narocilo, drobni tisk) in angleski blok s polnimi podatki (vrh). Besedilo (text/plain) je nespremenjeno. `plakat`: vgrajen plakat dogodka (CID).
+// HTML (25. 10. 2026, izrisiAngleskoKarta): angleški videz z navpično karto, kratke angleške vrstice (kje so kode, prenos, odstop, pogoji), nato popoln slovenski
+// blok v drobnem tisku (vrh, kode, prenos, naročilo, drobni tisk). Besedilo (text/plain) je nespremenjeno. `plakat`: vgrajen plakat dogodka (CID).
 function kupecPotrdilo(o, povezava, pril = { kode: [], vse: 0, pdf: false }, plakat = false) {
   const bloki = kupecPotrdiloBloki(o, povezava, pril);
   const besedilo = bloki.map((b) => [b.naslov, "", ...b.vrh, "", ...b.kode, ...(b.prenos ? [b.prenos] : []), "", b.narocilo, "", b.drobni].join("\n")).join(`\n\n${LOCILO_MAILA}\n\n`) + "\n";
-  const N = GOST_POSTA_NIZ, K = mailKarta, Bv = K.B;
-  const zLinkom = (v) => { const e = N(v); return v.includes(povezava) ? e.replace(N(povezava), () => `<a href="${N(povezava)}" style="color:${Bv.besedilo}">${N(povezava)}</a>`) : e; };
-  const p = (v, slog = "") => `<p style="margin:0 0 8px;font-size:14px;line-height:1.5;color:${Bv.svetlo};${slog}">${v}</p>`;
-  const html = K.ovoj("sl", K.glava("Potrdilo o nakupu", bloki[0].naslov) + K.karta({ ...bloki[0].karta, plakat })
-    + bloki.map((b, i) => (i ? K.locilo : "") + `<div lang="${b.jez}">`
-      + (i ? `<h2 style="margin:0 0 10px;font-size:20px;line-height:1.25;font-weight:800;color:${Bv.besedilo}">${N(b.naslov)}</h2>`
-           + p(b.vrh.map((v, j) => (j === 2 ? `<strong style="color:${Bv.besedilo}">${N(v)}</strong>` : N(v))).join("<br>"), "margin:0 0 12px") : `<div style="height:20px;line-height:20px;font-size:1px">&nbsp;</div>`)
-      + b.kode.map((v) => p(zLinkom(v))).join("")
-      + (b.prenos ? p(`<strong>${N(b.prenos)}</strong>`, `color:${Bv.besedilo}`) : "")
-      + K.gumb(povezava, b.gumb)
-      + `<p style="margin:16px 0 0;font-size:13px;line-height:1.5;color:${Bv.drobno}">${N(b.narocilo)}</p>`
-      + `<p style="${K.SLOG_DROBNO}">${N(b.drobni)}</p>`
-      + `</div>`).join(""));
+  const [sl, en] = bloki;
+  const html = izrisiAngleskoKarta({ oznaka: "Order confirmed", naslov: en.naslov, karta: { ...en.karta, plakat }, povezava, gumb: en.gumb,
+    en: [(pril.pdf && pril.kode.length
+      ? "All QR codes are also in the attached PDF. If you transfer a ticket in the Outly app, its QR code in the PDF stops working. "
+      : "Your QR codes are in the Outly app (Profile, My tickets). ")
+      + "There is no right of withdrawal for tickets to an event on a fixed date (Slovenian Consumer Protection Act ZVPot-1, Article 135, point 12). Terms: https://outly.si/terms"],
+    sl: [[`${sl.naslov}: ${sl.vrh.join("; ")}`, ...sl.kode, ...(sl.prenos ? [sl.prenos] : []), sl.narocilo].map((v) => (/[.!?]$/.test(v.trim()) ? v : `${v}.`)).join(" "),
+      { html: `<p style="${mailKarta.SLOG_DROBNO}">${GOST_POSTA_NIZ(sl.drobni)}</p>` }] });
   return { besedilo, html, brezTelefona: bloki[0].brezTelefona };
 }
 // Varnostni stavek v PDF kupca z racunom (angleski kot ves PDF; pravnik 2026-10-20, razdelek 5): prenos razveljavi kodo v PDF.
@@ -7818,7 +7827,7 @@ function prenosPotrdilo(x, povezava, kode, plakat = false) {
            "If the event is cancelled, a refund goes to the person who bought the ticket, not to you.", "If you create an Outly account with this email, the ticket will appear there."]) },
       { naslov: T("Vstopnice niste pričakovali?", "Not for you?"), vrstice: [T("Če te vstopnice niste pričakovali, odgovorite na to sporočilo in vaš e-naslov bomo izbrisali.",
           "If you were not expecting this ticket, reply to this email and we will delete your email address.")] },
-      { naslov: T("O vašem e-naslovu (GDPR, 14. člen)", "About your email address (GDPR, Article 14)"), vrstice: T([
+      { naslov: T("O vašem e-naslovu (GDPR, 14. člen)", "About your email address (GDPR, Article 14)"), enPolno: true, vrstice: T([
           `Kdo smo: ${POSREDNIK_VRSTICA}.`,
           `Zakaj: vaš e-naslov uporabljamo samo za dostavo te vstopnice in za omogočanje vstopa. Pravna podlaga: zakoniti interes (GDPR, člen 6(1)(f)): ${kdoSl} vam želi predati to vstopnico.`,
           `Od kod podatek: vnesel ga je ${kdoSl}.`,
@@ -7835,7 +7844,7 @@ function prenosPotrdilo(x, povezava, kode, plakat = false) {
           `Transfer outside the EEA: our email provider is based in the United States; the transfer relies on the EU standard contractual clauses or an adequacy decision, as described in our privacy policy.`,
           `Retention: we delete your email address 30 days after the event ends, unless you create an Outly account with it.`,
           `Your rights: access, rectification, erasure, restriction, and a complaint to the Information Commissioner of Slovenia (www.ip-rs.si). Privacy policy: https://outly.si/privacy` ]) },
-      { naslov: T("Pravica do ugovora", "Right to object"), vrstice: [T("Ne želite, da obdelujemo vaš e-naslov? Pravico do ugovora imate kadar koli: odgovorite na to sporočilo in vaš naslov bomo izbrisali.",
+      { naslov: T("Pravica do ugovora", "Right to object"), enPolno: true, vrstice: [T("Ne želite, da obdelujemo vaš e-naslov? Pravico do ugovora imate kadar koli: odgovorite na to sporočilo in vaš naslov bomo izbrisali.",
           "Don't want us to process your email address? You have the right to object at any time: reply to this email and we will delete your address.")] },
       { naslov: T("Vprašanja", "Questions"), vrstice: [T(`Odgovorite na to sporočilo ali pišite na ${POSTA_ODGOVOR}.`, `Reply to this email or write to ${POSTA_ODGOVOR}.`)] },
     ];
@@ -7848,7 +7857,9 @@ function prenosPotrdilo(x, povezava, kode, plakat = false) {
       brezQr: T("Vstopnico odprite s povezavo spodaj", "Open your ticket with the link below"), pod: [T("Pokažite pri vhodu", "Show at the door")],
     };
     return { naslovBesedila: T(`${posiljatelj} vam je poslal(-a) vstopnico za ${x.event_title}`, `${posiljatelj} sent you a ticket for ${x.event_title}`),
-      naslovHtml: T(`${posiljatelj} vam je poslal(-a) vstopnico`, `${posiljatelj} sent you a ticket`), razdelki, karta, gumb: T("Odpri vstopnico", "Open your ticket") };
+      oznakaHtml: T("Prejeli ste vstopnico", "Ticket received"), naslovHtml: T(`${posiljatelj} vam je poslal(-a) vstopnico`, `${posiljatelj} sent you a ticket`), razdelki, karta,
+      kratko: [`${QR_STAVEK} Open your ticket: ${povezava}`, "If you were not expecting this ticket, reply to this email and we will delete your email address."],
+      gumb: T("Odpri vstopnico", "Open your ticket") };
   }, povezava, plakat);
 }
 

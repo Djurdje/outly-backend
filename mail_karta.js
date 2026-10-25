@@ -1,8 +1,8 @@
 "use strict";
 /**
- * Mail z vstopnico v obliki prave karte (Martin, 24. 10. 2026, DECISIONS): levi stolpec logotip Outly, koda QR in podatki pod njo, srednji podatki
- * dogodka, desni plakat; vodoravno na racunalniku IN na telefonu (Martinova odlocitev, stolpci v odstotkih). Temno ozadje kot aplikacija, karta bela,
- * koda QR na beli podlagi (sken na vratih). Velja za potrdilo kupcu z racunom (I32), mail z vstopnicami gostu (I22) in prenos gostu (I23).
+ * Mail z vstopnico v obliki prave karte (Martin, 24. in 25. 10. 2026, DECISIONS): NAVPICNA karta (25. 10.: »naj bo navpicen«): zgoraj logotip Outly,
+ * koda QR in podatki pod njo, perforacija z izrezoma, podatki dogodka, perforacija, lezec plakat. Temno ozadje kot aplikacija, karta bela, koda QR na
+ * beli podlagi (sken na vratih). Velja za potrdilo kupcu z racunom (I32), mail z vstopnicami gostu (I22) in prenos gostu (I23).
  *
  * Samo izris HTML (besedilo text/plain in pravna vsebina se tu NE spreminjata). Pravila:
  *   - postavitev s tabelami in vrsticnimi slogi (Outlook, Gmail); brez flex/grid, brez skriptov, brez zunanjih slik in pisav (sledenje: samo cid:);
@@ -10,7 +10,7 @@
  *   - vsak podatek iz baze gre skozi `ubezi` (I43);
  *   - drobni tisk >= 13 px in noga s firmo 12 px: kontrast na crni >= kontrast #555 na beli (7,5 : 1): #A1A1A6 na #000000 je 8,2 : 1;
  *   - plakat: prenese ga streznik (ne prejemnikov odjemalec), samo z NASEGA Cloudinaryja (SSRF), z rokom, omejeno velikostjo in predpomnilnikom
- *     in zdruzevanjem hkratnih klicev (ob navali nakupov za isti dogodek en prenos); ob kakrsnikoli napaki mail gre brez plakata (srednji stolpec se razsiri).
+ *     in zdruzevanjem hkratnih klicev (ob navali nakupov za isti dogodek en prenos); ob kakrsnikoli napaki mail gre brez plakata (karta brez spodnjega dela).
  */
 const fs = require("fs");
 const path = require("path");
@@ -33,7 +33,7 @@ const prilogaPlakat = (buf) => ({ filename: "event.jpg", content: buf.toString("
 const PLAKAT_ROK_MS = 3000, PLAKAT_NAJVEC_B = 400 * 1024, PLAKAT_PREDPOMNILNIK = 50, PLAKAT_OK_MS = 6 * 3600 * 1000, PLAKAT_NAPAKA_MS = 60 * 1000;
 const plakati = new Map();   // url -> { buf | null, do }
 const plakatiVTeku = new Map();   // url -> Promise: hkratni klici za isti plakat (naval nakupov) cakajo na en prenos
-// Iz shranjenega URL-ja naredi URL za mail (ozek pokoncni izrez 1 : 2, JPEG, ~30-60 KB) ali null, ce ni z nasega Cloudinaryja.
+// Iz shranjenega URL-ja naredi URL za mail (lezec izrez 2 : 1 za spodnji del navpicne karte, JPEG, ~40-80 KB) ali null, ce ni z nasega Cloudinaryja.
 // `%` je prepovedan: fetch normalizira `%2e%2e` v `..` (pregled 24. 10.: .../upload/v1/%2e%2e/.../tujracun/image/fetch/... bi sel na tuj racun).
 // Za vsak primer se preveri se normaliziran URL (kot ga poslje fetch): isti gostitelj, pot se zacne z nasim racunom in izrezom.
 function plakatUrlZaMail(url, cloudName = process.env.CLOUDINARY_CLOUD_NAME) {
@@ -42,7 +42,7 @@ function plakatUrlZaMail(url, cloudName = process.env.CLOUDINARY_CLOUD_NAME) {
   if (!url.startsWith(predpona)) return null;
   const ostanek = url.slice(predpona.length);
   if (!ostanek || !/^[A-Za-z0-9_\-.,/]+$/.test(ostanek) || /\.\.|\/\.\/|^\.?\/|\/\//.test(ostanek)) return null;
-  const izrez = `${predpona}c_fill,g_auto,w_300,h_600,f_jpg,q_70/`;
+  const izrez = `${predpona}c_fill,g_auto,w_840,h_420,f_jpg,q_70/`;
   const u = izrez + ostanek;
   let n;
   try { n = new URL(u); } catch (e) { return null; }
@@ -90,58 +90,45 @@ function datumKarta(d, jez) {
 
 // --- karta ---
 // k = { jez, vrsta, naslov, vrstice: [[oznaka, vrednost, krepko?]], qr: { cid, alt, oznaka } | null, brezQr, pod: [nizi], plakat: bool }
-// Postavitev (25. 10. 2026, Martinov posnetek iz telefona): stolpci levo | perforacija | sredina | [perforacija | plakat]. Perforacija sta dva stolpca po IZREZ px
-// (crtkana crta je desni rob levega), zgoraj in spodaj ima izrez (polkrog v barvi ozadja maila, kot pri pravi vstopnici). Vsaka celica ima SVOJO barvo
-// (bgcolor + background): brez tega je odjemalec v temnem nacinu sredino pobarval crno (celica je dedovala barvo tabele) in besedilo se ni videlo.
-const IZREZ = 10;   // polmer izreza (px), kot na Martinovem osnutku (20 px); stolpec perforacije je sirok 2 x IZREZ
+// Navpicna karta (25. 10. 2026): vrstice krtica (logotip, koda QR, oznaka, st. narocila) | perforacija | podatki | [perforacija | plakat]. Perforacija je
+// vrstica s crtkano crto in izrezoma levo in desno (polkrog v barvi ozadja maila, kot pri pravi vstopnici). Vsaka celica ima SVOJO barvo (bgcolor +
+// background): Martinov posnetek 25. 10. je pokazal, da odjemalec v temnem nacinu celico brez lastne barve pobarva temno (besedilo se ne vidi).
+const IZREZ = 10;   // polmer izreza (px), kot na Martinovem osnutku (20 px)
 function karta(k) {
   const N = ubezi;
-  const sredina = k.plakat ? 42 : 66;
-  const crta = `2px dashed ${B.perforacija}`;
-  const celica = (barva, slog = "", atr = "") => `<td${atr} bgcolor="${barva}" style="background:${barva};${slog}">`;
-  const prazna = (barva, slog = "", atr = "") => celica(barva, `height:${IZREZ + 1}px;font-size:0;line-height:0;${slog}`, ` height="${IZREZ + 1}"${atr}`) + `</td>`;
-  const izrez = (zgoraj, barva) => celica(barva, `height:${IZREZ + 1}px;font-size:0;line-height:0;padding:0`, ` colspan="2" height="${IZREZ + 1}" width="${2 * IZREZ}" align="center" valign="${zgoraj ? "top" : "bottom"}"`)
-    + `<div style="width:${2 * IZREZ}px;height:${IZREZ}px;margin:0 auto;background:${B.ozadje};border-radius:${zgoraj ? `0 0 ${IZREZ}px ${IZREZ}px` : `${IZREZ}px ${IZREZ}px 0 0`};font-size:0;line-height:0">&nbsp;</div></td>`;
-  // Logotip = napis Outly (Martin 25. 10. 2026: »pravi logo«), temen na svetli krtici; slika 192 x 74 (2x), prikaz 96 px, na telefonu najvec sirina stolpca.
+  const celica = (barva, slog, atr = "") => `<td${atr} bgcolor="${barva}" style="background:${barva};${slog}">`;
+  const izrez = (barva, levo) => celica(barva, `width:${IZREZ}px;height:${2 * IZREZ}px;padding:0;font-size:0;line-height:0`, ` width="${IZREZ}" height="${2 * IZREZ}" valign="middle"`)
+    + `<div style="width:${IZREZ}px;height:${2 * IZREZ}px;background:${B.ozadje};border-radius:${levo ? `0 ${IZREZ}px ${IZREZ}px 0` : `${IZREZ}px 0 0 ${IZREZ}px`};font-size:0;line-height:0">&nbsp;</div></td>`;
+  const perforacija = (barva) => `<tr>` + izrez(barva, true)
+    + celica(barva, `height:${2 * IZREZ}px;padding:0 6px;font-size:0;line-height:0`, ` height="${2 * IZREZ}" valign="middle"`)
+    + `<div style="height:0;border-top:2px dashed ${B.perforacija};font-size:0;line-height:0">&nbsp;</div></td>` + izrez(barva, false) + `</tr>`;
+  const vrstica = (barva, slog, atr, vsebina) => `<tr>` + celica(barva, slog, ` colspan="3"${atr}`) + vsebina + `</td></tr>`;
+  // Logotip = napis Outly (Martin 25. 10. 2026: »pravi logo«), temen na svetli krtici; slika 192 x 74 (2x), prikaz 96 px.
   const logo = `<img src="cid:${CID_LOGO}" width="96" alt="Outly" style="display:block;margin:0 auto;width:96px;max-width:100%;height:auto;border:0">`;
   const qr = k.qr
-    ? `<img src="cid:${k.qr.cid}" class="k-qr" width="150" alt="${N(k.qr.alt)}" style="display:block;margin:12px auto 0;width:100%;max-width:150px;height:auto;border:0">`
-      + (k.qr.oznaka ? `<p style="margin:8px 0 0;font-size:12px;line-height:1.35;font-weight:700;color:${B.karta_besedilo}">${N(k.qr.oznaka)}</p>` : "")
-    : `<p style="margin:14px 0 0;font-size:12px;line-height:1.4;font-weight:600;color:${B.karta_besedilo}">${N(k.brezQr || "")}</p>`;
-  const pod = (k.pod || []).filter(Boolean).map((v) => N(v)).join("<br>");
+    ? `<img src="cid:${k.qr.cid}" class="k-qr" width="210" alt="${N(k.qr.alt)}" style="display:block;margin:14px auto 0;width:210px;max-width:100%;height:auto;border:0">`
+      + (k.qr.oznaka ? `<p style="margin:10px 0 0;font-size:14px;line-height:1.35;font-weight:700;color:${B.karta_besedilo}">${N(k.qr.oznaka)}</p>` : "")
+    : `<p style="margin:16px 0 0;font-size:14px;line-height:1.4;font-weight:600;color:${B.karta_besedilo}">${N(k.brezQr || "")}</p>`;
+  const pod = (k.pod || []).filter(Boolean).map((v) => N(v)).join(" · ");
   const vrstice = k.vrstice.filter((v) => v && v[1]).map(([o, v, krepko]) =>
-    `<p class="k-oznaka" style="margin:10px 0 0;font-size:10px;line-height:1.3;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${B.karta_sivo}">${N(o)}</p>`
-    + `<p class="k-vrednost" style="margin:2px 0 0;font-size:13px;line-height:1.35;font-weight:${krepko ? 700 : 600};color:${B.karta_besedilo}">${N(v)}</p>`).join("");
-  const desniKot = (zgoraj) => (zgoraj ? "border-radius:0 14px 0 0;" : "border-radius:0 0 14px 0;");
-  // zgornja / spodnja vrstica: robovi karte z zaobljenimi koti in izrezi na perforacijah
-  const rob = (zgoraj) => `<tr>`
-    + prazna(B.krtica, zgoraj ? "border-radius:14px 0 0 0;" : "border-radius:0 0 0 14px;")
-    + izrez(zgoraj, B.karta)
-    + prazna(B.karta, k.plakat ? "" : desniKot(zgoraj))
-    + (k.plakat ? izrez(zgoraj, B.karta) + prazna(B.plakat_ozadje, desniKot(zgoraj)) : "")
-    + `</tr>`;
-  const perf = (levaBarva, desnaBarva) => celica(levaBarva, `width:${IZREZ}px;font-size:0;line-height:0;border-right:${crta}`, ` width="${IZREZ}"`) + `</td>`
-    + celica(desnaBarva, `width:${IZREZ}px;font-size:0;line-height:0`, ` width="${IZREZ}"`) + `</td>`;
-  const levo = celica(B.krtica, "width:34%;padding:8px 10px;text-align:center", ` class="k-levo" width="34%" valign="top"`)
-    + logo + qr + (pod ? `<p class="k-mali" style="margin:6px 0 0;font-size:11px;line-height:1.4;color:#444444">${pod}</p>` : "") + `</td>`;
-  const srednje = celica(B.karta, `width:${sredina}%;padding:8px 8px 8px 6px`, ` class="k-sredina" width="${sredina}%" valign="top"`)
-    + `<p class="k-oznaka" style="margin:0;font-size:10px;line-height:1.3;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:${B.modra_temna}">${N(k.vrsta)}</p>`
-    + `<p class="k-naslov" style="margin:4px 0 0;font-size:20px;line-height:1.15;font-weight:800;color:${B.karta_besedilo}">${N(k.naslov)}</p>`
-    + vrstice + `</td>`;
-  const desno = k.plakat
-    ? perf(B.karta, B.plakat_ozadje)
-      + celica(B.plakat_ozadje, "width:24%;padding:0", ` class="k-desno" width="24%" valign="middle"`)
-      + `<img src="cid:${CID_PLAKAT}" width="144" alt="" style="display:block;width:100%;height:auto;border:0"></td>`
+    `<p class="k-oznaka" style="margin:12px 0 0;font-size:10px;line-height:1.3;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${B.karta_sivo}">${N(o)}</p>`
+    + `<p class="k-vrednost" style="margin:2px 0 0;font-size:14px;line-height:1.35;font-weight:${krepko ? 700 : 600};color:${B.karta_besedilo}">${N(v)}</p>`).join("");
+  const krtica = vrstica(B.krtica, "padding:20px 16px 14px;text-align:center;border-radius:14px 14px 0 0", ` class="k-krtica" align="center"`,
+    logo + qr + (pod ? `<p class="k-mali" style="margin:4px 0 0;font-size:12px;line-height:1.4;color:#444444">${pod}</p>` : ""));
+  const podatki = vrstica(B.karta, `padding:4px 22px 18px;${k.plakat ? "" : "border-radius:0 0 14px 14px"}`, ` class="k-podatki"`,
+    `<p class="k-oznaka" style="margin:0;font-size:10px;line-height:1.3;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:${B.modra_temna}">${N(k.vrsta)}</p>`
+    + `<p class="k-naslov" style="margin:4px 0 0;font-size:22px;line-height:1.15;font-weight:800;color:${B.karta_besedilo}">${N(k.naslov)}</p>` + vrstice);
+  const plakat = k.plakat
+    ? perforacija(B.karta) + vrstica(B.plakat_ozadje, "padding:0;border-radius:0 0 14px 14px", ` class="k-plakat"`,
+      `<img src="cid:${CID_PLAKAT}" width="420" alt="" style="display:block;width:100%;height:auto;border:0;border-radius:0 0 14px 14px">`)
     : "";
-  return `<table role="presentation" class="k-karta" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${B.karta}" style="width:100%;border-collapse:separate;border-spacing:0;background:${B.karta};border-radius:14px;font-family:${PISAVA};color:${B.karta_besedilo}">`
-    + rob(true) + `<tr>` + levo + perf(B.krtica, B.karta) + srednje + desno + `</tr>` + rob(false) + `</table>`;
+  return `<table role="presentation" class="k-karta" width="100%" align="center" cellpadding="0" cellspacing="0" border="0" bgcolor="${B.karta}" style="width:100%;max-width:420px;margin:0 auto;border-collapse:separate;border-spacing:0;background:${B.karta};border-radius:14px;font-family:${PISAVA};color:${B.karta_besedilo}">`
+    + krtica + perforacija(B.karta) + podatki + plakat + `</table>`;
 }
 
 // --- ovoj celega maila ---
-// Telefon (do 480 px): manjse pisave na karti, da so trije stolpci berljivi; odjemalec brez medijskih poizvedb pokaze iste stolpce z vecjo pisavo.
-const SLOG = `body{margin:0;padding:0;background:${B.ozadje}}a{color:${B.besedilo}}`
-  + `@media (max-width:480px){.k-levo{padding:6px 4px !important}.k-sredina{padding:6px 6px 6px 2px !important}.k-naslov{font-size:15px !important}`
-  + `.k-vrednost{font-size:11px !important}.k-oznaka{font-size:9px !important}.k-mali{font-size:10px !important}.o-zunaj{padding:16px 8px !important}}`;
+// Telefon (do 480 px): ozji zunanji rob. Navpicna karta ne rabi manjsih pisav (en stolpec, najvec 420 px).
+const SLOG = `body{margin:0;padding:0;background:${B.ozadje}}a{color:${B.besedilo}}@media (max-width:480px){.o-zunaj{padding:16px 8px !important}}`;
 function ovoj(jez, vsebina) {
   return `<!doctype html><html lang="${jez}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">`
     + `<meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark"><style>${SLOG}</style></head>`
@@ -156,11 +143,10 @@ const glava = (oznaka, naslov) => `<p style="margin:0 0 6px;font-size:13px;font-
   + `<h1 style="margin:0 0 18px;font-size:24px;line-height:1.2;font-weight:800;color:${B.besedilo}">${ubezi(naslov)}</h1>`;
 const gumb = (href, besedilo) => `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:20px 0 0"><tr>`
   + `<td align="center" bgcolor="${B.gumb}" style="background:${B.gumb};border-radius:14px"><a href="${ubezi(href)}" style="display:block;padding:15px 20px;font-family:${PISAVA};font-size:16px;font-weight:700;color:#FFFFFF;text-decoration:none">${ubezi(besedilo)}</a></td></tr></table>`;
-const locilo = `<hr style="margin:32px 0 24px;border:0;border-top:1px solid ${B.crta}">`;
 // Noga s firmo (nogaMaila v index.js) gre namesto oznake <!--noga--> v temnem slogu.
 const nogaHtml = (n) => `<p style="margin:32px 0 0;font-family:${PISAVA};font-size:12px;line-height:1.5;color:${B.noga}">${n}</p>`;
 
 module.exports = {
-  ubezi, B, SLOG_DROBNO, karta, ovoj, glava, gumb, locilo, nogaHtml, datumKarta,
+  ubezi, B, SLOG_DROBNO, karta, ovoj, glava, gumb, nogaHtml, datumKarta,
   prilogaLogo, prilogaPlakat, plakatZaMail, plakatUrlZaMail, CID_LOGO, CID_PLAKAT,
 };

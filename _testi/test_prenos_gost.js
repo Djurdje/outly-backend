@@ -311,7 +311,10 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     assert(/zakoniti interes \(GDPR, člen 6\(1\)\(f\)\): uporabnik Outly kupec vam želi predati to vstopnico/.test(sl) && /Od kod podatek: vnesel ga je uporabnik Outly kupec\./.test(sl), "mail (sl): namen, pravna podlaga in vir z uporabniskim imenom posiljatelja");
     assert(/Prejemniki: Resend \(dostava e-pošte\)\. Organizator \(Pure Club\) vidi samo/.test(sl) && /Hramba: vaš e-naslov izbrišemo 30 dni po koncu dogodka/.test(sl) && /Informacijskem pooblaščencu/.test(sl), "mail (sl): prejemniki, hramba, pritozba");
     assert(/PRAVICA DO UGOVORA\nNe želite, da obdelujemo vaš e-naslov\?/.test(sl) && /Organizator: Pure Club \(info@pure\.test\)/.test(sl) && /\(ljubljanski čas\)/.test(sl), "mail (sl): pravica do ugovora, organizator, cas");
-    assert((m0.html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="sl">,<div lang="en">' && (m0.html.match(/cid:ticket-qr-1/g) || []).length === 2, "mail (HTML): bloka sl in en, koda QR v obeh (isti CID)");
+    // Martin 25. 10. 2026: angleski videz, navpicna karta (koda QR enkrat); GDPR 14 in ugovor ostaneta v CELOTI v obeh jezikih (pravna obveznost do prejemnika)
+    assert((m0.html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="en">,<div lang="sl">' && (m0.html.match(/cid:ticket-qr-1/g) || []).length === 1
+      && /Who we are: NEXT DIMENSIONS/.test(m0.html) && /Kdo smo: NEXT DIMENSIONS/.test(m0.html) && /right to object at any time/.test(m0.html) && /Pravico do ugovora imate kadar koli/.test(m0.html),
+      "mail (HTML): angleski del, nato slovenski; koda QR enkrat; GDPR 14 in ugovor v obeh jezikih");
 
     ob(/Organiser: Pure Club \(info@pure\.test\)/, "organizator + kontakt");
     ob(/One entry per code\.[\s\S]*house rules or the law[\s\S]*Reselling[\s\S]*refund goes to the person who bought the ticket/, "pravila vstopnice");
