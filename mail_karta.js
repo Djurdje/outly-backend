@@ -94,9 +94,8 @@ function karta(k) {
   const N = ubezi;
   const sredina = k.plakat ? 42 : 66;
   const perforacija = `2px dashed ${B.perforacija}`;
-  const logo = `<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center"><tr>`
-    + `<td style="padding:0 6px 0 0;vertical-align:middle"><img src="cid:${CID_LOGO}" width="22" height="22" alt="Outly" style="display:block;width:22px;height:22px;border:0;border-radius:6px"></td>`
-    + `<td style="vertical-align:middle;font-family:${PISAVA};font-size:15px;font-weight:800;color:${B.karta_besedilo}">Outly</td></tr></table>`;
+  // Logotip = napis Outly (Martin 25. 10. 2026: »pravi logo«), temen na svetli krtici; slika 192 x 74 (2x), prikaz 96 px, na telefonu najvec sirina stolpca.
+  const logo = `<img src="cid:${CID_LOGO}" width="96" alt="Outly" style="display:block;margin:0 auto;width:96px;max-width:100%;height:auto;border:0">`;
   const qr = k.qr
     ? `<img src="cid:${k.qr.cid}" class="k-qr" width="150" alt="${N(k.qr.alt)}" style="display:block;margin:12px auto 0;width:100%;max-width:150px;height:auto;border:0">`
       + (k.qr.oznaka ? `<p style="margin:8px 0 0;font-size:12px;line-height:1.35;font-weight:700;color:${B.karta_besedilo}">${N(k.qr.oznaka)}</p>` : "")
