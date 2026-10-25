@@ -311,7 +311,18 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     assert(/zakoniti interes \(GDPR, člen 6\(1\)\(f\)\): uporabnik Outly kupec vam želi predati to vstopnico/.test(sl) && /Od kod podatek: vnesel ga je uporabnik Outly kupec\./.test(sl), "mail (sl): namen, pravna podlaga in vir z uporabniskim imenom posiljatelja");
     assert(/Prejemniki: Resend \(dostava e-pošte\)\. Organizator \(Pure Club\) vidi samo/.test(sl) && /Hramba: vaš e-naslov izbrišemo 30 dni po koncu dogodka/.test(sl) && /Informacijskem pooblaščencu/.test(sl), "mail (sl): prejemniki, hramba, pritozba");
     assert(/PRAVICA DO UGOVORA\nNe želite, da obdelujemo vaš e-naslov\?/.test(sl) && /Organizator: Pure Club \(info@pure\.test\)/.test(sl) && /\(ljubljanski čas\)/.test(sl), "mail (sl): pravica do ugovora, organizator, cas");
-    assert((m0.html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="sl">,<div lang="en">' && (m0.html.match(/cid:ticket-qr-1/g) || []).length === 2, "mail (HTML): bloka sl in en, koda QR v obeh (isti CID)");
+    // Martin 25. 10. 2026: angleski videz, navpicna karta (koda QR enkrat); GDPR 14 in ugovor ostaneta v CELOTI v obeh jezikih (pravna obveznost do prejemnika)
+    assert((m0.html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="en">,<div lang="sl">' && (m0.html.match(/cid:ticket-qr-1/g) || []).length === 1
+      && /Who we are: NEXT DIMENSIONS/.test(m0.html) && /Kdo smo: NEXT DIMENSIONS/.test(m0.html) && /right to object at any time/.test(m0.html) && /Pravico do ugovora imate kadar koli/.test(m0.html),
+      "mail (HTML): angleski del, nato slovenski; koda QR enkrat; GDPR 14 in ugovor v obeh jezikih");
+    // pregled #371: pravila vstopnice (vracilo gre kupcu) tudi v angleskem delu HTML; za URL-jem ni pike; brez »?.«; varnostni stavek krepko v SL
+    {
+      const h = m0.html, [hEn, hSl] = h.split('<div lang="sl">');
+      assert(/One entry per code\./.test(hEn) && /refund goes to the person who bought the ticket/.test(hEn) && /Reselling the ticket is not allowed/.test(hEn),
+        "mail (HTML, EN): pravila vstopnice v celoti", hEn.length);
+      assert(!/https:\/\/outly\.si\/(privacy|terms)\./.test(h) && !/[?!.]\.<\/strong>/.test(h), "mail (HTML): za URL-jem ni dodane pike, za naslovom razdelka ni »?.«");
+      assert(/<strong>To sporočilo in priloženi PDF sta vaša vstopnica\./.test(hSl), "mail (HTML, SL): varnostni stavek krepko");
+    }
 
     ob(/Organiser: Pure Club \(info@pure\.test\)/, "organizator + kontakt");
     ob(/One entry per code\.[\s\S]*house rules or the law[\s\S]*Reselling[\s\S]*refund goes to the person who bought the ticket/, "pravila vstopnice");
@@ -439,11 +450,23 @@ const hash = (z) => crypto.createHash("sha256").update(z).digest("hex");
     assert(await cakaj(async () => (await pool.query("SELECT holder_guest_mail_attempts AS n FROM tickets WHERE id=$1", [hV[0].id])).rows[0].n >= 1), "poskus je zabelezen");
     assert(poslanoNa("napaka@example.com").length === 0 && (await poslanoOb(hV[0].id)) === null, "mail se ni poslan (Resend zavraca), »poslano« ni zapisano");
     assert(!/napaka@example\.com/.test(a.log + b.log + c.log), "dnevnik brez e-naslova");
+    // posiljatelj medtem izbrise racun (ticket_transfers.from_user_id -> NULL): ponovni mail je brez uporabniskega imena (pregled #371: »An Outly user, an Outly user«)
+    await pool.query("UPDATE ticket_transfers SET from_user_id = NULL WHERE ticket_id = $1", [hV[0].id]);
+    // poskus, ki je bil sestavljen pred UPDATE (s starim imenom), bi lahko prisel do Resenda po vklopu: pocakamo, da streznik prevzame nov poskus (prevzem je pred branjem imena)
+    const nPoskus = async () => (await pool.query("SELECT holder_guest_mail_attempts AS n FROM tickets WHERE id=$1", [hV[0].id])).rows[0].n;
+    const n0 = await nPoskus();
+    assert(await cakaj(async () => (await nPoskus()) > n0, 8000), "nov poskus po izbrisu posiljatelja");
     R.napaka = false;
     assert(await cakaj(() => poslanoNa("napaka@example.com").length === 1, 8000), "pospravljalec poslje mail, ko Resend spet dela");
     assert(await cakaj(async () => (await poslanoOb(hV[0].id)) !== null), "»poslano« zapisano");
     assert(poslanoNa("napaka@example.com").length === 1, "pospravljalec ne poslje drugega (najvec enkrat ob uspehu)");
     const hZ = zetonIzMaila(poslanoNa("napaka@example.com")[0]);
+    {
+      const mb = poslanoNa("napaka@example.com")[0], tb = mb.text || "";
+      assert(/Where we got it: an Outly user entered your email address\./.test(tb) && /\(GDPR Article 6\(1\)\(f\)\): an Outly user wanted/.test(tb)
+        && !/an Outly user, an Outly user/i.test(tb + mb.html) && /An Outly user sent you a ticket/.test(mb.html) && /Od kod podatek: vnesel ga je uporabnik Outly\./.test(tb),
+        "prenos brez uporabniskega imena: »an Outly user« enkrat, slovnicno (EN in SL)", tb.slice(0, 200));
+    }
     // anonimizacija: konec dogodka + 30 dni
     await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '40 days', end_at = NOW() - INTERVAL '39 days' WHERE id=$1", [eT]);
     assert(await cakaj(async () => (await pool.query("SELECT holder_guest_email FROM tickets WHERE id=$1", [hV[0].id])).rows[0].holder_guest_email === null, 8000), "po koncu dogodka + 30 dni: e-naslov imetnika izbrisan");

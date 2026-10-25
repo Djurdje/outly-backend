@@ -210,11 +210,12 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     assert(drobniSl.includes("Pritožbe glede dogodka: prodajalec; glede nakupa ali plačila: odgovorite na to sporočilo ali pišite na luka@outly.si.") && drobniSl.endsWith("Pogoji uporabe Outly: https://outly.si/terms"), "drobni tisk: pritozbe in pogoji");
     assert(!/guest\/order/.test(besedilo + html) && !/klub vam lahko zavrne/.test(besedilo), "brez gostovega zetona/povezave");
     // HTML: kratek, drobni tisk >= 12 px in #555, ni zlozen; QR (CID) v slovenskem bloku; gumb »Odpri v aplikaciji«
-    assert((html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="sl">,<div lang="en">' && html.indexOf('lang="sl"') < html.indexOf('lang="en"'), "HTML: bloka sl in en, sl prvi");
+    // Martin 25. 10. 2026 (DECISIONS): angleski videz, nato popoln slovenski blok v drobnem tisku (ZVPot-1 7/1); text/plain ostane SL, nato EN
+    assert((html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="en">,<div lang="sl">' && html.indexOf('<div lang="en">') < html.indexOf('<div lang="sl">'), "HTML: angleski del, nato slovenski blok");
     // Temen mail (karta, 24. 10. 2026): drobni tisk #A1A1A6 na #000000 = kontrast 8,2 : 1 (vec kot #555 na beli, 7,5 : 1), 13 px, ni skrit
-    assert((html.match(/font-size:13px;line-height:1\.5;color:#A1A1A6">Pri vstopnicah/g) || []).length === 1 && (html.match(/color:#A1A1A6">There is no right/g) || []).length === 1 && !/display:\s*none/i.test(html), "HTML: drobni tisk 13 px, #A1A1A6 na crni, ni skrit (oba bloka)");
-    assert((html.match(/<img src="cid:ticket-qr-1"/g) || []).length === 1 && html.indexOf("cid:ticket-qr-1") < html.indexOf('lang="en"'), "HTML: vgrajena koda QR prve vstopnice (CID) v slovenskem bloku");
-    assert(html.includes(">Odpri v aplikaciji</a>") && html.includes(">Open in the app</a>") && (html.match(/<a href="https:\/\/outly\.test\/app\/tickets"/g) || []).length >= 4, "HTML: gumb Odpri v aplikaciji in klikljiva povezava v obeh blokih");
+    assert((html.match(/font-size:13px;line-height:1\.5;color:#A1A1A6">Pri vstopnicah/g) || []).length === 1 && (html.match(/There is no right of withdrawal for tickets to an event on a fixed date/g) || []).length === 1 && !/display:\s*none/i.test(html), "HTML: drobni tisk 13 px, #A1A1A6 na crni, ni skrit (oba bloka)");
+    assert((html.match(/<img src="cid:ticket-qr-1"/g) || []).length === 1 && html.indexOf("cid:ticket-qr-1") < html.indexOf('<div lang="en">'), "HTML: vgrajena koda QR prve vstopnice (CID) enkrat, na karti na vrhu");
+    assert(html.includes(">Open in the app</a>") && (html.match(/<a href="https:\/\/outly\.test\/app\/tickets"/g) || []).length >= 2, "HTML: gumb Open in the app in klikljiva povezava v slovenskem bloku");
     assert(html.includes("Noc &amp; &lt;b&gt;Test&lt;/b&gt;") && !html.includes("<b>Test</b>"), "HTML: ime dogodka ubezeno");
     assert(!/<img(?![^>]*cid:)/i.test(html) && !/https?:\/\/[^"]*\.(png|gif)/i.test(html), "HTML: brez sledilnika (samo CID slika)");
     // PRILOGI: PNG prve kode (content_id) + PDF z obema vstopnicama (trenutni seriali)
@@ -524,7 +525,7 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
     m = mailiNa("pc@outly.si");
     // Logotip karte (CID) ostane; ni PDF, ni vgrajene kode QR (karta pove, da so kode v aplikaciji)
     assert(m.length === 1 && (m[0].attachments || []).every(x => x.content_id === "outly-logo") && !/cid:ticket-qr|application\/pdf/i.test(m[0].html + JSON.stringify(m[0].attachments || []))
-      && m[0].html.includes("Kode QR so v aplikaciji Outly"), "PDF ni nastal: natanko en mail, BREZ priloge PDF in brez vgrajene kode", m.map(x => (x.attachments || []).map(a => a.content_id)));
+      && m[0].html.includes("Your QR codes are in the Outly app"), "PDF ni nastal: natanko en mail, BREZ priloge PDF in brez vgrajene kode", m.map(x => (x.attachments || []).map(a => a.content_id)));
     assert(m[0].text.includes("Vstopnice s kodami QR so v aplikaciji Outly (Profil → Vstopnice): https://outly.test/app/tickets") && !/PDF/.test(m[0].text) && m[0].text.includes("Pri vstopnicah za dogodek na določen datum nimate pravice do odstopa"),
       "besedilo: vstopnice so v aplikaciji, brez omembe PDF; pravni blok ostane", m[0].text.slice(0, 400));
     assert(/\[potrdilo\] POZOR: priprava QR\/PDF za narocilo OUT-[A-Z0-9]+ ni uspela/.test(C.log) && !/pc@outly\.si/.test(C.log), "alarm v dnevniku (brez e-naslova)", C.log.slice(-400));
@@ -569,13 +570,14 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       const plk = pp.find(x => x.content_id === "event-poster");
       assert(plk && plk.content_type === "image/jpeg" && Buffer.from(plk.content, "base64").subarray(0, 2).equals(Buffer.from([0xFF, 0xD8])) && hp.includes('src="cid:event-poster"'),
         "plakat je vgrajena priloga JPEG (CID) in je v HTML", pp.map(x => [x.content_id, x.content_type]));
-      assert(prenosi().length === 1 && prenosi()[0] === "[test-plakat] https://res.cloudinary.com/testcloud/image/upload/c_fill,g_auto,w_300,h_600,f_jpg,q_70/v1/plakat.jpg",
-        "plakat prenese streznik, ozek izrez z nasega Cloudinaryja", prenosi());
+      assert(prenosi().length === 1 && prenosi()[0] === "[test-plakat] https://res.cloudinary.com/testcloud/image/upload/c_fill,g_auto,w_840,h_420,f_jpg,q_70/v1/plakat.jpg",
+        "plakat prenese streznik, lezec izrez z nasega Cloudinaryja", prenosi());
       const iK = hp.indexOf('class="k-karta"');
-      assert(iK > 0 && hp.indexOf('class="k-levo"') > iK && hp.indexOf('class="k-sredina"') > hp.indexOf('class="k-levo"') && hp.indexOf('class="k-desno"') > hp.indexOf('class="k-sredina"')
-        && hp.indexOf('src="cid:outly-logo"') > hp.indexOf('class="k-levo"') && hp.indexOf('src="cid:ticket-qr-1"') < hp.indexOf('class="k-sredina"') && hp.indexOf('src="cid:event-poster"') > hp.indexOf('class="k-desno"'),
-        "karta: levo logotip in koda QR, sredina podatki, desno plakat (vodoravno)");
-      assert(hp.includes(">Vstopnica 1 od 2<") && hp.includes(">Plakat noc<") && hp.includes(">18+ · osebni dokument<") && hp.includes("2 vstopnici · 30,00 EUR"), "karta: oznaka kode, dogodek, starost, nakup");
+      assert(iK > 0 && hp.indexOf('class="k-krtica"') > iK && hp.indexOf('class="k-podatki"') > hp.indexOf('class="k-krtica"') && hp.indexOf('class="k-plakat"') > hp.indexOf('class="k-podatki"')
+        && hp.indexOf('src="cid:outly-logo"') > hp.indexOf('class="k-krtica"') && hp.indexOf('src="cid:ticket-qr-1"') < hp.indexOf('class="k-podatki"') && hp.indexOf('src="cid:event-poster"') > hp.indexOf('class="k-plakat"'),
+        "karta (navpicna): zgoraj logotip in koda QR, nato podatki, spodaj plakat");
+      assert(hp.includes(">Ticket 1 of 2<") && hp.includes(">Plakat noc<") && hp.includes(">18+ · photo ID<") && hp.includes("2 tickets · 30.00 EUR") && hp.includes("2 vstopnici · 30,00 EUR"),
+        "karta v anglescini (oznaka kode, dogodek, starost, nakup); slovenski blok ima iste podatke");
       const iNoga = hp.indexOf("Pošiljatelj / Sender: NEXT DIMENSIONS");
       assert(!hp.includes("<!--noga-->") && iNoga > hp.indexOf('lang="en"') && iNoga < hp.indexOf("</body>") && (hp.match(/Pošiljatelj \/ Sender/g) || []).length === 1, "noga s firmo enkrat, znotraj temnega ovoja");
       assert(!/<img(?![^>]*cid:)/i.test(hp) && !/https?:\/\/res\.cloudinary|@import|<link/i.test(hp), "HTML: samo vgrajene slike, brez zunanjih slik in pisav");
@@ -589,8 +591,8 @@ async function cakajStreznik(baza) { for (let i = 0; i < 80; i++) { try { await 
       assert(r.status === 201, "gostujoci nakup (dogodek s plakatom)", r.body);
       assert(await cakaj(() => mailiNa("gost.plakat@example.com").length >= 1), "mail z vstopnico gostu pride");
       const mg = mailiNa("gost.plakat@example.com")[0] || {};
-      assert((mg.html.match(/src="cid:event-poster"/g) || []).length === 2 && (mg.html.match(/src="cid:ticket-qr-1"/g) || []).length === 2 && (mg.attachments || []).some(x => x.content_id === "event-poster" && x.content_type === "image/jpeg")
-        && /guest\/order#t=/.test(mg.html) && prenosi().length === 1, "gost: karta s plakatom in kodo QR v obeh blokih, plakat iz predpomnilnika", prenosi().length);
+      assert((mg.html.match(/src="cid:event-poster"/g) || []).length === 1 && (mg.html.match(/src="cid:ticket-qr-1"/g) || []).length === 1 && (mg.attachments || []).some(x => x.content_id === "event-poster" && x.content_type === "image/jpeg")
+        && /guest\/order#t=/.test(mg.html) && prenosi().length === 1, "gost: navpicna karta s plakatom in kodo QR (enkrat), plakat iz predpomnilnika", prenosi().length);
       for (const ev of [evTuj, evDrug]) {
         r = await zahtevek(BD, "POST", `/events/${ev}/orders`, T.pg, { quantity: 1 });
         assert(r.status === 201, "nakup (plakat ni z nasega Cloudinaryja)", r.body);

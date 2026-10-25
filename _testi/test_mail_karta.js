@@ -3,7 +3,8 @@
  * Mail z vstopnico v obliki karte (mail_karta.js, Martin 24. 10. 2026). Brez baze in streznika:
  *   node _testi/test_mail_karta.js
  *   1  plakat: samo z NASEGA Cloudinaryja (SSRF), izrez za mail, rok, velikost, tip, predpomnilnik (tudi neuspeha)
- *   2  karta: tri stolpci (levo logotip + QR, sredina podatki, desno plakat), brez plakata dva, brez kode QR besedilo, ubezanje podatkov
+ *   2  karta: navpicna (25. 10. 2026): zgoraj logotip + QR, perforacija z izrezoma, podatki, perforacija, plakat; brez plakata brez spodnjega dela;
+ *      vsaka celica s svojo barvo (temni nacin); brez kode QR besedilo; ubezanje podatkov
  *   3  ovoj: temno ozadje, oznaka za nogo, brez zunanjih virov in skritega besedila
  * Integracija (pravi maili, plakat v potrdilu kupcu in mailu gostu, noga): test_potrdilo_kupcu.js sklop 10; karta brez plakata: test_gost.js, test_prenos_gost.js.
  */
@@ -21,7 +22,7 @@ global.fetch = async (url, opt) => { klici.push({ url: String(url), opt }); retu
   try {
     console.log("\n# 1. Plakat");
     const P = "https://res.cloudinary.com/nasoblak/image/upload/";
-    assert(K.plakatUrlZaMail(P + "v17/klub/plakat.jpg") === P + "c_fill,g_auto,w_300,h_600,f_jpg,q_70/v17/klub/plakat.jpg", "nas Cloudinary: ozek pokoncni izrez (1 : 2, JPEG)");
+    assert(K.plakatUrlZaMail(P + "v17/klub/plakat.jpg") === P + "c_fill,g_auto,w_840,h_420,f_jpg,q_70/v17/klub/plakat.jpg", "nas Cloudinary: lezec izrez (2 : 1, JPEG) za spodnji del navpicne karte");
     for (const [u, opis] of [["https://res.cloudinary.com/tujoblak/image/upload/v1/a.jpg", "tuj Cloudinary racun"], ["http://res.cloudinary.com/nasoblak/image/upload/v1/a.jpg", "http"],
       ["https://example.com/image/upload/v1/a.jpg", "tuj streznik"], ["https://res.cloudinary.com.evil.test/nasoblak/image/upload/a.jpg", "podobna domena"],
       [P + "../../tujoblak/image/upload/a.jpg", "pot z .."], [P + "v1/a.jpg?x=1", "poizvedba"],
@@ -31,7 +32,7 @@ global.fetch = async (url, opt) => { klici.push({ url: String(url), opt }); retu
       assert(K.plakatUrlZaMail(u) === null, `zavrnjen: ${opis}`);
     }
     assert(K.plakatUrlZaMail(P + "v1/a.jpg", "") === null, "brez CLOUDINARY_CLOUD_NAME: brez plakata");
-    assert(K.plakatUrlZaMail(P + "c_fill,w_500/v17/klub_1/plakat-2.jpg") === P + "c_fill,g_auto,w_300,h_600,f_jpg,q_70/c_fill,w_500/v17/klub_1/plakat-2.jpg", "obstojec izrez v URL-ju (vejica) je dovoljen");
+    assert(K.plakatUrlZaMail(P + "c_fill,w_500/v17/klub_1/plakat-2.jpg") === P + "c_fill,g_auto,w_840,h_420,f_jpg,q_70/c_fill,w_500/v17/klub_1/plakat-2.jpg", "obstojec izrez v URL-ju (vejica) je dovoljen");
 
     let b = await K.plakatZaMail(P + "v1/ok.jpg");
     assert(b && b.equals(JPEG) && klici.length === 1 && klici[0].opt.redirect === "error" && klici[0].opt.signal, "prenos: JPEG, brez preusmeritev, z rokom (signal)", klici.map(k => k.url));
@@ -67,21 +68,21 @@ global.fetch = async (url, opt) => { klici.push({ url: String(url), opt }); retu
       qr: { cid: "ticket-qr-1", alt: "Koda QR vstopnice", oznaka: "Vstopnica 1 od 2" }, brezQr: "Kode QR so v aplikaciji Outly", pod: ["OUT-ABC", "Pokažite pri vhodu"] };
     const h3 = K.karta({ ...osnova, plakat: true });
     const i = (s) => h3.indexOf(s);
-    assert(i('class="k-levo" width="34%"') > 0 && i('class="k-sredina" width="42%"') > i('class="k-levo"') && i('class="k-desno" width="24%"') > i('class="k-sredina"'), "plakat: trije stolpci 34 / 42 / 24 %");
-    assert(i('src="cid:outly-logo"') < i('src="cid:ticket-qr-1"') && i('src="cid:ticket-qr-1"') < i('class="k-sredina"') && i(">Vstopnica 1 od 2<") < i('class="k-sredina"') && i("OUT-ABC") < i('class="k-sredina"'),
-      "levo: logotip, koda QR, oznaka in podatki pod kodo");
-    assert(i('src="cid:event-poster"') > i('class="k-desno"') && /max-width:150px/.test(h3), "desno plakat; koda QR do 150 px (na telefonu stolpec 34 %)");
+    // Navpicna karta (Martin 25. 10. 2026: »naj bo navpicen«): vrstni red od zgoraj navzdol
+    assert(i('class="k-krtica"') > 0 && i('src="cid:outly-logo"') > i('class="k-krtica"') && i('src="cid:ticket-qr-1"') > i('src="cid:outly-logo"') && i(">Vstopnica 1 od 2<") > i('src="cid:ticket-qr-1"')
+      && i("OUT-ABC") < i('class="k-podatki"') && i('class="k-podatki"') < i('class="k-plakat"') && i('src="cid:event-poster"') > i('class="k-plakat"'),
+      "navpicno: logotip, koda QR in podatki pod njo, nato podatki dogodka, spodaj plakat");
+    assert(/max-width:420px/.test(h3) && /class="k-qr" width="210"/.test(h3) && !/colspan="3"[^>]*width="(34|42|24)%"|width="(34|42|24)%"/.test(h3), "en stolpec do 420 px, koda QR 210 px (brez vodoravnih stolpcev)");
     assert(h3.includes("Noc &amp; &lt;b&gt;x&lt;/b&gt;") && h3.includes("Klub &lt;i&gt;") && !h3.includes("<b>x") && !h3.includes(">Prazno<"), "podatki ubezeni; prazne vrstice izpuscene");
-    // Martinov posnetek 25. 10. 2026: v temnem nacinu odjemalca je bil srednji stolpec crn (celica brez lastne barve). Vsaka celica karte ima bgcolor IN background.
+    // Martinov posnetek 25. 10. 2026: v temnem nacinu odjemalca je bil srednji del karte crn (celica brez lastne barve). Vsaka celica karte ima bgcolor IN background.
     const celice = h3.match(/<td\b[^>]*>/g) || [];
-    assert(celice.length >= 10 && celice.every((t) => /bgcolor="#[0-9A-F]{6}"/i.test(t) && /style="background:#[0-9A-F]{6};/i.test(t)), "vsaka celica karte ima svojo barvo (bgcolor + background): temni nacin je ne pobarva",
+    assert(celice.length >= 9 && celice.every((t) => /bgcolor="#[0-9A-F]{6}"/i.test(t) && /style="background:#[0-9A-F]{6};/i.test(t)), "vsaka celica karte ima svojo barvo (bgcolor + background): temni nacin je ne pobarva",
       celice.filter((t) => !/bgcolor=/.test(t)).slice(0, 2));
-    assert(/class="k-sredina"[^>]*bgcolor="#FFFFFF"|bgcolor="#FFFFFF"[^>]*class="k-sredina"/.test(h3), "srednji stolpec je bel (#FFFFFF)");
-    const izrezi = h3.match(/<div style="width:20px;height:10px;margin:0 auto;background:#000000;border-radius:[^"]+">/g) || [];
-    assert(izrezi.length === 4 && (h3.match(/border-right:2px dashed #D0D0D6/g) || []).length === 2, "plakat: dve perforaciji, vsaka z izrezom zgoraj in spodaj (20 px, barva ozadja maila)", izrezi.length);
+    assert(/class="k-podatki"[^>]*bgcolor="#FFFFFF"|bgcolor="#FFFFFF"[^>]*class="k-podatki"/.test(h3), "del s podatki je bel (#FFFFFF)");
+    const izrezi = h3.match(/<div style="width:10px;height:20px;background:#000000;border-radius:[^"]+">/g) || [];
+    assert(izrezi.length === 4 && (h3.match(/border-top:2px dashed #D0D0D6/g) || []).length === 2, "plakat: dve perforaciji, vsaka z izrezom levo in desno (20 px, barva ozadja maila)", izrezi.length);
     const h2 = K.karta({ ...osnova, plakat: false });
-    assert((h2.match(/<div style="width:20px;height:10px;margin:0 auto;background:#000000;/g) || []).length === 2, "brez plakata: ena perforacija z dvema izrezoma");
-    assert(h2.includes('class="k-sredina" width="66%"') && !h2.includes("k-desno") && !h2.includes("event-poster"), "brez plakata: dva stolpca, sredina 66 %");
+    assert((h2.match(/<div style="width:10px;height:20px;background:#000000;/g) || []).length === 2 && !h2.includes("k-plakat") && !h2.includes("event-poster"), "brez plakata: ena perforacija, brez spodnjega dela");
     const h0 = K.karta({ ...osnova, qr: null, plakat: false });
     assert(!h0.includes("ticket-qr") && h0.includes("Kode QR so v aplikaciji Outly"), "brez kode QR: besedilo namesto kode");
     assert(!/display:\s*flex|display:\s*grid|position:\s*absolute/i.test(h3 + h2), "postavitev s tabelami (Outlook/Gmail), brez flex/grid/absolute");
@@ -92,7 +93,7 @@ global.fetch = async (url, opt) => { klici.push({ url: String(url), opt }); retu
     const ov = K.ovoj("sl", "<p>vsebina</p>");
     assert(ov.startsWith("<!doctype html>") && /bgcolor="#000000"/.test(ov) && ov.includes("max-width:600px") && ov.includes("<!--noga-->") && ov.indexOf("<!--noga-->") < ov.indexOf("</body>"), "temen ovoj (600 px), oznaka za nogo znotraj");
     assert(!/<link|@import|https?:\/\/|<script|display:\s*none/i.test(ov + h3), "brez zunanjih virov, skriptov in skritega besedila");
-    assert(/@media \(max-width:480px\)/.test(ov) && /\.k-vrednost\{font-size:11px/.test(ov), "telefon: manjse pisave na karti (stolpci ostanejo vodoravni)");
+    assert(/@media \(max-width:480px\)\{\.o-zunaj/.test(ov) && !/\.k-vrednost\{font-size/.test(ov), "telefon: samo ozji zunanji rob (navpicna karta ne rabi manjsih pisav)");
     assert(K.nogaHtml("X").includes("color:#A1A1A6") && K.SLOG_DROBNO.includes("font-size:13px") && K.SLOG_DROBNO.includes("color:#A1A1A6"), "noga in drobni tisk: berljiva siva na crni (13 px)");
     const lg = K.prilogaLogo();
     const lgB = Buffer.from(lg.content, "base64");

@@ -204,7 +204,7 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     const mail = poslanoNa("gost@example.com");
     assert(mail.length === 1, "mail poslan natanko enkrat (tudi po pospravljalcu)", mail.length);
     const m0 = mail[0] || {};
-    assert(/Gost Noc/.test(m0.subject || "") && /Gost Noc/.test(m0.html || "") && /Pure Club/.test(m0.html || "") && /2 x 15\.00 EUR/.test(m0.html || ""), "mail: dogodek, klub, stevilo vstopnic", m0.subject);
+    assert(/Gost Noc/.test(m0.subject || "") && /Gost Noc/.test(m0.html || "") && /Pure Club/.test(m0.html || "") && /2 × 15\.00 EUR = 30\.00 EUR/.test(m0.html || "") && /2 x 15,00 EUR = 30,00 EUR/.test(m0.html || ""), "mail: dogodek, klub, stevilo vstopnic (karta en, slovenski blok)", m0.subject);
     assert(/^Outly <test@outly\.test>$/.test(m0.from || ""), "mail: posiljatelj iz EMAIL_FROM", m0.from);
     assert(!/<script|pixel|track/i.test(m0.html || "") && !/<img[^>]+src="(?!cid:)/i.test(m0.html || ""), "mail: brez sledilnikov in zunanjih slik (samo vgrajene cid:)");
     // QR inline + PDF (migracija 034): 2 vstopnici -> vgrajena slika PNG SAMO za prvo kodo (content_id) + 1 PDF z 2 stranema (vse kode)
@@ -240,10 +240,14 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(/Gost Noc\n.*\(ljubljanski čas\)\nPure Club, .*Ljubljana\nBrez starostne omejitve\./s.test(slG), "sl: dogodek, datum, kraj, starostna meja");
     assert(slG.includes("2 x 15,00 EUR = 30,00 EUR. DDV se obračuna v skladu s statusom prodajalca."), "sl: znesek z vejico + DDV stavek (vat_rate NULL, vat_payer null)");
     assert(/Vstopnico prodaja klub: Pure Club/.test(slG) && /Outly je samo posrednik: NEXT DIMENSIONS/.test(slG) && /pravice do odstopa od pogodbe ni \(Zakon o varstvu potrošnikov ZVPot-1, 135\. člen, 12\. točka\)/.test(slG), "sl: prodajalec, posrednik, izjema od odstopa");
+    // pregled #371 (pravnik 20. 10.: zakonsko jamstvo v potrdilu, kot pri kupcu): stavek o pravicah po ZVPot v obeh jezikih, tudi v HTML
+    assert(slG.includes("Za nepravilnosti pri izvedbi dogodka imate pravice po Zakonu o varstvu potrošnikov.") && deliG[1].includes("You have the rights under the Consumer Protection Act if the event is not delivered as agreed.")
+      && m0.html.includes("Za nepravilnosti pri izvedbi dogodka imate pravice po Zakonu o varstvu potrošnikov."), "gost: zakonsko jamstvo (SL + EN besedilo, SL v HTML)");
     assert(/Sprejeli ste pogoje uporabe Outly, različica 2026-10-01: https:\/\/outly\.si\/terms/.test(slG) && /Ta povezava je vaša vstopnica\./.test(slG) && /Prva koda QR je na vstopnici v tem sporočilu, vse vaše kode QR/.test(slG), "sl: pogoji z razlicico, skrivna povezava, koda QR");
     assert(/Pritožbe\n/i.test(slG) && slG.includes(`https://outly.test/app/guest/order#t=${zetonIzMaila(m0)}`), "sl: pritozbe in povezava z zetonom");
-    assert((m0.html.match(/cid:ticket-qr-1/g) || []).length === 2 && m0.html.includes("Vstopnica 1 od 2") && m0.html.includes("Ticket 1 of 2") && m0.html.includes('alt="Koda QR vstopnice"') && !/cid:ticket-qr-2/.test(m0.html), "HTML: koda QR v obeh blokih z oznako po jeziku (ista priloga)");
-    assert((m0.html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="sl">,<div lang="en">', "HTML: bloka sl in en");
+    // Martin 25. 10. 2026: angleski videz z navpicno karto (koda QR enkrat, na vrhu), nato popoln slovenski blok; text/plain nespremenjen
+    assert((m0.html.match(/cid:ticket-qr-1/g) || []).length === 1 && m0.html.includes("Ticket 1 of 2") && m0.html.includes('alt="Ticket QR code"') && !/cid:ticket-qr-2/.test(m0.html), "HTML: koda QR na karti (enkrat, ista priloga) z oznako");
+    assert((m0.html.match(/<div lang="(sl|en)">/g) || []).join() === '<div lang="en">,<div lang="sl">' && /Ta povezava je vaša vstopnica\./.test(m0.html) && /This link is your ticket\./.test(m0.html), "HTML: angleski del, nato slovenski blok (varnostni stavek v obeh)");
     const zetonMail = zetonIzMaila(m0);
     assert(zetonMail && zetonMail !== zeton1, "mail: povezava https://outly.test/app/guest/order#t=<svez zeton> (fragment, ne poizvedba)", zetonMail);
     assert((m0.text || "").includes(`https://outly.test/app/guest/order#t=${zetonMail}`), "mail: povezava tudi v tekstovni razlicici");
