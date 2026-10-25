@@ -6603,9 +6603,10 @@ function nogaMaila({ html, text }) {
   };
 }
 const POSTA_ODGOVOR = "luka@outly.si";
-// Maili, ki so del nakupa (potrdilo kupcu, vstopnice gostu, prejeta vstopnica), so DVOJEZICNI: slovenski blok, locilo, angleski blok (#100, ZVPot-1 7/1: informacije pred
-// sklenitvijo pogodbe v slovenscini). Podatki so eni, razdelke za vsak jezik gradi ista funkcija z `jez` ("sl" | "en") in jih izrise izrisiDvojezicno.
-// Angleski blok je BESEDA ZA BESEDO enak kot pred #100 (testi ga preverjajo). Slovenski blok: vikanje, znesek z decimalno vejico, datum po sl-SI.
+// Maili, ki so del nakupa (potrdilo kupcu, vstopnice gostu, prejeta vstopnica), so DVOJEZICNI (#100, ZVPot-1 7/1: informacije pred sklenitvijo pogodbe v slovenscini).
+// Podatki so eni, razdelke za vsak jezik gradi ista funkcija z `jez` ("sl" | "en"). Besedilo (text/plain): slovenski blok, locilo, angleski blok.
+// HTML: angleski videz s karto, nato popoln slovenski blok drobno (izrisiAngleskoKarta, 25. 10. 2026). Slovensko: vikanje, decimalna vejica, datum po sl-SI.
+// izrisiDvojezicno (starejsi HTML, oba bloka v celoti) ostaja za maile o vracilu in sporu.
 const JEZIKI_MAILA = ["sl", "en"];
 const LOCILO_MAILA = "----------------------------------------";
 const znesek = (centi, valuta, jez = "en") => {
@@ -6668,13 +6669,16 @@ function izrisiDvojezicno(zgradi, povezava) {
 // HTML maila z vstopnico (Martin 25. 10. 2026: »izberiva tistega, ki je v angleščini, naj bo navpičen«; DECISIONS): angleški videz (oznaka, naslov, navpična
 // karta v angleščini, gumb, kratke vrstice), nato OBVEZNI slovenski blok v drobnem tisku (ZVPot-1 7/1: slovenščina obvezna in popolna; pravnik 20. 10.: drugi
 // jezik je dovoljen, SL na prvem mestu bi bil boljši dokaz, odločil je Martin). Besedilo (text/plain) ostane dvojezično (SL, nato EN) kot doslej.
-//   en: kratke vrstice; enRazdelki: angleški razdelki, ki ostanejo v celoti (prenos: GDPR 14 in ugovor); sl: nizi ali { html } ali { naslov, vrstice }.
+//   en: kratke vrstice; enRazdelki: angleški razdelki, ki ostanejo v celoti (prenos: pravila, GDPR 14 in ugovor); sl: nizi ali { naslov, vrstice } ali
+//   { html } — ta gre v mail NEUBEZAN: klicalec mora vse podatke iz baze sam spustiti skozi GOST_POSTA_NIZ (I43).
 function izrisiAngleskoKarta({ oznaka, naslov, karta, povezava, gumb, en = [], enRazdelki = [], sl = [] }) {
   const N = GOST_POSTA_NIZ, K = mailKarta, Bv = K.B;
   const drobno = (v, slog = "") => `<p style="margin:12px 0 0;font-size:13px;line-height:1.5;color:${Bv.drobno}${slog ? `;${slog}` : ""}">${v}</p>`;
   const zP = (v) => zPovezavo(v, povezava, `color:${Bv.svetlo};word-break:break-all`);
-  const stavek = (v) => (/[.!?]$/.test(String(v).trim()) ? v : `${v}.`);   // vrstice razdelka (npr. naslov dogodka, datum) v enem odstavku locene s piko
-  const razdelek = (r) => drobno(`<strong style="color:${Bv.svetlo}">${N(r.naslov)}.</strong> ` + r.vrstice.map((v) => zP(stavek(v))).join(" "));
+  // Vrstice razdelka (naslov dogodka, datum ...) so v enem odstavku locene s piko; za URL-jem pike ne dodamo (bralnik bi jo vzel v povezavo: /terms. -> 404).
+  const stavek = (v) => (/([.!?:]|https?:\/\/\S+)$/.test(String(v).trim()) ? v : `${v}.`);
+  const razdelek = (r) => drobno(`<strong style="color:${Bv.svetlo}">${N(stavek(r.naslov))}</strong> `
+    + r.vrstice.map((v) => (r.krepko ? `<strong>${zP(stavek(v))}</strong>` : zP(stavek(v)))).join(" "));
   return K.ovoj("en", K.glava(oznaka, naslov) + K.karta(karta) + K.gumb(povezava, gumb)
     + `<div lang="en">` + en.map((v) => drobno(zP(v))).join("") + enRazdelki.map(razdelek).join("") + `</div>`
     + `<div lang="sl"><p style="margin:24px 0 0;padding-top:16px;border-top:1px solid ${Bv.crta};font-size:13px;line-height:1.5;color:${Bv.svetlo}"><strong>Slovensko</strong></p>`
@@ -6711,7 +6715,8 @@ function gostPotrdilo(o, povezava, prevzeto, kode = [], plakat = false) {
       { naslov: T("Prodajalec", "Seller"), vrstice: sellerVrstice(o, jez) },
       { naslov: T("Brez pravice do odstopa", "No right of withdrawal"), vrstice: [T(
         "Pri vstopnicah za dogodek na določen datum pravice do odstopa od pogodbe ni (Zakon o varstvu potrošnikov ZVPot-1, 135. člen, 12. točka). Če je dogodek odpovedan ali prestavljen, veljajo pravila iz pogojev.",
-        "There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply.")] },
+        "There is no right of withdrawal for tickets to an event on a fixed date (Consumer Protection Act ZVPot-1, Article 135, point 12). If the event is cancelled or postponed, the rules in the terms apply."),
+        T("Za nepravilnosti pri izvedbi dogodka imate pravice po Zakonu o varstvu potrošnikov.", "You have the rights under the Consumer Protection Act if the event is not delivered as agreed.")] },
       { naslov: T("Pogoji", "Terms"), vrstice: [T(`Sprejeli ste pogoje uporabe Outly, različica ${o.guest_terms_version}: https://outly.si/terms`, `You accepted the Outly terms, version ${o.guest_terms_version}: https://outly.si/terms`)] },
       { naslov: T("Vaše vstopnice", "Your tickets"), vrstice: (prevzeto
         ? [T(`Vstopnice odprite v svojem računu Outly: ${povezava}`, `Open your tickets in your Outly account: ${povezava}`)]
@@ -6735,7 +6740,7 @@ function gostPotrdilo(o, povezava, prevzeto, kode = [], plakat = false) {
     return { naslovBesedila: T(`Vaše vstopnice Outly - naročilo ${o.public_ref}`, `Your Outly tickets - order ${o.public_ref}`), oznakaHtml: T("Potrdilo o nakupu", "Order confirmed"),
       naslovHtml: T(`Vaše vstopnice za ${o.event_title}`, `Your tickets for ${o.event_title}`), razdelki,
       kratko: [prevzeto ? `Your tickets are in your Outly account: ${povezava}`
-        : `Open your tickets: ${povezava} This link is your ticket. Don't share it except with people coming with you. All QR codes are also in the attached PDF.`,
+        : `Open your tickets: ${povezava} This link is your ticket. Don't share it except with people coming with you.${kode.length ? " All QR codes are also in the attached PDF." : ""}`,
         "There is no right of withdrawal for tickets to an event on a fixed date (Slovenian Consumer Protection Act ZVPot-1, Article 135, point 12). Terms: https://outly.si/terms"],
       karta, gumb: prevzeto ? T("Odpri v aplikaciji", "Open in the app") : T("Odpri vstopnice", "Open your tickets") };
   }, povezava, plakat);
@@ -6937,7 +6942,7 @@ function potrdiloPostaIzstopi() { const n = potrdiloPosta.cakajoci.shift(); if (
 const potrdiloIzcrpaj = (oid) => pool.query("UPDATE orders SET receipt_mail_attempts = $2 WHERE id = $1 AND receipt_mail_sent_at IS NULL", [oid, GOST_POSTA_POSKUSOV]);
 
 // Vsebina potrdila kupcu (#95, kratka oblika od 20. 10. 2026: Martin je obrnil »brez QR«, DECISIONS 2026-10-20; besedilo po pravniku
-// outly-hq/pravno/2026-10-20-potrdilo-nakupa-kratko.md, razdelek 6A platforma / 6B klub). Dvojezicno: slovenski blok (obvezen, ZVPot-1 7/1), locilo, angleski blok.
+// outly-hq/pravno/2026-10-20-potrdilo-nakupa-kratko.md, razdelek 6A platforma / 6B klub). Dvojezicno: besedilo SL, locilo, EN; HTML angleski videz + popoln SL blok drobno (izrisiAngleskoKarta).
 // Vsak blok: VRH (dogodek, datum, prizorisce, kolicina · znesek · plačano, starost + osebni dokument, kje je QR, stavek o prenosu, gumb, stevilka narocila) in
 // DROBNI TISK (en odstavek, >= 12 px, #555 ali temneje na beli oz. #A1A1A6 na crni od 24. 10., ni zlozen; isto besedilo v text/plain): neobstoj odstopa PRVI, zakonsko jamstvo, prodajalec (firma, sedez,
 // telefon, e-naslov, maticna, davcna; stavek o DDV), pri klubu Outly kot posrednik, pritozbe, pogoji z razlicico. Nic pravnega ni samo na povezavi ali samo v PDF.
@@ -7003,7 +7008,7 @@ function kupecPotrdiloBloki(o, povezava, pril) {
       o.terms_version ? T(`Pogoji uporabe Outly, različica ${o.terms_version}: https://outly.si/terms`, `Outly terms of use, version ${o.terms_version}: https://outly.si/terms`)
         : T("Pogoji uporabe Outly: https://outly.si/terms", "Outly terms of use: https://outly.si/terms"),
     ].join(" ");
-    // Karta (mail_karta.js): isti podatki kot `vrh`, razporejeni po stolpcih; koda QR prve vstopnice samo, ce je PDF nastal.
+    // Karta (mail_karta.js): isti podatki kot `vrh` (navpicna karta, HTML jo kaze samo v anglescini); koda QR prve vstopnice samo, ce je PDF nastal.
     const karta = {
       jez, vrsta: jeMiza ? T("VIP miza", "VIP table") : T("Vstopnica", "Ticket"), naslov: o.event_title,
       vrstice: [[T("Datum", "Date"), mailKarta.datumKarta(o.start_at, jez)], [T("Prizorišče", "Venue"), prizoriscePodatki(o)], [T("Nakup", "Purchase"), vrh[2], true],
@@ -7820,7 +7825,7 @@ function prenosPotrdilo(x, povezava, kode, plakat = false) {
           T(`Organizator: ${x.club_name}${klubKontakt ? ` (${klubKontakt})` : ""}. Glede samega dogodka se obrnite na organizatorja.`,
             `Organiser: ${x.club_name}${klubKontakt ? ` (${klubKontakt})` : ""}. Contact the organiser about the event itself.`), starost] },
       { naslov: T("Vaša vstopnica", "Your ticket"), vrstice: [vrsta, T(`Kodo QR pokažite pri vhodu (je tudi v priloženem PDF, outly-ticket.pdf): ${povezava}`, `Show this QR code at the door (it is also in the attached PDF, outly-ticket.pdf): ${povezava}`)] },
-      { naslov: T("Pravila vstopnice", "Ticket rules"), vrstice: T(
+      { naslov: T("Pravila vstopnice", "Ticket rules"), enPolno: true, vrstice: T(
           ["En vstop na kodo.", "Organizator vam lahko zavrne vstop na podlagi hišnega reda ali zakona.", "Preprodaja vstopnice ni dovoljena.",
            "Če je dogodek odpovedan, se vračilo izplača osebi, ki je vstopnico kupila, ne vam.", "Če z istim e-naslovom ustvarite račun Outly, se bo vstopnica pojavila tam."],
           ["One entry per code.", "The organiser may refuse entry under its house rules or the law.", "Reselling the ticket is not allowed.",
@@ -7837,8 +7842,8 @@ function prenosPotrdilo(x, povezava, kode, plakat = false) {
           `Hramba: vaš e-naslov izbrišemo 30 dni po koncu dogodka, razen če z njim ustvarite račun Outly.`,
           `Vaše pravice: dostop, popravek, izbris, omejitev obdelave in pritožba pri Informacijskem pooblaščencu Republike Slovenije (www.ip-rs.si). Politika zasebnosti: https://outly.si/privacy` ], [
           `Who we are: ${POSREDNIK_VRSTICA}.`,
-          `Why: we use your email address only to deliver this ticket and to allow entry. Legal basis: legitimate interest (GDPR Article 6(1)(f)): ${posiljatelj} wanted to pass this ticket on to you.`,
-          `Where we got it: ${posiljatelj}, an Outly user, entered your email address.`,
+          `Why: we use your email address only to deliver this ticket and to allow entry. Legal basis: legitimate interest (GDPR Article 6(1)(f)): ${x.from_username || "an Outly user"} wanted to pass this ticket on to you.`,
+          `Where we got it: ${x.from_username ? `${x.from_username}, an Outly user,` : "an Outly user"} entered your email address.`,
           `Data: your email address, the ticket and event, the sender's confirmation that you meet the age limit (if there is one), and the time the ticket is scanned at entry.`,
           `Recipients: Resend (email delivery). The organiser (${x.club_name}) only sees that the ticket was passed on to a guest, not your email address.`,
           `Transfer outside the EEA: our email provider is based in the United States; the transfer relies on the EU standard contractual clauses or an adequacy decision, as described in our privacy policy.`,

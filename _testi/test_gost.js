@@ -240,6 +240,9 @@ const letaNazaj = (leta, dniNaprej = 0) => { const d = new Date(); d.setUTCFullY
     assert(/Gost Noc\n.*\(ljubljanski čas\)\nPure Club, .*Ljubljana\nBrez starostne omejitve\./s.test(slG), "sl: dogodek, datum, kraj, starostna meja");
     assert(slG.includes("2 x 15,00 EUR = 30,00 EUR. DDV se obračuna v skladu s statusom prodajalca."), "sl: znesek z vejico + DDV stavek (vat_rate NULL, vat_payer null)");
     assert(/Vstopnico prodaja klub: Pure Club/.test(slG) && /Outly je samo posrednik: NEXT DIMENSIONS/.test(slG) && /pravice do odstopa od pogodbe ni \(Zakon o varstvu potrošnikov ZVPot-1, 135\. člen, 12\. točka\)/.test(slG), "sl: prodajalec, posrednik, izjema od odstopa");
+    // pregled #371 (pravnik 20. 10.: zakonsko jamstvo v potrdilu, kot pri kupcu): stavek o pravicah po ZVPot v obeh jezikih, tudi v HTML
+    assert(slG.includes("Za nepravilnosti pri izvedbi dogodka imate pravice po Zakonu o varstvu potrošnikov.") && deliG[1].includes("You have the rights under the Consumer Protection Act if the event is not delivered as agreed.")
+      && m0.html.includes("Za nepravilnosti pri izvedbi dogodka imate pravice po Zakonu o varstvu potrošnikov."), "gost: zakonsko jamstvo (SL + EN besedilo, SL v HTML)");
     assert(/Sprejeli ste pogoje uporabe Outly, različica 2026-10-01: https:\/\/outly\.si\/terms/.test(slG) && /Ta povezava je vaša vstopnica\./.test(slG) && /Prva koda QR je na vstopnici v tem sporočilu, vse vaše kode QR/.test(slG), "sl: pogoji z razlicico, skrivna povezava, koda QR");
     assert(/Pritožbe\n/i.test(slG) && slG.includes(`https://outly.test/app/guest/order#t=${zetonIzMaila(m0)}`), "sl: pritozbe in povezava z zetonom");
     // Martin 25. 10. 2026: angleski videz z navpicno karto (koda QR enkrat, na vrhu), nato popoln slovenski blok; text/plain nespremenjen
