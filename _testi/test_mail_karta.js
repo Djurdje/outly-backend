@@ -72,7 +72,15 @@ global.fetch = async (url, opt) => { klici.push({ url: String(url), opt }); retu
       "levo: logotip, koda QR, oznaka in podatki pod kodo");
     assert(i('src="cid:event-poster"') > i('class="k-desno"') && /max-width:150px/.test(h3), "desno plakat; koda QR do 150 px (na telefonu stolpec 34 %)");
     assert(h3.includes("Noc &amp; &lt;b&gt;x&lt;/b&gt;") && h3.includes("Klub &lt;i&gt;") && !h3.includes("<b>x") && !h3.includes(">Prazno<"), "podatki ubezeni; prazne vrstice izpuscene");
+    // Martinov posnetek 25. 10. 2026: v temnem nacinu odjemalca je bil srednji stolpec crn (celica brez lastne barve). Vsaka celica karte ima bgcolor IN background.
+    const celice = h3.match(/<td\b[^>]*>/g) || [];
+    assert(celice.length >= 10 && celice.every((t) => /bgcolor="#[0-9A-F]{6}"/i.test(t) && /style="background:#[0-9A-F]{6};/i.test(t)), "vsaka celica karte ima svojo barvo (bgcolor + background): temni nacin je ne pobarva",
+      celice.filter((t) => !/bgcolor=/.test(t)).slice(0, 2));
+    assert(/class="k-sredina"[^>]*bgcolor="#FFFFFF"|bgcolor="#FFFFFF"[^>]*class="k-sredina"/.test(h3), "srednji stolpec je bel (#FFFFFF)");
+    const izrezi = h3.match(/<div style="width:20px;height:10px;margin:0 auto;background:#000000;border-radius:[^"]+">/g) || [];
+    assert(izrezi.length === 4 && (h3.match(/border-right:2px dashed #D0D0D6/g) || []).length === 2, "plakat: dve perforaciji, vsaka z izrezom zgoraj in spodaj (20 px, barva ozadja maila)", izrezi.length);
     const h2 = K.karta({ ...osnova, plakat: false });
+    assert((h2.match(/<div style="width:20px;height:10px;margin:0 auto;background:#000000;/g) || []).length === 2, "brez plakata: ena perforacija z dvema izrezoma");
     assert(h2.includes('class="k-sredina" width="66%"') && !h2.includes("k-desno") && !h2.includes("event-poster"), "brez plakata: dva stolpca, sredina 66 %");
     const h0 = K.karta({ ...osnova, qr: null, plakat: false });
     assert(!h0.includes("ticket-qr") && h0.includes("Kode QR so v aplikaciji Outly"), "brez kode QR: besedilo namesto kode");

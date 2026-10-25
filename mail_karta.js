@@ -90,10 +90,18 @@ function datumKarta(d, jez) {
 
 // --- karta ---
 // k = { jez, vrsta, naslov, vrstice: [[oznaka, vrednost, krepko?]], qr: { cid, alt, oznaka } | null, brezQr, pod: [nizi], plakat: bool }
+// Postavitev (25. 10. 2026, Martinov posnetek iz telefona): stolpci levo | perforacija | sredina | [perforacija | plakat]. Perforacija sta dva stolpca po IZREZ px
+// (crtkana crta je desni rob levega), zgoraj in spodaj ima izrez (polkrog v barvi ozadja maila, kot pri pravi vstopnici). Vsaka celica ima SVOJO barvo
+// (bgcolor + background): brez tega je odjemalec v temnem nacinu sredino pobarval crno (celica je dedovala barvo tabele) in besedilo se ni videlo.
+const IZREZ = 10;   // polmer izreza (px), kot na Martinovem osnutku (20 px); stolpec perforacije je sirok 2 x IZREZ
 function karta(k) {
   const N = ubezi;
   const sredina = k.plakat ? 42 : 66;
-  const perforacija = `2px dashed ${B.perforacija}`;
+  const crta = `2px dashed ${B.perforacija}`;
+  const celica = (barva, slog = "", atr = "") => `<td${atr} bgcolor="${barva}" style="background:${barva};${slog}">`;
+  const prazna = (barva, slog = "", atr = "") => celica(barva, `height:${IZREZ + 1}px;font-size:0;line-height:0;${slog}`, ` height="${IZREZ + 1}"${atr}`) + `</td>`;
+  const izrez = (zgoraj, barva) => celica(barva, `height:${IZREZ + 1}px;font-size:0;line-height:0;padding:0`, ` colspan="2" height="${IZREZ + 1}" width="${2 * IZREZ}" align="center" valign="${zgoraj ? "top" : "bottom"}"`)
+    + `<div style="width:${2 * IZREZ}px;height:${IZREZ}px;margin:0 auto;background:${B.ozadje};border-radius:${zgoraj ? `0 0 ${IZREZ}px ${IZREZ}px` : `${IZREZ}px ${IZREZ}px 0 0`};font-size:0;line-height:0">&nbsp;</div></td>`;
   // Logotip = napis Outly (Martin 25. 10. 2026: »pravi logo«), temen na svetli krtici; slika 192 x 74 (2x), prikaz 96 px, na telefonu najvec sirina stolpca.
   const logo = `<img src="cid:${CID_LOGO}" width="96" alt="Outly" style="display:block;margin:0 auto;width:96px;max-width:100%;height:auto;border:0">`;
   const qr = k.qr
@@ -101,28 +109,38 @@ function karta(k) {
       + (k.qr.oznaka ? `<p style="margin:8px 0 0;font-size:12px;line-height:1.35;font-weight:700;color:${B.karta_besedilo}">${N(k.qr.oznaka)}</p>` : "")
     : `<p style="margin:14px 0 0;font-size:12px;line-height:1.4;font-weight:600;color:${B.karta_besedilo}">${N(k.brezQr || "")}</p>`;
   const pod = (k.pod || []).filter(Boolean).map((v) => N(v)).join("<br>");
-  const levo = `<td class="k-levo" width="34%" valign="top" bgcolor="${B.krtica}" style="width:34%;background:${B.krtica};padding:16px 10px;text-align:center;border-right:${perforacija};border-radius:14px 0 0 14px">`
-    + logo + qr + (pod ? `<p class="k-mali" style="margin:6px 0 0;font-size:11px;line-height:1.4;color:#444444">${pod}</p>` : "") + `</td>`;
   const vrstice = k.vrstice.filter((v) => v && v[1]).map(([o, v, krepko]) =>
     `<p class="k-oznaka" style="margin:10px 0 0;font-size:10px;line-height:1.3;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${B.karta_sivo}">${N(o)}</p>`
     + `<p class="k-vrednost" style="margin:2px 0 0;font-size:13px;line-height:1.35;font-weight:${krepko ? 700 : 600};color:${B.karta_besedilo}">${N(v)}</p>`).join("");
-  const desniRob = k.plakat ? `border-right:${perforacija};` : "border-radius:0 14px 14px 0;";
-  const srednje = `<td class="k-sredina" width="${sredina}%" valign="top" style="width:${sredina}%;padding:16px 14px;${desniRob}">`
+  const desniKot = (zgoraj) => (zgoraj ? "border-radius:0 14px 0 0;" : "border-radius:0 0 14px 0;");
+  // zgornja / spodnja vrstica: robovi karte z zaobljenimi koti in izrezi na perforacijah
+  const rob = (zgoraj) => `<tr>`
+    + prazna(B.krtica, zgoraj ? "border-radius:14px 0 0 0;" : "border-radius:0 0 0 14px;")
+    + izrez(zgoraj, B.karta)
+    + prazna(B.karta, k.plakat ? "" : desniKot(zgoraj))
+    + (k.plakat ? izrez(zgoraj, B.karta) + prazna(B.plakat_ozadje, desniKot(zgoraj)) : "")
+    + `</tr>`;
+  const perf = (levaBarva, desnaBarva) => celica(levaBarva, `width:${IZREZ}px;font-size:0;line-height:0;border-right:${crta}`, ` width="${IZREZ}"`) + `</td>`
+    + celica(desnaBarva, `width:${IZREZ}px;font-size:0;line-height:0`, ` width="${IZREZ}"`) + `</td>`;
+  const levo = celica(B.krtica, "width:34%;padding:8px 10px;text-align:center", ` class="k-levo" width="34%" valign="top"`)
+    + logo + qr + (pod ? `<p class="k-mali" style="margin:6px 0 0;font-size:11px;line-height:1.4;color:#444444">${pod}</p>` : "") + `</td>`;
+  const srednje = celica(B.karta, `width:${sredina}%;padding:8px 8px 8px 6px`, ` class="k-sredina" width="${sredina}%" valign="top"`)
     + `<p class="k-oznaka" style="margin:0;font-size:10px;line-height:1.3;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:${B.modra_temna}">${N(k.vrsta)}</p>`
     + `<p class="k-naslov" style="margin:4px 0 0;font-size:20px;line-height:1.15;font-weight:800;color:${B.karta_besedilo}">${N(k.naslov)}</p>`
     + vrstice + `</td>`;
   const desno = k.plakat
-    ? `<td class="k-desno" width="24%" valign="middle" bgcolor="${B.plakat_ozadje}" style="width:24%;background:${B.plakat_ozadje};padding:0;border-radius:0 14px 14px 0">`
-      + `<img src="cid:${CID_PLAKAT}" width="144" alt="" style="display:block;width:100%;height:auto;border:0;border-radius:0 14px 14px 0"></td>`
+    ? perf(B.karta, B.plakat_ozadje)
+      + celica(B.plakat_ozadje, "width:24%;padding:0", ` class="k-desno" width="24%" valign="middle"`)
+      + `<img src="cid:${CID_PLAKAT}" width="144" alt="" style="display:block;width:100%;height:auto;border:0"></td>`
     : "";
-  return `<table role="presentation" class="k-karta" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${B.karta}" style="width:100%;border-collapse:separate;border-spacing:0;background:${B.karta};border-radius:14px;font-family:${PISAVA};color:${B.karta_besedilo}"><tr>`
-    + levo + srednje + desno + `</tr></table>`;
+  return `<table role="presentation" class="k-karta" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${B.karta}" style="width:100%;border-collapse:separate;border-spacing:0;background:${B.karta};border-radius:14px;font-family:${PISAVA};color:${B.karta_besedilo}">`
+    + rob(true) + `<tr>` + levo + perf(B.krtica, B.karta) + srednje + desno + `</tr>` + rob(false) + `</table>`;
 }
 
 // --- ovoj celega maila ---
 // Telefon (do 480 px): manjse pisave na karti, da so trije stolpci berljivi; odjemalec brez medijskih poizvedb pokaze iste stolpce z vecjo pisavo.
 const SLOG = `body{margin:0;padding:0;background:${B.ozadje}}a{color:${B.besedilo}}`
-  + `@media (max-width:480px){.k-levo{padding:12px 6px !important}.k-sredina{padding:12px 8px !important}.k-naslov{font-size:15px !important}`
+  + `@media (max-width:480px){.k-levo{padding:6px 4px !important}.k-sredina{padding:6px 6px 6px 2px !important}.k-naslov{font-size:15px !important}`
   + `.k-vrednost{font-size:11px !important}.k-oznaka{font-size:9px !important}.k-mali{font-size:10px !important}.o-zunaj{padding:16px 8px !important}}`;
 function ovoj(jez, vsebina) {
   return `<!doctype html><html lang="${jez}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">`
