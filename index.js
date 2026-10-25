@@ -6741,7 +6741,7 @@ function gostPotrdilo(o, povezava, prevzeto, kode = [], plakat = false) {
       naslovHtml: T(`Vaše vstopnice za ${o.event_title}`, `Your tickets for ${o.event_title}`), razdelki,
       kratko: [prevzeto ? `Your tickets are in your Outly account: ${povezava}`
         : `Open your tickets: ${povezava} This link is your ticket. Don't share it except with people coming with you.${kode.length ? " All QR codes are also in the attached PDF." : ""}`,
-        "There is no right of withdrawal for tickets to an event on a fixed date (Slovenian Consumer Protection Act ZVPot-1, Article 135, point 12). Terms: https://outly.si/terms"],
+        `There is no right of withdrawal for tickets to an event on a fixed date (Slovenian Consumer Protection Act ZVPot-1, Article 135, point 12). Terms, version ${o.guest_terms_version}: https://outly.si/terms`],
       karta, gumb: prevzeto ? T("Odpri v aplikaciji", "Open in the app") : T("Odpri vstopnice", "Open your tickets") };
   }, povezava, plakat);
 }
@@ -7034,7 +7034,8 @@ function kupecPotrdilo(o, povezava, pril = { kode: [], vse: 0, pdf: false }, pla
     en: [(pril.pdf && pril.kode.length
       ? "All QR codes are also in the attached PDF. If you transfer a ticket in the Outly app, its QR code in the PDF stops working. "
       : "Your QR codes are in the Outly app (Profile, My tickets). ")
-      + "There is no right of withdrawal for tickets to an event on a fixed date (Slovenian Consumer Protection Act ZVPot-1, Article 135, point 12). Terms: https://outly.si/terms"],
+      + "There is no right of withdrawal for tickets to an event on a fixed date (Slovenian Consumer Protection Act ZVPot-1, Article 135, point 12). "
+      + (o.terms_version ? `Terms, version ${o.terms_version}: https://outly.si/terms` : "Terms: https://outly.si/terms")],
     sl: [[`${sl.naslov}: ${sl.vrh.join("; ")}`, ...sl.kode, ...(sl.prenos ? [sl.prenos] : []), sl.narocilo].map((v) => (/[.!?]$/.test(v.trim()) ? v : `${v}.`)).join(" "),
       { html: `<p style="${mailKarta.SLOG_DROBNO}">${GOST_POSTA_NIZ(sl.drobni)}</p>` }] });
   return { besedilo, html, brezTelefona: bloki[0].brezTelefona };
