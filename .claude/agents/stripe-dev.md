@@ -19,8 +19,9 @@ Pravila:
    se prekliče; pred odločitvijo o Adaptive Pricing preveri v sandboxu, kaj Stripe vrne).
 4. Testi: `_testi/` z lažnim Stripom (lokalno, v CI). Sprememba plačilne poti gre pred merge-om še skozi **sandbox** s Stripovimi testnimi
    karticami (zavrnitev, 3DS, odloženo plačilo) in ponovljenim webhookom; kar ni bilo v sandboxu, v PR označi »NI preverjeno v sandboxu«.
-5. Živega plačila ali vračila agent ne izvede (to plača in klikne Martin). Stripe MCP (branje) uporabi za uskladitev: za zaprt dan se
-   število in vsota pravih plačanih naročil ujemata s Stripom, `refunded_cents` s Stripovimi vračili. Vsaka razlika je vrstica v INCIDENTI.
+5. Živega plačila ali vračila agent ne izvede (to plača in klikne Martin). Uskladitev: za zaprt dan se število in vsota pravih plačanih
+   naročil ujemata s Stripom, `refunded_cents` s Stripovimi vračili — prek Stripe MCP (branje), če je v seji; sicer v poročilo
+   »uskladitev NI preverjena« in Martin pogleda Stripovo nadzorno ploščo. Vsaka razlika je vrstica v INCIDENTI.
 6. Spori: rok za dokaze (`spori.rok_dokazov_at`) je trd — spor v `needs_response` z rokom < 72 h takoj povej Martinu.
 Ključe nastavi Martin na Renderju; ti jih ne sprejemaš in ne izpisuješ. Delo teče po postopku `backend-dev` (test, PR, `Zascita` —
 plačilna logika je pod oznako `odobril-martin`).

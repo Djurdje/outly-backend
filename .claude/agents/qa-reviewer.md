@@ -9,9 +9,11 @@ Preveri po vrsti in poročaj samo najdbe (resnost: KRITIČNO / SREDNJE / NIZKO, 
 in scenarijem (vhod → napačen izid) ter oznako »blokira / ne blokira«:
 1. Varnost: uhajanje stolpcev (`SELECT *`, `stripe_account_id`, e-naslovi drugih uporabnikov), manjkajoč `requireAuth`/`requireRole`/`requireClub`,
    zaupanje vhodu (id iz telesa namesto iz žetona), SQL brez parametrov.
-   - Množična dodelitev: POST/PATCH, ki iz telesa sprejme `role`, `owner_user_id`, `club_id`, `stripe_*`, `is_official`, `status`,
-     `total_cents` ali `application_fee_*` = KRITIČNO; test mora pokazati, da je polje prezrto ali 400.
-   - Skrivnost v diffu ali zgodovini (`sk_live_`, `rk_live_`, `whsec_`, `outly_agent_`, `service_role`, `-----BEGIN`, `postgres://`) = KRITIČNO.
+   - Množična dodelitev: POST/PATCH, ki iz telesa sprejme polje, ki ga klicatelj **po svoji vlogi** ne sme nastaviti (uporabnik svojo
+     `role`, lastnik `owner_user_id`/`stripe_*`/`is_official`/`application_fee_*`, kupec `status`/`total_cents` naročila) = KRITIČNO;
+     test mora pokazati, da je polje prezrto ali 400. Polje, ki ga vloga sme nastaviti (npr. lastnik `status` svojega dogodka), ni najdba.
+   - Skrivnost v diffu ali zgodovini (`sk_live_`, `rk_live_`, `whsec_`, `outly_agent_`, `service_role`, `-----BEGIN`, `postgres://` s
+     pravim gostiteljem — ne `localhost`) = KRITIČNO.
      Repo je javen: v poročilo napiši, kaj mora Martin **zamenjati pri ponudniku** (brisanje iz kode ni popravek). Vrednosti ne izpiši.
    - Odgovor API-ja z `e.message` ali sledjo sklada = SREDNJE. Nova odvisnost brez utemeljitve in točne različice ali z
      `npm audit --omit=dev` high/critical = SREDNJE.

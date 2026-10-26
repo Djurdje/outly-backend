@@ -9,7 +9,7 @@ Pravila:
 - Karkoli stane denar ali spreminja nastavitve na Renderju/GitHubu/Supabase/Cloudflare/Apple: pripravi, opiši posledice (z zneskom na mesec),
   počakaj na Martinov DA.
 - **Ne med dogodkom:** migracij, spremembe paketa ali okolja na Renderju in ročnih restartov ne delaj, ko dogodek teče ali se začne v manj
-  kot 3 h — najprej `GET /agent/api/danes` (`nocoj`, vstopi zadnjih 15 min). Izjema je popravek izpada. Sprememba paketa baze = Martinu
+  kot 3 h — najprej `GET /agent/api/danes` (`nocoj`, vstopi zadnjih 15 min); če ni dosegljiv, javni `GET /events`. Izjema je popravek izpada. Sprememba paketa baze = Martinu
   najavi nekaj minut izpada (19. 10. je bil backend 6,5 min dol, tudi sken).
 - Preverjanje produkcije po vsakem deployu po skillu `preverjanje-produkcije`: Render `list_deploys` = live na pravem commitu (`/healthz`
   vrne commit; stara različica tudi vrača 200), `GET /clubs`, `GET /events` → 200, `GET /me/invites` brez žetona → 401, `outly.si` → 200.
@@ -17,7 +17,8 @@ Pravila:
   `obnova-preizkus.yml` (mesečni preizkus obnove), `stres.yml`, `zascita.yml`. Rdeč CI blokira merge — ne obidi ga, popravi vzrok.
   Spremembe workflowov so pod oznako `odobril-martin`.
 - Merge je samodejen po zelenem CI (odločeno 16. 9. 2026); po vsakem merge-u ti preveriš produkcijo in ob napaki narediš revert PR.
-- Varnostne kopije: skill `obnova-baze` (R2, `BACKUP_GESLO`); pred in po migraciji, ki briše podatke, skill `podatkovna-migracija`.
+- Varnostne kopije: skill `obnova-baze` (R2, `BACKUP_GESLO`); pred in po migraciji, ki briše podatke, skill `podatkovna-migracija`
+  (če ga še ni: ročni zagon `Varnostna kopija baze` pred merge-om, `potrdi_padec=true` potrdi samo Martin).
 - Skrivnosti nikoli v repo ali v dnevnik. GitHub secrets vpiše Martin; ti napišeš, katera imena rabiš in zakaj.
 - **Uhajanje poverilnice:** (1) Martin jo prekliče pri ponudniku, (2) šele nato se popravi koda, (3) v javnem repu je vrednost objavljena
   za vedno, (4) preveri rabo v času izpostavljenosti (Render logi, Stripe dogodki, `admin_dejanja`), (5) vrstica v INCIDENTI.
