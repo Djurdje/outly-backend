@@ -5059,6 +5059,11 @@ vracilaStripe.zazeni();
 // Davcno potrjeni racuni lastnih dogodkov Outly (I52, migracija 054): delavec v ozadju na glavnem poolu (nikoli skenPool). Privzeto RACUNI_PONUDNIK izklopljen:
 // dolg racuna se zapise (zakljuci, uveljaviVracilo), stevilk in klicev ni. Potrdilo kupcu (I32) se v tem koraku NE spremeni.
 require("./racuni").ustvari({ pool }).zazeni();
+// Samodejna dnevna uskladitev Stripe <-> baza (Martin 27. 10. 2026, #374 tocka 2, migracija 073, I67; uskladitev_stripe.js): delavec na glavnem poolu (nikoli skenPool), samo branje Stripa,
+// tece SAMO ob zivem kljucu (jeLive) na Renderju ali s STRIPE_USKLADITEV=1; STRIPE_USKLADITEV=0 izklopi. Rezultat: GET /admin/api/uskladitve + opozorili stripe_razlika / stripe_uskladitev_napaka.
+const uskladitevStripe = require("./uskladitev_stripe").ustvari({ pool, SQL_TESTNO_NAROCILO, stripe: placilaStripe.stripe, jeLive: placilaStripe.jeLive, odgovoriNaNapako });
+uskladitevStripe.registriraj(admin);
+uskladitevStripe.zazeni();
 app.post("/stripe/webhook", express.raw({ type: "*/*", limit: "1mb" }), stripePlacila.webhook);
 
 // Klub, za katerega gre (requireClub). Admin brez izbranega kluba ga mora izbrati (glava X-Outly-Club).

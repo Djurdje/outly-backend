@@ -57,7 +57,7 @@ async function api(method, path, token) {
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE racuni, vracila, spori, admin_dejanja, agent_zetoni, omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE stripe_uskladitve, racuni, vracila, spori, admin_dejanja, agent_zetoni, omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
   // racuni/vracila/spori: vstavljanje v poljubnem stanju (trigger racuni_varuj sicer dovoli samo nov dolg): seja brez sprozilcev, samo za te vstavke
   const brezSprozilcev = new Client({ connectionString: DB });
   await brezSprozilcev.connect();
@@ -322,6 +322,64 @@ async function api(method, path, token) {
     rk = await rokVrsta();
     assert(!rk.v && rk.rdece === rdeceBrez, "po under_review opozorilo izgine", rk.v);
     await brezSprozilcev.query("DELETE FROM spori WHERE id LIKE 'dp_rok_%'");
+
+    console.log("\n# Dnevna uskladitev Stripe <-> baza (I67): stripe_razlika, stripe_uskladitev_napaka, GET /admin/api/uskladitve");
+    const uskIns = (dan, stanje, polja = {}) => pool.query(
+      `INSERT INTO stripe_uskladitve (dan, stanje, zacetek_at, izvedeno_at, razlike_stevilo, razlike, napaka_koda)
+       VALUES ((NOW() AT TIME ZONE 'Europe/Ljubljana')::date - $1::int, $2, NOW() - $3::interval, NOW() - $3::interval, $4, $5::jsonb, $6)`,
+      [dan, stanje, polja.pred || "1 hour", polja.razlik || 0, JSON.stringify(polja.razlike || []), polja.koda || null]);
+    const uskVrste = async () => { const d = (await dobi()).body; return { d, r: d.items.find(i => i.vrsta === "stripe_razlika"), n: d.items.find(i => i.vrsta === "stripe_uskladitev_napaka") }; };
+    await pool.query("TRUNCATE stripe_uskladitve");
+    let uk = await uskVrste();
+    const rdeceUsk = uk.d.stevci.rdece, oranznoUsk = uk.d.stevci.oranzno;
+    assert(!uk.r && !uk.n, "prazna tabela (delavec se ni tekel, npr. sandbox): ni nobenega stripe_* opozorila");
+    await uskIns(1, "ok", { pred: "2 hours" });
+    uk = await uskVrste();
+    assert(!uk.r && !uk.n && uk.d.stevci.rdece === rdeceUsk && uk.d.stevci.oranzno === oranznoUsk, "zadnja uskladitev ok: opozorila ni");
+    await uskIns(2, "razlike", { razlik: 2, razlike: [{ vrsta: "placilo_brez_narocila", charge_id: "ch_skrivni_123", stripe_cents: 1500 }, { vrsta: "vracilo", narocilo_id: 5 }] });
+    uk = await uskVrste();
+    assert(uk.r && uk.r.resnost === "rdece" && uk.r.cilj_tip === "uskladitve" && /dni z razlikami: 1/.test(uk.r.besedilo) && /razlik skupaj: 2/.test(uk.r.besedilo), "dan z razlikami: stripe_razlika, rdece, 1 dan, 2 razliki", uk.r);
+    assert(uk.d.stevci.rdece === rdeceUsk + 1, "stevec rdecih +1", [rdeceUsk, uk.d.stevci.rdece]);
+    assert(!(await dobi()).text.includes("ch_skrivni_123") && !/\b1500\b/.test(uk.r.besedilo), "opozorilo ima samo stevila in datum: brez ID-jev in zneskov");
+    assert(uk.r && /^\d{4}-\d{2}-\d{2}$/.test(/zadnji dan (\S+)\)/.exec(uk.r.besedilo)[1]), "opozorilo vsebuje datum dneva z razlikami");
+    // naslednji ujemajoc dan razlike NE skrije
+    await uskIns(0, "ok", { pred: "1 minute" });
+    assert((await uskVrste()).r, "ujemanje naslednjega dne razlike ne skrije");
+    const danesUsk = await dobi("/admin/api/danes");
+    assert(danesUsk.status === 200 && danesUsk.body.opozorila_rdeca === rdeceUsk + 1, "Danes: opozorila_rdeca vkljucuje stripe_razlika", [danesUsk.status, danesUsk.body.opozorila_rdeca, rdeceUsk]);
+    // razlika starejsa od 7 dni ne opozarja vec
+    await pool.query("UPDATE stripe_uskladitve SET dan = dan - 8 WHERE stanje = 'razlike'");
+    assert(!(await uskVrste()).r, "razlika starejsa od 7 dni: opozorila ni");
+    await pool.query("TRUNCATE stripe_uskladitve");
+    // napaka: oranzno
+    await uskIns(1, "napaka", { koda: "StripeAuthenticationError_401" });
+    uk = await uskVrste();
+    assert(uk.n && uk.n.resnost === "oranzno" && /dni z napako: 1/.test(uk.n.besedilo) && uk.d.stevci.oranzno === oranznoUsk + 1 && !uk.r, "uskladitev `napaka`: stripe_uskladitev_napaka, oranzno, stevec +1, ni stripe_razlika", uk.n);
+    assert(!(await dobi()).text.includes("StripeAuthenticationError"), "koda napake ne uide v opozorilo");
+    await pool.query("UPDATE stripe_uskladitve SET stanje = 'ok'");
+    assert(!(await uskVrste()).n, "po uspesnem ponovnem poskusu opozorilo izgine");
+    // zadnja uspesna starejsa od 2 dni (delavec je nehal teci)
+    await pool.query("TRUNCATE stripe_uskladitve");
+    await uskIns(4, "ok", { pred: "3 days" });
+    uk = await uskVrste();
+    assert(uk.n && uk.n.resnost === "oranzno" && /pred več kot 2 dnevi/.test(uk.n.besedilo), "zadnja uspesna pred 3 dnevi: stripe_uskladitev_napaka (oranzno)", uk.n);
+    await uskIns(0, "ok", { pred: "1 hour" });
+    assert(!(await uskVrste()).n, "svez uspeh: opozorila ni");
+    await pool.query("TRUNCATE stripe_uskladitve");
+    await pool.query("INSERT INTO stripe_uskladitve (dan, stanje, zacetek_at) VALUES ((NOW() AT TIME ZONE 'Europe/Ljubljana')::date - 1, 'tece', NOW() - INTERVAL '2 minutes')");
+    assert(!(await uskVrste()).n, "prvi krog v teku (brez uspeha, prva vrstica sveza): opozorila ni");
+    await pool.query("TRUNCATE stripe_uskladitve");
+    // pot za branje rezultatov
+    await uskIns(1, "razlike", { razlik: 1, razlike: [{ vrsta: "vracilo", narocilo_id: 7, stripe_cents: 500, baza_cents: 0 }] });
+    r = await dobi("/admin/api/uskladitve");
+    assert(r.status === 200 && Array.isArray(r.body.items) && r.body.items.length === 1 && r.body.items[0].stanje === "razlike" && r.body.items[0].razlike_stevilo === 1 && r.body.items[0].razlike[0].vrsta === "vracilo", "GET /admin/api/uskladitve: 200, vrstica z razlikami", r.body);
+    assert(typeof r.body.items[0].stripe_bruto_cents !== "string" && /^\d{4}-\d{2}-\d{2}$/.test(r.body.items[0].dan) && r.glave.get("cache-control") === "no-store", "dan kot niz, centi kot stevila, no-store");
+    assert((await dobi("/admin/api/uskladitve?od=2026-13-01")).status === 400 && (await dobi("/admin/api/uskladitve?od=2026-01-01&do=2026-12-31")).status === 400, "neveljaven datum / obdobje > 93 dni: 400");
+    for (const [ime, t, status] of [["user", T.navaden, 403], ["business", T.lastnik, 403], ["backup", T.kopija, 403], ["brez zetona", null, 401]]) {
+      const x = await api("GET", "/admin/api/uskladitve", t);
+      assert(x.status === status, `uskladitve: ${ime} -> ${status}`, x.status);
+    }
+    await pool.query("TRUNCATE stripe_uskladitve");
 
     console.log("\n# GET /admin/api/racuni");
     r = await dobi("/admin/api/racuni");

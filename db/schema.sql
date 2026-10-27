@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–072, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–073, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -1875,6 +1875,58 @@ COMMENT ON TABLE public.stripe_events IS 'Ze obdelani Stripe webhook dogodki (id
 
 
 --
+-- Name: stripe_uskladitve; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.stripe_uskladitve (
+    dan date NOT NULL,
+    stanje text NOT NULL,
+    poskusov smallint DEFAULT 1 NOT NULL,
+    zacetek_at timestamp with time zone DEFAULT now() NOT NULL,
+    izvedeno_at timestamp with time zone,
+    stripe_stevilo integer,
+    stripe_bruto_cents bigint,
+    stripe_vrnjeno_cents bigint,
+    stripe_provizija_cents bigint,
+    stripe_vracila_stevilo integer,
+    stripe_vracila_cents bigint,
+    stripe_spori_stevilo integer,
+    baza_stevilo integer,
+    baza_bruto_cents bigint,
+    baza_vrnjeno_cents bigint,
+    baza_provizija_cents bigint,
+    baza_spori_stevilo integer,
+    mejni_stevilo integer DEFAULT 0 NOT NULL,
+    razlike_stevilo integer DEFAULT 0 NOT NULL,
+    razlike jsonb DEFAULT '[]'::jsonb NOT NULL,
+    napaka_koda text,
+    CONSTRAINT stripe_uskladitve_razlike_check CHECK ((jsonb_typeof(razlike) = 'array'::text)),
+    CONSTRAINT stripe_uskladitve_stanje_check CHECK ((stanje = ANY (ARRAY['tece'::text, 'ok'::text, 'razlike'::text, 'napaka'::text])))
+);
+
+
+--
+-- Name: TABLE stripe_uskladitve; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.stripe_uskladitve IS 'Dnevna uskladitev Stripe <-> baza (073, I67): ena vrstica na zaprt dan (Europe/Ljubljana); razlike samo ID-ji in zneski, nikoli osebni podatki.';
+
+
+--
+-- Name: COLUMN stripe_uskladitve.stanje; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.stripe_uskladitve.stanje IS 'tece | ok | razlike | napaka (073). napaka NI »ni razlik«: opozorilo stripe_uskladitev_napaka, ponovni poskus po 3 h.';
+
+
+--
+-- Name: COLUMN stripe_uskladitve.razlike; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.stripe_uskladitve.razlike IS 'JSONB seznam {vrsta, narocilo_id?, charge_id?, ...} (najvec 100), samo ID-ji in centi (073). razlike_stevilo = polno stevilo.';
+
+
+--
 -- Name: table_holds; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2825,6 +2877,14 @@ ALTER TABLE ONLY public.spori
 
 ALTER TABLE ONLY public.stripe_events
     ADD CONSTRAINT stripe_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: stripe_uskladitve stripe_uskladitve_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.stripe_uskladitve
+    ADD CONSTRAINT stripe_uskladitve_pkey PRIMARY KEY (dan);
 
 
 --

@@ -77,7 +77,7 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE racuni, vracila, spori, admin_dejanja, omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE stripe_uskladitve, racuni, vracila, spori, admin_dejanja, omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
   const brezSprozilcev = new Client({ connectionString: DB });
   await brezSprozilcev.connect();
   await brezSprozilcev.query("SET session_replication_role = replica");

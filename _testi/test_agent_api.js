@@ -91,7 +91,7 @@ function nicOsebnega(ime, tekst) {
 
 (async () => {
   const pool = new Pool({ connectionString: DB });
-  await pool.query("TRUNCATE agent_zetoni, racuni, vracila, spori, admin_dejanja, omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE stripe_uskladitve, agent_zetoni, racuni, vracila, spori, admin_dejanja, omejitve, ticket_transfers, club_invites, club_members, event_favorites, tickets, orders, events, clubs, creator_applications, users RESTART IDENTITY CASCADE");
   const brezSprozilcev = new Client({ connectionString: DB });
   await brezSprozilcev.connect();
   await brezSprozilcev.query("SET session_replication_role = replica");
