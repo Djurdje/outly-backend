@@ -326,6 +326,14 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       const r = await vrstica(R.id); const k = F.klici.slice(n0).map((x) => x.method);
       assert(r.stanje === "potrjen" && F.docs.length === d0 + 1 && !k.includes("SalesInvoiceList"), "ponovitev: izdaja brez iskanja, potrjen, ena izdaja", k);
     }
+    {
+      // 5b. Ponovitev s kratkim premorom (kot v produkciji 429 s premorom 5 s v teku do 45 s): vrstica se ponovi brez pospesitve (obicajno v istem teku), ena izdaja (pregled #382).
+      const R = await nov(1, 1001); const w = deloven({ RACUNI_PREMOR_MS: "1" }); const d0 = F.docs.length, c0 = klicov("SalesInvoiceCreate");
+      nastavi("429", 1);
+      await tek(w, 3, 100, false);
+      const r = await vrstica(R.id);
+      assert(r.stanje === "potrjen" && F.docs.length === d0 + 1 && klicov("SalesInvoiceCreate") === c0 + 2, "429 + kratek premor: ponovitev brez pospesitve, potrjen, natanko ena izdaja (2 Create)", [r.stanje, F.docs.length - d0, klicov("SalesInvoiceCreate") - c0]);
+    }
 
     // ================================================================
     console.log("\n# 6. Trajna napaka (validacija): napaka brez stevilke + POZOR; rocna ponovitev gre skozi iskanje");
@@ -455,7 +463,7 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
     // ================================================================
     console.log("\n# 11. En klic naenkrat, razmak med zahtevki, zaporedne stevilke");
     {
-      const w = deloven({ RACUNI_VZPOREDNO: "4", ERACUNI_RAZMAK_MS: "60", RACUNI_ROK_MS: "5000" });
+      const w = deloven({ RACUNI_VZPOREDNO: "4", ERACUNI_RAZMAK_MS: "100", RACUNI_ROK_MS: "5000" });   // 100 ms: izpuscen razmak (~100) se jasno loci od tolerance 50 za zakasnjen prihod
       const ids = []; for (let i = 0; i < 7; i++) ids.push((await nov(1, 1000 + i)).id);
       const od = F.zacetki.length; F.maxInflight = 0;
       await tek(w, 3, 50);
@@ -464,10 +472,12 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       assert(st.every((x) => x.stanje === "potrjen"), "vseh 7 potrjenih", st);
       assert(F.maxInflight === 1, "nikoli dva hkratna zahtevka (API tega ne dovoli)", F.maxInflight);
       // Cas prihoda meri lazni streznik v ISTEM procesu: zastoj zanke dogodkov (CI, obremenitev) en prihod zakasni, naslednjega ne, zato posamezen razmak ni zanesljiv (izmerjeno 20 ms
-      // namesto 60). Zato kumulativno: i-ti zahtevek je od prvega oddaljen vsaj i x 60 ms, z eno-samo toleranco 50 ms za zastoj na koncih (ne narasca z i). Brez razmaka (ali s polovico)
+      // namesto 60). Zato kumulativno: zahtevek i je od vsakega prejsnjega j oddaljen vsaj (i-j) x razmak, z eno-samo toleranco 50 ms za zakasnjen prihod (ne narasca z i). Brez razmaka (ali s polovico)
       // je zaostanek ze pri tretjem zahtevku vecji od tolerance.
-      const zaostanek = z.map((t, i) => i * 60 - (t - z[0]));
-      assert(z.length >= 8 && zaostanek.every((x) => x <= 50), "razmak med zacetki zahtevkov: i-ti zahtevek vsaj i x 60 ms za prvim (mejo 1/s zagotovi ERACUNI_RAZMAK_MS)", [z.length, Math.max(...zaostanek)]);
+      // Za VSE pare (j < i), ne samo od prvega: zamuda na zacetku sicer "pokrije" kasnejsi zahtevek brez razmaka (pregled #382).
+      let zaostanek = -Infinity;
+      for (let i = 1; i < z.length; i++) for (let j = 0; j < i; j++) zaostanek = Math.max(zaostanek, (i - j) * 100 - (z[i] - z[j]));
+      assert(z.length >= 8 && zaostanek <= 50, "razmak med zacetki zahtevkov: zahtevek i vsaj (i-j) x 100 ms za zahtevkom j, za vsak par (mejo 1/s zagotovi ERACUNI_RAZMAK_MS)", [z.length, zaostanek]);
       const sv = st.map((x) => Number(x.stevilka)).sort((a, b) => a - b);
       assert(new Set(sv).size === 7 && sv.every((x, i) => i === 0 || x === sv[i - 1] + 1), "stevilke (po vrstnem redu izdaje pri ponudniku) zaporedne, brez dvojnikov", sv);
     }
@@ -1145,13 +1155,14 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       const c2 = F.klici.slice(n1).find((k) => k.method === "SalesInvoiceCreate");
       assert((await vrstica(R2.id)).stanje === "potrjen" && c2 && c2.parameters.SalesInvoice.Items[0].productCode === "KARTA-1", "ERACUNI_ARTIKEL (obrezan) se uporabi kot productCode", c2 && c2.parameters.SalesInvoice.Items);
       // (c) manjkajoce obvezno polje: POZOR, konfiguracijski premor, poslano_at OSTANE (izid ni dokazan), vrstica gre naprej samo prek iskanja po referenci
-      const R3 = await nov(1, 2720); const w3 = deloven(); const l3 = LOG.length, o0 = F.obveznoPolje;
+      // Kratek splosni premor (50 ms) in dolg konfiguracijski (5 s), kot v testu 7: sicer bi preverba premora spodaj veljala ze zaradi splosnih 10 min (pregled #382).
+      const R3 = await nov(1, 2720); const w3 = deloven({ RACUNI_PREMOR_MS: "50", RACUNI_KONFIG_PREMOR_MS: "5000" }); const l3 = LOG.length, o0 = F.obveznoPolje;
       nastavi("obvezno", 1);
       await tek(w3, 1, 40, true);
       const r3 = await vrstica(R3.id);
       const dn = logOd(l3).join("\n");
       assert(F.obveznoPolje - o0 === 1 && /#Item1_productCode - This field is required/.test(dn) && /POZOR/.test(dn), "obvezno polje manjka: napaka z opisom v dnevniku in POZOR", dn.slice(0, 300));
-      assert(r3.stanje === "caka" && r3.poslano_at !== null && r3.poskusi === 1 && new Date(r3.naslednji_poskus_at).getTime() >= Date.now() + 200, "vrstica caka, poslano_at ostane (izid ni dokazan), pocasen konfiguracijski premor", [r3.stanje, r3.poslano_at, r3.naslednji_poskus_at]);
+      assert(r3.stanje === "caka" && r3.poslano_at !== null && r3.poskusi === 1 && new Date(r3.naslednji_poskus_at).getTime() >= Date.now() + 2000, "vrstica caka, poslano_at ostane (izid ni dokazan), pocasen konfiguracijski premor (>= 2 s, splosni je 50 ms)", [r3.stanje, r3.poslano_at, r3.naslednji_poskus_at]);
       const c3 = klicov("SalesInvoiceCreate");
       await tek(w3, 2, 40);   // premor + zaustavitev izdaje za cel proces: nobenega novega Create
       assert(klicov("SalesInvoiceCreate") === c3, "po napaki obveznega polja nobenega novega Create takoj (zaustavitev izdaje)");
