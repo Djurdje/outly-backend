@@ -20,6 +20,9 @@ const NAJVEC_VRSTIC_NAPAKA = 100;     // racunov v stanju napaka, ki jih opozori
 const NAJVEC_OPOZORIL = 500;          // zgornja meja odgovora (stevci stejejo vse)
 const OKNO_PLAKATA_DNI = 14;
 const ROK_SPORA_URE = 72;   // spor v needs_response z rokom za dokaze v manj kot toliko urah (ali ze potecenim) -> rdece opozorilo `spori_rok_blizu` (#374); zamujen rok = izgubljen spor
+const USKLADITEV_OKNO_DNI = 7;        // razlika iz dnevne uskladitve Stripe <-> baza ostane rdeca toliko dni (naslednji ujemajoc dan je NE skrije; #374 tocka 2, I67)
+const USKLADITEV_NAPAKA_OKNO_DNI = 30; // dan v stanju `napaka` ostane oranzno opozorilo toliko dni (delavec ga po OKNO_DNI = 7 vec ne poskusa; brez tega bi po 7 dneh tiho izginil, dan pa bi ostal neusklajen)
+const USKLADITEV_ZASTARELA_DNI = 2;   // zadnja uspesna uskladitev starejsa od toliko dni (ob obstoju vrstic) = oranzno `stripe_uskladitev_napaka`
 const ZAMUDA_OBJAVE_MS = 3 * 60 * 1000;   // osnutek z minulim publish_at toliko casa po roku ni objavljen -> rdece opozorilo (delavec teče vsako minuto, samodejna_objava.js)
 const STANJA_RACUNOV = ["caka", "izdan", "potrjen", "napaka", "preklican"];
 const RESNOST_VRSTNI_RED = { rdece: 0, oranzno: 1, rumeno: 2 };
@@ -274,6 +277,29 @@ function ustvari(dep) {
           s.spori_rok_najblizji);
       }
       if (s.spori > 0) dodaj("spori_odprti", "oranzno", "spori", null, `${s.spori} odprtih Stripovih sporov (vstopnice med sporom na vratih ne veljajo).`);
+      // Dnevna uskladitev Stripe <-> baza (I67, uskladitev_stripe.js): samo stevila in datumi, nikoli ID-ji ali zneski (razlike so v GET /admin/api/uskladitve).
+      const usk = (await c.query(
+        `SELECT COUNT(*) FILTER (WHERE stanje = 'razlike' AND dan >= (NOW() AT TIME ZONE 'Europe/Ljubljana')::date - $1::int)::int AS razlike_dni,
+                COALESCE(SUM(razlike_stevilo) FILTER (WHERE stanje = 'razlike' AND dan >= (NOW() AT TIME ZONE 'Europe/Ljubljana')::date - $1::int), 0)::int AS razlike_vseh,
+                to_char(MAX(dan) FILTER (WHERE stanje = 'razlike' AND dan >= (NOW() AT TIME ZONE 'Europe/Ljubljana')::date - $1::int), 'YYYY-MM-DD') AS razlike_zadnji,
+                COUNT(*) FILTER (WHERE stanje = 'napaka' AND dan >= (NOW() AT TIME ZONE 'Europe/Ljubljana')::date - $2::int)::int AS napake_dni,
+                to_char(MAX(dan) FILTER (WHERE stanje = 'napaka' AND dan >= (NOW() AT TIME ZONE 'Europe/Ljubljana')::date - $2::int), 'YYYY-MM-DD') AS napaka_zadnji,
+                COUNT(*)::int AS vrstic,
+                MAX(izvedeno_at) FILTER (WHERE stanje IN ('ok','razlike')) AS zadnja_uspesna, MIN(zacetek_at) AS prvi_zacetek
+           FROM stripe_uskladitve`, [USKLADITEV_OKNO_DNI, USKLADITEV_NAPAKA_OKNO_DNI])).rows[0];
+      if (usk.razlike_dni > 0) {
+        dodaj("stripe_razlika", "rdece", "uskladitve", null,
+          `Stripe in baza se ne ujemata (dni z razlikami: ${usk.razlike_dni}, razlik skupaj: ${usk.razlike_vseh}, zadnji dan ${usk.razlike_zadnji}). Podrobnosti: GET /admin/api/uskladitve; pogledaj Stripovo nadzorno ploščo in dopiši vrstico v INCIDENTI.`);
+      }
+      // Zastarelo: obstajajo vrstice (delavec je tekel), a zadnja uspesna je starejsa od 2 dni (brez uspesne: prva vrstica starejsa od 2 dni). Prazna tabela = delavec se ni tekel (sandbox, pred prvim dnem): brez opozorila.
+      const zastarela = usk.vrstic > 0 && new Date(usk.zadnja_uspesna || usk.prvi_zacetek).getTime() < Date.now() - USKLADITEV_ZASTARELA_DNI * 864e5;
+      if (usk.napake_dni > 0 || zastarela) {
+        dodaj("stripe_uskladitev_napaka", "oranzno", "uskladitve", null,
+          usk.napake_dni > 0
+            ? `Dnevna uskladitev Stripe in baze ni uspela (dni z napako: ${usk.napake_dni}, zadnji dan ${usk.napaka_zadnji}); nov poskus se sproži sam, a samo za zadnjih ${USKLADITEV_OKNO_DNI} dni: starejši dan ostane neusklajen, dokler ga ne pogledaš ročno v Stripovi nadzorni plošči (opozorilo traja ${USKLADITEV_NAPAKA_OKNO_DNI} dni).`
+            : `Dnevna uskladitev Stripe in baze zadnjič uspela pred več kot ${USKLADITEV_ZASTARELA_DNI} dnevi. Preveri Stripovo nadzorno ploščo ročno.`,
+          usk.zadnja_uspesna || null);
+      }
       const potrdila = (await c.query(
         `SELECT COUNT(*)::int AS n, MIN(paid_at) AS najstarejse FROM orders
           WHERE receipt_mail_attempts IS NOT NULL AND receipt_mail_sent_at IS NULL AND status = 'paid' AND user_id IS NOT NULL

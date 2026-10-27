@@ -1,0 +1,405 @@
+# ENKRATNA preverba: ali so v SHRANJENIH kopijah baze (R2) sumljivi zanri (preiskava XSS 13. 10. 2026, register krsitev K-05 v outly-hq).
+#
+# Kaj: izbrane kopije iz R2 odsifrira z BACKUP_GESLO (geslo ne zapusti GitHuba), vsako obnovi v PRAZNO bazo v service containerju postgres:16
+# na runnerju (shema do migracije, ki jo kopija vsebuje: `db/migrate.js --do NNN`, nato `db/obnovi_izvoz.js` - enako kot mesecni preizkus
+# v obnova-preizkus.yml) in poene SAMO BRALNO poizvedbo po stolpcu `genres` (clubs, events, users). Izpise STEVILA, nikoli vrstic.
+# Brez Martina in brez dostopa do produkcije; produkcijske baze se ne dotakne.
+#
+# Rocni zagon (Actions > Preverba XSS v kopiji > Run workflow; SAMO veja main zaradi environmenta »kopije«):
+#   datumi        seznam YYYY-MM-DD, ločen z vejicami (najvec 6). Prazno = NAJZGODNEJSA ohranjena kopija IN ZADNJA kopija PRED migracijo 066
+#                 (24. 10. 2026 ~01:19 UTC; brisanje demo klubov). Za datum z vec kopijami se vzame najnovejsa tega dne.
+#   seznam_samo   true = samo izpise, katere kopije obstajajo (datum, ime, cas, velikost) in katere bi bile privzeto izbrane; brez obnove, brez gesla.
+#
+# Razsodba v povzetku: »VSE 0 - ni sledi« (zelen) | »NAJDENO: ...« (rdec, exit 1: takoj obvesti Martina, 72 h, register K-05) |
+# »NEPREVERJENO: ...« (rdec: obnova ali poizvedba za katero kopijo ni uspela - to NI »ni sledi«).
+#
+# ZASEBNOST (repo je javen, dnevniki zagonov so javni; HQ pravilo 8): v dnevnik, povzetek in anotacije gredo samo imena tabel, imena kopij,
+# casi in STEVILA. Nobena vrstica, e-naslov, ime ali vsebina zanra. Brez nalaganja artefaktov. Sporocila napak pg/gpg/node se NE izpisujejo
+# (lahko vsebujejo vrednosti): stderr gre v datoteke, izpise se samo lastno besedilo. Obnovljena baza in odsifrirana datoteka se izbrisejo
+# takoj po uporabi in se enkrat v `if: always()`.
+#
+# SKRIVNOSTI: samo obstojece v environmentu »kopije«: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET, BACKUP_GESLO (kot obnova-preizkus.yml).
+name: Preverba XSS v kopiji (enkratna)
+
+on:
+  workflow_dispatch:
+    inputs:
+      datumi:
+        description: "Datumi kopij YYYY-MM-DD, locene z vejicami (najvec 6); prazno = najzgodnejsa kopija IN zadnja pred 24. 10. 2026 01:19 UTC (migracija 066)"
+        type: string
+        required: false
+        default: ""
+      seznam_samo:
+        description: "true = samo izpisi, katere kopije obstajajo (brez obnove in brez gesla)"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preverba-xss-kopija
+  cancel-in-progress: false
+
+jobs:
+  preverba:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: kopije
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: outly
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Ciljna baza: SAMO service container na runnerju (nikoli produkcija). db/obnovi_izvoz.js in stevila.js zavrneta vse, kar ni localhost.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/outly
+      NODE_ENV: test
+      VNOS_DATUMI: ${{ inputs.datumi }}
+      SEZNAM_SAMO: ${{ inputs.seznam_samo }}
+      # Cas, ko je migracija 066 (brisanje demo klubov) prisla v produkcijo: PR #359 zdruzen 2026-10-24 03:19 +02:00 = 01:19 UTC.
+      MEJA_066: "2026-10-24T01:19:00Z"
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Namesti odvisnosti in preveri orodja
+        run: |
+          set -euo pipefail
+          npm ci
+          gpg --version | head -n1
+          psql --version
+
+      - name: Seznam kopij v R2 in izbor
+        run: |
+          set -euo pipefail
+          DELO="$RUNNER_TEMP/xss"
+          mkdir -p "$DELO"
+          chmod 700 "$DELO"
+
+          # Seznam (najprej v datoteko: napaka R2 mora zrusiti korak, ne se izgubiti v cevi). Vrstica: kljuc<TAB>cas<TAB>velikost.
+          bash _orodja/kopija/r2.sh list "kopije/20" > "$DELO/vse.tsv"
+          grep -E $'^kopije/[0-9]{4}/[0-9]{2}/outly-db-[0-9]{4}-[0-9]{2}-[0-9]{2}-r[0-9]+(-[0-9]+)?\\.json\\.gz\\.gpg\t' "$DELO/vse.tsv" > "$DELO/sirov.tsv" || true
+
+          # kopije.tsv: datum<TAB>ime<TAB>nastala(UTC)<TAB>velikost(B)<TAB>kljuc, od najstarejse
+          : > "$DELO/kopije.tsv"
+          while IFS=$'\t' read -r kljuc cas velikost; do
+            ime="${kljuc##*/}"
+            datum="${ime:9:10}"
+            printf '%s\t%s\t%s\t%s\t%s\n' "$datum" "$ime" "$(date -u -d "$cas" +%Y-%m-%dT%H:%M:%SZ)" "$velikost" "$kljuc" >> "$DELO/kopije.tsv"
+          done < "$DELO/sirov.tsv"
+          sort -t$'\t' -k3,3 -o "$DELO/kopije.tsv" "$DELO/kopije.tsv"
+
+          ST=$(grep -c . "$DELO/kopije.tsv" || true)
+          if [ "$ST" -eq 0 ]; then echo "::error::V R2 ni nobene kopije."; exit 1; fi
+
+          ZGODNJA=$(head -n1 "$DELO/kopije.tsv" | cut -f2)
+          PRED_066=$(awk -F'\t' -v m="$MEJA_066" '$3 < m' "$DELO/kopije.tsv" | tail -n1 | cut -f2 || true)
+
+          {
+            echo "## Preverba XSS v kopijah: seznam kopij v R2"
+            echo
+            echo "Kopij v R2: $ST. Meja migracije 066: $MEJA_066."
+            echo
+            echo "| datum | kopija | nastala (UTC) | velikost (KB) | oznaka |"
+            echo "|---|---|---|---|---|"
+            while IFS=$'\t' read -r datum ime nastala velikost kljuc; do
+              oznaka=""
+              [ "$ime" != "$ZGODNJA" ] || oznaka="najzgodnejsa"
+              if [ "$ime" = "$PRED_066" ]; then oznaka="${oznaka:+$oznaka, }zadnja pred 066"; fi
+              echo "| $datum | $ime | $nastala | $(( velikost / 1024 )) | $oznaka |"
+            done < "$DELO/kopije.tsv"
+            echo
+          } > "$DELO/seznam.md"
+          cat "$DELO/seznam.md"
+          cat "$DELO/seznam.md" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$SEZNAM_SAMO" = "true" ]; then
+            echo "Nacin »samo seznam«: obnove ne bo."
+            exit 0
+          fi
+
+          # --- izbor ---
+          : > "$DELO/izbrane.tsv"
+          if [ -z "${VNOS_DATUMI//[[:space:]]/}" ]; then
+            [ -n "$ZGODNJA" ] || { echo "::error::Najzgodnejse kopije ni."; exit 1; }
+            if [ -z "$PRED_066" ]; then
+              echo "::error::V R2 ni nobene kopije, nastale pred migracijo 066 ($MEJA_066): najzgodnejsa ohranjena je ze po njej. Preverba »pred 066« ni mogoca."
+              exit 1
+            fi
+            { grep -F "$(printf '\t%s\t' "$ZGODNJA")" "$DELO/kopije.tsv" | head -n1
+              grep -F "$(printf '\t%s\t' "$PRED_066")" "$DELO/kopije.tsv" | head -n1
+            } | sort -u -t$'\t' -k3,3 > "$DELO/izbrane.tsv"
+          else
+            IFS=',' read -r -a DATUMI <<< "$VNOS_DATUMI"
+            NAPAKA=0
+            for d in "${DATUMI[@]}"; do
+              d="${d//[[:space:]]/}"
+              [ -n "$d" ] || continue
+              # vnos je lahko le datum (preverba pred uporabo; vrednosti iz vnosa se ne izpisujejo)
+              if ! [[ "$d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || ! date -u -d "$d" +%F > /dev/null 2>&1; then
+                echo "::error::Polje datumi mora vsebovati datume YYYY-MM-DD, locene z vejicami."; exit 1
+              fi
+              vrstica=$(awk -F'\t' -v d="$d" '$1 == d' "$DELO/kopije.tsv" | tail -n1)
+              if [ -z "$vrstica" ]; then
+                echo "::error::Za datum $d ni kopije v R2 (glej seznam zgoraj)."; NAPAKA=1; continue
+              fi
+              printf '%s\n' "$vrstica" >> "$DELO/izbrane.tsv"
+            done
+            [ "$NAPAKA" -eq 0 ] || exit 1
+            sort -u -t$'\t' -k3,3 -o "$DELO/izbrane.tsv" "$DELO/izbrane.tsv"
+          fi
+          IZ=$(grep -c . "$DELO/izbrane.tsv" || true)
+          if [ "$IZ" -lt 1 ]; then echo "::error::Izbrana ni nobena kopija."; exit 1; fi
+          if [ "$IZ" -gt 6 ]; then echo "::error::Najvec 6 kopij naenkrat (cas zagona)."; exit 1; fi
+          echo "Izbranih kopij: $IZ"
+          cut -f1,2,3 "$DELO/izbrane.tsv" | sed 's/^/  /'
+
+      - name: Obnovi izbrane kopije in poenesi poizvedbo (samo branje)
+        if: ${{ env.SEZNAM_SAMO != 'true' }}
+        env:
+          # Geslo je v tem koraku pod drugim imenom; odsifriraj.sh ga dobi kot BACKUP_GESLO samo za svoj klic.
+          GESLO_KOPIJ: ${{ secrets.BACKUP_GESLO }}
+        run: |
+          set -euo pipefail
+          [ -n "$GESLO_KOPIJ" ] || { echo "::error::Manjka secret BACKUP_GESLO v environmentu kopije."; exit 1; }
+          DELO="$RUNNER_TEMP/xss"
+          IZVOZ="$DELO/izvoz.json"
+          REZ="$DELO/rezultati.tsv"
+          : > "$REZ"
+          TRE_TABELE=(clubs events users)
+
+          # rezultati.tsv: datum<TAB>kopija<TAB>stanje<TAB>tabela<TAB>vseh_vrstic<TAB>z_nedovoljenim_zanrom<TAB>z_znaki_html
+          #   stanje = OK | NI_STOLPCA | NAPAKA (pri NAPAKA je v 4. stolpcu razlog, ki ga napisemo MI, ne pg/gpg/node)
+          neuspeh() {
+            printf '%s\t%s\tNAPAKA\t%s\t-\t-\t-\n' "$1" "$2" "$3" >> "$REZ"
+            echo "::error::Kopija $2: $3"
+          }
+
+          obdelaj() {
+            local DATUM="$1" IME="$2" KLJUC="$3" MAXMIG
+            rm -rf "$DELO/kopija"; mkdir -p "$DELO/kopija"
+
+            # 1. prenos in celovitost
+            if ! bash _orodja/kopija/r2.sh get "$KLJUC" "$DELO/kopija/$IME" || ! bash _orodja/kopija/r2.sh get "$KLJUC.sha256" "$DELO/kopija/$IME.sha256"; then
+              neuspeh "$DATUM" "$IME" "prenos iz R2 ni uspel"; return 0
+            fi
+            if ! ( cd "$DELO/kopija" && sha256sum -c --status "$IME.sha256" ); then
+              neuspeh "$DATUM" "$IME" "sha256 se ne ujema"; return 0
+            fi
+            if grep -q -a '"exported_at"' "$DELO/kopija/$IME"; then
+              neuspeh "$DATUM" "$IME" "kopija vsebuje golo besedilo"; return 0
+            fi
+            echo "Prenos in celovitost (sha256): OK"
+
+            # 2. odsifriranje (odsifriraj.sh izpise samo lastno besedilo; napake gpg/gzip so skrite)
+            if ! BACKUP_GESLO="$GESLO_KOPIJ" bash _orodja/kopija/odsifriraj.sh "$DELO/kopija/$IME" "$IZVOZ" > "$DELO/odsifriraj.log" 2>&1; then
+              cat "$DELO/odsifriraj.log"
+              neuspeh "$DATUM" "$IME" "odsifriranje ni uspelo (BACKUP_GESLO se je morda zamenjalo po nastanku kopije)"; return 0
+            fi
+            cat "$DELO/odsifriraj.log"
+            rm -rf "$DELO/kopija"
+
+            # 3. shema do zadnje migracije, ki jo kopija vsebuje (obnovi_izvoz.js zahteva enak seznam migracij)
+            if ! MAXMIG=$(node -e '
+              const fs = require("fs");
+              let m = null;
+              try {
+                const i = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+                const r = (i.tables && i.tables.schema_migrations && i.tables.schema_migrations.rows) || [];
+                for (const v of r) { const x = /^(\d{3})_/.exec(String(v.datoteka)); if (x && (m === null || x[1] > m)) m = x[1]; }
+              } catch (e) { /* sporocilo JSON.parse bi vsebovalo kos podatkov */ }
+              if (m === null) process.exit(1);
+              console.log(m);
+            ' "$IZVOZ") || ! [[ "$MAXMIG" =~ ^[0-9]{3}$ ]]; then
+              neuspeh "$DATUM" "$IME" "v izvozu ni seznama migracij"; return 0
+            fi
+            echo "Kopija vsebuje migracije do $MAXMIG"
+
+            psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -c 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;' > /dev/null 2>&1 \
+              || { neuspeh "$DATUM" "$IME" "priprava prazne baze ni uspela"; return 0; }
+            if ! node db/migrate.js --do "$MAXMIG" > "$DELO/migrate.log" 2>&1; then
+              tail -n 3 "$DELO/migrate.log" | cut -c1-200   # prazna baza: ni osebnih podatkov
+              neuspeh "$DATUM" "$IME" "migracije do $MAXMIG na prazni bazi so padle"; return 0
+            fi
+            echo "Migracije do $MAXMIG: OK"
+
+            # Seedi starih migracij (servisni racun, demo klubi) pobrisemo SPLOH (lokalna prazna baza): obnovi_izvoz.js zavrne neprazen cilj.
+            psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -c "DO \$\$ DECLARE t text; BEGIN SELECT string_agg(format('%I.%I', schemaname, tablename), ', ') INTO t FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'schema_migrations'; IF t IS NOT NULL THEN EXECUTE 'TRUNCATE ' || t; END IF; END \$\$;" > /dev/null 2>&1 \
+              || { neuspeh "$DATUM" "$IME" "praznjenje seed vrstic ni uspelo"; return 0; }
+
+            # 4. obnova (isti postopek kot preizkus_obnove.sh): izpis samo iz kontroliranih Zavrnitev (imena tabel), sicer skrito
+            if ! node db/obnovi_izvoz.js "$IZVOZ" > "$DELO/obnova.log" 2>&1; then
+              if grep -E '^✖ (Cilj ni prazen|Cilj nima|Seznam migracij|Število vrstic|Tabela |Stolpec |Zaporedje |Med tabelami|Izvoz ne vsebuje|Datoteka ni videti)' "$DELO/obnova.log" > /dev/null; then
+                grep -A8 '^✖' "$DELO/obnova.log" | sed -E 's/pričakovano [0-9]+, dejansko [0-9]+/stevili se ne ujemata/; s/že ima [0-9]+ vrstic/ze ima vrstice/' | cut -c1-300 || true
+              else
+                echo "(podrobnosti skrite: napaka lahko vsebuje vrednosti iz baze)"
+              fi
+              rm -f "$IZVOZ"
+              neuspeh "$DATUM" "$IME" "obnova izvoza je padla"; return 0
+            fi
+            echo "Obnova izvoza: OK"
+            # neodvisna primerjava tabel in migracij (izpis samo OK/NAPAKA in imena tabel; v povzetek ne pise)
+            if ! env -u GITHUB_STEP_SUMMARY node _orodja/kopija/stevila.js primerjaj "$IZVOZ" > "$DELO/primerjava.log" 2>&1; then
+              rm -f "$IZVOZ"
+              neuspeh "$DATUM" "$IME" "primerjava tabel po obnovi se ne ujema"; return 0
+            fi
+            rm -f "$IZVOZ"   # odsifriranega izvoza ni vec treba: poizvedba bere obnovljeno bazo
+            echo "Primerjava tabel in migracij: OK ($(grep -c -E '^  OK ' "$DELO/primerjava.log" || true) tabel)"
+
+            # 5. poizvedba (samo branje). Tabela brez stolpca genres (ali brez tipa text[]) se izpise kot »ni stolpca«, ne podre zagona.
+            local VSE="" PRISOTNE=() t n
+            for t in "${TRE_TABELE[@]}"; do
+              n=$(psql "$DATABASE_URL" -X -At -q -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '$t' AND column_name = 'genres' AND udt_name = '_text'" 2> /dev/null) \
+                || { neuspeh "$DATUM" "$IME" "pregled stolpcev ni uspel"; return 0; }
+              if [ "$n" = "1" ]; then
+                PRISOTNE+=("$t")
+                if [ -z "$VSE" ]; then VSE="SELECT '$t' AS tabela, genres FROM $t"; else VSE="$VSE UNION ALL SELECT '$t', genres FROM $t"; fi
+              else
+                printf '%s\t%s\tNI_STOLPCA\t%s\t-\t-\t-\n' "$DATUM" "$IME" "$t" >> "$REZ"
+                echo "Tabela $t: ni stolpca genres"
+              fi
+            done
+            if [ "${#PRISOTNE[@]}" -eq 0 ]; then neuspeh "$DATUM" "$IME" "nobena tabela nima stolpca genres"; return 0; fi
+
+            cat > "$DELO/poizvedba.tpl" <<'SQL'
+          WITH dovoljeni(g) AS (VALUES ('electronic'),('hiphop'),('pop'),('rnb'),('rock'),('metal'),('punk'),('afrobeat'),('balkan'),('latino'),('country'),('hardcore'),('70s'),('80s'),('90s'),('rap'),('2000s'),('house'),('garage'),('trap'),('techno')),
+          vse AS (__VSE__)
+          SELECT tabela, count(*)::int AS vseh_vrstic,
+            count(*) FILTER (WHERE EXISTS (SELECT 1 FROM unnest(genres) x WHERE lower(trim(x)) NOT IN (SELECT g FROM dovoljeni)))::int AS z_nedovoljenim_zanrom,
+            count(*) FILTER (WHERE array_to_string(genres, ' ') ~* '[<>"''`]|script|onerror|onload|javascript:')::int AS z_znaki_html
+          FROM vse GROUP BY tabela ORDER BY tabela;
+          SQL
+            local TPL
+            TPL=$(cat "$DELO/poizvedba.tpl")
+            printf '%s\n' "${TPL//__VSE__/$VSE}" > "$DELO/poizvedba.sql"
+
+            if ! PGOPTIONS='-c default_transaction_read_only=on' psql "$DATABASE_URL" -X -At -F $'\t' -v ON_ERROR_STOP=1 -f "$DELO/poizvedba.sql" > "$DELO/stevila.tsv" 2> "$DELO/psql.err"; then
+              neuspeh "$DATUM" "$IME" "poizvedba ni uspela"; return 0
+            fi
+            local vrstica RE=$'^[0-9]+\t[0-9]+\t[0-9]+$'
+            for t in "${PRISOTNE[@]}"; do
+              vrstica=$(awk -F'\t' -v t="$t" '$1 == t { print $2 "\t" $3 "\t" $4 }' "$DELO/stevila.tsv")
+              [ -n "$vrstica" ] || vrstica=$'0\t0\t0'   # prazna tabela: GROUP BY ne vrne vrstice
+              if ! [[ "$vrstica" =~ $RE ]]; then neuspeh "$DATUM" "$IME" "nepricakovan izhod poizvedbe"; return 0; fi
+              printf '%s\t%s\tOK\t%s\t%s\n' "$DATUM" "$IME" "$t" "$vrstica" >> "$REZ"
+            done
+            echo "Poizvedba: OK (${#PRISOTNE[@]} tabel)"
+          }
+
+          while IFS=$'\t' read -r -u 9 DATUM IME NASTALA _ KLJUC; do
+            echo "=== $DATUM  $IME (nastala $NASTALA) ==="
+            obdelaj "$DATUM" "$IME" "$KLJUC"
+            rm -rf "$DELO/kopija" "$IZVOZ"
+          done 9< "$DELO/izbrane.tsv"
+
+      - name: Razsodba
+        if: ${{ !cancelled() && env.SEZNAM_SAMO != 'true' }}
+        run: |
+          set -euo pipefail
+          DELO="$RUNNER_TEMP/xss"
+          REZ="$DELO/rezultati.tsv"
+          POR="$DELO/porocilo.md"
+          if [ ! -s "$REZ" ] || [ ! -s "$DELO/izbrane.tsv" ]; then
+            {
+              echo "## Preverba XSS v kopijah: razsodba"
+              echo
+              echo "**NEPREVERJENO: nobena kopija ni bila obdelana (korak obnove ni stekel ali je padel).** To NI »ni sledi«."
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "::error::NEPREVERJENO: nobena kopija ni bila obdelana."
+            exit 1
+          fi
+
+          {
+            echo "## Preverba XSS v kopijah: rezultati"
+            echo
+            echo "Poizvedba: samo branje; stevila vrstic z nedovoljenim zanrom (izven seznama dovoljenih) in z znaki HTML/skripte v \`genres\`. Vrstic, imen ali vsebine zanrov ta zagon ne izpisuje."
+            echo
+            while IFS=$'\t' read -r -u 9 DATUM IME NASTALA _ _; do
+              echo "### $DATUM"
+              echo
+              echo "Kopija \`$IME\`, nastala $NASTALA (UTC)."
+              echo
+              if [ "$(awk -F'\t' -v i="$IME" '$2 == i' "$REZ" | grep -c . || true)" -eq 0 ]; then
+                echo "**NEPREVERJENO** (kopija ni bila obdelana)."
+                echo
+                continue
+              fi
+              # Stevila VSEH vrstic (npr. stevilo uporabnikov) se NE izpisejo: repo je javen, logi so javni (Martin 27. 10. 2026; kot kopija.yml).
+              echo "| tabela | z_nedovoljenim_zanrom | z_znaki_html |"
+              echo "|---|---|---|"
+              awk -F'\t' -v i="$IME" '$2 == i && $3 == "OK" { printf "| %s | %s | %s |\n", $4, $6, $7 }
+                                       $2 == i && $3 == "NI_STOLPCA" { printf "| %s | ni stolpca | ni stolpca |\n", $4 }
+                                       $2 == i && $3 == "NAPAKA" { printf "| (obdelava) | **NEPREVERJENO: %s** | |\n", $4 }' <(sort -s -t$'\t' -k4,4 "$REZ")
+              echo
+            done 9< "$DELO/izbrane.tsv"
+          } > "$POR"
+
+          # --- razsodba ---
+          NAJDENO=$(awk -F'\t' '$3 == "OK" && ($6 > 0 || $7 > 0) {
+              st = ($6 > $7) ? $6 : $7
+              printf "NAJDENO: %s %d (kopija %s; nedovoljen zanr: %d, znaki HTML/skripta: %d) - takoj obvesti Martina (72 h, register K-05)\n", $4, st, $1, $6, $7 }' "$REZ")
+          NEPREVERJENO=$(awk -F'\t' '$3 == "NAPAKA" { printf "%s: %s\n", $1, $4 }' "$REZ")
+          IZBRANIH=$(grep -c . "$DELO/izbrane.tsv" || true)
+          OBDELANIH=$(awk -F'\t' '$3 == "OK" { print $2 }' "$REZ" | sort -u | grep -c . || true)
+          if [ "$OBDELANIH" -lt "$IZBRANIH" ] && [ -z "$NEPREVERJENO" ]; then
+            NEPREVERJENO="nekatere kopije niso bile obdelane"
+          fi
+
+          RC=0
+          {
+            echo "## Razsodba"
+            echo
+            if [ -n "$NAJDENO" ]; then
+              while IFS= read -r v; do echo "**$v**"; echo; done <<< "$NAJDENO"
+              RC=1
+            fi
+            if [ -n "$NEPREVERJENO" ]; then
+              echo "**NEPREVERJENO** (za te kopije obnova ali poizvedba ni uspela; to NI »ni sledi«):"
+              echo
+              while IFS= read -r v; do echo "- $v"; done <<< "$NEPREVERJENO"
+              echo
+              RC=1
+            fi
+            if [ "$RC" -eq 0 ]; then
+              echo "**VSE 0 - ni sledi** (v $OBDELANIH preverjenih kopijah: nobena vrstica v clubs/events/users nima zanra izven seznama dovoljenih ali znakov HTML/skripte)."
+              echo
+              if awk -F'\t' '$3 == "NI_STOLPCA" { n++ } END { exit !n }' "$REZ"; then
+                echo "Opomba: v nekaterih kopijah tabela nima stolpca genres (»ni stolpca« v tabeli zgoraj); tam ni kaj preverjati."
+                echo
+              fi
+              echo "Velja samo za posnetke baze, ki so bili preverjeni (po en na dan), ne za cas med njimi."
+            fi
+          } > "$DELO/razsodba.md"
+
+          cat "$POR" "$DELO/razsodba.md"
+          cat "$POR" "$DELO/razsodba.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$NAJDENO" ]; then
+            while IFS= read -r v; do echo "::error title=Preverba XSS::$v"; done <<< "$NAJDENO"
+          fi
+          if [ -n "$NEPREVERJENO" ]; then
+            echo "::error title=Preverba XSS::NEPREVERJENO: obnova ali poizvedba za vsaj eno kopijo ni uspela."
+          fi
+          exit "$RC"
+
+      - name: Pocisti odsifrirane podatke in obnovljeno bazo
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/xss" || true
+          psql "$DATABASE_URL" -X -q -c 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;' > /dev/null 2>&1 || true
