@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–067, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–072, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -2922,6 +2922,13 @@ CREATE INDEX admin_dejanja_cilj_idx ON public.admin_dejanja USING btree (cilj_ti
 
 
 --
+-- Name: bottle_packages_club_all_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX bottle_packages_club_all_idx ON public.bottle_packages USING btree (club_id);
+
+
+--
 -- Name: bottle_packages_club_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2943,6 +2950,13 @@ CREATE INDEX ca_status_created_idx ON public.creator_applications USING btree (s
 
 
 --
+-- Name: club_event_notifications_event_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_event_notifications_event_idx ON public.club_event_notifications USING btree (event_id);
+
+
+--
 -- Name: club_event_notifications_unseen_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2957,10 +2971,31 @@ CREATE INDEX club_follows_user_idx ON public.club_follows USING btree (user_id, 
 
 
 --
+-- Name: club_invites_club_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_invites_club_idx ON public.club_invites USING btree (club_id);
+
+
+--
+-- Name: club_invites_invited_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_invites_invited_by_idx ON public.club_invites USING btree (invited_by_user_id) WHERE (invited_by_user_id IS NOT NULL);
+
+
+--
 -- Name: club_invites_pending_uniq; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE UNIQUE INDEX club_invites_pending_uniq ON public.club_invites USING btree (club_id, user_id) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: club_invites_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_invites_user_idx ON public.club_invites USING btree (user_id);
 
 
 --
@@ -2985,10 +3020,24 @@ CREATE UNIQUE INDEX club_members_club_user_uniq ON public.club_members USING btr
 
 
 --
+-- Name: club_members_invited_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_members_invited_by_idx ON public.club_members USING btree (invited_by_user_id) WHERE (invited_by_user_id IS NOT NULL);
+
+
+--
 -- Name: club_members_user_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX club_members_user_idx ON public.club_members USING btree (user_id, created_at);
+
+
+--
+-- Name: club_tables_club_all_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX club_tables_club_all_idx ON public.club_tables USING btree (club_id);
 
 
 --
@@ -3048,6 +3097,27 @@ CREATE UNIQUE INDEX clubs_stripe_account_key ON public.clubs USING btree (stripe
 
 
 --
+-- Name: creator_applications_club_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX creator_applications_club_idx ON public.creator_applications USING btree (club_id) WHERE (club_id IS NOT NULL);
+
+
+--
+-- Name: creator_applications_decided_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX creator_applications_decided_by_idx ON public.creator_applications USING btree (decided_by) WHERE (decided_by IS NOT NULL);
+
+
+--
+-- Name: creator_applications_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX creator_applications_user_idx ON public.creator_applications USING btree (user_id) WHERE (user_id IS NOT NULL);
+
+
+--
 -- Name: device_tokens_user_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3104,6 +3174,20 @@ CREATE INDEX events_venue_club_idx ON public.events USING btree (venue_club_id, 
 
 
 --
+-- Name: events_vip_layout_from_club_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX events_vip_layout_from_club_idx ON public.events USING btree (vip_layout_from_club_id) WHERE (vip_layout_from_club_id IS NOT NULL);
+
+
+--
+-- Name: friend_requests_from_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX friend_requests_from_user_idx ON public.friend_requests USING btree (from_user_id);
+
+
+--
 -- Name: friend_requests_pending_uniq; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3115,6 +3199,13 @@ CREATE UNIQUE INDEX friend_requests_pending_uniq ON public.friend_requests USING
 --
 
 CREATE INDEX friend_requests_to_pending_idx ON public.friend_requests USING btree (to_user_id) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: friend_requests_to_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX friend_requests_to_user_idx ON public.friend_requests USING btree (to_user_id);
 
 
 --
@@ -3146,6 +3237,13 @@ CREATE UNIQUE INDEX guest_list_members_aktiven_key ON public.guest_list_members 
 
 
 --
+-- Name: guest_list_members_guest_list_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX guest_list_members_guest_list_idx ON public.guest_list_members USING btree (guest_list_id);
+
+
+--
 -- Name: guest_list_members_neprebrana_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3157,6 +3255,13 @@ CREATE INDEX guest_list_members_neprebrana_idx ON public.guest_list_members USIN
 --
 
 CREATE INDEX guest_list_members_uporabnik_idx ON public.guest_list_members USING btree (user_id) WHERE (removed_at IS NULL);
+
+
+--
+-- Name: guest_list_members_user_all_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX guest_list_members_user_all_idx ON public.guest_list_members USING btree (user_id) WHERE (user_id IS NOT NULL);
 
 
 --
@@ -3174,6 +3279,13 @@ CREATE UNIQUE INDEX guest_lists_aktivna_key ON public.guest_lists USING btree (e
 
 
 --
+-- Name: guest_lists_created_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX guest_lists_created_by_idx ON public.guest_lists USING btree (created_by) WHERE (created_by IS NOT NULL);
+
+
+--
 -- Name: guest_lists_dogodek_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3185,6 +3297,13 @@ CREATE INDEX guest_lists_dogodek_idx ON public.guest_lists USING btree (event_id
 --
 
 CREATE INDEX guest_lists_gostitelj_idx ON public.guest_lists USING btree (host_user_id) WHERE (revoked_at IS NULL);
+
+
+--
+-- Name: guest_lists_host_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX guest_lists_host_user_idx ON public.guest_lists USING btree (host_user_id) WHERE (host_user_id IS NOT NULL);
 
 
 --
@@ -3276,6 +3395,13 @@ CREATE UNIQUE INDEX orders_idempotency_key ON public.orders USING btree (user_id
 --
 
 CREATE UNIQUE INDEX orders_miza_dogodek_key ON public.orders USING btree (event_id, table_id) WHERE ((table_id IS NOT NULL) AND (status = ANY (ARRAY['pending'::text, 'paid'::text, 'partially_refunded'::text])));
+
+
+--
+-- Name: orders_package_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX orders_package_idx ON public.orders USING btree (package_id) WHERE (package_id IS NOT NULL);
 
 
 --
@@ -3426,6 +3552,13 @@ CREATE INDEX reports_reporter_idx ON public.reports USING btree (reporter_id, cr
 
 
 --
+-- Name: reports_resolved_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX reports_resolved_by_idx ON public.reports USING btree (resolved_by) WHERE (resolved_by IS NOT NULL);
+
+
+--
 -- Name: reports_status_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3468,6 +3601,13 @@ CREATE UNIQUE INDEX table_holds_app_uporabnik_key ON public.table_holds USING bt
 
 
 --
+-- Name: table_holds_created_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX table_holds_created_by_idx ON public.table_holds USING btree (created_by_user_id) WHERE (created_by_user_id IS NOT NULL);
+
+
+--
 -- Name: table_holds_package_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3493,6 +3633,27 @@ CREATE INDEX table_holds_user_idx ON public.table_holds USING btree (user_id) WH
 --
 
 CREATE INDEX table_service_club_event_idx ON public.table_service USING btree (club_id, event_id, delivered_at);
+
+
+--
+-- Name: table_service_delivered_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX table_service_delivered_by_idx ON public.table_service USING btree (delivered_by_user_id) WHERE (delivered_by_user_id IS NOT NULL);
+
+
+--
+-- Name: table_service_event_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX table_service_event_idx ON public.table_service USING btree (event_id);
+
+
+--
+-- Name: ticket_transfers_from_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ticket_transfers_from_user_idx ON public.ticket_transfers USING btree (from_user_id) WHERE (from_user_id IS NOT NULL);
 
 
 --
@@ -3528,6 +3689,13 @@ CREATE INDEX ticket_transfers_ticket_idx ON public.ticket_transfers USING btree 
 --
 
 CREATE INDEX ticket_transfers_to_unseen_idx ON public.ticket_transfers USING btree (to_user_id) WHERE (seen_at IS NULL);
+
+
+--
+-- Name: ticket_transfers_to_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ticket_transfers_to_user_idx ON public.ticket_transfers USING btree (to_user_id) WHERE (to_user_id IS NOT NULL);
 
 
 --
@@ -3573,6 +3741,13 @@ CREATE UNIQUE INDEX tickets_serial_key ON public.tickets USING btree (serial);
 
 
 --
+-- Name: tickets_used_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX tickets_used_by_idx ON public.tickets USING btree (used_by_user_id) WHERE (used_by_user_id IS NOT NULL);
+
+
+--
 -- Name: user_blocks_blocked_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3612,6 +3787,13 @@ CREATE UNIQUE INDEX users_supabase_uid_key ON public.users USING btree (supabase
 --
 
 CREATE UNIQUE INDEX users_username_lower_key ON public.users USING btree (lower(username));
+
+
+--
+-- Name: view_counts_event_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX view_counts_event_idx ON public.view_counts USING btree (event_id) WHERE (event_id IS NOT NULL);
 
 
 --

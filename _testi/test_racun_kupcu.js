@@ -142,8 +142,11 @@ const PDF = (oznaka) => Buffer.from(`%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nen
 
     console.log("\n# 5. Izid neznan (rok Resenda potekel): NI ponovitve, POZOR");
     R.zamik = 1500;
+    const prispelo5 = R.prispelo;
     const K5 = await nov();
-    assert(await cakaj(async () => (await vrstica(K5.racunId)).mail_izid_neznan === true, 10000), "mail_izid_neznan = true");
+    // Najprej mora zahteva PRISPETI k stubu (zamik se prebere ob prihodu): mail_izid_neznan je TRUE ze ob rezervaciji, pred klicem,
+    // zato bi na pocasnem CI R.zamik = 0 spodaj lahko prehitel zahtevo in mail bi uspel (CI 27. 10., PR #376).
+    assert(await cakaj(async () => R.prispelo > prispelo5 && (await vrstica(K5.racunId)).mail_izid_neznan === true, 10000), "mail_izid_neznan = true");
     R.zamik = 0;
     await pocakaj(2500);
     const r5 = await vrstica(K5.racunId);

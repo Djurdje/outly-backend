@@ -8,7 +8,7 @@
  * Kaj dokazuje:
  *  1. vsaka vrsta opozorila nastane za dogodek, ki krsi natanko ta pogoj, in izgine, ko se pogoj odpravi (brez_plakata, brez_cene, brez_kapacitete, brez_konca,
  *     prodaja_ustavljena, prodajalec_nepopoln, placila_niso_pripravljena, demo_objavljen, racun_napaka, racun_zaostanek, vracila_pozornost, spori_odprti,
- *     povrnitve_sporov, potrdila_neposlana); stevci rdece/oranzno/rumeno so skladni s seznamom.
+ *     spori_rok_blizu (#374: needs_response, rok dokazov < 72 h ali potekel; cez 5 dni, drugo stanje, brez roka, zaprt = ne), povrnitve_sporov, potrdila_neposlana); stevci rdece/oranzno/rumeno so skladni s seznamom.
  *  2. skriti klub, ze koncan dogodek, osnutek (razen plakata) in dogodki brez kršitve NE dajo opozoril; demo klub je izvzet iz placil (samo demo_objavljen);
  *     brezplacen in zunanji dogodek nista »placila niso pripravljena«; plakat > 14 dni vnaprej ne opozarja; racuni skritega kluba so vidni.
  *  3. odgovor nima nobenega @ (tudi ko zadnja_napaka racuna vsebuje e-naslov), nima e-naslovov, Stripovih ID-jev (acct_, pi_, cs_) ne imen kupcev.
@@ -278,6 +278,50 @@ async function api(method, path, token) {
     po = (await dobi()).body.items;
     assert(!ima(po, "vracila_pozornost") && !ima(po, "spori_odprti") && !ima(po, "povrnitve_sporov"), "vracila in spori izginejo, ko so urejeni");
     assert(!(await dobi()).text.includes("pi_skrivni") && !(await dobi()).text.includes("cs_live"), "Stripovi ID-ji naročila ne uidejo");
+
+    console.log("\n# Rok za dokaze v sporu (#374): spori_rok_blizu");
+    const rokIns = (id, stanje, rok, zaprt = false) => brezSprozilcev.query(
+      "INSERT INTO spori (id, order_id, stanje, znesek_cents, rok_dokazov_at, zaprt_at) VALUES ($1, $2, $3, 1500, CASE WHEN $4::text IS NULL THEN NULL ELSE NOW() + $4::interval END, CASE WHEN $5 THEN NOW() END)",
+      [id, nVracilo, stanje, rok, zaprt]);
+    const rokVrsta = async () => { const d = (await dobi()).body; return { v: d.items.find(i => i.vrsta === "spori_rok_blizu"), rdece: d.stevci.rdece }; };
+    // brez sporov z rokom: opozorila ni
+    let rk = await rokVrsta();
+    const rdeceBrez = rk.rdece;
+    assert(!rk.v, "brez sporov v needs_response: spori_rok_blizu ni");
+    // rok cez 5 dni, drugo stanje, brez roka, zaprt spor: NE
+    await rokIns("dp_rok_5dni", "needs_response", "5 days");
+    await rokIns("dp_rok_review", "under_review", "1 hour");
+    await rokIns("dp_rok_won", "won", "1 hour", true);
+    await rokIns("dp_rok_brez", "needs_response", null);
+    await rokIns("dp_rok_zaprt", "needs_response", "1 hour", true);
+    rk = await rokVrsta();
+    assert(!rk.v && rk.rdece === rdeceBrez, "rok cez 5 dni, under_review, won, needs_response brez roka in zaprt spor: opozorila ni", rk.v);
+    // rok cez 24 h: opozorilo, rdece, 1 spor
+    await rokIns("dp_rok_24h", "needs_response", "24 hours");
+    rk = await rokVrsta();
+    assert(rk.v && rk.v.resnost === "rdece" && rk.v.cilj_tip === "spori" && /sporov: 1[;)]/.test(rk.v.besedilo) && !/potekel/.test(rk.v.besedilo), "rok cez 24 h: spori_rok_blizu, rdece, 1 spor, brez 'potekel'", rk.v);
+    assert(rk.rdece === rdeceBrez + 1, "stevec rdecih se poveca za 1", [rdeceBrez, rk.rdece]);
+    assert(rk.v && Math.abs(new Date(rk.v.cas).getTime() - (Date.now() + 24 * 3600e3)) < 120e3, "cas = najblizji rok (cez ~24 h)", rk.v && rk.v.cas);
+    // meja: rok cez 71 h je znotraj, cez 73 h ni
+    await brezSprozilcev.query("UPDATE spori SET rok_dokazov_at = NOW() + INTERVAL '73 hours' WHERE id = 'dp_rok_24h'");
+    assert(!(await rokVrsta()).v, "rok cez 73 h: opozorila ni");
+    await brezSprozilcev.query("UPDATE spori SET rok_dokazov_at = NOW() + INTERVAL '71 hours' WHERE id = 'dp_rok_24h'");
+    assert((await rokVrsta()).v, "rok cez 71 h: opozorilo je");
+    // ze potekel rok: se vedno opozorilo (stanje v bazi je zastarelo ali Stripe se ni zaprl spora), steje potekle
+    await rokIns("dp_rok_potekel", "needs_response", "-2 hours");
+    rk = await rokVrsta();
+    assert(rk.v && /sporov: 2/.test(rk.v.besedilo) && /rok že potekel: 1/.test(rk.v.besedilo), "potekel rok se steje: 2 spora, od tega 1 potekel", rk.v && rk.v.besedilo);
+    assert(rk.v && Math.abs(new Date(rk.v.cas).getTime() - (Date.now() - 2 * 3600e3)) < 120e3, "cas = najblizji (potekli) rok", rk.v && rk.v.cas);
+    assert(ima((await dobi()).body.items, "spori_odprti"), "spori_odprti ostane (oranzno) poleg spori_rok_blizu");
+    // opozorilo ne vsebuje ID-jev sporov in je enako v povzetku (Danes: opozorila_rdeca)
+    assert(!(await dobi()).text.includes("dp_rok"), "ID-ji sporov ne uidejo v odgovor");
+    const danesRok = await dobi("/admin/api/danes");
+    assert(danesRok.status === 200 && danesRok.body.opozorila_rdeca === rdeceBrez + 1, "Danes: opozorila_rdeca vkljucuje spori_rok_blizu", [danesRok.status, danesRok.body.opozorila_rdeca, rdeceBrez]);
+    // urejen spor (npr. dokazi poslani -> under_review): opozorilo izgine
+    await brezSprozilcev.query("UPDATE spori SET stanje = 'under_review' WHERE id IN ('dp_rok_24h', 'dp_rok_potekel')");
+    rk = await rokVrsta();
+    assert(!rk.v && rk.rdece === rdeceBrez, "po under_review opozorilo izgine", rk.v);
+    await brezSprozilcev.query("DELETE FROM spori WHERE id LIKE 'dp_rok_%'");
 
     console.log("\n# GET /admin/api/racuni");
     r = await dobi("/admin/api/racuni");

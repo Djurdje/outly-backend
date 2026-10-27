@@ -19,6 +19,7 @@ const NAJVEC_ZNAKOV_NAPAKE = 300;
 const NAJVEC_VRSTIC_NAPAKA = 100;     // racunov v stanju napaka, ki jih opozorila naštejejo posamično (stevci vedno stejejo vse)
 const NAJVEC_OPOZORIL = 500;          // zgornja meja odgovora (stevci stejejo vse)
 const OKNO_PLAKATA_DNI = 14;
+const ROK_SPORA_URE = 72;   // spor v needs_response z rokom za dokaze v manj kot toliko urah (ali ze potecenim) -> rdece opozorilo `spori_rok_blizu` (#374); zamujen rok = izgubljen spor
 const ZAMUDA_OBJAVE_MS = 3 * 60 * 1000;   // osnutek z minulim publish_at toliko casa po roku ni objavljen -> rdece opozorilo (delavec teče vsako minuto, samodejna_objava.js)
 const STANJA_RACUNOV = ["caka", "izdan", "potrjen", "napaka", "preklican"];
 const RESNOST_VRSTNI_RED = { rdece: 0, oranzno: 1, rumeno: 2 };
@@ -259,9 +260,19 @@ function ustvari(dep) {
       const s = (await c.query(
         `SELECT (SELECT COUNT(*)::int FROM vracila WHERE stanje IN ('ni_uspelo','rocno')) AS vracila,
                 (SELECT COUNT(*)::int FROM spori WHERE zaprt_at IS NULL) AS spori,
-                (SELECT COUNT(*)::int FROM spori WHERE povrnitev_stanje IN ('ni_uspelo','rocno')) AS povrnitve`)).rows[0];
+                rok.n AS spori_rok, rok.potekli AS spori_rok_potekli, rok.najblizji AS spori_rok_najblizji,
+                (SELECT COUNT(*)::int FROM spori WHERE povrnitev_stanje IN ('ni_uspelo','rocno')) AS povrnitve
+           FROM (SELECT COUNT(*)::int AS n, COUNT(*) FILTER (WHERE rok_dokazov_at <= NOW())::int AS potekli, MIN(rok_dokazov_at) AS najblizji
+                   FROM spori WHERE stanje = 'needs_response' AND zaprt_at IS NULL AND rok_dokazov_at IS NOT NULL
+                    AND rok_dokazov_at < NOW() + ($1::int * INTERVAL '1 hour')) rok`, [ROK_SPORA_URE])).rows[0];
       if (s.vracila > 0) dodaj("vracila_pozornost", "rdece", "vracila", null, `${s.vracila} vračil kupcem je ostalo brez denarja (ni uspelo ali ročno).`);
       if (s.povrnitve > 0) dodaj("povrnitve_sporov", "rdece", "spori", null, `${s.povrnitve} povrnitev izgubljenih sporov od klubov ni uspelo (ni uspelo ali ročno).`);
+      if (s.spori_rok > 0) {
+        const ob = new Date(s.spori_rok_najblizji).toLocaleString("sl-SI", { timeZone: "Europe/Ljubljana", dateStyle: "short", timeStyle: "short" });
+        dodaj("spori_rok_blizu", "rdece", "spori", null,
+          `Rok za dokaze v Stripovem sporu je blizu (sporov: ${s.spori_rok}${s.spori_rok_potekli > 0 ? `, rok že potekel: ${s.spori_rok_potekli}` : ""}; najbližji rok ${ob}, meja ${ROK_SPORA_URE} ur). Zamujen rok = izgubljen spor: dokaze pošlji v Stripe Dashboardu (Disputes).`,
+          s.spori_rok_najblizji);
+      }
       if (s.spori > 0) dodaj("spori_odprti", "oranzno", "spori", null, `${s.spori} odprtih Stripovih sporov (vstopnice med sporom na vratih ne veljajo).`);
       const potrdila = (await c.query(
         `SELECT COUNT(*)::int AS n, MIN(paid_at) AS najstarejse FROM orders
