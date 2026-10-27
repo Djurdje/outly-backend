@@ -78,11 +78,13 @@ async function zazeni(port, dbOpcije) {
   const tabele = (await pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' AND table_name <> 'schema_migrations'")).rows.map((x) => `"${x.table_name}"`);
   await pool.query(`TRUNCATE ${tabele.join(", ")} RESTART IDENTITY CASCADE`);
   await new Promise((r) => jwksServer.listen(JWKS_PORT, r));
-  const A = await zazeni(PORTI.A, null);
+  // Mrtva zanka: proces A (DELETE) preveri cikel po 3 s, zadrzevalec T1 sele po 60 s -> zrtev je zanesljivo DELETE, tudi ce T1 na pocasnem CI zacne cakati pozneje
+  // kot privzeta 1 s (pregled #379; z deadlock_timeout=30ms je bil zrtev T1 in DELETE je uspel).
+  const A = await zazeni(PORTI.A, "-c deadlock_timeout=3000");
   const B = await zazeni(PORTI.B, "-c lock_timeout=600");
   const C = await zazeni(PORTI.C, "-c statement_timeout=700");
   const drzalci = [];
-  const odjemalec = async () => { const c = new Client({ connectionString: DB }); await c.connect(); drzalci.push(c); return c; };
+  const odjemalec = async () => { const c = new Client({ connectionString: DB }); await c.connect(); await c.query("SET deadlock_timeout = '60s'"); drzalci.push(c); return c; };
 
   try {
     // ---- osnova: admin, lastnik kluba, klub, dogodek za narocila
