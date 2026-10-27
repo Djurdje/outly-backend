@@ -751,7 +751,7 @@ Po tem je alarm dvojen: nadzor javi, ko je produkcija pokvarjena, Healthchecks p
 ## Varnostne kopije in obnova
 
 Kopije so **izven Renderja** (od 30. 9. 2026 je baza plačljiva; dnevna šifrirana kopija v R2, DECISIONS 2026-10-02, zagoni `Varnostna kopija baze` v INCIDENTI 2026-10-24; obnova: skill `obnova-baze`).
-Ali ima plačljiva Renderjeva baza tudi lastne kopije ali obnovo na točko v času (PITR), **ni preverjeno** (issue #374; v Render nadzorni plošči ali dokumentaciji). Do preverbe se nanje ne zanašaj.
+Renderjeva plačljiva baza (`outly-db`, paket `0.5c-1g`) ima po Renderjevi dokumentaciji (https://render.com/docs/postgresql-backups, prebrano 27. 10. 2026) obnovo na točko v času (PITR): okno **3 dni** na delovnem prostoru Hobby, **7 dni** na Pro ali višje (nadgradnja okna ne podaljša za nazaj), in logične kopije, ki jih Render hrani 7 dni. Kateri paket ima delovni prostor, iz API-ja ni razvidno (Render MCP `get_postgres` polja nima) — preveri v nadzorni plošči. Obnovo izvede Martin v nadzorni plošči (ustvari NOVO bazo); naša kopija v R2 ostane edina zunaj Renderja in edina, starejša od tega okna (issue #374).
 Pot nazaj je logični izvoz `GET /admin/api/export`
 (gumb v admin panelu, vloga `admin`, ali račun za kopije z vlogo `backup`; JSON vseh tabel v enem posnetku) in skripta `db/obnovi_izvoz.js`,
 ki tak JSON obnovi v **prazno, z migracijami pripravljeno** bazo. Kaj skripta zagotavlja (test `_testi/test_obnova.js`):
