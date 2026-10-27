@@ -1673,6 +1673,9 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       odjemalec.release();
     }
   } catch (e) {
+    // Mrtva zanka / lock_timeout / statement_timeout: Postgres je transakcijo prekinil, ROLLBACK je ze opravljen (notranji catch), Supabasov racun se ni bil poklican
+    // (klic je zadnji stavek pred COMMIT-om) -> 503, odjemalec ponovi. Kaskada brisanja pise skoraj vse tabele, zato je cikel s hkratnim nakupom ali skenom realen.
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "2").send(NAKUP_ZASEDEN); }
     console.error(e);
     return res.status(500).send("Server error.");
   }
@@ -3499,6 +3502,7 @@ app.delete("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, 
       event: r.rows[0],
     });
   } catch (e) {
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "2").send("The event is busy. Please try again."); }   // ROLLBACK opravljen, nic spremenjeno; isto besedilo kot PATCH /events/:id
     console.error(e);
     return res.status(500).send("Server error.");
   }

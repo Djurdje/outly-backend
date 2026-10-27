@@ -52,7 +52,7 @@ function ustvari({ pool, celoId4, zapisiAdminDejanje, omeji, sqlTestno, poBrisan
 
   // Zaklep ali casovna meja -> 503 (nic spremenjeno, ponovi). Tuji kljuc (nakup je v istem trenutku vstavil vrstico) -> 409.
   function napakaBaze(res, e) {
-    if (e && (e.code === "55P03" || e.code === "40P01" || e.code === "57014")) return napaka(res, 503, "busy", "The record is busy (a purchase or a scan is using it). Nothing was deleted; try again in a moment.");
+    if (e && (e.code === "55P03" || e.code === "40P01" || e.code === "57014")) { res.set("Retry-After", "2"); return napaka(res, 503, "busy", "The record is busy (a purchase or a scan is using it). Nothing was deleted; try again in a moment."); }
     if (e && e.code === "23503") return napaka(res, 409, "changed_meanwhile", "Something was added to this record while deleting (e.g. a purchase). Nothing was deleted; check again.");
     console.error(e);
     return res.status(500).send("Server error.");
