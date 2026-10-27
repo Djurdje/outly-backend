@@ -320,6 +320,10 @@ function zavrniRazprodanoMizo(req, res, next) {
   if (id && mizaId && razprodanoJe("m:" + id + ":" + mizaId)) return res.status(409).send("This table is already booked.");
   next();
 }
+// Najdaljsi cas, ki ga DELETE /me in DELETE /events/:id (kaskada, zaklep vrstice dogodka) cakata na tuj zaklep (SET LOCAL lock_timeout v njuni transakciji; #380).
+// Brez mej bi izbris racuna, ki caka na zaklep placanega narocila, drzal zaklep vrstice dogodka (sprozilec sprosti_zalogo) in vsi nakupi za dogodek bi dobivali 503.
+// Po izteku 55P03 -> 503 + Retry-After: 2 (napakaZasedenosti). Privzeto 3 s kot ADMIN_BRISANJE_ZAKLEP_MS.
+const BRISANJE_ZAKLEP_MS = okoljeCelo("BRISANJE_ZAKLEP_MS", 3000, 100, 60000);
 // Zacetek nakupne transakcije z zgornjo mejo za zaklep in stavek (glej NAKUP_DB_TIMEOUT_MS).
 function nakupZacni(c) {
   return c.query(`BEGIN; SET LOCAL lock_timeout = ${NAKUP_DB_TIMEOUT_MS}; SET LOCAL statement_timeout = ${NAKUP_DB_TIMEOUT_MS}`);
@@ -1577,19 +1581,14 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       if (!r.ok) return res.status(503).send("Auth service unavailable.");
     }
 
-    // Brez tabele orders (pred migracijo 002) je izbris preprost.
-    if (!obstajajoNarocila) {
-      if (supabase) { await izbrisiSupabaseRacun(req.user.supabaseToken); supabaseIzbrisan = true; izbrisaniSub.set(req.user.supabaseSub, req.user.supabaseExp); }
-      await pool.query("DELETE FROM users WHERE id=$1", [req.user.userId]);
-      return res.status(200).json({ message: "Account deleted." });
-    }
-
-    // Od migracije 002 naprej sta v igri dve nasprotujoci si zahtevi:
+    // Poenostavljene poti brez kaskade ni (#380): tabela orders obstaja od migracije 002, zastavica, nastavljena z zagonsko poizvedbo, pa bi ob njeni napaki
+    // (ali v prvih trenutkih po zagonu) pustila izbris brez anonimizacije naracil. Sta v igri dve nasprotujoci si zahtevi:
     // Apple hoce, da uporabnik racun izbrise; davcni predpisi hocejo, da se
     // racun o nakupu ohrani. Resitev je anonimizacija, ne izbris naracil.
     const odjemalec = await pool.connect();
     try {
       await odjemalec.query("BEGIN");
+      await odjemalec.query(`SET LOCAL lock_timeout = ${BRISANJE_ZAKLEP_MS}`);   // #380: ob tujem zaklepu (placano narocilo, dogodek) ne cakamo brez roka -> 55P03 -> 503
 
       // 1. Lastnik kluba, ki ima narocila, racuna ne more izbrisati — klub
       //    mora najprej dobiti drugega lastnika. Baza bi to zavrnila tako ali
@@ -1675,8 +1674,8 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
     }
   } catch (e) {
     // Mrtva zanka / lock_timeout / statement_timeout: Postgres je transakcijo prekinil, ROLLBACK je ze opravljen (notranji catch) -> 503, odjemalec ponovi.
-    // Kaskada brisanja pise skoraj vse tabele, zato je cikel s hkratnim nakupom ali skenom realen. Izjema: Supabasov racun je ze izbrisan (57014 ob COMMIT-u ali
-    // pot brez tabele orders) - ponovitev ne more uspeti (401), zato ostane 500 (pregled #379).
+    // Kaskada brisanja pise skoraj vse tabele, zato je cikel s hkratnim nakupom ali skenom realen. Izjema: Supabasov racun je ze izbrisan (57014 ob COMMIT-u)
+    // - ponovitev ne more uspeti (401), zato ostane 500 (pregled #379).
     if (napakaZasedenosti(e) && !supabaseIzbrisan) { console.error(e.message); return res.status(503).set("Retry-After", "2").send(NAKUP_ZASEDEN); }
     console.error(e);
     return res.status(500).send("Server error.");
@@ -3089,18 +3088,6 @@ async function obvestiSledilce(eventId, clubId) {
   if (r.rows.length) void pushObjavaDogodka(eventId, r.rows.map((x) => x.user_id));
 }
 
-// Ali je migracija 002 (placila) ze pognana? Od nje naprej se racun ne sme
-// vec trdo izbrisati, ker so narocila racunovodski dokumenti.
-let obstajajoNarocila = false;
-pool.query("SELECT to_regclass('public.orders') IS NOT NULL AS obstaja")
-  .then(r => {
-    obstajajoNarocila = r.rows[0].obstaja;
-    console.log(obstajajoNarocila
-      ? "Tabela orders obstaja -> brisanje racuna anonimizira"
-      : "Tabele orders se ni -> brisanje racuna je trd izbris");
-  })
-  .catch(e => console.error("Ne morem preveriti tabele orders:", e.message));
-
 // ---------------------------
 // DOGODKI: urejanje in odpoved
 // ---------------------------
@@ -3459,11 +3446,6 @@ app.delete("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, 
     const d = await dogodekZaUrejanje(req, res);
     if (!d) return;
 
-    if (!obstajajoNarocila) {   // pred migracijo 002 narocil ni
-      await pool.query("DELETE FROM events WHERE id=$1", [d.id]);
-      return res.status(200).json({ message: "Event deleted." });
-    }
-
     // Vse v ENI transakciji z zaklepom vrstice dogodka (zaklepDogodkaZaOdpoved): preverba #255, stetje narocil in izbris/odpoved vidijo isto sliko.
     // - Brez narocil: izbris kot doslej.
     // - S katerimkoli narocilom: dogodek se NE brise (narocilo je racunovodski dokument; FK orders_event_id_fkey je RESTRICT, prej je to dalo 500, #258 N2),
@@ -3476,6 +3458,7 @@ app.delete("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, 
     let r, vVrsti, z;
     try {
       await c.query("BEGIN");
+      await c.query(`SET LOCAL lock_timeout = ${BRISANJE_ZAKLEP_MS}`);   // #380: zaklep vrstice dogodka / odvisnih vrstic ne caka brez roka -> 55P03 -> 503
       z = await zaklepDogodkaZaOdpoved(c, d.id);
       if (!z) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }
       if (z.narocil === 0) {
