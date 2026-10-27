@@ -170,14 +170,15 @@ const klicov = (m) => F.klici.filter((k) => k.method === m).length;
 const nastavi = (v, n = 1) => { F.vedenje = v ? { ustvari: v, preostalo: n } : null; };
 
 const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}/WebServicesSI/API`, ERACUNI_USERNAME: TAJNO.user, ERACUNI_SECRET_KEY: TAJNO.key, ERACUNI_TOKEN: TAJNO.token,
-  ERACUNI_RAZMAK_MS: "20", RACUNI_TICK_MS: "0", RACUNI_POSPRAVI_MS: "0", RACUNI_PREMOR_MS: "50", RACUNI_NEZNAN_PREMOR_MS: "0", RACUNI_KONFIG_PREMOR_MS: "400", RACUNI_ROK_MS: "600",
-  RACUNI_ODLOG_MS: "50", RACUNI_LUKNJA_PO_MS: "0", RACUNI_ISKANJE_RAZMAK_MS: "0", ERACUNI_SEZNAM_PREVERJEN: "1" };
+  ERACUNI_RAZMAK_MS: "20", RACUNI_TICK_MS: "0", RACUNI_POSPRAVI_MS: "0", RACUNI_PREMOR_MS: "600000", RACUNI_NEZNAN_PREMOR_MS: "0", RACUNI_KONFIG_PREMOR_MS: "400", RACUNI_ROK_MS: "600",
+  RACUNI_ODLOG_MS: "600000", RACUNI_LUKNJA_PO_MS: "0", RACUNI_ISKANJE_RAZMAK_MS: "0", ERACUNI_SEZNAM_PREVERJEN: "1" };
 
 (async () => {
   await new Promise((r) => streznik.listen(PORT, r));
   const pool = new Pool({ connectionString: DB, max: 12 });
   await pool.query("TRUNCATE omejitve, stripe_events, ticket_transfers, club_invites, club_members, event_favorites, vracila, odpovedi_dogodkov, racuni, tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
   await pool.query("TRUNCATE racuni_zaporedje");
+  await pool.query("TRUNCATE racuni_najem");   // najem delavca (90 s) prezivi prekinjen zagon in bi naslednjemu zagonu v prvih 90 s preprecil vsako delo
   const uid = (await pool.query("INSERT INTO users (email, username) VALUES ('lastnik@outly.si', 'lastnik') RETURNING id")).rows[0].id;
   const klub = (await pool.query("INSERT INTO clubs (owner_user_id, name, is_official) VALUES ($1, 'Outly', TRUE) RETURNING id", [uid])).rows[0].id;
   const ev = (await pool.query("INSERT INTO events (club_id, title, start_at, status, ticket_price_cents, capacity, min_age) VALUES ($1, 'Outly Launch Party', '2026-12-24T20:00:00+01:00', 'published', 1999, 500, 0) RETURNING id", [klub])).rows[0].id;
@@ -190,8 +191,11 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
   }
   const vrstica = async (id) => (await pool.query("SELECT * FROM racuni WHERE id = $1", [id])).rows[0];
   const deloven = (env = {}) => racuni.ustvari({ pool, env: { ...ENV, ...env } });
-  // pospesi: odlozene vrstice (iskanje po referenci, pocasna ponovitev) gredo takoj naprej; vrstice, odlozene za > 2 uri (izkljucene iz testa), ostanejo.
-  async function tek(w, n = 1, cakaj = 130, pospesi = false) {
+  // Premor ponovitve (RACUNI_PREMOR_MS, RACUNI_ODLOG_MS) je v ENV namenoma DOLG (10 min), ne kratek: delavec en tek() ponavlja `prevzemi`, dokler je kaj na vrsti, in vrstico, ki je
+  // pravkar padla, vzame ISTI tek znova, takoj ko premor mine. Pri 50 ms je to odvisalo od hitrosti racunalnika (CI, obremenitev: Issue #348 - 429, zavrnjena povezava, EOR, 500 se
+  // je ponovilo znotraj enega teka, poskusi = 2). Zdaj se vrstica, ki je v tem teku padla, v ISTEM teku ne vzame znova; naslednja ponovitev je izrecna: `pospesi` (privzeto VKLOPLJEN) pred vsakim tekom premakne
+  // odlozene vrstice na »zdaj«. Vrstice, odlozene za > 2 uri (izkljucene iz testa), ostanejo. `pospesi = false` = premor se uposteva (glej test 5).
+  async function tek(w, n = 1, cakaj = 130, pospesi = true) {
     for (let i = 0; i < n; i++) {
       if (pospesi) await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() WHERE stanje IN ('caka', 'izdan') AND naslednji_poskus_at > NOW() AND naslednji_poskus_at < NOW() + INTERVAL '2 hours'");
       await w.tek(); if (i < n - 1) await pocakaj(cakaj);
@@ -310,15 +314,25 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
     // ================================================================
     console.log("\n# 5. 429 (zagotovo ni obdelano): poslano_at se pobrise, ponovitev brez iskanja");
     {
-      const R = await nov(1, 1000); const w = deloven(); const n0 = F.klici.length, d0 = F.docs.length;
+      const R = await nov(1, 1000); const w = deloven(); const n0 = F.klici.length, d0 = F.docs.length, c5 = klicov("SalesInvoiceCreate");
       nastavi("429", 1);
       await tek(w);
       const r1 = await vrstica(R.id);
       assert(r1.stanje === "caka" && r1.poslano_at === null && r1.poskusi === 1 && F.docs.length === d0, "429: caka, poslano_at pobrisan, nic izdanega", r1);
-      await pocakaj(100);
+      const rp = new Date(r1.naslednji_poskus_at).getTime() - Date.now();
+      await tek(w, 2, 130, false);
+      assert(rp > 60000 && klicov("SalesInvoiceCreate") === c5 + 1 && (await vrstica(R.id)).poskusi === 1, "premor se uposteva: tek brez pospesitve vrstice ne ponovi (ponovitev ni takoj)", [rp, klicov("SalesInvoiceCreate") - c5]);
       await tek(w, 2);
       const r = await vrstica(R.id); const k = F.klici.slice(n0).map((x) => x.method);
       assert(r.stanje === "potrjen" && F.docs.length === d0 + 1 && !k.includes("SalesInvoiceList"), "ponovitev: izdaja brez iskanja, potrjen, ena izdaja", k);
+    }
+    {
+      // 5b. Ponovitev s kratkim premorom (kot v produkciji 429 s premorom 5 s v teku do 45 s): vrstica se ponovi brez pospesitve (obicajno v istem teku), ena izdaja (pregled #382).
+      const R = await nov(1, 1001); const w = deloven({ RACUNI_PREMOR_MS: "1" }); const d0 = F.docs.length, c0 = klicov("SalesInvoiceCreate");
+      nastavi("429", 1);
+      await tek(w, 3, 100, false);
+      const r = await vrstica(R.id);
+      assert(r.stanje === "potrjen" && F.docs.length === d0 + 1 && klicov("SalesInvoiceCreate") === c0 + 2, "429 + kratek premor: ponovitev brez pospesitve, potrjen, natanko ena izdaja (2 Create)", [r.stanje, F.docs.length - d0, klicov("SalesInvoiceCreate") - c0]);
     }
 
     // ================================================================
@@ -343,13 +357,14 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
     // ================================================================
     console.log("\n# 7. Napacne poverilnice / nastavitev: vrstica ostane `caka`, pocasna ponovitev + POZOR; preizkus pred izdajo (pregled #318, 3. krog)");
     for (const [ime, okolje] of [["ERACUNI_SEZNAM_PREVERJEN=1", {}], ["zastavica izklopljena (privzeto v produkciji)", { ERACUNI_SEZNAM_PREVERJEN: "" }]]) {
-      const R = await nov(1, 1000); const w = deloven(okolje); const l0 = LOG.length, d0 = F.docs.length, c0 = klicov("SalesInvoiceCreate");
+      // RACUNI_PREMOR_MS je tu KRATEK (50 ms), da konfiguracijski premor (RACUNI_KONFIG_PREMOR_MS) res odloca o ponovitvi; premor 5 s je tako dolg, da vrstice isti tek ne vzame znova.
+      const R = await nov(1, 1000); const w = deloven({ ...okolje, RACUNI_PREMOR_MS: "50", RACUNI_KONFIG_PREMOR_MS: "5000" }); const l0 = LOG.length, d0 = F.docs.length, c0 = klicov("SalesInvoiceCreate");
       F.poverilnice = false;
       const t0 = Date.now();
       await tek(w);
       const r = await vrstica(R.id);
       const odlog = new Date(r.naslednji_poskus_at).getTime() - t0;
-      assert(r.stanje === "caka" && r.stevilka === null && r.poskusi === 1 && /Access denied/.test(r.zadnja_napaka) && odlog >= 300 && F.docs.length === d0, `[${ime}] caka (NE napaka), ponovitev po >= 400 ms (RACUNI_KONFIG_PREMOR_MS)`, [r.stanje, odlog]);
+      assert(r.stanje === "caka" && r.stevilka === null && r.poskusi === 1 && /Access denied/.test(r.zadnja_napaka) && odlog >= 4000 && F.docs.length === d0, `[${ime}] caka (NE napaka), ponovitev po >= 5 s (RACUNI_KONFIG_PREMOR_MS, ne kratkega RACUNI_PREMOR_MS)`, [r.stanje, odlog]);
       assert(klicov("SalesInvoiceCreate") === c0 && r.poslano_at === null, `[${ime}] napacen kljuc: Create se NE poslje (bralni preizkus pade), poslano_at ostane prazen`, [klicov("SalesInvoiceCreate") - c0, r.poslano_at]);
       assert(logOd(l0).some((l) => /POZOR.*nastavitev pri ponudniku/.test(l)), `[${ime}] POZOR: nastavitev pri ponudniku`);
       F.poverilnice = true;
@@ -448,15 +463,21 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
     // ================================================================
     console.log("\n# 11. En klic naenkrat, razmak med zahtevki, zaporedne stevilke");
     {
-      const w = deloven({ RACUNI_VZPOREDNO: "4", ERACUNI_RAZMAK_MS: "60", RACUNI_ROK_MS: "5000" });
+      const w = deloven({ RACUNI_VZPOREDNO: "4", ERACUNI_RAZMAK_MS: "100", RACUNI_ROK_MS: "5000" });   // 100 ms: izpuscen razmak (~100) se jasno loci od tolerance 50 za zakasnjen prihod
       const ids = []; for (let i = 0; i < 7; i++) ids.push((await nov(1, 1000 + i)).id);
       const od = F.zacetki.length; F.maxInflight = 0;
       await tek(w, 3, 50);
       const st = (await pool.query("SELECT stanje, stevilka FROM racuni WHERE id = ANY($1::bigint[]) ORDER BY id", [ids])).rows;
-      const z = F.zacetki.slice(od); let najmanj = 1e9; for (let i = 1; i < z.length; i++) najmanj = Math.min(najmanj, z[i] - z[i - 1]);
+      const z = F.zacetki.slice(od);
       assert(st.every((x) => x.stanje === "potrjen"), "vseh 7 potrjenih", st);
       assert(F.maxInflight === 1, "nikoli dva hkratna zahtevka (API tega ne dovoli)", F.maxInflight);
-      assert(najmanj >= 50, "razmak med zacetki zahtevkov >= 60 ms (mejo 1/s zagotovi ERACUNI_RAZMAK_MS)", najmanj);
+      // Cas prihoda meri lazni streznik v ISTEM procesu: zastoj zanke dogodkov (CI, obremenitev) en prihod zakasni, naslednjega ne, zato posamezen razmak ni zanesljiv (izmerjeno 20 ms
+      // namesto 60). Zato kumulativno: zahtevek i je od vsakega prejsnjega j oddaljen vsaj (i-j) x razmak, z eno-samo toleranco 50 ms za zakasnjen prihod (ne narasca z i). Brez razmaka (ali s polovico)
+      // je zaostanek ze pri tretjem zahtevku vecji od tolerance.
+      // Za VSE pare (j < i), ne samo od prvega: zamuda na zacetku sicer "pokrije" kasnejsi zahtevek brez razmaka (pregled #382).
+      let zaostanek = -Infinity;
+      for (let i = 1; i < z.length; i++) for (let j = 0; j < i; j++) zaostanek = Math.max(zaostanek, (i - j) * 100 - (z[i] - z[j]));
+      assert(z.length >= 8 && zaostanek <= 50, "razmak med zacetki zahtevkov: zahtevek i vsaj (i-j) x 100 ms za zahtevkom j, za vsak par (mejo 1/s zagotovi ERACUNI_RAZMAK_MS)", [z.length, zaostanek]);
       const sv = st.map((x) => Number(x.stevilka)).sort((a, b) => a - b);
       assert(new Set(sv).size === 7 && sv.every((x, i) => i === 0 || x === sv[i - 1] + 1), "stevilke (po vrstnem redu izdaje pri ponudniku) zaporedne, brez dvojnikov", sv);
     }
@@ -1025,7 +1046,10 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       const R1 = await nov(1, 2500), R2 = await nov(1, 2510); const w = deloven(); const l0 = LOG.length;
       nastavi("500opis", 1); F.vedenje.besedilo = `Error nr: 12 #invalidPaymentMethod - Payment method Stripe is not supported (token ${TAJNO.token})`;
       await tek(w, 1, 40, true);
-      const r1 = await vrstica(R1.id);
+      // Katera od obeh vrstic je v istem teku prva na vrsti za Create (in dobi napako 500), je odvisno od vrstnega reda DB odgovorov, ne od id-ja: R1 ali R2, druga pa mora biti potrjena.
+      const rv = [await vrstica(R1.id), await vrstica(R2.id)];
+      const r1 = rv.find((x) => x.stanje === "caka") || rv[0];
+      assert(rv.filter((x) => x.stanje === "caka").length === 1 && rv.filter((x) => x.stanje === "potrjen").length === 1, "ena vrstica je dobila 500 (caka), druga je potrjena", rv.map((x) => x.stanje));
       const dn = logOd(l0).join("\n");
       assert(/apiMethod=SalesInvoiceCreate/.test(dn) && /#invalidPaymentMethod/.test(dn) && /Payment method Stripe is not supported/.test(dn), "dnevnik vsebuje apiMethod in description iz telesa 500", dn.slice(0, 400));
       assert(![TAJNO.user, TAJNO.key, TAJNO.token].some((t) => dn.includes(t) || (r1.zadnja_napaka || "").includes(t)), "poverilnice (tudi ce jih ponudnik odmeva v description) niso v dnevniku ne v zadnja_napaka");
@@ -1041,7 +1065,7 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       // 500 z drugo kodo na Get/List (ne-2xx nasploh): tudi tam opis
       const l1 = LOG.length;
       F.listOblika = "napaka500";
-      await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() WHERE id = $1", [R1.id]);
+      await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() WHERE id = $1", [r1.id]);
       await tek(w, 2, 40, true);
       assert(logOd(l1).some((l) => /SalesInvoiceList: HTTP 500 \(.*#internalError/.test(l)), "tudi bralni preizkus/List ob 500 izpise description (#internalError)", logOd(l1).slice(0, 3));
       F.listOblika = "ok";
@@ -1131,13 +1155,14 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
       const c2 = F.klici.slice(n1).find((k) => k.method === "SalesInvoiceCreate");
       assert((await vrstica(R2.id)).stanje === "potrjen" && c2 && c2.parameters.SalesInvoice.Items[0].productCode === "KARTA-1", "ERACUNI_ARTIKEL (obrezan) se uporabi kot productCode", c2 && c2.parameters.SalesInvoice.Items);
       // (c) manjkajoce obvezno polje: POZOR, konfiguracijski premor, poslano_at OSTANE (izid ni dokazan), vrstica gre naprej samo prek iskanja po referenci
-      const R3 = await nov(1, 2720); const w3 = deloven(); const l3 = LOG.length, o0 = F.obveznoPolje;
+      // Kratek splosni premor (50 ms) in dolg konfiguracijski (5 s), kot v testu 7: sicer bi preverba premora spodaj veljala ze zaradi splosnih 10 min (pregled #382).
+      const R3 = await nov(1, 2720); const w3 = deloven({ RACUNI_PREMOR_MS: "50", RACUNI_KONFIG_PREMOR_MS: "5000" }); const l3 = LOG.length, o0 = F.obveznoPolje;
       nastavi("obvezno", 1);
       await tek(w3, 1, 40, true);
       const r3 = await vrstica(R3.id);
       const dn = logOd(l3).join("\n");
       assert(F.obveznoPolje - o0 === 1 && /#Item1_productCode - This field is required/.test(dn) && /POZOR/.test(dn), "obvezno polje manjka: napaka z opisom v dnevniku in POZOR", dn.slice(0, 300));
-      assert(r3.stanje === "caka" && r3.poslano_at !== null && r3.poskusi === 1 && new Date(r3.naslednji_poskus_at).getTime() >= Date.now() + 200, "vrstica caka, poslano_at ostane (izid ni dokazan), pocasen konfiguracijski premor", [r3.stanje, r3.poslano_at, r3.naslednji_poskus_at]);
+      assert(r3.stanje === "caka" && r3.poslano_at !== null && r3.poskusi === 1 && new Date(r3.naslednji_poskus_at).getTime() >= Date.now() + 2000, "vrstica caka, poslano_at ostane (izid ni dokazan), pocasen konfiguracijski premor (>= 2 s, splosni je 50 ms)", [r3.stanje, r3.poslano_at, r3.naslednji_poskus_at]);
       const c3 = klicov("SalesInvoiceCreate");
       await tek(w3, 2, 40);   // premor + zaustavitev izdaje za cel proces: nobenega novega Create
       assert(klicov("SalesInvoiceCreate") === c3, "po napaki obveznega polja nobenega novega Create takoj (zaustavitev izdaje)");
@@ -1180,7 +1205,7 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
         await pool.query("UPDATE racuni SET poslano_at = poslano_at WHERE id = $1", [T.id]);
         await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() + INTERVAL '3 hours' WHERE id = $1", [T.id]);   // tuje vrstice ta test ne izdaja
         // stara instanca ob deployu (koda brez productCode) vrstice NE sme prevzeti pred casom: nobenega Create, nobenega Lista, vrstica nespremenjena
-        await tek(w, 4, 40);
+        await tek(w, 4, 40, false);   // brez pospesitve: vrstica je odlozena za 5 minut (tek jo sme prevzeti sele po tem)
         const pred5 = await vrstica(R.id);
         assert(klicov("SalesInvoiceCreate") === c0 && klicov("SalesInvoiceList") === l0 && pred5.stanje === "caka" && pred5.poslano_at === null && pred5.prevzem_zeton === null && F.docs.length === 0, `[${stanje}] pred potekom 5 minut vrstice noben delavec ne prevzame (0 Create, 0 List)`, [klicov("SalesInvoiceCreate") - c0, pred5.stanje, pred5.poslano_at]);
         await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() WHERE id = $1", [R.id]);   // 5 minut je minilo
@@ -1249,7 +1274,7 @@ const ENV = { RACUNI_PONUDNIK: "eracuni", ERACUNI_URL: `http://127.0.0.1:${PORT}
         await pool.query("UPDATE racuni SET poslano_at = poslano_at WHERE id = $1", [T.id]);
         await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() + INTERVAL '3 hours' WHERE id = $1", [T.id]);   // tuje vrstice ta test ne izdaja
         // stara instanca ob deployu (koda brez productCode) vrstice NE sme prevzeti pred casom: nobenega Create, nobenega Lista, vrstica nespremenjena
-        await tek(w, 4, 40);
+        await tek(w, 4, 40, false);   // brez pospesitve: vrstica je odlozena za 5 minut
         const pred5 = await vrstica(R.id);
         assert(klicov("SalesInvoiceCreate") === c0 && klicov("SalesInvoiceList") === l0 && pred5.stanje === "caka" && pred5.poslano_at === null && pred5.prevzem_zeton === null && F.docs.length === 0, `[${stanje}] pred potekom 5 minut vrstice noben delavec ne prevzame (0 Create, 0 List)`, [klicov("SalesInvoiceCreate") - c0, pred5.stanje, pred5.poslano_at]);
         await pool.query("UPDATE racuni SET naslednji_poskus_at = NOW() WHERE id = $1", [R.id]);   // 5 minut je minilo
