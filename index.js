@@ -1554,6 +1554,7 @@ async function izbrisiSupabaseRacun(token) {
 }
 
 app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3600 }), async (req, res) => {
+  let supabaseIzbrisan = false;   // po izbrisu pri Supabase ponovitev ni vec mogoca (zeton neveljaven) -> napaka zasedenosti NE sme vrniti 503 "poskusi znova"
   try {
     const { password } = req.body || {};
     const supabase = true;
@@ -1578,7 +1579,7 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
 
     // Brez tabele orders (pred migracijo 002) je izbris preprost.
     if (!obstajajoNarocila) {
-      if (supabase) { await izbrisiSupabaseRacun(req.user.supabaseToken); izbrisaniSub.set(req.user.supabaseSub, req.user.supabaseExp); }
+      if (supabase) { await izbrisiSupabaseRacun(req.user.supabaseToken); supabaseIzbrisan = true; izbrisaniSub.set(req.user.supabaseSub, req.user.supabaseExp); }
       await pool.query("DELETE FROM users WHERE id=$1", [req.user.userId]);
       return res.status(200).json({ message: "Account deleted." });
     }
@@ -1644,7 +1645,7 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       // 4. Supabasov račun — PRED potrditvijo transakcije: če Supabase odpove,
       //    ostane vse, kot je bilo, in uporabnik lahko poskusi znova.
       if (supabase) {
-        try { await izbrisiSupabaseRacun(req.user.supabaseToken); }
+        try { await izbrisiSupabaseRacun(req.user.supabaseToken); supabaseIzbrisan = true; }
         catch (e) {
           await odjemalec.query("ROLLBACK");
           console.error(e);
@@ -1673,6 +1674,10 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       odjemalec.release();
     }
   } catch (e) {
+    // Mrtva zanka / lock_timeout / statement_timeout: Postgres je transakcijo prekinil, ROLLBACK je ze opravljen (notranji catch) -> 503, odjemalec ponovi.
+    // Kaskada brisanja pise skoraj vse tabele, zato je cikel s hkratnim nakupom ali skenom realen. Izjema: Supabasov racun je ze izbrisan (57014 ob COMMIT-u ali
+    // pot brez tabele orders) - ponovitev ne more uspeti (401), zato ostane 500 (pregled #379).
+    if (napakaZasedenosti(e) && !supabaseIzbrisan) { console.error(e.message); return res.status(503).set("Retry-After", "2").send(NAKUP_ZASEDEN); }
     console.error(e);
     return res.status(500).send("Server error.");
   }
@@ -3499,6 +3504,7 @@ app.delete("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, 
       event: r.rows[0],
     });
   } catch (e) {
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "2").send("The event is busy. Please try again."); }   // ROLLBACK opravljen, nic spremenjeno; isto besedilo kot PATCH /events/:id
     console.error(e);
     return res.status(500).send("Server error.");
   }
