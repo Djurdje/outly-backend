@@ -3,10 +3,12 @@
  * Test: brisanje racuna / dogodka / kluba ob mrtvi zanki (40P01), lock_timeout (55P03) in statement_timeout (57014) vrne 503 + Retry-After, ne 500.
  * Zagon (PG16, prazna baza z vsemi migracijami; v URL-ju mora pisati `localhost`):
  *   DATABASE_URL="postgres://postgres:postgres@localhost:5432/outly" node _testi/test_brisanje_zasedenost.js
- * Trije procesi backenda (porti 41xx), ker meji lock_timeout / statement_timeout veljata za povezave procesa (`options` v DATABASE_URL, ne za bazo):
- *   A) brez mej  -> 40P01: pravi cikel zaklepov (test drzi eno vrstico, DELETE zaklene drugo, test zahteva njegovo = Postgres prekine DELETE)
- *   B) lock_timeout   -> 55P03: test drzi vrstico, DELETE caka nanjo
- *   C) statement_timeout -> 57014: isto, stavek caka dlje od meje
+ * Trije procesi backenda (porti 4151-4153), ker meji lock_timeout / statement_timeout veljata za povezave procesa (`options` v DATABASE_URL, ne za bazo):
+ *   A) deadlock_timeout 3 s, BRISANJE_ZAKLEP_MS 30 s -> 40P01: pravi cikel zaklepov (test drzi eno vrstico, DELETE zaklene drugo, test zahteva njegovo =
+ *      Postgres prekine DELETE; zaklep je daljsi od deadlock_timeout, sicer bi pred ciklom odnehal lock_timeout)
+ *   B) BREZ lock_timeout v `options`, BRISANJE_ZAKLEP_MS 600 -> 55P03: test drzi vrstico dlje od meje (HOLD_MS), DELETE mora odnehati v ~meji,
+ *      ne cakati do sprostitve (#380 t.1: transakciji DELETE /me in DELETE /events/:id sami nastavita SET LOCAL lock_timeout)
+ *   C) statement_timeout 700 ms, BRISANJE_ZAKLEP_MS 30 s -> 57014: isto, stavek caka dlje od meje (zaklep daljsi od statement_timeout)
  * Kar je 503: nic spremenjeno (ROLLBACK), Supabasov delete_my_account se NI poklical (tece pred COMMIT-om, a po vseh stavkih baze), ponovitev po sprostitvi uspe.
  * Ostale napake (npr. 23503) ostanejo 500. Admin brisanje (admin_brisanje.js) je ze imelo 503 `busy`; tu preverjamo se glavo Retry-After.
  */
@@ -61,11 +63,14 @@ async function ins(c, tab, o) {
 }
 
 const procesi = [];
+const ZAKLEP_B_MS = 600;     // BRISANJE_ZAKLEP_MS procesa B
+const HOLD_MS = 6000;        // zadrzevalec v B sprosti zaklep sam sele po tem casu: brez roka v kodi bi zahtevek cakal toliko (in pod tem rokom ne bi vrnil 503)
+const MEJA_MS = ZAKLEP_B_MS + 2500;   // zgornja meja trajanja zahtevka z roko 600 ms (rezerva za pocasen CI; precej pod HOLD_MS)
 const NIZ_NAPAKE = { "40P01": "deadlock detected", "55P03": "lock timeout", "57014": "statement timeout" };   // sporocilo Postgresa v dnevniku procesa = dokaz, da je res padla ta napaka
 const stNiza = (o, kod) => o.log.split(NIZ_NAPAKE[kod]).length - 1;
-async function zazeni(port, dbOpcije) {
+async function zazeni(port, dbOpcije, okolje = {}) {
   const srv = spawn("node", ["index.js"], { cwd: KOREN, env: { ...process.env, DATABASE_URL: dbZ(dbOpcije), PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, RESEND_API_KEY: "", QR_SECRET: "test",
-    TEST_PLACILA: "", ADMIN_BRISANJE_ZAKLEP_MS: "500", VRACILA_TICK_MS: "0" }, stdio: ["ignore", "pipe", "pipe"] });
+    TEST_PLACILA: "", ADMIN_BRISANJE_ZAKLEP_MS: "500", VRACILA_TICK_MS: "0", ...okolje }, stdio: ["ignore", "pipe", "pipe"] });
   const o = { srv, log: "" };
   srv.stdout.on("data", (d) => o.log += d); srv.stderr.on("data", (d) => o.log += d);
   procesi.push(srv);
@@ -80,9 +85,9 @@ async function zazeni(port, dbOpcije) {
   await new Promise((r) => jwksServer.listen(JWKS_PORT, r));
   // Mrtva zanka: proces A (DELETE) preveri cikel po 3 s, zadrzevalec T1 sele po 60 s -> zrtev je zanesljivo DELETE, tudi ce T1 na pocasnem CI zacne cakati pozneje
   // kot privzeta 1 s (pregled #379; z deadlock_timeout=30ms je bil zrtev T1 in DELETE je uspel).
-  const A = await zazeni(PORTI.A, "-c deadlock_timeout=3000");
-  const B = await zazeni(PORTI.B, "-c lock_timeout=600");
-  const C = await zazeni(PORTI.C, "-c statement_timeout=700");
+  const A = await zazeni(PORTI.A, "-c deadlock_timeout=3000", { BRISANJE_ZAKLEP_MS: "30000" });
+  const B = await zazeni(PORTI.B, "", { BRISANJE_ZAKLEP_MS: String(ZAKLEP_B_MS) });   // brez lock_timeout v options: mejo postavi koda sama (SET LOCAL)
+  const C = await zazeni(PORTI.C, "-c statement_timeout=700", { BRISANJE_ZAKLEP_MS: "30000" });
   const drzalci = [];
   const odjemalec = async () => { const c = new Client({ connectionString: DB }); await c.connect(); await c.query("SET deadlock_timeout = '60s'"); drzalci.push(c); return c; };
 
@@ -128,6 +133,8 @@ async function zazeni(port, dbOpcije) {
       const t1 = await odjemalec();
       await t1.query("BEGIN");
       await t1.query("SELECT id FROM orders WHERE id = $1 FOR UPDATE", [k.ok]);
+      const sprostiCez = !cikel && proces === B ? setTimeout(() => t1.query("ROLLBACK").catch(() => {}), HOLD_MS) : null;   // B: zaklep drzi dlje od meje
+      const t0 = Date.now();
       const p = api(port, "DELETE", "/me", k.token, { password: "x" });
       let t1Cikel = null;
       if (cikel) {
@@ -135,8 +142,11 @@ async function zazeni(port, dbOpcije) {
         t1Cikel = t1.query("SELECT id FROM events WHERE id = $1 FOR UPDATE", [evNarocila]).then(() => "ok", (e) => e.code);
       }
       const r = await p;
+      const ms = Date.now() - t0;
+      if (sprostiCez) clearTimeout(sprostiCez);
       assert(stNiza(proces, kod) === logPred + 1, `${kod}: v dnevniku procesa je res "${NIZ_NAPAKE[kod]}"`);
       assert(r.status === 503, `${kod}: status 503 (ne 500)`, [r.status, r.body]);
+      if (sprostiCez) assert(ms >= ZAKLEP_B_MS - 100 && ms < MEJA_MS, `${kod}: odneha v ~meji (${ms} ms; meja ${ZAKLEP_B_MS} ms, zaklep se drzi ${HOLD_MS} ms), ne caka na sprostitev`, ms);
       assert(r.retryAfter === "2", `${kod}: Retry-After: 2`, r.retryAfter);
       assert(typeof r.body === "string" && /busy/i.test(r.body) && !/deadlock|timeout|canceling|code|stack/i.test(r.body), `${kod}: telo brez notranjih podrobnosti`, r.body);
       await t1.query("ROLLBACK").catch(() => {});
@@ -188,7 +198,12 @@ async function zazeni(port, dbOpcije) {
         await t1.query("SELECT id FROM events WHERE id = $1 FOR UPDATE", [ev]);
         p = api(port, "DELETE", `/events/${ev}`, T.lastnik);
       }
+      const sprostiCez = !cikel && proces === B ? setTimeout(() => t1.query("ROLLBACK").catch(() => {}), HOLD_MS) : null;   // B: zaklep drzi dlje od meje
+      const t0 = Date.now();
       const r = await p;
+      const ms = Date.now() - t0;
+      if (sprostiCez) clearTimeout(sprostiCez);
+      if (sprostiCez) assert(ms >= ZAKLEP_B_MS - 100 && ms < MEJA_MS, `${kod}: odneha v ~meji (${ms} ms; meja ${ZAKLEP_B_MS} ms, zaklep se drzi ${HOLD_MS} ms), ne caka na sprostitev`, ms);
       assert(stNiza(proces, kod) === logPred + 1, `${kod}: v dnevniku procesa je res "${NIZ_NAPAKE[kod]}"`);
       assert(r.status === 503 && r.retryAfter === "2", `${kod}: 503 + Retry-After: 2`, [r.status, r.body, r.retryAfter]);
       assert(typeof r.body === "string" && /busy/i.test(r.body), `${kod}: telo pove, da je zasedeno`, r.body);
@@ -201,6 +216,14 @@ async function zazeni(port, dbOpcije) {
     await brisiDogodek("mrtva zanka", PORTI.A, A, "40P01", { cikel: true });
     await brisiDogodek("lock_timeout", PORTI.B, B, "55P03", { cikel: false });
     await brisiDogodek("statement_timeout", PORTI.C, C, "57014", { cikel: false });
+
+    // ---- #380 t.2: poenostavljene poti brez kaskade (zastavica obstajajoNarocila, ki je ob napaki zagonske poizvedbe ostala false) ni vec
+    console.log("\n# DELETE /me in DELETE /events/:id nimata poenostavljene poti (#380 t.2)");
+    {
+      const koda = require("fs").readFileSync(path.join(KOREN, "index.js"), "utf8");
+      assert(!/obstajajoNarocila/.test(koda), "index.js nima zastavice obstajajoNarocila (tabela orders obstaja od migracije 002)");
+      assert(!/to_regclass\('public\.orders'\)/.test(koda), "ni zagonske poizvedbe, katere napaka bi pustila drugo vedenje do konca procesa");
+    }
 
     // ---- Admin brisanje dogodka in kluba: ze 503 `busy`, zdaj z glavo Retry-After (lock_timeout admina je 500 ms, ADMIN_BRISANJE_ZAKLEP_MS)
     console.log("\n# Admin DELETE /admin/api/events|clubs/:id: zaseden zapis -> 503 busy + Retry-After");
