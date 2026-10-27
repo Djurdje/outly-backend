@@ -8,7 +8,8 @@
 // Kdaj: delavec s korakom 30 min (STRIPE_USKLADITEV_TIK_MS), prvi krog 2-10 min po zagonu procesa (nakljucen zamik: vec instanc, ob deployu ne obremeni zagona).
 // Vsak krog obdela najvec 4 dni izmed zadnjih 7 (OKNO_DNI) brez uspesne uskladitve, najstarejsi najprej: vceraj sele po 04:00 ljubljanskega casa (webhooki in
 // pospravljalec so takrat ze poravnali dan), starejsi manjkajoci dnevi takoj (dohitevanje po izpadu/deployu). Nikoli dan pred zacetkom zivega nacina (ZIVO_OD, 19. 10. 2026).
-// Teče samo, ko je Stripe kljuc ZIV (jeLive(): sandbox/lazni nacin ni promet) in je delavec vklopljen: na Renderju (RENDER) ali STRIPE_USKLADITEV=1; STRIPE_USKLADITEV=0 izklopi.
+// Teče samo, ko je Stripe kljuc ZIV (jeLive(): sandbox/lazni nacin ni promet) in je delavec vklopljen: na Renderju (RENDER, ga nastavi Render sam) ali STRIPE_USKLADITEV=1;
+// STRIPE_USKLADITEV=0 izklopi. NODE_ENV=production sam ne vklopi (eksplicitno je varneje: lokalen/CI zagon s production + zivim kljucem ne sme sam klicati Stripa).
 //
 // Ena izvedba na dan, tudi ob vec instancah: zahtevek vrstice dneva je en atomaren stavek (INSERT ... ON CONFLICT DO UPDATE ... WHERE): zmaga natanko en proces, ostali
 // dobijo 0 vrstic. Vrstica je 'tece'; zastarela (> 15 min, proces je umrl) ali 'napaka' starejsa od 3 h se prevzame. Konec zapisa je pogojen s stevilko poskusa, zato
@@ -28,6 +29,8 @@
 //  - Po narocilu (par prek payment_intent <-> orders.stripe_payment_intent_id, sicer prek metadata.order_id): (a) placilo brez placanega narocila, (b) placano narocilo brez
 //    placila, (c) znesek/valuta/provizija (c), (d) refunded_cents proti charge.amount_refunded (tudi za stare naboje, vrnjene v D), (e) spor v Stripu brez vrstice v `spori`
 //    (in obratno, in razlicno stanje/znesek).
+//    Izjema od (a): naboj za narocilo, ki ga je zakljuci() preklical in v CELOTI vrnil (`cancelled|failed` + vrstica `vracila` z razlogom `inactive_order` + amount_refunded >= amount),
+//    je pricakovan izid, ne razlika (steje se v `vrnjeno_neaktivno_stevilo` rezultata in dnevniku). Delno vrnjeno ali brez vrstice `vracila` ostane razlika.
 //  - Vsote (informativno): stevilo, bruto, vrnjeno, provizija; Stripova vracila in spori dneva.
 
 const ZIVO_OD = /^\d{4}-\d{2}-\d{2}$/.test(process.env.STRIPE_USKLADITEV_OD || "") ? process.env.STRIPE_USKLADITEV_OD : "2026-10-19";
@@ -71,20 +74,24 @@ function ustvari(dep) {
   const jeLive = dep.jeLive;
   const log = dep.log || console;
   const odgovoriNaNapako = dep.odgovoriNaNapako;
-  const vklopljena = dep.vklopljena || (() => process.env.STRIPE_USKLADITEV === "1" || (process.env.STRIPE_USKLADITEV !== "0" && (!!process.env.RENDER || process.env.NODE_ENV === "production")));
+  const dbRok = Number.isInteger(dep.dbRokMs) && dep.dbRokMs > 0 ? dep.dbRokMs : DB_ROK_MS;   // samo za teste (lazni pool); produkcija vedno DB_ROK_MS
+  const vklopljena = dep.vklopljena || (() => process.env.STRIPE_USKLADITEV === "1" || (process.env.STRIPE_USKLADITEV !== "0" && !!process.env.RENDER));
 
   // --- baza: kratke transakcije z mejami; odjemalski rok (obvisela povezava se zavrze, ne zasede poola) ---
   function qRok(c, sql, params) {
     return new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(Object.assign(new Error("uskladitev: poizvedba timed out"), { koda: "db_rok", rok: true })), DB_ROK_MS);
+      const t = setTimeout(() => reject(Object.assign(new Error("uskladitev: poizvedba timed out"), { koda: "db_rok", rok: true })), dbRok);
       let p;
       try { p = params === undefined ? c.query(sql) : c.query(sql, params); } catch (e) { clearTimeout(t); reject(e); return; }
       Promise.resolve(p).then((r) => { clearTimeout(t); resolve(r); }, (e) => { clearTimeout(t); reject(e); });
     });
   }
+  // Povezava gre nazaj v glavni pool (release(false)) SAMO, ko je zanesljivo znano, da je cista: transakcija se je koncala z COMMIT ali ROLLBACK, ki je uspel.
+  // Vsaka druga pot (rok ali napaka ze pri BEGIN/SET, rok pri fn/COMMIT/ROLLBACK, `error` na povezavi) = release(true): povezava se uniči. Prej je bila privzeta
+  // vrednost »cista«, zato je rok pri BEGIN (prvi stavek je viselo) vrnil povezavo z odprto/neznano transakcijo v pool, kjer jo je lahko dobil nakup ali webhook.
   async function vTx(fn, pisi = false) {
     const c = await pool.connect();
-    let pokvarjena = false;
+    let pokvarjena = false, cista = false;
     const naNapako = () => { pokvarjena = true; };
     c.on("error", naNapako);
     try {
@@ -92,15 +99,15 @@ function ustvari(dep) {
       try {
         const r = await fn((sql, params) => qRok(c, sql, params));
         await qRok(c, "COMMIT");
+        cista = true;
         return r;
       } catch (e) {
-        if (e && e.rok) pokvarjena = true;
-        else { try { await qRok(c, "ROLLBACK"); } catch (_) { pokvarjena = true; } }
+        if (!(e && e.rok)) { try { await qRok(c, "ROLLBACK"); cista = true; } catch (_) { /* ostane cista = false */ } }
         throw e;
       }
     } finally {
       c.removeListener("error", naNapako);
-      c.release(pokvarjena);
+      c.release(pokvarjena || !cista);
     }
   }
 
@@ -184,7 +191,8 @@ function ustvari(dep) {
           ORDER BY o.id`, [t0, t1]);
       const O = await q(
         `SELECT o.id, o.status, o.total_cents, o.currency, o.refunded_cents, o.application_fee_cents, o.stripe_payment_intent_id AS pi,
-                (o.paid_at >= to_timestamp($3) AND o.paid_at < to_timestamp($4)) AS v_dnevu, ${T} AS testno
+                (o.paid_at >= to_timestamp($3) AND o.paid_at < to_timestamp($4)) AS v_dnevu, ${T} AS testno,
+                EXISTS (SELECT 1 FROM vracila vr WHERE vr.order_id = o.id AND vr.razlog = 'inactive_order') AS vrnjeno_neaktivno
            FROM orders o WHERE o.stripe_payment_intent_id = ANY($1::text[]) OR o.id = ANY($2::bigint[])`, [pis, oids, t0, t1]);
       const P = await q(
         `SELECT id, stanje, znesek_cents, valuta, (ustvarjen_at >= to_timestamp($2) AND ustvarjen_at < to_timestamp($3)) AS v_dnevu
@@ -194,7 +202,7 @@ function ustvari(dep) {
 
     // 3. izracun
     const razlike = [];
-    let razlikeSkupaj = 0, mejni = 0;
+    let razlikeSkupaj = 0, mejni = 0, vrnjenoNeaktivno = 0;
     const r = (x) => { razlikeSkupaj++; if (razlike.length < NAJVEC_RAZLIK) razlike.push(x); };
     const poPi = new Map(), poId = new Map();
     for (const o of baza.O) { if (o.pi) poPi.set(o.pi, o); poId.set(String(o.id), o); }
@@ -208,6 +216,10 @@ function ustvari(dep) {
       const osnova = { charge_id: ch.id, ...(pi ? { payment_intent: pi } : {}) };
       if (!o) { r({ vrsta: "placilo_brez_narocila", ...osnova, ...(oid ? { metadata_narocilo_id: Number(oid) } : {}), stripe_cents: celo(ch.amount), stripe_valuta: String(ch.currency || "").toUpperCase() }); continue; }
       if (!PLACANO.includes(o.status)) {
+        // Nasa avtomatika (placila_stripe.js zakljuci() -> vrniNeaktivno(), vracila_stripe.js): placilo za preklicano/neuspelo narocilo je bilo v CELOTI vrnjeno
+        // (vrstica `vracila` z razlogom `inactive_order` + Stripov amount_refunded >= amount). To je pricakovan izid, ne razlika. Delno vrnjeno, vrstice `vracila` ali
+        // drugo stanje narocila (npr. pending) ostane razlika.
+        if (["cancelled", "failed"].includes(o.status) && o.vrnjeno_neaktivno === true && celo(ch.amount) > 0 && celo(ch.amount_refunded) >= celo(ch.amount)) { vrnjenoNeaktivno++; continue; }
         r({ vrsta: "placilo_brez_placanega_narocila", ...osnova, narocilo_id: Number(o.id), stanje_narocila: o.status, stripe_cents: celo(ch.amount), stripe_valuta: String(ch.currency || "").toUpperCase(),
             v_celoti_vrnjeno: celo(ch.amount_refunded) >= celo(ch.amount) });
         continue;
@@ -268,7 +280,7 @@ function ustvari(dep) {
 
     const vsota = (a, f) => a.reduce((n, x) => n + f(x), 0);
     return {
-      stanje: razlikeSkupaj ? "razlike" : "ok", razlike, razlike_stevilo: razlikeSkupaj, mejni_stevilo: mejni,
+      stanje: razlikeSkupaj ? "razlike" : "ok", razlike, razlike_stevilo: razlikeSkupaj, mejni_stevilo: mejni, vrnjeno_neaktivno_stevilo: vrnjenoNeaktivno,
       stripe_stevilo: naboji.length, stripe_bruto_cents: vsota(naboji, (x) => celo(x.amount)), stripe_vrnjeno_cents: vsota(naboji, (x) => celo(x.amount_refunded)),
       stripe_provizija_cents: vsota(naboji, (x) => (typeof x.application_fee_amount === "number" ? x.application_fee_amount : 0)),
       stripe_vracila_stevilo: vracila.length, stripe_vracila_cents: vsota(vracila, (x) => celo(x.amount)), stripe_spori_stevilo: spori.length,
@@ -318,7 +330,7 @@ function ustvari(dep) {
         for (const z of x.razlike) vrste[z.vrsta] = (vrste[z.vrsta] || 0) + 1;
         log.error(`[uskladitev-stripe] POZOR: dan ${dan}: ${x.razlike_stevilo} razlik med Stripom in bazo (${Object.entries(vrste).map(([k, n]) => `${k}: ${n}`).join(", ")}); Stripe ${x.stripe_stevilo} placil / ${x.stripe_bruto_cents} c, baza ${x.baza_stevilo} narocil / ${x.baza_bruto_cents} c. Podrobnosti: GET /admin/api/uskladitve, vrstica v INCIDENTI.`);
       } else {
-        log.log(`[uskladitev-stripe] dan ${dan}: ujemanje (Stripe ${x.stripe_stevilo} placil / ${x.stripe_bruto_cents} c, baza ${x.baza_stevilo} narocil / ${x.baza_bruto_cents} c, vrnjeno ${x.stripe_vrnjeno_cents}/${x.baza_vrnjeno_cents} c)`);
+        log.log(`[uskladitev-stripe] dan ${dan}: ujemanje (Stripe ${x.stripe_stevilo} placil / ${x.stripe_bruto_cents} c, baza ${x.baza_stevilo} narocil / ${x.baza_bruto_cents} c, vrnjeno ${x.stripe_vrnjeno_cents}/${x.baza_vrnjeno_cents} c${x.vrnjeno_neaktivno_stevilo ? `, v celoti vrnjenih placil za neaktivno narocilo (inactive_order): ${x.vrnjeno_neaktivno_stevilo}` : ""})`);
       }
       return { dan, stanje: x.stanje };
     } catch (e) {

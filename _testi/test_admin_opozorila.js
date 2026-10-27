@@ -358,6 +358,21 @@ async function api(method, path, token) {
     assert(!(await dobi()).text.includes("StripeAuthenticationError"), "koda napake ne uide v opozorilo");
     await pool.query("UPDATE stripe_uskladitve SET stanje = 'ok'");
     assert(!(await uskVrste()).n, "po uspesnem ponovnem poskusu opozorilo izgine");
+    // N2: dan v `napaka` starejsi od 7 dni (delavec ga po 7 dneh vec ne poskusa) NE sme tiho izginiti: opozorilo traja 30 dni, dokler dan ni uspesno usklajen
+    await pool.query("TRUNCATE stripe_uskladitve");
+    await uskIns(8, "napaka", { koda: "StripeAPIConnectionError" });
+    await uskIns(0, "ok", { pred: "1 hour" });   // sveza uspesna uskladitev drugega dne ne skrije starejse napake
+    uk = await uskVrste();
+    assert(uk.n && uk.n.resnost === "oranzno" && /dni z napako: 1/.test(uk.n.besedilo) && uk.d.stevci.oranzno === oranznoUsk + 1 && !uk.r, "napaka pred 8 dnevi (izven okna 7 dni), danes ok: stripe_uskladitev_napaka ostane", uk.n);
+    await pool.query("UPDATE stripe_uskladitve SET dan = dan - 21 WHERE stanje = 'napaka'");   // 29 dni
+    assert((await uskVrste()).n, "napaka pred 29 dnevi: opozorilo se vedno traja");
+    await pool.query("UPDATE stripe_uskladitve SET dan = dan - 2 WHERE stanje = 'napaka'");   // 31 dni
+    assert(!(await uskVrste()).n, "napaka pred 31 dnevi: izven okna 30 dni, opozorila ni");
+    await pool.query("UPDATE stripe_uskladitve SET dan = dan + 25 WHERE stanje = 'napaka'");   // 6 dni
+    assert((await uskVrste()).n, "napaka pred 6 dnevi: opozorilo");
+    await pool.query("UPDATE stripe_uskladitve SET dan = dan - 3 WHERE stanje = 'napaka'");   // 9 dni
+    await pool.query("UPDATE stripe_uskladitve SET stanje = 'ok' WHERE stanje = 'napaka'");
+    assert(!(await uskVrste()).n, "starejsa napaka uspesno usklajena (stanje ok): opozorilo izgine");
     // zadnja uspesna starejsa od 2 dni (delavec je nehal teci)
     await pool.query("TRUNCATE stripe_uskladitve");
     await uskIns(4, "ok", { pred: "3 days" });

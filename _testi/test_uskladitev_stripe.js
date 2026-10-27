@@ -12,6 +12,8 @@
  *   5  ena izvedba na dan: dva hkratna zagona (ena in dve instanci) = ena vrstica in en sklop Stripovih klicev; zastarela `tece` se prevzame, zakasneli star proces ne povozi novejsega
  *   6  brez zivega kljuca (jeLive false) ali brez vklopa: krog ne naredi nicesar; kandidati: vceraj sele po 04:00, okno 7 dni, ZIVO_OD, ze opravljeni dnevi izpadejo; krog dohiti do 4 dni
  *   7  samo GET proti Stripu; v modulu ni skenPool; pisanje samo v stripe_uskladitve (orders/spori nespremenjeni)
+ *   8  povezava iz poola (lazni pool): rok/napaka pri BEGIN, fn, COMMIT, ROLLBACK ali `error` na povezavi -> release(true) (povezava se unici, ne gre nazaj v glavni pool); samo cist konec -> release(false)
+ *   2b naboj za preklicano/neuspelo narocilo, v celoti vrnjen (`inactive_order`) NI razlika; delno vrnjeno, brez vrstice `vracila`, drug razlog ali pending je razlika
  */
 const http = require("http");
 const fs = require("fs");
@@ -192,6 +194,37 @@ async function main() {
     await razlika("placilo za testno narocilo", async () => { await narocilo({ pi: "test_pi_1", ses: "cs_test_1" }); naboj(1, { payment_intent: "test_pi_1" }); }, ["placilo_za_testno_narocilo"]);
     await razlika("placilo za neplacano (pending) narocilo", async () => { await narocilo({ pi: "pi_1", status: "pending", placano: null }); naboj(1); }, ["placilo_brez_placanega_narocila"],
       (v) => assert(v.razlike[0].stanje_narocila === "pending", "stanje_narocila pending"));
+    // ------------------------------------------------------------------ 2b. S2: placilo za preklicano narocilo, v celoti vrnjeno (inactive_order)
+    console.log("\n# 2b. Preklicano narocilo, v celoti vrnjeno (inactive_order) ni razlika");
+    const vracilo = (narociloId, razlog) => pool.query(
+      "INSERT INTO vracila (order_id, event_id, razlog, znesek_cents, payment_intent_id, stripe_livemode, valuta) VALUES ($1, $2, $3, 1500, 'pi_1', TRUE, 'EUR')", [narociloId, dogodek, razlog]);
+    for (const stanje of ["cancelled", "failed"]) {
+      await cisto();
+      const nc = await narocilo({ pi: "pi_1", status: stanje, placano: null }); await vracilo(nc, "inactive_order");
+      naboj(1, { amount_refunded: 1500, metadata: { order_id: String(nc) } });
+      F.refunds.push({ id: "re_c", amount: 1500, status: "succeeded", created: sredina + 10, charge: "ch_1" });
+      const xc = await U.izracunaj(D);
+      assert(xc.stanje === "ok" && xc.razlike_stevilo === 0 && xc.vrnjeno_neaktivno_stevilo === 1, `S2: ${stanje} + vrstica inactive_order + v celoti vrnjeno -> ok (informativni stevec 1)`, { stanje: xc.stanje, razlike: xc.razlike, st: xc.vrnjeno_neaktivno_stevilo });
+      await U.obdelajDan(D);
+      const vc = await vrstica(D);
+      assert(vc.stanje === "ok" && vc.razlike_stevilo === 0, `S2: ${stanje}: vrstica dneva ok`, vc && vc.razlike);
+    }
+    await razlika("S2: preklicano + delno vrnjeno (700 od 1500)", async () => {
+      const nc = await narocilo({ pi: "pi_1", status: "cancelled", placano: null }); await vracilo(nc, "inactive_order"); naboj(1, { amount_refunded: 700 });
+    }, ["placilo_brez_placanega_narocila"], (v) => assert(v.razlike[0].stanje_narocila === "cancelled" && v.razlike[0].v_celoti_vrnjeno === false, "razlika: cancelled, ni v celoti vrnjeno"));
+    await razlika("S2: preklicano + v celoti vrnjeno, a brez vrstice `vracila`", async () => {
+      await narocilo({ pi: "pi_1", status: "cancelled", placano: null }); naboj(1, { amount_refunded: 1500 });
+    }, ["placilo_brez_placanega_narocila"]);
+    await razlika("S2: preklicano + v celoti vrnjeno, vrstica `vracila` z drugim razlogom", async () => {
+      const nc = await narocilo({ pi: "pi_1", status: "cancelled", placano: null }); await vracilo(nc, "event_cancelled"); naboj(1, { amount_refunded: 1500 });
+    }, ["placilo_brez_placanega_narocila"]);
+    await razlika("S2: preklicano + brez vracila (kupec je placal, denar ni vrnjen)", async () => {
+      const nc = await narocilo({ pi: "pi_1", status: "cancelled", placano: null }); await vracilo(nc, "inactive_order"); naboj(1, { amount_refunded: 0 });
+    }, ["placilo_brez_placanega_narocila"]);
+    await razlika("S2: pending (ne cancelled/failed) + v celoti vrnjeno + vrstica inactive_order", async () => {
+      const nc = await narocilo({ pi: "pi_1", status: "pending", placano: null }); await vracilo(nc, "inactive_order"); naboj(1, { amount_refunded: 1500 });
+    }, ["placilo_brez_placanega_narocila"]);
+
     // vec razlik hkrati + brez osebnih podatkov
     await cisto();
     const na = await narocilo({ pi: "pi_1", cena: 1400, fee: 140 }); naboj(1, { amount: 1500, application_fee_amount: 140, metadata: { order_id: String(na), ime: "Janez Novak", email: "janez@primer.si" }, billing_details: { email: "janez@primer.si", name: "Janez Novak" } });
@@ -324,6 +357,14 @@ async function main() {
     const stari_env = { r: process.env.RENDER, n: process.env.NODE_ENV, s: process.env.STRIPE_USKLADITEV };
     delete process.env.RENDER; delete process.env.STRIPE_USKLADITEV; process.env.NODE_ENV = "test";
     assert(nov().zazeni() === null, "lokalno/CI (brez RENDER) privzeto izklopljeno");
+    process.env.NODE_ENV = "production";
+    assert(nov().zazeni() === null, "N1: NODE_ENV=production brez RENDER in brez STRIPE_USKLADITEV=1 NE vklopi delavca");
+    process.env.NODE_ENV = "test";
+    process.env.STRIPE_USKLADITEV = "1"; process.env.STRIPE_USKLADITEV_ZAGON_MS = "60000";
+    const casEks = nov().zazeni();
+    assert(casEks && typeof casEks.ustavi === "function", "N1: STRIPE_USKLADITEV=1 eksplicitno vklopi tudi brez RENDER");
+    if (casEks) casEks.ustavi();
+    delete process.env.STRIPE_USKLADITEV; delete process.env.STRIPE_USKLADITEV_ZAGON_MS;
     process.env.STRIPE_USKLADITEV = "0"; process.env.RENDER = "1";
     assert(nov().zazeni() === null, "STRIPE_USKLADITEV=0 izklopi tudi na Renderju");
     delete process.env.STRIPE_USKLADITEV;
@@ -398,6 +439,58 @@ async function main() {
     const koda = fs.readFileSync(path.join(__dirname, "..", "uskladitev_stripe.js"), "utf8");
     assert(!/skenPool/.test(koda.replace(/\/\/.*$/gm, "")), "uskladitev_stripe.js ne uporablja skenPool (I16)");
     assert(!/\bs\.(charges|refunds|disputes|paymentIntents|transfers|accounts)\.(create|update|close|cancel|capture|confirm|del)\(/.test(koda), "v modulu ni Stripovih klicev za pisanje");
+
+    // ------------------------------------------------------------------ 8. S1: povezava z neznanim stanjem se unici
+    console.log("\n# 8. Povezava iz poola: neznano stanje transakcije -> release(true)");
+    const EventEmitter = require("events");
+    const NIKOLI = Symbol("nikoli");
+    // skripta: (sql) => NIKOLI (poizvedba nikoli ne odgovori) | Error (zavrne) | objekt (odgovor)
+    const lazni = (skripta) => {
+      const rel = [], clients = [];
+      const p = { connect: async () => { const c = new EventEmitter(); clients.push(c); c.query = (sql) => { const x = skripta(String(sql)); return x === NIKOLI ? new Promise(() => {}) : x instanceof Error ? Promise.reject(x) : Promise.resolve(x); }; c.release = (x) => { rel.push(x); }; return c; } };
+      return { p, rel, clients };
+    };
+    const tih = { log() {}, error() {} };
+    const mk = (L) => ustvari({ pool: L.p, dbRokMs: 40, SQL_TESTNO_NAROCILO: "FALSE", stripe: () => ({}), jeLive: () => true, log: tih });
+    const zacetek = (q) => /^BEGIN/.test(q), konec = (q) => q === "COMMIT", povrni = (q) => q === "ROLLBACK";
+    const pot = (U2) => { let h; U2.registriraj({ get: (_p, fn) => { h = fn; } }); return async () => { const o = { code: 200, body: null }; const res = { set() {}, status(c) { o.code = c; return res; }, json(b) { o.body = b; return res; } }; await h({ query: {} }, res); return o; }; };
+
+    let L = lazni((q) => (zacetek(q) ? NIKOLI : { rows: [] }));
+    let e1 = await mk(L).kandidati().then(() => null, (e) => e);
+    assert(e1 && e1.koda === "db_rok" && L.rel.length === 1 && L.rel[0] === true, "S1: BEGIN nikoli ne odgovori (kandidati): release(true)", { koda: e1 && e1.koda, rel: L.rel });
+    L = lazni((q) => (zacetek(q) ? NIKOLI : { rows: [] }));
+    const o1 = await mk(L).obdelajDan("2026-10-20");
+    assert(o1.stanje === "napaka" && L.rel.length >= 1 && L.rel.every((x) => x === true), "S1: BEGIN nikoli ne odgovori (obdelajDan / zahtevaj): vsi release(true), brez izjeme", { o1, rel: L.rel });
+    L = lazni((q) => (zacetek(q) ? NIKOLI : { rows: [] }));
+    const kr1 = await mk(L).krog();
+    assert(kr1 && !!kr1.napaka && L.rel.length >= 1 && L.rel.every((x) => x === true), "S1: BEGIN nikoli ne odgovori (krog): krog ne vrze, release(true)", { kr1, rel: L.rel });
+    L = lazni((q) => (zacetek(q) ? NIKOLI : { rows: [] }));
+    let ro = await pot(mk(L))();
+    assert(ro.code === 500 && L.rel.length === 1 && L.rel[0] === true, "S1: BEGIN nikoli ne odgovori (GET /admin/api/uskladitve): 500 in release(true)", { ro, rel: L.rel });
+    L = lazni((q) => (zacetek(q) ? new Error("permission denied") : { rows: [] }));
+    e1 = await mk(L).kandidati().then(() => null, (e) => e);
+    assert(e1 && L.rel.length === 1 && L.rel[0] === true, "S1: BEGIN zavrnjen z napako (stanje povezave neznano): release(true)", L.rel);
+    L = lazni((q) => (zacetek(q) || povrni(q) ? { rows: [] } : new Error("boom")));
+    ro = await pot(mk(L))();
+    assert(ro.code === 500 && L.rel.length === 1 && L.rel[0] === false, "napaka v fn, ROLLBACK uspe (cista povezava): release(false)", { ro, rel: L.rel });
+    L = lazni((q) => (zacetek(q) ? { rows: [] } : povrni(q) ? NIKOLI : new Error("boom")));
+    ro = await pot(mk(L))();
+    assert(ro.code === 500 && L.rel.length === 1 && L.rel[0] === true, "napaka v fn, ROLLBACK nikoli ne odgovori: release(true)", L.rel);
+    L = lazni((q) => (zacetek(q) ? { rows: [] } : povrni(q) ? new Error("rollback ni uspel") : new Error("boom")));
+    ro = await pot(mk(L))();
+    assert(ro.code === 500 && L.rel.length === 1 && L.rel[0] === true, "napaka v fn, ROLLBACK zavrnjen: release(true)", L.rel);
+    L = lazni((q) => (zacetek(q) ? { rows: [] } : NIKOLI));
+    ro = await pot(mk(L))();
+    assert(ro.code === 500 && L.rel.length === 1 && L.rel[0] === true, "rok v fn (poizvedba nikoli ne odgovori): release(true)", L.rel);
+    L = lazni((q) => (konec(q) ? NIKOLI : { rows: [] }));
+    ro = await pot(mk(L))();
+    assert(ro.code === 500 && L.rel.length === 1 && L.rel[0] === true, "COMMIT nikoli ne odgovori: release(true)", L.rel);
+    L = lazni(() => ({ rows: [] }));
+    ro = await pot(mk(L))();
+    assert(ro.code === 200 && L.rel.length === 1 && L.rel[0] === false, "uspesna transakcija (BEGIN, SELECT, COMMIT): release(false), povezava gre nazaj v pool", { ro, rel: L.rel });
+    L = lazni((q) => { if (/^SELECT/.test(q)) L.clients[0].emit("error", new Error("povezava prekinjena")); return { rows: [] }; });
+    ro = await pot(mk(L))();
+    assert(L.rel.length === 1 && L.rel[0] === true, "`error` na povezavi med transakcijo: release(true)", L.rel);
   } finally {
     await pool.query("TRUNCATE stripe_uskladitve, spori, orders").catch(() => {});   // druge teste (opozorila, Danes) ne smejo motiti ostanki
     await pool.end().catch(() => {});
