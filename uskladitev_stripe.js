@@ -29,7 +29,7 @@
 //  - Po narocilu (par prek payment_intent <-> orders.stripe_payment_intent_id, sicer prek metadata.order_id): (a) placilo brez placanega narocila, (b) placano narocilo brez
 //    placila, (c) znesek/valuta/provizija (c), (d) refunded_cents proti charge.amount_refunded (tudi za stare naboje, vrnjene v D), (e) spor v Stripu brez vrstice v `spori`
 //    (in obratno, in razlicno stanje/znesek).
-//    Izjema od (a): naboj za narocilo, ki ga je zakljuci() preklical in v CELOTI vrnil (`cancelled|failed` + vrstica `vracila` z razlogom `inactive_order` + amount_refunded >= amount),
+//    Izjema od (a): naboj za narocilo, ki ga je zakljuci() preklical in v CELOTI vrnil (`cancelled|failed` + vrstica `vracila` z razlogom `inactive_order`, stanje `opravljeno`, isti PI + amount_refunded >= amount),
 //    je pricakovan izid, ne razlika (steje se v `vrnjeno_neaktivno_stevilo` rezultata in dnevniku). Delno vrnjeno ali brez vrstice `vracila` ostane razlika.
 //  - Vsote (informativno): stevilo, bruto, vrnjeno, provizija; Stripova vracila in spori dneva.
 
@@ -192,7 +192,7 @@ function ustvari(dep) {
       const O = await q(
         `SELECT o.id, o.status, o.total_cents, o.currency, o.refunded_cents, o.application_fee_cents, o.stripe_payment_intent_id AS pi,
                 (o.paid_at >= to_timestamp($3) AND o.paid_at < to_timestamp($4)) AS v_dnevu, ${T} AS testno,
-                EXISTS (SELECT 1 FROM vracila vr WHERE vr.order_id = o.id AND vr.razlog = 'inactive_order') AS vrnjeno_neaktivno
+                (SELECT vr.payment_intent_id FROM vracila vr WHERE vr.order_id = o.id AND vr.razlog = 'inactive_order' AND vr.stanje = 'opravljeno') AS vrnjeno_neaktivno_pi
            FROM orders o WHERE o.stripe_payment_intent_id = ANY($1::text[]) OR o.id = ANY($2::bigint[])`, [pis, oids, t0, t1]);
       const P = await q(
         `SELECT id, stanje, znesek_cents, valuta, (ustvarjen_at >= to_timestamp($2) AND ustvarjen_at < to_timestamp($3)) AS v_dnevu
@@ -218,8 +218,9 @@ function ustvari(dep) {
       if (!PLACANO.includes(o.status)) {
         // Nasa avtomatika (placila_stripe.js zakljuci() -> vrniNeaktivno(), vracila_stripe.js): placilo za preklicano/neuspelo narocilo je bilo v CELOTI vrnjeno
         // (vrstica `vracila` z razlogom `inactive_order` + Stripov amount_refunded >= amount). To je pricakovan izid, ne razlika. Delno vrnjeno, vrstice `vracila` ali
-        // drugo stanje narocila (npr. pending) ostane razlika.
-        if (["cancelled", "failed"].includes(o.status) && o.vrnjeno_neaktivno === true && celo(ch.amount) > 0 && celo(ch.amount_refunded) >= celo(ch.amount)) { vrnjenoNeaktivno++; continue; }
+        // drugo stanje narocila (npr. pending) ostane razlika. Vrstica mora biti `opravljeno` (nase vracilo je uspelo; rocno vracilo v Stripu ali `caka`/`ni_uspelo` ostane
+        // razlika) in za ISTI PaymentIntent kot naboj (drug PI istega narocila ni pokrit z naso vrstico). UNIQUE (order_id, razlog) -> najvec ena vrstica.
+        if (["cancelled", "failed"].includes(o.status) && pi && o.vrnjeno_neaktivno_pi === pi && celo(ch.amount) > 0 && celo(ch.amount_refunded) >= celo(ch.amount)) { vrnjenoNeaktivno++; continue; }
         r({ vrsta: "placilo_brez_placanega_narocila", ...osnova, narocilo_id: Number(o.id), stanje_narocila: o.status, stripe_cents: celo(ch.amount), stripe_valuta: String(ch.currency || "").toUpperCase(),
             v_celoti_vrnjeno: celo(ch.amount_refunded) >= celo(ch.amount) });
         continue;

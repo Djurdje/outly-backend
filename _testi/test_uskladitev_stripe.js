@@ -196,8 +196,8 @@ async function main() {
       (v) => assert(v.razlike[0].stanje_narocila === "pending", "stanje_narocila pending"));
     // ------------------------------------------------------------------ 2b. S2: placilo za preklicano narocilo, v celoti vrnjeno (inactive_order)
     console.log("\n# 2b. Preklicano narocilo, v celoti vrnjeno (inactive_order) ni razlika");
-    const vracilo = (narociloId, razlog) => pool.query(
-      "INSERT INTO vracila (order_id, event_id, razlog, znesek_cents, payment_intent_id, stripe_livemode, valuta) VALUES ($1, $2, $3, 1500, 'pi_1', TRUE, 'EUR')", [narociloId, dogodek, razlog]);
+    const vracilo = (narociloId, razlog, stanjeV = "opravljeno", piV = "pi_1") => pool.query(
+      "INSERT INTO vracila (order_id, event_id, razlog, stanje, znesek_cents, payment_intent_id, stripe_livemode, valuta) VALUES ($1, $2, $3, $4, 1500, $5, TRUE, 'EUR')", [narociloId, dogodek, razlog, stanjeV, piV]);
     for (const stanje of ["cancelled", "failed"]) {
       await cisto();
       const nc = await narocilo({ pi: "pi_1", status: stanje, placano: null }); await vracilo(nc, "inactive_order");
@@ -209,6 +209,14 @@ async function main() {
       const vc = await vrstica(D);
       assert(vc.stanje === "ok" && vc.razlike_stevilo === 0, `S2: ${stanje}: vrstica dneva ok`, vc && vc.razlike);
     }
+    // 2. krog pregleda (N-A, N-B): vracilo mora biti nase, uspesno (`opravljeno`) in za isti PaymentIntent
+    for (const st of ["caka", "ni_uspelo", "rocno"])
+      await razlika(`S2: preklicano + v celoti vrnjeno, vrstica inactive_order v stanju ${st}`, async () => {
+        const nc = await narocilo({ pi: "pi_1", status: "cancelled", placano: null }); await vracilo(nc, "inactive_order", st); naboj(1, { amount_refunded: 1500 });
+      }, ["placilo_brez_placanega_narocila"]);
+    await razlika("S2: preklicano + v celoti vrnjeno, vrstica inactive_order za drug PaymentIntent", async () => {
+      const nc = await narocilo({ pi: "pi_1", status: "cancelled", placano: null }); await vracilo(nc, "inactive_order", "opravljeno", "pi_drug"); naboj(1, { amount_refunded: 1500 });
+    }, ["placilo_brez_placanega_narocila"]);
     await razlika("S2: preklicano + delno vrnjeno (700 od 1500)", async () => {
       const nc = await narocilo({ pi: "pi_1", status: "cancelled", placano: null }); await vracilo(nc, "inactive_order"); naboj(1, { amount_refunded: 700 });
     }, ["placilo_brez_placanega_narocila"], (v) => assert(v.razlike[0].stanje_narocila === "cancelled" && v.razlike[0].v_celoti_vrnjeno === false, "razlika: cancelled, ni v celoti vrnjeno"));
