@@ -55,6 +55,9 @@
 --   PR z migracijami 068–072 NE v dogodek in ne manj kot 3 h pred njim (merge = deploy z migracijami).
 
 BEGIN;
+-- Sken (skenPool) ima lock_timeout 1 s: migracija ne caka na zaklep dlje kot 800 ms, da sken pred njo ne obtici v vrsti
+-- in ne pade (pregled PR #376, 2. krog N1); migrate.js ob izteku (55P03) migracijo ponovi.
+SET LOCAL lock_timeout = '800ms';
 
 CREATE INDEX IF NOT EXISTS creator_applications_user_idx          ON creator_applications (user_id)              WHERE user_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS creator_applications_club_idx          ON creator_applications (club_id)              WHERE club_id IS NOT NULL;

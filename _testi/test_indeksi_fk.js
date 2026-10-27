@@ -159,8 +159,7 @@ async function main() {
     console.log("\n# 5. Nobena migracija ne zaklene dveh tabel, ki ju aplikacija pise skupaj (mrtva zanka 40P01 z nakupom)");
     const kr = krsitveRazdelitve(indeksne);
     assert(kr.length === 0, "vroce tabele (events, orders, tickets) so vsaka v svoji migraciji in noben par iz SKUPAJ_PISANE ni v isti", kr);
-    const tabeleMig = Object.fromEntries(indeksne.map(([f, v]) => [f.slice(0, 3), [...tabeleIndeksovMigracije(v)].sort().join(",")]));
-    for (const t of VROCE) assert(Object.values(tabeleMig).filter((x) => x.split(",").includes(t)).length === 1, `${t}: indeks ustvari natanko ena migracija`, tabeleMig);
+    // (Ne preverjamo "natanko ena migracija na vroco tabelo": prihodnja migracija s svojim indeksom na orders ni krsitev - varovalo je krsitveRazdelitve.)
     // Razclenjevalnik ni prazen: stara 068 (vse v eni transakciji) in par iz SKUPAJ_PISANE morata pasti; komentar z imenom tabele ne steje.
     const stara = ["-- komentar: CREATE INDEX IF NOT EXISTS x ON tickets (a)", "BEGIN;", "CREATE INDEX IF NOT EXISTS a ON events (x) WHERE x IS NOT NULL;",
       "CREATE INDEX IF NOT EXISTS b ON public.orders (y);", "CREATE INDEX IF NOT EXISTS c ON tickets (z);", "COMMIT;"].join("\n");

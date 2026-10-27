@@ -5,10 +5,13 @@
 --
 -- Ločena: sken (tickets + table_service v enem stavku), nakup (orders + events + tickets), prenos (tickets + ticket_transfers), guest lista (tickets + guest_list_members + guest_lists).
 -- Pisalni strosek: delni indeks na used_by_user_id; sken vstopnice (UPDATE status/used_at/used_by_user_id) ze zdaj ni HOT (status je v tickets_event_idx), zato je nov vnos v delni indeks
--- na skenirano vstopnico en dodaten list B-drevesa (izmerjeno lokalno ~+5 us na vrstico). Ker je tickets na poti skena, je ta migracija zadnja in zaklepa samo to tabelo.
+-- na skenirano vstopnico en dodaten list B-drevesa (izmerjeno lokalno ~+5 us na vrstico). Ker je tickets na poti skena, je ta migracija zadnja in zaklepa samo to tabelo (na poti skena je tudi table_service v 068 - zato obe s kratkim lock_timeout).
 
 
 BEGIN;
+-- Sken (skenPool) ima lock_timeout 1 s: migracija ne caka na zaklep dlje kot 800 ms, da sken pred njo ne obtici v vrsti
+-- in ne pade (pregled PR #376, 2. krog N1); migrate.js ob izteku (55P03) migracijo ponovi.
+SET LOCAL lock_timeout = '800ms';
 
 CREATE INDEX IF NOT EXISTS tickets_used_by_idx                    ON tickets (used_by_user_id)                   WHERE used_by_user_id IS NOT NULL;
 

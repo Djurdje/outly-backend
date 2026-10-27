@@ -3897,6 +3897,9 @@ COMMENT ON COLUMN table_holds.price_cents IS 'Cena mize ob rezervaciji v aplikac
 --     070 events   071 orders   072 tickets  (vsaka sama: nakup pise vse tri, sken tickets + table_service). Vroci tabeli sta ZADNJI: njun SHARE zaklep traja en sam stavek.
 --   PR z migracijami 068–072 NE v dogodek in ne manj kot 3 h pred njim (merge = deploy z migracijami).
 
+-- Sken (skenPool) ima lock_timeout 1 s: migracija ne caka na zaklep dlje kot 800 ms, da sken pred njo ne obtici v vrsti
+-- in ne pade (pregled PR #376, 2. krog N1); migrate.js ob izteku (55P03) migracijo ponovi.
+SET LOCAL lock_timeout = '800ms';
 
 CREATE INDEX IF NOT EXISTS creator_applications_user_idx          ON creator_applications (user_id)              WHERE user_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS creator_applications_club_idx          ON creator_applications (club_id)              WHERE club_id IS NOT NULL;
@@ -3963,9 +3966,12 @@ CREATE INDEX IF NOT EXISTS orders_package_idx                     ON orders (pac
 --
 -- Ločena: sken (tickets + table_service v enem stavku), nakup (orders + events + tickets), prenos (tickets + ticket_transfers), guest lista (tickets + guest_list_members + guest_lists).
 -- Pisalni strosek: delni indeks na used_by_user_id; sken vstopnice (UPDATE status/used_at/used_by_user_id) ze zdaj ni HOT (status je v tickets_event_idx), zato je nov vnos v delni indeks
--- na skenirano vstopnico en dodaten list B-drevesa (izmerjeno lokalno ~+5 us na vrstico). Ker je tickets na poti skena, je ta migracija zadnja in zaklepa samo to tabelo.
+-- na skenirano vstopnico en dodaten list B-drevesa (izmerjeno lokalno ~+5 us na vrstico). Ker je tickets na poti skena, je ta migracija zadnja in zaklepa samo to tabelo (na poti skena je tudi table_service v 068 - zato obe s kratkim lock_timeout).
 
 
+-- Sken (skenPool) ima lock_timeout 1 s: migracija ne caka na zaklep dlje kot 800 ms, da sken pred njo ne obtici v vrsti
+-- in ne pade (pregled PR #376, 2. krog N1); migrate.js ob izteku (55P03) migracijo ponovi.
+SET LOCAL lock_timeout = '800ms';
 
 CREATE INDEX IF NOT EXISTS tickets_used_by_idx                    ON tickets (used_by_user_id)                   WHERE used_by_user_id IS NOT NULL;
 
@@ -4041,11 +4047,11 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('065_promo_kode.sql', 'dc78c558596b297e'),
     ('066_brisanje_demo_klubov.sql', 'aa1a24e192ec0558'),
     ('067_vip_placilo_vrata.sql', '3eebdc75db021fa5'),
-    ('068_indeksi_tujih_kljucev.sql', '81f1549649fea69f'),
+    ('068_indeksi_tujih_kljucev.sql', '06aed86452cbaaa0'),
     ('069_indeksi_tujih_kljucev_2.sql', '25dc4a10df970db6'),
     ('070_indeksi_tujih_kljucev_events.sql', '3545a0f83f86c094'),
     ('071_indeksi_tujih_kljucev_orders.sql', 'c1bd0b0e55c84516'),
-    ('072_indeksi_tujih_kljucev_tickets.sql', 'c9a23135871541a8')
+    ('072_indeksi_tujih_kljucev_tickets.sql', '5b90b5672f3e2225')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
