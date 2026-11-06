@@ -22,6 +22,9 @@ const app = express();
 // Render stoji za proxyjem. Brez tega je req.ip naslov proxyja in bi
 // omejevanje veljalo za vse uporabnike skupaj.
 app.set("trust proxy", 1);
+// Varnostne glave (pregled 6. 11. 2026): brez razkritja ogrodja; nosniff na vseh odgovorih (API vrne JSON, brskalnik ga ne sme ugibati kot HTML).
+app.disable("x-powered-by");
+app.use((req, res, next) => { res.setHeader("X-Content-Type-Options", "nosniff"); next(); });
 // Sentry: vsak odgovor 500 iz katerekoli poti pride v Sentry (odgovor ostane nespremenjen); brez SENTRY_DSN se ne doda nic.
 if (sentry.vklopljen()) app.use(sentry.vmesnik);
 
@@ -1215,6 +1218,13 @@ app.get("/healthz/sken", async (req, res) => {
 // Admin panel: statična stran v mapi admin/ (en HTML + JS, brez ogrodja).
 // Sama stran ne razkrije ničesar — vsi podatki pridejo prek poti /admin/api/*,
 // ki zahtevajo vlogo admin.
+// Glave panela: ne sme se vgraditi v okvir (clickjacking). Polne script-src CSP NAMENOMA ni (panel nalaga Supabase in ima vrstične skripte).
+app.use("/admin", (req, res, next) => {
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+  res.setHeader("Referrer-Policy", "same-origin");
+  next();
+});
 app.use("/admin", express.static(path.join(__dirname, "admin"), { index: "index.html" }));
 
 // ---------------------------
