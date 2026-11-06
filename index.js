@@ -32,6 +32,7 @@ if (sentry.vklopljen()) app.use(sentry.vmesnik);
 // zato brskalnik sme poslati Authorization, X-Outly-Club in Idempotency-Key (test_idempotenca.js to preveri).
 // exposedHeaders: brez tega JavaScript v brskalniku Retry-After (503/429/409) NE vidi; Idempotent-Replayed pove, da je odgovor ponovitev.
 app.use(cors({ exposedHeaders: ["Retry-After", "Idempotent-Replayed"] }));
+app.get("/coming-soon", require("./kmalu_klubi").obravnava);   // klubi »Coming soon« (6. 11. 2026): statican seznam iz podatki/kmalu_klubi.json, brez baze in prijave
 
 // Javni predpomnilnik (issue #114, invarianta I17): kratek predpomnilnik ze serializiranih javnih seznamov. TTL v ms
 // (JAVNI_PREDPOMNILNIK_MS, privzeto 3000, 0 = izklopljeno), najvec JAVNI_PREDPOMNILNIK_KLJUCEV kljucev (privzeto 300).
