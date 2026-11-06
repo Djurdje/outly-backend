@@ -1,0 +1,54 @@
+{
+  "clubs": [
+    {
+      "slug": "square",
+      "name": "Square Club",
+      "city": "Ljubljana",
+      "address": "Kongresni trg 3, 1000 Ljubljana",
+      "logo_url": "https://outly.si/assets/kmalu/square-logo.png",
+      "cover_url": "https://outly.si/assets/kmalu/square-cover.jpg",
+      "website": "https://squareclub.si/",
+      "instagram": "square_ljubljana"
+    },
+    {
+      "slug": "cirkus",
+      "name": "Klub Cirkus",
+      "city": "Ljubljana",
+      "address": "Trg mladinskih delovnih brigad 7, 1000 Ljubljana",
+      "logo_url": "https://outly.si/assets/kmalu/cirkus-logo.png",
+      "cover_url": "https://outly.si/assets/kmalu/cirkus-cover.jpg",
+      "website": "https://cirkusklub.si/",
+      "instagram": "cirkusklub"
+    },
+    {
+      "slug": "k4",
+      "name": "Klub K4",
+      "city": "Ljubljana",
+      "address": "Kersnikova 4, 1000 Ljubljana",
+      "logo_url": "https://outly.si/assets/kmalu/k4-logo.png",
+      "cover_url": "https://outly.si/assets/kmalu/k4-cover.jpg",
+      "website": "https://www.klub-k4.si/",
+      "instagram": "klub_k4"
+    },
+    {
+      "slug": "shooters",
+      "name": "Shooters Club",
+      "city": "Ljubljana",
+      "address": "Nazorjeva ulica 6a, 1000 Ljubljana",
+      "logo_url": "https://outly.si/assets/kmalu/shooters-logo.jpg",
+      "cover_url": "https://outly.si/assets/kmalu/shooters-cover.jpg",
+      "website": "",
+      "instagram": ""
+    },
+    {
+      "slug": "cutty-sark",
+      "name": "Cutty Sark Pub",
+      "city": "Ljubljana",
+      "address": "Knafljev prehod 1, 1000 Ljubljana",
+      "logo_url": "https://outly.si/assets/kmalu/cutty-sark-logo.png",
+      "cover_url": "https://outly.si/assets/kmalu/cutty-sark-cover.jpg",
+      "website": "https://cuttysarkpub.si/",
+      "instagram": "cutty.sark.pub"
+    }
+  ]
+}
