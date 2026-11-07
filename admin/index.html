@@ -553,12 +553,23 @@ function fVrstice(f, vse) {
 function fNarocilaIzris() {
   const f = fPodatki; if (!f) return;
   const n = f.abandoned_count || 0;
-  $("fNedokoncani").innerHTML = `<div>Nedokončani nakupi v obdobju: <b>${ubezi(n)}</b>
-    ${n || fPokaziNedokoncane ? `<button class="tih mali" onclick="fPrikaziNedokoncane()" style="margin-left:8px">${fPokaziNedokoncane ? "skrij" : "pokaži"}</button>` : ""}</div>
+  const vteku = f.recent_orders.filter(o => o.status === "pending" && !o.is_test).length;
+  $("fNedokoncani").innerHTML = `<div>Nedokončani nakupi v obdobju: <b>${ubezi(n)}</b>${vteku ? ` · v teku: <b>${ubezi(vteku)}</b>` : ""}
+    ${n || vteku || fPokaziNedokoncane ? `<button class="tih mali" onclick="fPrikaziNedokoncane()" style="margin-left:8px">${fPokaziNedokoncane ? "skrij" : "pokaži"}</button>` : ""}</div>
     <div style="margin-top:6px;font-size:12.5px;color:var(--faint)">Kupec je odprl plačilo in ga ni dokončal. Nič ni bilo zaračunano, vstopnice so se vrnile v prodajo. Niso del prometa.${fPokaziNedokoncane ? " Spodaj so nedokončani izmed zadnjih 100 naročil obdobja." : ""}</div>`;
   const st = { paid: '<span class="znacka ok">plačano</span>', partially_refunded: '<span class="znacka opoz">delno vrnjeno</span>', refunded: '<span class="znacka slabo">vrnjeno</span>',
-    cancelled: '<span class="znacka opoz">preklicano, vrnjeno</span>', pending: '<span class="znacka">v teku</span>' };
-  const znacka = o => o.ni_placano ? '<span class="znacka siva">ni plačano</span>' : (st[o.status] || ubezi(o.status));
+    pending: '<span class="znacka">v teku</span>' };
+  // cancelled/failed, kjer je plačilo prispelo (po preklicu): »vrnjeno« samo, če je vračilo opravljeno; sicer dejansko stanje vračila
+  const VRACILO = { opravljeno: ["opoz", "vrnjeno"], caka: ["opoz", "čaka"], v_teku: ["opoz", "v teku"], ni_uspelo: ["slabo", "ni uspelo"], rocno: ["slabo", "ročno"], preklicano: ["opoz", "preklicano"] };
+  const znacka = o => {
+    if (o.ni_placano) return '<span class="znacka siva">ni plačano</span>';
+    if (o.status === "cancelled" || o.status === "failed") {
+      if (o.vracilo_stanje === "opravljeno") return '<span class="znacka opoz">preklicano, vrnjeno</span>';
+      const [b, t] = VRACILO[o.vracilo_stanje] || ["opoz", "ni vnosa"];
+      return `<span class="znacka ${b}">plačano po preklicu · vračilo: ${t}</span>`;
+    }
+    return st[o.status] || ubezi(o.status);
+  };
   tabela($("fNarocila"), ["Ref", "Kdaj", "Dogodek", "Klub", "Kupec", "Kol.", "Znesek", "Provizija", "Stanje"], fVrstice(f, fPokaziNedokoncane).map(o => `
       <tr><td class="mono">${ubezi(o.public_ref)}</td><td class="mono">${datum(o.created_at)}</td>
       <td>${ubezi(o.event_title)}</td><td>${ubezi(o.club_name)}</td><td>${ubezi(o.buyer_username || "")}<span class="drobno">${ubezi(o.buyer_email)}</span></td>
@@ -566,13 +577,15 @@ function fNarocilaIzris() {
       <td>${znacka(o)}${o.refunded_cents ? `<span class="drobno">vrnjeno ${evri(o.refunded_cents)}</span>` : ""}</td></tr>`), "V tem obdobju ni naročil.");
 }
 function fPrikaziNedokoncane() { fPokaziNedokoncane = !fPokaziNedokoncane; fNarocilaIzris(); }
+// CSV injekcija (Excel/Sheets izvedeta celico, ki se zacne z = + - @ tab CR): predpona '
+function csvCelica(x) { const t = String(x ?? ""); return /^[=+\-@\t\r]/.test(t) ? "'" + t : t; }
 function fIzvoz() {
   if (!fPodatki) { obvesti("Najprej naloži podatke.", "slabo"); return; }
-  const g = ["ref", "datum", "dogodek", "klub", "kupec", "e-naslov", "kolicina", "znesek_eur", "provizija_eur", "vracilo_eur", "stanje", "status_baza"];
+  const g = ["ref", "datum", "dogodek", "klub", "kupec", "e-naslov", "kolicina", "znesek_eur", "provizija_eur", "vracilo_eur", "stanje", "status_baza", "vracilo_stanje"];
   // isti filter kot tabela (nedokončani samo, če so prikazani); stanje = "ni_placano" za nedokončan nakup, sicer status; status_baza = status v bazi
   const v = fVrstice(fPodatki, fPokaziNedokoncane).map(o => [o.public_ref, o.created_at, o.event_title, o.club_name, o.buyer_username || "", o.buyer_email, o.quantity,
-    (o.total_cents / 100).toFixed(2), (o.application_fee_cents / 100).toFixed(2), (o.refunded_cents / 100).toFixed(2), o.ni_placano ? "ni_placano" : o.status, o.status]);
-  const csv = [g, ...v].map(r => r.map(x => `"${String(x ?? "").replace(/"/g, '""')}"`).join(";")).join("\n");
+    (o.total_cents / 100).toFixed(2), (o.application_fee_cents / 100).toFixed(2), (o.refunded_cents / 100).toFixed(2), o.ni_placano ? "ni_placano" : o.status, o.status, o.vracilo_stanje || ""]);
+  const csv = [g, ...v].map(r => r.map(x => `"${csvCelica(x).replace(/"/g, '""')}"`).join(";")).join("\n");
   const b = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = `outly-narocila-${fPodatki.from}-${fPodatki.to}.csv`; document.body.appendChild(a); a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);

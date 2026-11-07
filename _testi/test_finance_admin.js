@@ -227,20 +227,28 @@ async function api(method, path, token, body) {
   await pool.query("INSERT INTO vracila (order_id, event_id, razlog, znesek_cents, payment_intent_id, checkout_session_id) VALUES ($1,$2,'inactive_order',2000,'pi_live_a5','cs_live_a5')", [a5.id, dogodekId]);
   const a6 = await nov(1, "status='cancelled', cancelled_at=NOW(), paid_at=NOW(), stripe_payment_intent_id='pi_live_a6', stripe_checkout_session_id='cs_live_a6'");   // je bilo placano
   const a7 = await nov(1, "status='pending', paid_at=NULL, stripe_payment_intent_id=NULL, stripe_checkout_session_id='cs_live_a7'");                           // v teku
+  const a9 = await nov(1, "status='cancelled', cancelled_at=NOW(), paid_at=NULL, stripe_payment_intent_id='pi_live_a9', stripe_checkout_session_id='cs_live_a9'");   // spor na narocilu brez vracila
+  await pool.query("INSERT INTO spori (id, order_id, payment_intent_id, stanje) VALUES ('dp_a9', $1, 'pi_live_a9', 'odprt')", [a9.id]);
   const a8 = await nov(1, "status='cancelled', cancelled_at=NOW() - INTERVAL '60 days', paid_at=NULL, created_at=NOW() - INTERVAL '60 days', stripe_payment_intent_id=NULL, stripe_checkout_session_id='cs_live_a8'");   // izven obdobja
   r = await api("GET", "/admin/api/finance", T.admin);
   assert(r.status === 200 && r.body.abandoned_count === 2, "abandoned_count = 2 (potekla seja + failed; brez testnih, brez placila po preklicu, brez placanega, brez pending, brez izven obdobja)", r.body.abandoned_count);
   assert(JSON.stringify(r.body.summary) === JSON.stringify(pred.summary) && JSON.stringify(r.body.all_time) === JSON.stringify(pred.all_time)
     && JSON.stringify(r.body.by_club) === JSON.stringify(pred.by_club) && JSON.stringify(r.body.test_summary) === JSON.stringify(pred.test_summary), "seštevki (summary, all_time, by_club, test_summary) so nespremenjeni", r.body.summary);
   const vsa = Object.fromEntries(r.body.recent_orders.map(o => [o.id, o]));
-  assert(Object.keys(vsa).length === 5 + 3 + 7, "recent_orders (obstojece polje) vrne se vsa naroclila obdobja, tudi nedokoncana", Object.keys(vsa).length);
+  assert(Object.keys(vsa).length === 5 + 3 + 8, "recent_orders (obstojece polje) vrne se vsa naroclila obdobja, tudi nedokoncana", Object.keys(vsa).length);
   assert(vsa[a1.id].ni_placano === true && vsa[a2.id].ni_placano === true, "recent_orders[].ni_placano: potekla seja in failed = true", [vsa[a1.id].ni_placano, vsa[a2.id].ni_placano]);
   assert(vsa[a5.id].ni_placano === false && vsa[a6.id].ni_placano === false && vsa[a7.id].ni_placano === false && vsa[narocilo.id].ni_placano === false, "ni_placano false: placilo po preklicu (vracilo), cancelled s paid_at, pending, placano", [vsa[a5.id].ni_placano, vsa[a6.id].ni_placano, vsa[a7.id].ni_placano]);
+  assert(vsa[a9.id].ni_placano === false, "ni_placano false tudi ob sporu (spori)", vsa[a9.id].ni_placano);
+  assert(vsa[a5.id].vracilo_stanje === "caka" && vsa[a1.id].vracilo_stanje === null && vsa[narocilo.id].vracilo_stanje === null, "vracilo_stanje: placilo po preklicu = caka (privzeto), brez vracila null", [vsa[a5.id].vracilo_stanje, vsa[a1.id].vracilo_stanje]);
+  await pool.query("UPDATE vracila SET stanje = 'opravljeno' WHERE order_id = $1", [a5.id]);
+  const r2 = await api("GET", "/admin/api/finance", T.admin);
+  assert(r2.body.recent_orders.find(o => o.id === a5.id).vracilo_stanje === "opravljeno" && r2.body.recent_paid_orders.find(o => o.id === a5.id).vracilo_stanje === "opravljeno", "vracilo_stanje opravljeno v recent_orders in recent_paid_orders", r2.body.recent_paid_orders.find(o => o.id === a5.id));
+  await pool.query("UPDATE vracila SET stanje = 'caka' WHERE order_id = $1", [a5.id]);
   const pl = r.body.recent_paid_orders;
   assert(Array.isArray(pl), "recent_paid_orders obstaja", pl);
   const plId = new Set(pl.map(o => o.id));
   assert(!plId.has(a1.id) && !plId.has(a2.id) && !plId.has(a3.id) && !plId.has(a4.id) && !plId.has(a7.id) && !plId.has(a8.id), "recent_paid_orders: brez nedokoncanih, pending in izven obdobja", [...plId]);
-  assert(plId.has(a5.id) && plId.has(a6.id) && plId.has(narocilo.id), "recent_paid_orders: placilo po preklicu, cancelled s paid_at in placano so notri", [...plId]);
+  assert(plId.has(a5.id) && plId.has(a6.id) && plId.has(a9.id) && plId.has(narocilo.id), "recent_paid_orders: placilo po preklicu, cancelled s paid_at in placano so notri", [...plId]);
   assert(pl.every(o => typeof o.is_test === "boolean" && o.ni_placano === false), "recent_paid_orders: ima is_test in ni_placano=false", pl[0]);
   assert(pl.filter(o => o.status === "refunded").length === 3, "recent_paid_orders: vrnjena narocila notri", pl.map(o => o.status));
   // Omejitev 100: nedokoncani ne smejo izriniti placanih
@@ -250,7 +258,7 @@ async function api(method, path, token, body) {
   r = await api("GET", "/admin/api/finance", T.admin);
   assert(r.body.abandoned_count === 122, "abandoned_count = 122 (120 dodanih)", r.body.abandoned_count);
   assert(r.body.recent_orders.length === 100 && r.body.recent_orders.filter(o => o.status === "paid").length === 0, "recent_orders: 100 najnovejsih je zdaj vseh preklicanih (stari problem)", r.body.recent_orders.length);
-  assert(r.body.recent_paid_orders.length === 10 && r.body.recent_paid_orders.some(o => o.status === "paid"), "recent_paid_orders: placana naroclila ostanejo vidna", r.body.recent_paid_orders.length);
+  assert(r.body.recent_paid_orders.length === 11 && r.body.recent_paid_orders.some(o => o.status === "paid"), "recent_paid_orders: placana naroclila ostanejo vidna", r.body.recent_paid_orders.length);
   await pool.query("DELETE FROM orders WHERE public_ref LIKE 'OUTLY-ZZ%'");
 
   console.log("\n# GET /admin/api/finance filtri from/to");

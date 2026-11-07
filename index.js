@@ -4181,7 +4181,9 @@ const SQL_PRAVO_NAROCILO = `NOT ${SQL_TESTNO_NAROCILO}`;
 // Nedokoncan nakup (7. 11. 2026, DECISIONS): kupec je odprl placilo in ga ni dokoncal, nic ni bilo zaracunano. Naroceno je cancelled/failed, paid_at je NULL
 // IN ni nobene vrstice vracil (placilo po preklicu ima paid_at NULL, a vrstico `inactive_order` v vracila: denar je sel in se je vrnil, to NI nedokoncan nakup).
 // Alias `o`. Uporablja samo GET /admin/api/finance (`abandoned_count`, `ni_placano`, `recent_paid_orders`).
-const SQL_NIKOLI_PLACANO = `(o.status IN ('cancelled','failed') AND o.paid_at IS NULL AND NOT EXISTS (SELECT 1 FROM vracila vr WHERE vr.order_id = o.id))`;
+const SQL_NIKOLI_PLACANO = `(o.status IN ('cancelled','failed') AND o.paid_at IS NULL AND NOT EXISTS (SELECT 1 FROM vracila vr WHERE vr.order_id = o.id) AND NOT EXISTS (SELECT 1 FROM spori sp WHERE sp.order_id = o.id))`;
+// Omejitev: placilo, ki prispe brez payment intenta ali ga izgubljen webhook ne dostavi, ne pusti vrstice v vracila/spori (vrniNeaktivno brez PI ne vstavi vracila); tako naroceno je do pospravljanja preklicanih videti kot nedokoncano.
+const SQL_VRACILO_STANJE = `(SELECT vr.stanje FROM vracila vr WHERE vr.order_id = o.id ORDER BY vr.id DESC LIMIT 1)`;   // stanje zadnjega vracila (caka, v_teku, opravljeno, ni_uspelo, rocno, preklicano) ali NULL
 // --- dogodki ---
 admin.get("/events", async (req, res) => {
   try {
@@ -4579,7 +4581,7 @@ admin.get("/finance", async (req, res) => {
               AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
          GROUP BY d.dan ORDER BY d.dan`, p),
       pool.query(
-        `SELECT ${STOLPCI_NAROCILA}, ${SQL_TESTNO_NAROCILO} AS testni_promet, ${SQL_NIKOLI_PLACANO} AS ni_placano, e.title AS event_title, c.name AS club_name, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
+        `SELECT ${STOLPCI_NAROCILA}, ${SQL_TESTNO_NAROCILO} AS testni_promet, ${SQL_NIKOLI_PLACANO} AS ni_placano, ${SQL_VRACILO_STANJE} AS vracilo_stanje, e.title AS event_title, c.name AS club_name, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
          FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs c ON c.id = o.club_id
          LEFT JOIN users u ON u.id = o.user_id
          WHERE o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day') AND o.guest_list_id IS NULL
@@ -4595,7 +4597,7 @@ admin.get("/finance", async (req, res) => {
       pool.query(`SELECT ${SESTEVEK_TEST} FROM orders o WHERE ${STANJA} AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}`),
       // zadnjih 100 narocil, ki so bila placana (tudi placilo po preklicu): nedokoncani nakupi in pending jih ne izrinejo iz omejitve
       pool.query(
-        `SELECT ${STOLPCI_NAROCILA}, ${SQL_TESTNO_NAROCILO} AS testni_promet, ${SQL_NIKOLI_PLACANO} AS ni_placano, e.title AS event_title, c.name AS club_name, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
+        `SELECT ${STOLPCI_NAROCILA}, ${SQL_TESTNO_NAROCILO} AS testni_promet, ${SQL_NIKOLI_PLACANO} AS ni_placano, ${SQL_VRACILO_STANJE} AS vracilo_stanje, e.title AS event_title, c.name AS club_name, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
          FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs c ON c.id = o.club_id
          LEFT JOIN users u ON u.id = o.user_id
          WHERE o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day') AND o.guest_list_id IS NULL
