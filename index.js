@@ -4178,6 +4178,10 @@ admin.patch("/users/:id", async (req, res) => {
 // Testno naročilo (alias `o`), glej komentar »TESTNI PROMET (#230)« pri GET /admin/api/finance. Uporabljajo: /finance, /admin/api/events (#236), GET /business/sales (#236).
 const SQL_TESTNO_NAROCILO = `(COALESCE(o.stripe_payment_intent_id LIKE 'test\\_%', FALSE) OR COALESCE(o.stripe_checkout_session_id LIKE 'cs\\_test\\_%', FALSE))`;
 const SQL_PRAVO_NAROCILO = `NOT ${SQL_TESTNO_NAROCILO}`;
+// Nedokoncan nakup (7. 11. 2026, DECISIONS): kupec je odprl placilo in ga ni dokoncal, nic ni bilo zaracunano. Naroceno je cancelled/failed, paid_at je NULL
+// IN ni nobene vrstice vracil (placilo po preklicu ima paid_at NULL, a vrstico `inactive_order` v vracila: denar je sel in se je vrnil, to NI nedokoncan nakup).
+// Alias `o`. Uporablja samo GET /admin/api/finance (`abandoned_count`, `ni_placano`, `recent_paid_orders`).
+const SQL_NIKOLI_PLACANO = `(o.status IN ('cancelled','failed') AND o.paid_at IS NULL AND NOT EXISTS (SELECT 1 FROM vracila vr WHERE vr.order_id = o.id))`;
 // --- dogodki ---
 admin.get("/events", async (req, res) => {
   try {
@@ -4525,7 +4529,7 @@ admin.get("/finance", async (req, res) => {
                 COALESCE(SUM(o.refunded_cents),0)::int AS refunded_cents,
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.table_id IS NULL AND ${NETO}),0)::int AS tickets_sold`;
 
-    const [skupaj, poKlubih, poDogodkih, poDnevih, zadnja, vseh, testObdobje, testVseh] = await Promise.all([
+    const [skupaj, poKlubih, poDogodkih, poDnevih, zadnja, vseh, testObdobje, testVseh, zadnjaPlacana, nedokoncani] = await Promise.all([
       pool.query(
         `SELECT COALESCE(SUM(o.total_cents),0)::int AS gross_cents,
                 COALESCE(SUM(o.application_fee_cents) FILTER (WHERE ${NETO}),0)::int AS fee_cents,
@@ -4575,7 +4579,7 @@ admin.get("/finance", async (req, res) => {
               AND o.created_at >= d.dan AND o.created_at < d.dan + INTERVAL '1 day'
          GROUP BY d.dan ORDER BY d.dan`, p),
       pool.query(
-        `SELECT ${STOLPCI_NAROCILA}, ${SQL_TESTNO_NAROCILO} AS testni_promet, e.title AS event_title, c.name AS club_name, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
+        `SELECT ${STOLPCI_NAROCILA}, ${SQL_TESTNO_NAROCILO} AS testni_promet, ${SQL_NIKOLI_PLACANO} AS ni_placano, e.title AS event_title, c.name AS club_name, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
          FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs c ON c.id = o.club_id
          LEFT JOIN users u ON u.id = o.user_id
          WHERE o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day') AND o.guest_list_id IS NULL
@@ -4589,6 +4593,16 @@ admin.get("/finance", async (req, res) => {
          FROM orders o WHERE ${STANJA} AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO}`),
       pool.query(`SELECT ${SESTEVEK_TEST} FROM orders o WHERE ${KJE_VSE} AND ${SQL_TESTNO_NAROCILO}`, p),
       pool.query(`SELECT ${SESTEVEK_TEST} FROM orders o WHERE ${STANJA} AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}`),
+      // zadnjih 100 narocil, ki so bila placana (tudi placilo po preklicu): nedokoncani nakupi in pending jih ne izrinejo iz omejitve
+      pool.query(
+        `SELECT ${STOLPCI_NAROCILA}, ${SQL_TESTNO_NAROCILO} AS testni_promet, ${SQL_NIKOLI_PLACANO} AS ni_placano, e.title AS event_title, c.name AS club_name, COALESCE(u.username, ${IME_GOSTA}) AS buyer_username
+         FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs c ON c.id = o.club_id
+         LEFT JOIN users u ON u.id = o.user_id
+         WHERE o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day') AND o.guest_list_id IS NULL
+           AND o.status <> 'pending' AND NOT ${SQL_NIKOLI_PLACANO}
+         ORDER BY o.created_at DESC LIMIT 100`, p),
+      // nedokoncani nakupi v obdobju (pravi promet; testni so ze loceni po definiciji SQL_TESTNO_NAROCILO)
+      pool.query(`SELECT COUNT(*)::int AS n FROM orders o WHERE o.created_at >= $1::date AND o.created_at < ($2::date + INTERVAL '1 day') AND o.guest_list_id IS NULL AND ${SQL_PRAVO_NAROCILO} AND ${SQL_NIKOLI_PLACANO}`, p),
     ]);
     return res.json({
       mode: testniNacinPlacil() ? "test" : "live",   // "live" je tudi ob sandbox kljucu (sk_test_): za panel glej payments_mode
@@ -4604,6 +4618,9 @@ admin.get("/finance", async (req, res) => {
       by_event: poDogodkih.rows,
       by_day: poDnevih.rows,
       recent_orders: zadnja.rows.map(({ testni_promet, ...o }) => ({ ...o, is_test: testni_promet })),   // is_test: nova definicija (glej SQL_TESTNO_NAROCILO)
+      // DODANO 7. 11. 2026: recent_orders ostane (vsa stanja, pomen nespremenjen); ni_placano = nedokoncan nakup (SQL_NIKOLI_PLACANO).
+      recent_paid_orders: zadnjaPlacana.rows.map(({ testni_promet, ...o }) => ({ ...o, is_test: testni_promet })),
+      abandoned_count: nedokoncani.rows[0].n,
     });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
 });

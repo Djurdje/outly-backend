@@ -329,7 +329,11 @@ async function vpisi(page, origin, zapomni) {
         by_day: [{ day: NAK, gross_cents: 100, tickets: NAK }],
         by_club: [{ name: NAK, city: NAK, gross_cents: 1, fee_cents: 1, refunded_cents: 0, net_cents: 1, tickets_sold: NAK, orders: NAK }],
         by_event: [{ title: NAK, status: NAK, club_name: NAK, start_at: "2027-01-01T20:00:00Z", ticket_price_cents: 100, tickets_sold: NAK, capacity: NAK, checked_in: NAK, gross_cents: 1, fee_cents: 1 }],
-        recent_orders: [{ public_ref: NAK, created_at: "2026-01-01T00:00:00Z", event_title: NAK, club_name: NAK, buyer_username: NAK, buyer_email: NAK, quantity: NAK, total_cents: 1, application_fee_cents: 0, refunded_cents: 0, status: NAK, is_test: false }] };
+        recent_orders: [{ id: 1, public_ref: NAK, created_at: "2026-01-01T00:00:00Z", event_title: NAK, club_name: NAK, buyer_username: NAK, buyer_email: NAK, quantity: NAK, total_cents: 1, application_fee_cents: 0, refunded_cents: 0, status: NAK, is_test: false },
+          { id: 2, public_ref: "ABANDONED", created_at: "2026-01-02T00:00:00Z", event_title: NAK, club_name: NAK, buyer_username: NAK, buyer_email: NAK, quantity: 1, total_cents: 1000, application_fee_cents: 0, refunded_cents: 0, status: "cancelled", is_test: false, ni_placano: true },
+          { id: 3, public_ref: "LATEPAY", created_at: "2026-01-01T12:00:00Z", event_title: NAK, club_name: NAK, buyer_username: NAK, buyer_email: NAK, quantity: 1, total_cents: 1000, application_fee_cents: 0, refunded_cents: 1000, status: "cancelled", is_test: false, ni_placano: false }],
+        recent_paid_orders: [{ id: 1, public_ref: NAK, created_at: "2026-01-01T00:00:00Z", event_title: NAK, club_name: NAK, buyer_username: NAK, buyer_email: NAK, quantity: NAK, total_cents: 1, application_fee_cents: 0, refunded_cents: 0, status: "paid", is_test: false, ni_placano: false }],
+        abandoned_count: 3 };
       const ctx = await brskalnik.newContext(); await namestiStub(ctx, st, origin);
       const page = await ctx.newPage(); const k = [];
       page.on("pageerror", (e) => k.push("pageerror: " + e.message));
@@ -344,6 +348,18 @@ async function vpisi(page, origin, zapomni) {
         preveri(o.xss === null && o.slike === 0 && o.besedilo, `(k1) zavihek ${zavihek}: skripta se ne izvede, besedilo je vidno ubezano`, o);
       }
       preveri(k.length === 0, "(k1) brez pageerror", k);
+      // nedokoncani nakupi (7. 11. 2026): privzeto skriti, stevec iz abandoned_count, »pokazi« jih doda s sivo znacko »ni placano«
+      await page.click('nav button[data-z="finance"]');
+      await page.waitForSelector("#fNarocila table", { timeout: 5000 });
+      const pred = await page.evaluate(() => ({ vrstice: document.querySelectorAll("#fNarocila tbody tr").length, glava: document.getElementById("fNedokoncani").innerText,
+        abandoned: document.getElementById("fNarocila").innerText.includes("ABANDONED") }));
+      preveri(pred.vrstice === 1 && !pred.abandoned && /Nedokončani nakupi v obdobju:\s*3/.test(pred.glava) && /nič ni bilo zaračunano/i.test(pred.glava), "(k2) privzeto samo plačana (1 vrstica), števec nedokončanih 3 + pojasnilo", pred);
+      await page.click("#fNedokoncani button");
+      const po = await page.evaluate(() => ({ vrstice: document.querySelectorAll("#fNarocila tbody tr").length, besedilo: document.getElementById("fNarocila").innerText,
+        siva: [...document.querySelectorAll("#fNarocila .znacka.siva")].map((e) => e.textContent), opoz: [...document.querySelectorAll("#fNarocila .znacka.opoz")].map((e) => e.textContent) }));
+      preveri(po.vrstice === 3 && po.besedilo.includes("ABANDONED") && po.besedilo.includes("LATEPAY") && po.siva.length === 1 && po.siva[0].toLowerCase().includes("ni plačano"), "(k2) po »pokaži« 3 vrstice, nedokončan nakup ima sivo značko »ni plačano«", po);
+      preveri(po.opoz.length === 1 && /preklicano, vrnjeno/.test(po.opoz[0]), "(k2) preklic po plačilu ostane opozorilna značka »preklicano, vrnjeno«", po.opoz);
+      preveri(k.length === 0, "(k2) brez pageerror", k);
       await ctx.close();
     }
 
