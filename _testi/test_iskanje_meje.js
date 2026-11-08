@@ -198,6 +198,8 @@ function posrednik() {
     assert(nulDrugo.every((x) => x === 200), "NUL v parametru, ki ga pot ne bere ali ne gre v SQL: obnasanje kot na main (200)", nulDrugo);
 
     // ------------------------------------------------------------------
+    // Glavni varovalec tega razdelka je STETJE SEJ `idle in transaction` na strezniku. Stara koda (f06c79f, transakcija na iskanju) pade samo s
+    // PROXY_VSE=1 (posrednik tedaj velja za vse povezave; stara koda nima zagonskih parametrov, po katerih bi ga locili od iskalnega poola).
     console.log("\n# (g) Polodprt TCP (odgovori baze izginejo, stran ne vidi zaprtja): 503 v roku, na strezniku NI seje v transakciji, ALTER TABLE uspe");
     const post = posrednik();
     const purl = await post.zagon();
@@ -215,15 +217,36 @@ function posrednik() {
     const sej = (await pool.query("SELECT state, count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'outly_test_iskanje_meje' AND pid <> pg_backend_pid() GROUP BY state")).rows;
     const vTx = sej.filter((x) => /in transaction/.test(x.state || "")).reduce((n, x) => n + x.n, 0);
     assert(vTx === 0, "na strezniku NI seje 'idle in transaction' (brez odprte transakcije z zaklepom na clubs)", sej);
+    // Dodatno (NE lovi regresije sam: obviseli BEGIN stare kode ni dosegel SELECT, zato ALTER uspe tudi tam): migracija ob deployu ne obvisi.
     const al = new Pool({ connectionString: DB, max: 1, options: "-c lock_timeout=2000" });
     let alterOk = false, alterNapaka = null;
     try { await al.query("ALTER TABLE clubs ADD COLUMN iskanje_test_x int"); alterOk = true; await al.query("ALTER TABLE clubs DROP COLUMN iskanje_test_x"); } catch (e) { alterNapaka = e.message; }
     await al.end();
-    assert(alterOk, "ALTER TABLE clubs ADD COLUMN z lock_timeout 2 s uspe (migracija ob deployu ne obvisi)", alterNapaka);
+    assert(alterOk, "(dodatno) ALTER TABLE clubs ADD COLUMN z lock_timeout 2 s uspe", alterNapaka);
     post.st.odgovoriIzgubljeni = false; post.st.drzi = false;
     const glavni = await klic(G, "/clubs?limit=5");
     assert(glavni.status === 200, "glavni pool je med tem delal normalno (/clubs brez q)", glavni.status);
     await G.ustavi(); post.zapri();
+
+    // ------------------------------------------------------------------
+    console.log("\n# (h) Prekinjena povezava med iskanjem (pg_terminate_backend ob cakanju na zaklep): 503, proces zivi, naslednje iskanje 200");
+    await pool.query("TRUNCATE omejitve");
+    const H = await zazeni(3178, { ISKANJE_NA_URO: "100000", ISKANJE_MEJA_MS: "1500" });
+    const lock3 = await pool.connect();
+    await lock3.query("BEGIN");
+    await lock3.query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE");
+    const cakajoce = [klic(H, "/search?q=prekini1"), klic(H, "/clubs?q=prekini2")];
+    await spi(400);
+    const ubiti = (await pool.query(`SELECT pg_terminate_backend(pid) AS t FROM pg_stat_activity WHERE application_name = 'outly_test_iskanje_meje' AND pid <> pg_backend_pid() AND state = 'active' AND wait_event_type = 'Lock'`)).rows.length;
+    const prekinjeni = await Promise.all(cakajoce);
+    assert(ubiti >= 1, "prekinjena vsaj ena seja, ki caka na zaklep", ubiti);
+    assert(prekinjeni[0].status === 503 && prekinjeni[0].iskanje === null && Number(prekinjeni[0].retryAfter) >= 1, "/search s prekinjeno povezavo -> 503 + Retry-After, brez X-Iskanje (ne 500)", prekinjeni.map((x) => [x.status, x.iskanje]));
+    assert(prekinjeni[1].status === 200, "/clubs?q= ne potrebuje events: 200", prekinjeni[1].status);
+    assert(H.umrl === null, "proces zivi");
+    await lock3.query("ROLLBACK"); lock3.release();
+    const poH = await klic(H, "/search?q=klub");
+    assert(poH.status === 200, "naslednje iskanje 200 (pool odpre novo povezavo)", poH.status);
+    await H.ustavi();
 
     // ------------------------------------------------------------------
     console.log("\n# (f) Obremenitev z razlicnimi q (odprta zanka): delez 503 pri ~15 / ~50 / ~100 iskanj/s");

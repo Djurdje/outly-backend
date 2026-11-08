@@ -1963,8 +1963,12 @@ function iskanjeMesto() {
 }
 // 503 namesto 500: iztek stavka/zaklep (napakaZasedenosti), zavrnitev mesta, odjemalski rok (pg "Query read timeout") ali rok povezave iz poola.
 function jeIztekIskanja(e) { return !!e && (e.code === "57014" || /Query read timeout/i.test(String(e.message))); }
+// Prekinjena povezava med iskanjem (restart/vzdrzevanje baze, pg_terminate_backend, omrezje): 57P01-57P03 (admin shutdown, crash shutdown, cannot connect now),
+// 08xxx (connection exception), ECONNRESET/ECONNREFUSED/EPIPE, »Connection terminated« -> 503 (nikoli 500).
+const KODE_PREKINJENE_POVEZAVE = new Set(["57P01", "57P02", "57P03", "08000", "08001", "08003", "08004", "08006", "ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT"]);
 function napakaIskanja(e) {
-  return napakaZasedenosti(e) || !!(e && (e.iskanjeZasedeno || /Query read timeout|timeout exceeded when trying to connect|Connection terminated/i.test(String(e.message))));
+  return napakaZasedenosti(e) || !!(e && (e.iskanjeZasedeno || KODE_PREKINJENE_POVEZAVE.has(e.code)
+    || /Query read timeout|timeout exceeded when trying to connect|Connection terminated|terminating connection|ECONNRESET|ECONNREFUSED/i.test(String(e.message))));
 }
 // NUL bajt v nizovnem parametru, ki ga pot bere in gre v SQL (`names`), pg zavrne (500 v Sentry): 400. Neznani parametri ostanejo kot na main.
 // Prekratek q (/search) tudi 400. Oboje PRED omejevalnikom (ne porabi stevca).
