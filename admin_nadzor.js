@@ -317,6 +317,10 @@ function ustvari(dep) {
           `Agent je v nujnem načinu izvedel dejanje (predlog ${x.id}), mail Martinu pa ni potrjeno poslan (${x.nujno_mail_poskusi} poskusov). Preveri dejanje v rdečem pasu na vrhu panela in klikni »Pregledal sem«.`,
           x.nujno_at);
       }
+      // Placilna seja Stripa traja 30 min, pospravljalec doda 5 min: `pending` starejse od 45 min (rezerva) = pospravljalec ne dela, Stripe ne odgovarja ali webhook ni prisel,
+      // zaloga in miza pa ostajata zasedeni (I70). Samo stevilo in najstarejsi cas, brez kupcev in referenc. Indeks orders_pending_idx (created_at WHERE status = 'pending').
+      const visijo = (await c.query(`SELECT COUNT(*)::int AS n, MIN(created_at) AS najstarejse FROM orders WHERE status = 'pending' AND created_at < NOW() - INTERVAL '45 minutes'`)).rows[0];
+      if (visijo.n > 0) dodaj("narocila_visijo", "rdece", "narocila", null, `${visijo.n} naročil čaka na plačilo več kot 45 minut (seja Stripa traja 30 min, pospravljalec doda 5 min): pospravljalec ali webhook morda ne delata, zaloga ostaja zasedena. Preveri Stripovo nadzorno ploščo in dnevnik.`, visijo.najstarejse);
       if (diskPct !== null && diskPct >= dep.bazaDisk.opozoriloPct) {
         dodaj("baza_disk", "rdece", "baza", null,
           `Disk baze je ${diskPct} % zaseden (meja opozorila ${dep.bazaDisk.opozoriloPct} %). Poln disk ustavi bazo, tudi sken na vratih: povečaj disk baze na Renderju (outly-db) in nato popravi BAZA_DISK_MB.`);
