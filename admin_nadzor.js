@@ -173,6 +173,9 @@ function ustvari(dep) {
   // `dogodekId` (neobvezno, samo GET /opozorila?dogodek=ID, #328): preverjanje enega dogodka PRED objavo. Isti pogoji, a tudi za osnutek (sicer se osnutek
   // preskoci: plakat je edino opozorilo osnutka), brez filtra skritosti/konca; vrne SAMO opozorila tega dogodka. Ne gre v predpomnilnik in ne v `zadnjiRdeci`.
   async function izracunajOpozorila(dogodekId = null, bere = beriReadOnly) {
+    // Zasedenost diska baze (baza_disk.js, I68): ista meritev kot GET /healthz/baza (v pomnilniku 5 min, nikoli null-izjema), PRED povezavo tega izracuna,
+    // da ne drzimo dveh povezav glavnega poola hkrati.
+    const diskPct = dogodekId === null && dep.bazaDisk ? await dep.bazaDisk.izmeri() : null;
     return bere(async (c) => {
       const items = [];
       const dodaj = (vrsta, resnost, cilj_tip, cilj_id, besedilo, cas) =>
@@ -313,6 +316,10 @@ function ustvari(dep) {
         dodaj("nujno_mail_neposlan", "rdece", "predlog", x.id,
           `Agent je v nujnem načinu izvedel dejanje (predlog ${x.id}), mail Martinu pa ni potrjeno poslan (${x.nujno_mail_poskusi} poskusov). Preveri dejanje v rdečem pasu na vrhu panela in klikni »Pregledal sem«.`,
           x.nujno_at);
+      }
+      if (diskPct !== null && diskPct >= dep.bazaDisk.opozoriloPct) {
+        dodaj("baza_disk", "rdece", "baza", null,
+          `Disk baze je ${diskPct} % zaseden (meja opozorila ${dep.bazaDisk.opozoriloPct} %). Poln disk ustavi bazo, tudi sken na vratih: povečaj disk baze na Renderju (outly-db) in nato popravi BAZA_DISK_MB.`);
       }
       }
 
