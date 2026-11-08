@@ -45,6 +45,29 @@ async function klic(p, pot) {
   return { status: r.status, besedilo, retryAfter: r.headers.get("retry-after"), iskanje: r.headers.get("x-iskanje"), ms: Date.now() - t0 };
 }
 
+// TCP posrednik pred bazo (velja SAMO za povezave iskalnega poola). odgovoriIzgubljeni: promet odjemalec -> baza tece, baza -> odjemalec se odvrze (poizvedba dosezena, odgovor ne pride).
+// drzi: ko odjemalec zapre povezavo, upstream OSTANE odprt (strezniku zaprtje nikoli ne pride: polodprt TCP).
+function posrednik() {
+  const st = { odgovoriIzgubljeni: false, drzi: false };
+  const gore = [];
+  const srvP = require("net").createServer((odj) => {
+    const u = new URL(DB);
+    const gor = require("net").connect(Number(u.port) || 5432, u.hostname);
+    gore.push(gor);
+    let iskalna = null;   // povezava iskalnega poola: v zagonskem paketu ima lock_timeout (omejevalnik, glavni pool in zdravje ga nimajo; skenPool miruje)
+    odj.on("data", (d) => { if (iskalna === null) iskalna = !!process.env.PROXY_VSE || d.toString("latin1").includes("lock_timeout"); gor.write(d); });
+    gor.on("data", (d) => { if (!(st.odgovoriIzgubljeni && iskalna)) odj.write(d); });
+    for (const x of [odj, gor]) x.on("error", () => {});
+    odj.on("close", () => { if (!(st.drzi && iskalna)) gor.destroy(); });
+    gor.on("close", () => odj.destroy());
+  });
+  return {
+    st,
+    zagon: () => new Promise((r) => srvP.listen(0, "127.0.0.1", () => { const u = new URL(DB); u.hostname = "localhost"; u.port = String(srvP.address().port); u.searchParams.set("application_name", "outly_test_iskanje_meje"); r(u.toString()); })),
+    zapri: () => { srvP.close(); for (const g of gore) g.destroy(); },
+  };
+}
+
 (async () => {
   const pool = new Pool({ connectionString: DB, max: 3 });
   pool.on("error", () => {});
@@ -169,8 +192,38 @@ async function klic(p, pot) {
     await lock2.query("ROLLBACK"); lock2.release();
     const po3 = await klic(E, "/search?q=klub");
     assert(po3.status === 200, "po sprostitvi zaklepa iskanje spet 200 (mesta se sprostijo)", po3.status);
-    const nulCity = [(await klic(E, "/clubs?city=a%00b")).status, (await klic(E, "/search?q=klub&limit=1%00")).status, (await klic(E, "/clubs?withCoords=%00")).status];
-    assert(nulCity.every((x) => x === 400), "NUL v city/limit/withCoords -> 400 (ne 500)", nulCity);
+    const nulCity = [(await klic(E, "/clubs?city=a%00b")).status, (await klic(E, "/clubs?q=%00")).status];
+    assert(nulCity.every((x) => x === 400), "NUL v city in q (parametra, ki gresta v SQL) -> 400 (ne 500)", nulCity);
+    const nulDrugo = [(await klic(E, "/clubs?neznan=%00")).status, (await klic(E, "/clubs?withCoords=%00")).status];
+    assert(nulDrugo.every((x) => x === 200), "NUL v parametru, ki ga pot ne bere ali ne gre v SQL: obnasanje kot na main (200)", nulDrugo);
+
+    // ------------------------------------------------------------------
+    console.log("\n# (g) Polodprt TCP (odgovori baze izginejo, stran ne vidi zaprtja): 503 v roku, na strezniku NI seje v transakciji, ALTER TABLE uspe");
+    const post = posrednik();
+    const purl = await post.zagon();
+    await pool.query("TRUNCATE omejitve");
+    const G = await zazeni(3177, { DATABASE_URL: purl, ISKANJE_NA_URO: "100000", ISKANJE_MEJA_MS: "1000" });
+    assert((await klic(G, "/search?q=klub")).status === 200, "ogrevanje prek posrednika: 200");
+    post.st.odgovoriIzgubljeni = true; post.st.drzi = true;   // poizvedba DOSEZE bazo, odgovor ne pride nazaj; ob zaprtju na strani odjemalca upstream ostane odprt
+    const zamrz = [];
+    for (let i = 0; i < 3; i++) zamrz.push(await klic(G, "/search?q=zamrzni" + i));
+    assert(zamrz.every((x) => x.status === 503), "iskanja ob polodprti povezavi -> 503", zamrz.map((x) => x.status));
+    assert(zamrz.every((x) => x.ms < 3500), "503 v roku (meja 1 s + odjemalski rok 1 s), ne visi", zamrz.map((x) => x.ms));
+    assert(zamrz.every((x) => x.iskanje === null), "iztek odjemalskega roka: 503 brez X-Iskanje", zamrz.map((x) => x.iskanje));
+    if (process.env.IZPIS_LOGA) console.log(G.log.slice(-1800));
+    await spi(300);
+    const sej = (await pool.query("SELECT state, count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'outly_test_iskanje_meje' AND pid <> pg_backend_pid() GROUP BY state")).rows;
+    const vTx = sej.filter((x) => /in transaction/.test(x.state || "")).reduce((n, x) => n + x.n, 0);
+    assert(vTx === 0, "na strezniku NI seje 'idle in transaction' (brez odprte transakcije z zaklepom na clubs)", sej);
+    const al = new Pool({ connectionString: DB, max: 1, options: "-c lock_timeout=2000" });
+    let alterOk = false, alterNapaka = null;
+    try { await al.query("ALTER TABLE clubs ADD COLUMN iskanje_test_x int"); alterOk = true; await al.query("ALTER TABLE clubs DROP COLUMN iskanje_test_x"); } catch (e) { alterNapaka = e.message; }
+    await al.end();
+    assert(alterOk, "ALTER TABLE clubs ADD COLUMN z lock_timeout 2 s uspe (migracija ob deployu ne obvisi)", alterNapaka);
+    post.st.odgovoriIzgubljeni = false; post.st.drzi = false;
+    const glavni = await klic(G, "/clubs?limit=5");
+    assert(glavni.status === 200, "glavni pool je med tem delal normalno (/clubs brez q)", glavni.status);
+    await G.ustavi(); post.zapri();
 
     // ------------------------------------------------------------------
     console.log("\n# (f) Obremenitev z razlicnimi q (odprta zanka): delez 503 pri ~15 / ~50 / ~100 iskanj/s");
