@@ -1910,6 +1910,37 @@ const GLAVE_OSEBNO = { "Cache-Control": "private", Vary: "Authorization" };
 function kljucId(vrsta, id) {
   return id.length > 15 ? null : JSON.stringify([vrsta, id]);
 }
+// Meje javnega iskanja (#405, I69): GET /search in GET /clubs?q= delata ILIKE '%q%' po opisu (brez indeksa) na glavnem poolu, nakljucen q
+// obide predpomnilnik. Zato: omejevalnik na IP (deljen kljuc obeh poti; GET /clubs brez q se ne steje), q najvec ISKANJE_Q_NAJVEC znakov
+// (daljsi se OBREZE, ne zavrne: odjemalca polja ne omejujeta, napaka pri lepljenju bi bila hujsa od obreza) in casovna meja poizvedbe.
+const ISKANJE_Q_NAJVEC = 64;
+const ISKANJE_NA_URO = stevilkaIzOkolja("ISKANJE_NA_URO", 600, 100000);
+const ISKANJE_MEJA_MS = stevilkaIzOkolja("ISKANJE_MEJA_MS", 2000, 30000);   // 0 = brez meje
+const omejiIskanje = omeji({ kljuc: "iskanje-javno", najvec: ISKANJE_NA_URO, oknoSekund: 3600, priNapaki: "odpri" });
+const omejiIskanjeCeQ = (req, res, next) => (req.query.q ? omejiIskanje(req, res, next) : next());
+function skrajsajQ(surov) {
+  const q = String(surov || "").trim();
+  return q.length > ISKANJE_Q_NAJVEC ? Array.from(q).slice(0, ISKANJE_Q_NAJVEC).join("") : q;   // po kodnih tockah: ne prerezi surogatnega para
+}
+// Ena poizvedba v kratki READ ONLY transakciji s SET LOCAL statement_timeout (glavni pool mej nima); povezava gre vedno nazaj v pool.
+// Iztek (57014) ujame klicalec (napakaZasedenosti) in odgovori 503 + Retry-After. Ravnanje s pokvarjeno povezavo kot skenBranje.
+async function iskalnoBranje(sql, params) {
+  const c = await pool.connect();
+  let pokvarjen = false;
+  try {
+    await c.query(ISKANJE_MEJA_MS > 0 ? `BEGIN READ ONLY; SET LOCAL statement_timeout = ${ISKANJE_MEJA_MS}` : "BEGIN READ ONLY");
+    const r = await c.query(sql, params);
+    await c.query("COMMIT");
+    return r;
+  } catch (e) {
+    const koda = String((e && e.code) || "");
+    if (/^[0-9A-Z]{5}$/.test(koda) && /[0-9]/.test(koda)) await c.query("ROLLBACK").catch(() => { pokvarjen = true; });
+    else pokvarjen = true;
+    throw e;
+  } finally { c.release(pokvarjen); }
+}
+const ISKANJE_ZASEDENO = "Search is busy. Please try again shortly.";
+
 function kljucKlubov(q) {
   const { limit, offset, city, q: iskanje, withCoords } = q;
   if (nenavadniParametri([limit, offset, city, iskanje, withCoords])) return null;
@@ -1938,7 +1969,7 @@ function kljucIskanja(surovQ, surovLimit, q, limit) {
   return JSON.stringify(["search", q, limit]);
 }
 
-app.get("/clubs", async (req, res) => {
+app.get("/clubs", omejiIskanjeCeQ, async (req, res) => {
   try {
     // city je prosto besedilo, offset > 0 zaporedna vrednost (#210): loceni majhen proracun (`prosto`), da poplava ne izpodrine vrocih kljucev.
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucKlubov(req.query), async () => {
@@ -1950,7 +1981,7 @@ app.get("/clubs", async (req, res) => {
 
     if (req.query.city) { p.push(req.query.city); pogoji.push(`city ILIKE $${p.length}`); }
     if (req.query.q) {
-      p.push(`%${String(req.query.q).trim()}%`);
+      p.push(`%${skrajsajQ(req.query.q)}%`);
       pogoji.push(`(name ILIKE $${p.length} OR city ILIKE $${p.length} OR description ILIKE $${p.length})`);
     }
     // Zemljevid potrebuje samo klube s koordinatami.
@@ -1960,10 +1991,11 @@ app.get("/clubs", async (req, res) => {
 
     const kje = pogoji.length ? "WHERE " + pogoji.join(" AND ") : "";
 
-    const skupaj = await pool.query(`SELECT COUNT(*)::int AS n FROM clubs ${kje}`, p);
+    const beri = req.query.q ? iskalnoBranje : (sql, par) => pool.query(sql, par);   // z q: casovna meja (#405); brez q ostane pot nespremenjena
+    const skupaj = await beri(`SELECT COUNT(*)::int AS n FROM clubs ${kje}`, p);
 
     p.push(limit); p.push(offset);
-    const r = await pool.query(
+    const r = await beri(
       `SELECT ${JAVNI_STOLPCI_KLUBA} FROM clubs ${kje}
        ORDER BY created_at DESC LIMIT $${p.length - 1} OFFSET $${p.length}`,
       p
@@ -1975,6 +2007,7 @@ app.get("/clubs", async (req, res) => {
     }, { prosto: prostKljucKlubov(req.query) });
     return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "2").send(ISKANJE_ZASEDENO); }
     console.error(e);
     res.status(500).send("Server error.");
   }
@@ -3526,9 +3559,9 @@ app.delete("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, 
 // ---------------------------
 // SearchView je doslej iskal na napravi, po prvih 100 klubih, ki jih je vrnil
 // strezik, in samo po klubih — ceprav polje obljublja "Search clubs or events".
-app.get("/search", async (req, res) => {
+app.get("/search", omejiIskanje, async (req, res) => {
   try {
-    const q = String(req.query.q || "").trim();
+    const q = skrajsajQ(req.query.q);
     if (q.length < 2) return res.status(400).send("Query must be at least 2 characters.");
 
     const limit = stevilo(req.query.limit, 20, 50);
@@ -3537,7 +3570,7 @@ app.get("/search", async (req, res) => {
     // Odgovor ne zavisi od uporabnika (I17); iskalni nizi so prosto besedilo -> loceni proracun (`prosto`).
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucIskanja(req.query.q, req.query.limit, q, limit), async () => {
     const [klubi, dogodki] = await Promise.all([
-      pool.query(
+      iskalnoBranje(
         `SELECT id, name, city, logo_url, lat, lng, genres, is_demo
          FROM clubs
          WHERE hidden = FALSE
@@ -3546,7 +3579,7 @@ app.get("/search", async (req, res) => {
          LIMIT $3`,
         [vzorec, `${q}%`, limit]
       ),
-      pool.query(
+      iskalnoBranje(
         `SELECT e.id, e.club_id, e.title, e.poster_url, e.start_at,
                 e.ticket_price_cents, e.currency, c.name AS club_name, c.is_demo, ${PRIZORISCE_E}
          FROM events e JOIN clubs c ON c.id = e.club_id ${PRIZORISCE_JOIN_JAVNO}
@@ -3567,6 +3600,7 @@ app.get("/search", async (req, res) => {
     }, { prosto: true });
     return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
+    if (napakaZasedenosti(e)) { console.error(e.message); return res.status(503).set("Retry-After", "2").send(ISKANJE_ZASEDENO); }
     console.error(e);
     return res.status(500).send("Server error.");
   }
