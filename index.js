@@ -2170,7 +2170,7 @@ app.get("/me/club-events", requireAuth, async (req, res) => {
   try {
     const r = await pool.query(
       `SELECT n.id, n.created_at, n.event_id,
-              e.title AS event_title, e.start_at, e.poster_url,
+              e.title AS event_title, e.start_at, e.poster_url, e.poster_card_url,
               c.id AS club_id, c.name AS club_name, c.logo_url AS club_logo_url
          FROM club_event_notifications n
          JOIN events e ON e.id = n.event_id
@@ -2485,6 +2485,8 @@ const STOLPCI_DOGODKA = `
         title,
         description,
         poster_url,
+        -- Majhen banner 3:4 (074, outly-backend#400): '' = ni; odjemalec za majhne kartice vzame poster_card_url, sicer poster_url. DODANO polje.
+        poster_card_url,
         start_at,
         end_at,
         min_age,
@@ -2961,6 +2963,7 @@ async function ustvariDogodek(req, res, opcije = {}) {
     const title = req.body.title;
     const description = req.body.description ?? "";
     const posterUrlSurov = req.body.posterUrl ?? req.body.poster_url;
+    const posterCardUrlSurov = req.body.posterCardUrl ?? req.body.poster_card_url;
     const startAt = req.body.startAt ?? req.body.start_at;
     const endAt = req.body.endAt ?? req.body.end_at ?? null;
     const minAge = req.body.minAge ?? req.body.min_age;
@@ -2980,9 +2983,10 @@ async function ustvariDogodek(req, res, opcije = {}) {
     if (!clubId || !title || !startAt) return res.status(400).send("Missing clubId, title or startAt.");
     if (!/^\d+$/.test(String(clubId))) return res.status(400).send("Invalid clubId.");
     // URL polja (#269): samo http(s), 400 invalid_url; brez polja ali null = "".
-    const urlD = preveriUrlPolja([["poster_url", posterUrlSurov], ["ticket_url", ticketUrlSurov]]);
+    const urlD = preveriUrlPolja([["poster_url", posterUrlSurov], ["poster_card_url", posterCardUrlSurov], ["ticket_url", ticketUrlSurov]]);
     if (urlD.napaka) return res.status(400).json(urlD.napaka);
     const posterUrl = urlD.vrednosti.poster_url || "";
+    const posterCardUrl = urlD.vrednosti.poster_card_url || "";
     const ticketUrl = urlD.vrednosti.ticket_url || "";
     if (String(title).trim().length === 0) return res.status(400).send("Title is required.");
     if (naslovPredolg(title)) return res.status(400).send(NASLOV_PREDOLG);
@@ -3029,10 +3033,11 @@ async function ustvariDogodek(req, res, opcije = {}) {
         club_id, title, description, poster_url, start_at, end_at,
         min_age, genres, status,
         ticket_price_cents, currency, ticket_url, capacity,
-        venue_club_id, venue_name, venue_address, venue_city, venue_lat, venue_lng
+        venue_club_id, venue_name, venue_address, venue_city, venue_lat, venue_lng,
+        poster_card_url
       )
       VALUES
-      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
       RETURNING *`;
     const parametri = [
         clubId,
@@ -3053,7 +3058,8 @@ async function ustvariDogodek(req, res, opcije = {}) {
         prizorisce.venue_address,
         prizorisce.venue_city,
         prizorisce.venue_lat,
-        prizorisce.venue_lng
+        prizorisce.venue_lng,
+        posterCardUrl
       ];
     let r;
     if (opcije.admin) {
@@ -3110,7 +3116,7 @@ async function dogodekZaUrejanje(req, res) {
   if (!/^\d+$/.test(req.params.id)) { res.status(400).send("Invalid event id."); return null; }
 
   const r = await pool.query(
-    `SELECT e.id, e.club_id, e.status, e.title, e.start_at, c.owner_user_id, c.is_organizer, e.poster_url, e.ticket_url,
+    `SELECT e.id, e.club_id, e.status, e.title, e.start_at, c.owner_user_id, c.is_organizer, e.poster_url, e.poster_card_url, e.ticket_url,
             e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng,
             (COALESCE(e.end_at, e.start_at + INTERVAL '8 hours') <= NOW()) AS je_koncan
      FROM events e JOIN clubs c ON c.id = e.club_id
@@ -3237,6 +3243,7 @@ async function urediDogodek(req, res, opcije = {}) {
       title:              b.title,
       description:        b.description,
       poster_url:         b.posterUrl        ?? b.poster_url,
+      poster_card_url:    b.posterCardUrl    ?? b.poster_card_url,   // majhen banner 3:4 (074, #400); '' ali null = brez
       start_at:           b.startAt          ?? b.start_at,
       end_at:             b.endAt            ?? b.end_at,
       min_age:            b.minAge           ?? b.min_age,
@@ -3253,7 +3260,7 @@ async function urediDogodek(req, res, opcije = {}) {
 
     // URL polja (#269): samo http(s), 400 invalid_url. Nespremenjena vrednost (tudi stara neveljavna) se ne preverja (obrazca iOS in splet
     // ob vsakem shranjevanju posljeta vsa polja); stari zapisi se ne cistijo.
-    const urlD = preveriUrlPolja([["poster_url", dovoljeno.poster_url], ["ticket_url", dovoljeno.ticket_url]], d);
+    const urlD = preveriUrlPolja([["poster_url", dovoljeno.poster_url], ["poster_card_url", dovoljeno.poster_card_url], ["ticket_url", dovoljeno.ticket_url]], d);
     if (urlD.napaka) return res.status(400).json(urlD.napaka);
     Object.assign(dovoljeno, urlD.vrednosti);
 
@@ -3530,7 +3537,7 @@ app.get("/search", async (req, res) => {
         [vzorec, `${q}%`, limit]
       ),
       pool.query(
-        `SELECT e.id, e.club_id, e.title, e.poster_url, e.start_at,
+        `SELECT e.id, e.club_id, e.title, e.poster_url, e.poster_card_url, e.start_at,
                 e.ticket_price_cents, e.currency, c.name AS club_name, c.is_demo, ${PRIZORISCE_E}
          FROM events e JOIN clubs c ON c.id = e.club_id ${PRIZORISCE_JOIN_JAVNO}
          WHERE e.status = 'published' AND c.hidden = FALSE
@@ -4200,7 +4207,7 @@ admin.get("/events", async (req, res) => {
     }
     const kje = pogoji.length ? "WHERE " + pogoji.join(" AND ") : "";
     const r = await pool.query(
-      `SELECT e.id, e.club_id, c.name AS club_name, c.hidden AS club_hidden, e.title, e.poster_url,
+      `SELECT e.id, e.club_id, c.name AS club_name, c.hidden AS club_hidden, e.title, e.poster_url, e.poster_card_url,
               e.start_at, e.end_at, e.min_age, e.genres, e.status, e.ticket_price_cents, e.currency,
               e.ticket_url, e.created_at, e.capacity, e.sold_count, e.sales_paused, e.sales_open_at, e.sales_close_at, e.publish_at, e.vip_enabled, ${PRIZORISCE_E},
               -- #190: koliko placanih narocil (brez guest liste) bi odpoved vrnila kupcem; admin panel to pokaze v potrditvenem oknu pred »Umakni«
@@ -4312,16 +4319,16 @@ async function podvojiDogodek(req, res, opcije = {}) {
     await c.query("SET LOCAL statement_timeout = 5000");
     if (opcije.predlog) await opcije.predlog(c, null);
     // Kopija ne prenese neveljavnih URL-jev (I48: stari zapis iz casov pred #269 bi se sicer razmnozil) in zanrov izven ZANRI: neveljavno postane '' / se izpusti.
-    const izvor = (await c.query("SELECT title, poster_url, ticket_url, genres FROM events WHERE id = $1", [id])).rows[0];
+    const izvor = (await c.query("SELECT title, poster_url, poster_card_url, ticket_url, genres FROM events WHERE id = $1", [id])).rows[0];
     if (!izvor) { await c.query("ROLLBACK"); return napaka(404, "event_not_found", "Event not found."); }
     const urlAliPrazno = (v, polje) => { const x = preveriUrlPolja([[polje, v]]); return x.napaka ? "" : (x.vrednosti[polje] || ""); };
-    const posterKopija = urlAliPrazno(izvor.poster_url, "poster_url"), ticketKopija = urlAliPrazno(izvor.ticket_url, "ticket_url");
+    const posterKopija = urlAliPrazno(izvor.poster_url, "poster_url"), posterKarticaKopija = urlAliPrazno(izvor.poster_card_url, "poster_card_url"), ticketKopija = urlAliPrazno(izvor.ticket_url, "ticket_url");
     const zanriKopija = ociscenoZanre(izvor.genres);
     // Naslov kopije najvec NASLOV_NAJVEC znakov (star daljsi naslov se obreze, podvajanje ne pade); naslov do meje se kopira nespremenjen.
     const naslovKopija = naslovPredolg(izvor.title) ? naslovObrezan(izvor.title) : izvor.title;
     const r = await c.query(
       `INSERT INTO events (club_id, title, description, poster_url, start_at, end_at, min_age, genres, status, ticket_price_cents, currency, ticket_url,
-                           capacity, vat_rate, sales_open_at, sales_close_at, venue_club_id, venue_name, venue_address, venue_city, venue_lat, venue_lng)
+                           capacity, vat_rate, sales_open_at, sales_close_at, venue_club_id, venue_name, venue_address, venue_city, venue_lat, venue_lng, poster_card_url)
        SELECT e.club_id, $7::text, e.description, $4::text, s.nov_start,
               CASE WHEN e.end_at IS NULL THEN NULL
                    ELSE s.nov_start + make_interval(secs => (EXTRACT(EPOCH FROM e.end_at) - EXTRACT(EPOCH FROM e.start_at))::float8) END,
@@ -4329,14 +4336,14 @@ async function podvojiDogodek(req, res, opcije = {}) {
               e.capacity, e.vat_rate,
               CASE WHEN e.sales_open_at IS NULL THEN NULL ELSE ((e.sales_open_at AT TIME ZONE 'Europe/Ljubljana') + s.zamik) AT TIME ZONE 'Europe/Ljubljana' END,
               CASE WHEN e.sales_close_at IS NULL THEN NULL ELSE ((e.sales_close_at AT TIME ZONE 'Europe/Ljubljana') + s.zamik) AT TIME ZONE 'Europe/Ljubljana' END,
-              e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng
+              e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng, $8::text
          FROM events e
         CROSS JOIN LATERAL (SELECT CASE WHEN g = 0 THEN $2::timestamptz   -- prvi osnutek natanko na zahtevanem trenutku (ura v dvoumni uri prehoda casa bi se prek AT TIME ZONE premaknila)
                                     ELSE ((($2::timestamptz AT TIME ZONE 'Europe/Ljubljana') + g * INTERVAL '7 days') AT TIME ZONE 'Europe/Ljubljana') END AS nov_start,
                                    (($2::timestamptz AT TIME ZONE 'Europe/Ljubljana') + g * INTERVAL '7 days') - (e.start_at AT TIME ZONE 'Europe/Ljubljana') AS zamik
                               FROM generate_series(0, $3::int - 1) AS g) s
         WHERE e.id = $1
-       RETURNING id, title, start_at, status`, [id, zacetekIso, n, posterKopija, ticketKopija, zanriKopija, naslovKopija]);
+       RETURNING id, title, start_at, status`, [id, zacetekIso, n, posterKopija, ticketKopija, zanriKopija, naslovKopija, posterKarticaKopija]);
     if (r.rows.length === 0) { await c.query("ROLLBACK"); return napaka(404, "event_not_found", "Event not found."); }
     nove = r.rows.sort((a, z) => a.start_at - z.start_at || a.id - z.id);
     for (const nov of nove) {
@@ -4370,7 +4377,7 @@ admin.get("/events/:id", async (req, res) => {
     await c.query("BEGIN READ ONLY");
     await c.query("SET LOCAL statement_timeout = 3000");
     const er = await c.query(
-      `SELECT e.id, e.club_id, cl.name AS club_name, cl.hidden AS club_hidden, cl.is_demo AS club_is_demo, e.title, e.description, e.poster_url,
+      `SELECT e.id, e.club_id, cl.name AS club_name, cl.hidden AS club_hidden, cl.is_demo AS club_is_demo, e.title, e.description, e.poster_url, e.poster_card_url,
               e.start_at, e.end_at, e.min_age, e.genres, e.status, e.ticket_price_cents, e.currency, e.ticket_url, e.capacity, e.sold_count,
               e.sales_paused, e.sales_open_at, e.sales_close_at, e.publish_at, e.vip_enabled, e.recap_video_url, e.created_at,
               e.venue_club_id, e.venue_name, e.venue_address, e.venue_city, e.venue_lat, e.venue_lng
@@ -5708,7 +5715,7 @@ async function idemZakleniInPoisci(c, userId, kljuc) {
 }
 // Telo odgovora nakupa (enako ob prvem nakupu in ob ponovitvi). db: odjemalec, ki ga klicatelj ze drzi, ali pool.
 async function odgovorNarocila(db, oid) {
-  const nr = await db.query(`SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name,
+  const nr = await db.query(`SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, e.poster_card_url, cl.name AS club_name,
        ${SQL_CHECKOUT_URL}
      FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id WHERE o.id = $1`, [oid]);
   const vst = await vstopniceNarocil([oid], db);
@@ -5971,7 +5978,7 @@ app.get("/me/orders", requireAuth, async (req, res) => {
   try {
     await prevzemiGostujocaNarocila(req.user.userId, true);
     const preberi = () => pool.query(
-      `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, cl.name AS club_name,
+      `SELECT ${STOLPCI_NAROCILA}, e.title AS event_title, e.start_at, e.poster_url, e.poster_card_url, cl.name AS club_name,
               ${SQL_CHECKOUT_URL}
        FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id
        WHERE o.user_id = $1 AND NOT (o.status IN ('cancelled','failed') AND o.paid_at IS NULL)
@@ -6046,7 +6053,7 @@ app.delete("/me/favorites/:eventId", requireAuth, async (req, res) => {
 // poizvedba (warning_needs_response, warning_under_review) NI chargeback in vrat ne zapre; spet veljajo ob won | warning_closed | prevented. En indeksiran EXISTS (spori_narocilo_idx) v ISTI poizvedbi, ki jo sken ze dela; brez klica Stripa. Alias naroceno: `o`.
 const SQL_SPOR_ODPRT = "EXISTS (SELECT 1 FROM spori sp WHERE sp.order_id = o.id AND sp.stanje IN ('needs_response', 'under_review', 'lost'))";
 const SQL_VSTOPNICE_POGLED = `SELECT ${STOLPCI_VSTOPNICE}, ${STOLPCI_VIP_VSTOPNICE}, o.public_ref, o.status AS order_status,
-              e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
+              e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.poster_card_url, e.min_age,
               cl.id AS club_id, cl.name AS club_name, ${PRIZORISCE_NASLOV}, cl.logo_url, ${PRIZORISCE_E},
               ${STOLPCI_IMETNIKA}, bu.username AS buyer_username,
               (t.status = 'valid' AND e.start_at > NOW() AND o.guest_list_id IS NULL AND NOT ${SQL_SPOR_ODPRT}) AS transferable,   -- vstopnice guest liste se ne prenasajo (035); ob odprtem/izgubljenem sporu tudi ne (#278)
@@ -6439,7 +6446,7 @@ async function gostNarociloOdgovor(db, oid) {
     `SELECT o.id, o.public_ref, o.status, o.quantity, o.unit_price_cents, o.total_cents, o.currency, o.refunded_cents,
             COALESCE(o.stripe_payment_intent_id LIKE 'test_%', FALSE) AS is_test, o.created_at, o.paid_at,
             ${SQL_CHECKOUT_URL},
-            e.id AS event_id, e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.min_age,
+            e.id AS event_id, e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.poster_card_url, e.min_age,
             cl.id AS club_id, cl.name AS club_name, ${PRIZORISCE_NASLOV}, cl.logo_url, ${PRIZORISCE_E},
             ${sqlProdajalecSurov("cl")} AS seller_raw, ${placilaStripe.SQL_NAROCILO_PLATFORMNO("o")} AS platformno
        FROM orders o JOIN events e ON e.id = o.event_id JOIN clubs cl ON cl.id = o.club_id ${PRIZORISCE_JOIN} WHERE o.id = $1`, [oid]);
@@ -6449,8 +6456,8 @@ async function gostNarociloOdgovor(db, oid) {
     id: x.id, public_ref: x.public_ref, status: x.status, quantity: x.quantity, unit_price_cents: x.unit_price_cents,
     total_cents: x.total_cents, currency: x.currency, refunded_cents: x.refunded_cents, is_test: x.is_test,
     created_at: x.created_at, paid_at: x.paid_at, checkout_url: x.checkout_url, checkout_expired: x.checkout_expired, payment_processing: x.payment_processing,
-    event_id: x.event_id, club_id: x.club_id, event_title: x.event_title, start_at: x.start_at, poster_url: x.poster_url, club_name: x.club_name,
-    event: { id: x.event_id, title: x.event_title, start_at: x.start_at, end_at: x.end_at, poster_url: x.poster_url, min_age: x.min_age,
+    event_id: x.event_id, club_id: x.club_id, event_title: x.event_title, start_at: x.start_at, poster_url: x.poster_url, poster_card_url: x.poster_card_url, club_name: x.club_name,
+    event: { id: x.event_id, title: x.event_title, start_at: x.start_at, end_at: x.end_at, poster_url: x.poster_url, poster_card_url: x.poster_card_url, min_age: x.min_age,
              club_id: x.club_id, club_name: x.club_name, address: x.address, city: x.city, logo_url: x.logo_url, ...prizoriscePolja(x) },
     seller: prodajalec({ ...x.seller_raw, is_official: false, is_platform: x.platformno === true }),   // prodajalec = organizator/klub dogodka, ne prizorisce (043, #94); I50: platforma po oznaki NAROCILA
   };
@@ -7814,12 +7821,12 @@ app.get("/guest/ticket", async (req, res) => {
     // BELI SEZNAM polj (ne SELECT-ova oblika /me/tickets): brez order_id, holder_user_id, holder_id, holder_email, is_guest, order_status (notranje/kupcevo).
     // public_ref ostane: spletna stran ga kaze kot »ORDER« (webapp/js/views/vstopnice.js QrTelo).
     const bel = {};
-    for (const k of ["id", "serial", "status", "used_at", "created_at", "event_id", "event_title", "start_at", "end_at", "poster_url", "min_age", "club_id", "club_name",
+    for (const k of ["id", "serial", "status", "used_at", "created_at", "event_id", "event_title", "start_at", "end_at", "poster_url", "poster_card_url", "min_age", "club_id", "club_name",
       "address", "city", "logo_url", "venue_club_id", "venue_club_name", "venue_club_logo_url", "venue_name", "venue_address", "venue_city", "venue_lat", "venue_lng",
       "is_vip", "table_label", "table_seats", "package_name", "package_description", "public_ref", "transferred", "holder_username", "is_guest_holder", "payment_disputed"]) bel[k] = t[k];
     return res.json({
       ticket: { ...bel, qr: qrVstopnice(t), transferable: false, from_username: pos, buyer_username: pos },   // gost vstopnice ne more naprej (brez racuna)
-      event: { id: t.event_id, title: t.event_title, start_at: t.start_at, end_at: t.end_at, poster_url: t.poster_url, min_age: t.min_age,
+      event: { id: t.event_id, title: t.event_title, start_at: t.start_at, end_at: t.end_at, poster_url: t.poster_url, poster_card_url: t.poster_card_url, min_age: t.min_age,
                club_id: t.club_id, club_name: t.club_name, address: t.address, city: t.city, logo_url: t.logo_url, ...prizoriscePolja(t) },
     });
   } catch (e) { console.error(e); return res.status(500).send("Server error."); }
@@ -8041,7 +8048,7 @@ app.get("/business/sales", requireAuth, requireClub("owner", "manager"), async (
                 COALESCE(SUM(o.quantity) FILTER (WHERE ${SQL_TESTNO_NAROCILO} AND o.table_id IS NULL),0)::int AS test_tickets_sold
          FROM orders o WHERE o.club_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL`, [klub]),   // guest lista (035, I24) ni prodaja: ne v bruto, tickets_sold, stevilo narocil; testno narocilo (#236, I39) ni v summary
       pool.query(
-        `SELECT e.id, e.title, e.start_at, e.poster_url, e.status, e.ticket_price_cents, e.capacity, e.sold_count,
+        `SELECT e.id, e.title, e.start_at, e.poster_url, e.poster_card_url, e.status, e.ticket_price_cents, e.capacity, e.sold_count,
                 -- #236 (I39): samo PRAVI promet. Pogoj je v FILTER (ne v ON): dogodek brez pravega prometa ostane v seznamu z nicelami.
                 COALESCE(SUM(o.total_cents) FILTER (WHERE o.status IN ('paid','partially_refunded') AND ${SQL_PRAVO_NAROCILO}),0)::int AS gross_cents,
                 COALESCE(SUM(o.quantity) FILTER (WHERE o.status IN ('paid','partially_refunded') AND ${SQL_PRAVO_NAROCILO} AND o.table_id IS NULL),0)::int AS tickets_sold,
@@ -8436,7 +8443,7 @@ const GUEST_LISTA_NEPREBRANA_KJE = `WHERE m.user_id = $1 AND m.seen_at IS NULL A
 async function guestListeOdgovor(db, kje, params, admin = false) {
   const r = await db.query(
     `SELECT gl.id, gl.spots, gl.note, gl.created_at, gl.revoked_at, gl.host_user_id,
-            e.id AS event_id, e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.club_id, cl.name AS club_name, e.min_age, e.status AS event_status,
+            e.id AS event_id, e.title AS event_title, e.start_at, e.end_at, e.poster_url, e.poster_card_url, e.club_id, cl.name AS club_name, e.min_age, e.status AS event_status,
             (e.status = 'published' AND ${GUEST_LISTA_KONEC} > NOW()) AS dogodek_odprt,
             hu.username AS host_username, hu.email AS host_email,
             (SELECT MIN(t.id) FROM tickets t JOIN orders o ON o.id = t.order_id WHERE o.guest_list_id = gl.id) AS my_ticket_id
@@ -8456,7 +8463,7 @@ async function guestListeOdgovor(db, kje, params, admin = false) {
     const invited = povabljeni.get(x.id) || [];
     const o = {
       id: x.id,
-      event: { id: x.event_id, title: x.event_title, start_at: x.start_at, end_at: x.end_at, poster_url: x.poster_url, club_id: x.club_id,
+      event: { id: x.event_id, title: x.event_title, start_at: x.start_at, end_at: x.end_at, poster_url: x.poster_url, poster_card_url: x.poster_card_url, club_id: x.club_id,
                club_name: x.club_name, min_age: x.min_age, status: x.event_status },
       spots: x.spots,
       remaining: Math.max(0, x.spots - invited.length),
@@ -8511,7 +8518,7 @@ app.get("/me/guest-list-invites/received", requireAuth, async (req, res) => {
   try {
     const r = await pool.query(
       `SELECT m.id, m.guest_list_id, m.ticket_id, m.created_at, hu.username AS host_username, hu.avatar_url AS host_avatar_url,
-              e.id AS event_id, e.title AS event_title, e.start_at AS event_start_at, e.poster_url AS event_poster_url, cl.name AS club_name
+              e.id AS event_id, e.title AS event_title, e.start_at AS event_start_at, e.poster_url AS event_poster_url, e.poster_card_url AS event_poster_card_url, cl.name AS club_name
        ${GUEST_LISTA_NEPREBRANA_IZ}
        JOIN clubs cl ON cl.id = e.club_id
        JOIN users hu ON hu.id = gl.host_user_id
@@ -8522,7 +8529,7 @@ app.get("/me/guest-list-invites/received", requireAuth, async (req, res) => {
       id: x.id, guest_list_id: x.guest_list_id, ticket_id: x.ticket_id,
       host_username: x.host_username, host_avatar_url: x.host_avatar_url || null,
       created_at: x.created_at,
-      event: { id: x.event_id, title: x.event_title, start_at: x.event_start_at, poster_url: x.event_poster_url, club_name: x.club_name },
+      event: { id: x.event_id, title: x.event_title, start_at: x.event_start_at, poster_url: x.event_poster_url, poster_card_url: x.event_poster_card_url, club_name: x.club_name },
     })) });
   } catch (e) { return odgovoriNaNapako(res, e, "GET /me/guest-list-invites/received"); }
 });
@@ -11175,7 +11182,7 @@ app.get("/business/team/:userId/scans", requireAuth, requireClub("owner", "manag
     );
     if (clan.rows.length === 0) return res.status(404).send("Member not found.");
     const r = await pool.query(
-      `SELECT e.id, e.title, e.start_at, e.poster_url, COUNT(*)::int AS scans
+      `SELECT e.id, e.title, e.start_at, e.poster_url, e.poster_card_url, COUNT(*)::int AS scans
          FROM tickets t JOIN events e ON e.id = t.event_id
         WHERE e.club_id = $1 AND t.used_by_user_id = $2 AND t.status = 'used'
         GROUP BY e.id HAVING COUNT(*) > 0 ORDER BY e.start_at DESC`,
