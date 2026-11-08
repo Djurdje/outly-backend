@@ -1216,6 +1216,23 @@ app.get("/healthz/sken", async (req, res) => {
   res.status(ok ? 200 : 503).json({ ok });
 });
 
+// GET /healthz/baza: zasedenost diska baze (baza_disk.js, I68). Render outly-db ima disk 1 GB brez autoscalinga; poln disk = baza stoji (tudi sken).
+// Odgovor SAMO { ok, disk_pct } (nikoli bajti, imena tabel); 503 ob disk_pct >= BAZA_DISK_OPOZORILO_PCT ali nedosegljivi bazi (disk_pct null).
+// Meritev je v pomnilniku 5 min (najvec ena poizvedba na 5 min, glavni pool s kratkim rokom; NE skenPool, NE zdraviPool). Ni Renderjev Health Check.
+// Po povecanju diska na Renderju je treba BAZA_DISK_MB popraviti, sicer alarm laze (.env.example).
+const bazaDisk = require("./baza_disk").ustvari({
+  pool, diskMb: okoljeCelo("BAZA_DISK_MB", 1024, 1, 100000000), opozoriloPct: okoljeCelo("BAZA_DISK_OPOZORILO_PCT", 70, 1, 100),
+  veljaMs: okoljeCelo("BAZA_DISK_VELJA_MS", 300000, 1, 3600000),   // samo za teste; produkcija pusti privzeto (5 min)
+});
+console.log(`[baza_disk] disk ${bazaDisk.diskMb} MB, opozorilo pri ${bazaDisk.opozoriloPct} %, meritev velja ${Math.round(bazaDisk.veljaMs / 60000)} min`);
+app.get("/healthz/baza", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const disk_pct = await bazaDisk.izmeri();
+  if (disk_pct === null) return res.status(503).json({ ok: false, disk_pct: null });
+  const ok = disk_pct < bazaDisk.opozoriloPct;
+  res.status(ok ? 200 : 503).json({ ok, disk_pct });
+});
+
 // Admin panel: statična stran v mapi admin/ (en HTML + JS, brez ogrodja).
 // Sama stran ne razkrije ničesar — vsi podatki pridejo prek poti /admin/api/*,
 // ki zahtevajo vlogo admin.
@@ -5010,7 +5027,7 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
 
 // Opozorila, seznam racunov in nadzorna plosca »Danes« (23. 10. 2026, #326): GET /admin/api/opozorila, /racuni, /danes (admin_nadzor.js; samo branje, glavni pool, nikoli skenPool).
 const adminNadzor = require("./admin_nadzor").ustvari({
-  pool, router: admin, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
+  pool, router: admin, bazaDisk, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
 });
 // Samodejna objava osnutkov ob casu (#327, migracija 062, I59; samodejna_objava.js): delavec vsako minuto, glavni pool, nikoli skenPool. Isti koraki po objavi kot rocna objava
 // (predpomnilnik, obvestilo sledilcem); SAMODEJNA_OBJAVA_MS=0 izklopi delavca (PATCH publishAt ostane: osnutek se potem objavi rocno).
