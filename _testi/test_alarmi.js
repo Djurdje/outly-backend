@@ -123,9 +123,9 @@ const zdravje = (port) => klic(port, "/healthz/opozorila");
     const klub = (await pool.query("INSERT INTO clubs (owner_user_id, name, city) VALUES ($1, 'Klub A', 'Ljubljana') RETURNING id", [u])).rows[0].id;
     const dog = (await pool.query("INSERT INTO events (club_id, title, status, start_at) VALUES ($1, 'Osnutek', 'draft', NOW() + INTERVAL '3 days') RETURNING id", [klub])).rows[0].id;
     const narocilo = (ref, min, polja = {}) => pool.query(
-      `INSERT INTO orders (public_ref, event_id, club_id, quantity, unit_price_cents, total_cents, status, buyer_email, created_at, stripe_checkout_session_id, checkout_url, guest_email, paid_at, guest_terms_version, guest_terms_accepted_at)
-       VALUES ($1, $2, $3, 1, 1000, 1000, $5, 'k@x.si', NOW() - ($4::int * INTERVAL '1 minute'), $6, $7, $8, CASE WHEN $5 = 'paid' THEN NOW() - ($4::int * INTERVAL '1 minute') ELSE NULL END, CASE WHEN $8::text IS NULL THEN NULL ELSE '1' END, CASE WHEN $8::text IS NULL THEN NULL ELSE NOW() END)`,
-      [ref, dog, klub, min, polja.status || "pending", polja.seja || null, polja.url === undefined ? null : polja.url, polja.gost || null]);
+      `INSERT INTO orders (public_ref, event_id, club_id, quantity, unit_price_cents, total_cents, status, buyer_email, created_at, stripe_checkout_session_id, checkout_url, guest_email, paid_at, guest_terms_version, guest_terms_accepted_at, stripe_payment_intent_id, guest_mail_attempts)
+       VALUES ($1, $2, $3, 1, 1000, 1000, $5, 'k@x.si', NOW() - ($4::int * INTERVAL '1 minute'), $6, $7, $8, CASE WHEN $5 IN ('paid', 'partially_refunded') THEN NOW() - ($4::int * INTERVAL '1 minute') ELSE NULL END, CASE WHEN $8::text IS NULL THEN NULL ELSE '1' END, CASE WHEN $8::text IS NULL THEN NULL ELSE NOW() END, $9, $10)`,
+      [ref, dog, klub, min, polja.status || "pending", polja.seja || null, polja.url === undefined ? null : polja.url, polja.gost || null, polja.pi || null, polja.poskusi || 0]);
     const pocakaj = () => spi(400);
     await pool.query("UPDATE users SET supabase_uid = $2 WHERE id = $1", [a.id, "00000000-0000-4000-8000-000000000001"]);
     const T = zeton("admin@outly.si", "00000000-0000-4000-8000-000000000001");
@@ -165,12 +165,24 @@ const zdravje = (port) => klic(port, "/healthz/opozorila");
     r = await zdravje(P1);
     assert(r.status === 200 && r.body.ok === true, "po odpravi spet 200", r);
     // gost: placano narocilo, mail z vstopnicami ni poslan 30+ min
-    await narocilo("ALARM-GOST", 40, { status: "paid", gost: "gost@primer.si" });
-    await pocakaj();
-    r = await zdravje(P1);
-    const pg = await panel();
-    assert(r.status === 503 && vrste(pg).includes("gost_vstopnice_neposlane") && pg.items.find((x) => x.vrsta === "gost_vstopnice_neposlane").resnost === "rdece", "gost_vstopnice_neposlane (rdece) -> 503", { r, v: vrste(pg) });
+    const gostPreizkus = async (ref, polja, oc503, besedilo) => {
+      await narocilo(ref, 40, { status: "paid", gost: "gost@primer.si", ...polja });
+      await pocakaj();
+      const rr = await zdravje(P1), pp = await panel();
+      assert(rr.status === (oc503 ? 503 : 200), besedilo, { rr, v: vrste(pp) });
+      await pool.query("DELETE FROM orders WHERE public_ref = $1", [ref]);
+      await pocakaj();
+      return pp;
+    };
+    let pg = await gostPreizkus("ALARM-GOST", {}, true, "gost: pospravljalec se poskusa, mail ni poslan 40 min -> 503");
+    assert(vrste(pg).includes("gost_vstopnice_neposlane") && pg.items.find((x) => x.vrsta === "gost_vstopnice_neposlane").resnost === "rdece", "gost_vstopnice_neposlane (rdece)", vrste(pg));
     assert(!/gost@primer|ALARM-GOST/.test(JSON.stringify(pg)), "opozorilo gosta brez e-naslova in reference");
+    pg = await gostPreizkus("ALARM-GOST-DELNO", { status: "partially_refunded" }, true, "gost: delno vrnjeno narocilo brez maila -> 503");
+    pg = await gostPreizkus("ALARM-GOST-IZCRPAN", { poskusi: 8 }, false, "gost: izcrpani poskusi (lahko namenoma) -> 200");
+    assert(vrste(pg).includes("gost_vstopnice_izcrpane") && !vrste(pg).includes("gost_vstopnice_neposlane") && pg.items.find((x) => x.vrsta === "gost_vstopnice_izcrpane").resnost === "oranzno", "izcrpani poskusi: ORANZNO gost_vstopnice_izcrpane v panelu", vrste(pg));
+    pg = await gostPreizkus("ALARM-GOST-TEST", { pi: "test_pi_alarm" }, false, "gost: testni promet -> 200");
+    assert(!vrste(pg).some((v) => /^gost_/.test(v)), "testni promet: nobenega gost_ opozorila", vrste(pg));
+    await narocilo("ALARM-GOST", 40, { status: "paid", gost: "gost@primer.si" });
     await pool.query("UPDATE orders SET guest_mail_sent_at = NOW() WHERE public_ref = 'ALARM-GOST'");
     await pocakaj();
     r = await zdravje(P1);
@@ -221,21 +233,24 @@ const zdravje = (port) => klic(port, "/healthz/opozorila");
     `INSERT INTO orders (public_ref, event_id, club_id, quantity, unit_price_cents, total_cents, status, buyer_email, created_at, stripe_checkout_session_id, checkout_expires_at, checkout_url)
      SELECT 'POSP-' || g, $1, $2, 1, 1000, 1000, 'pending', 'k@x.si', NOW() - INTERVAL '1 hour', 'cs_' || (SELECT COALESCE(MAX(id), 0) FROM orders) || g, NOW() - INTERVAL '20 minutes', 'https://checkout.test/x'
        FROM generate_series(1, $3) g`, [d3, k3, N]);
-  b = await zazeni(P3, { STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: "whsec_test", STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_POSPRAVI_MS: "3000", STRIPE_PODPIS_OKNO_MS: "1500" });
+  b = await zazeni(P3, { STRIPE_SECRET_KEY: "sk_test_lokalno", STRIPE_WEBHOOK_SECRET: "whsec_test", STRIPE_CONNECT_WEBHOOK_SECRET: "whsec_connect", STRIPE_API_BASE: `http://127.0.0.1:${STRIPE_PORT}`, STRIPE_POSPRAVI_MS: "3000", STRIPE_PODPIS_OKNO_MS: "1500" });
   try {
     const napacna = { "content-type": "application/json", "stripe-signature": "t=1700000000,v1=00ff00ffnapacen" };
     const Stripe = require("stripe");
     const telo = JSON.stringify({ id: "evt_veljaven1", object: "event", type: "ping.test", livemode: false, data: { object: {} } });
     const veljavna = { "content-type": "application/json", "stripe-signature": new Stripe("sk_test_lokalno").webhooks.generateTestHeaderString({ payload: telo, secret: "whsec_test" }) };
-    const poz = () => b.log().split("\n").filter((l) => /POZOR.*Stripe webhook.*podpis/i.test(l)).length;
+    const poz = (ime) => b.log().split("\n").filter((l) => new RegExp(`POZOR.*Stripe webhook \\(${ime}\\).*podpis`, "i").test(l)).length;
     await spi(1800);   // okno STRIPE_PODPIS_OKNO_MS (1500 ms) od zagona je mimo
     let w = await klic(P3, "/stripe/webhook", { metoda: "POST", glave: veljavna, telo });
     assert(w.status === 200, "veljaven podpis -> 200", w);
     w = await klic(P3, "/stripe/webhook", { metoda: "POST", glave: napacna, telo: "{\"id\":\"evt_1\"}" });
-    assert(w.status === 400 && poz() === 0, "napacen podpis TIK po veljavnem: 400 brez POZOR (smetje z interneta)", { w, poz: poz() });
-    await spi(1800);   // okno brez veljavnega podpisa
+    assert(w.status === 400 && poz("platformni") === 0, "napacen podpis TIK po veljavnem platformnem: brez POZOR za platformni (smetje z interneta)", { w, poz: poz("platformni") });
+    assert(poz("connect") === 1, "connect endpoint v oknu ni imel nobenega veljavnega podpisa -> POZOR (platformni uspeh ga ne krije)", poz("connect"));
+    assert(!/POZOR.*whsec_/.test(b.log()), "dnevnik ne razkrije skrivnosti");
+    await spi(1800);   // okno platformnega brez veljavnega podpisa
     for (let i = 0; i < 3; i++) await klic(P3, "/stripe/webhook", { metoda: "POST", glave: napacna, telo: "{\"id\":\"evt_1\"}" });
-    assert(poz() === 1, "napacen podpis brez veljavnega v oknu: POZOR natanko 1x (3 klici)", poz());
+    assert(poz("platformni") === 1, "napacen podpis brez veljavnega v oknu: POZOR natanko 1x (3 klici)", poz("platformni"));
+    assert(poz("connect") === 1, "connect POZOR se ne ponavlja (najvec 1x na 10 min)", poz("connect"));
     assert(!/napacen00|00ff00ff|evt_1/.test(b.log()), "dnevnik ne vsebuje glave podpisa ne telesa");
     // E: po prvem teku (3 s) je ob staremu LIMIT 50 obdelanih 50; nova koda ponavlja serije
     await spi(5000);

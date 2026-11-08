@@ -493,14 +493,19 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
     const podpis = req.headers["stripe-signature"];
     if (!podpis || !Buffer.isBuffer(req.body)) return res.status(400).send("Missing signature.");
     let d = null;
-    for (const sk of skrivnosti) {
-      try { d = s.webhooks.constructEvent(req.body, podpis, sk); break; } catch (_) { /* naslednja skrivnost */ }
+    const nastavljene = [[process.env.STRIPE_WEBHOOK_SECRET, "platformni"], [process.env.STRIPE_CONNECT_WEBHOOK_SECRET, "connect"]].filter(([v]) => v);
+    for (const [sk, ime] of nastavljene) {
+      try { d = s.webhooks.constructEvent(req.body, podpis, sk); delavci.uspeh("stripe:podpis:" + ime); break; } catch (_) { /* naslednja skrivnost */ }
     }
-    if (d) delavci.uspeh("stripe:veljaven_podpis");
     if (!d) {
-      // N3: napacni podpisi brez enega samega veljavnega v zadnjem oknu (privzeto 60 min od zagona ali zadnjega veljavnega) so lahko smetje z interneta; alarm samo, ce
-      // veljavnih ni (zamenjana skrivnost, napacen endpoint). Po zagonu okno steje od zagona, da deploy med smetjem ne sproži alarma.
-      if (!delavci.bilUspeh("stripe:veljaven_podpis", PODPIS_OKNO_MS) && Date.now() - ZAGON_PROCESA > PODPIS_OKNO_MS) delavci.pozorRedko("stripe:podpis", "Stripe webhook: napacen podpis in v zadnji uri NOBENEGA veljavnega (preveri STRIPE_WEBHOOK_SECRET in naslov webhooka v Stripovi nadzorni plosci); dogodki (spori, vracila, placila) ne pridejo, narocila ostajajo pending do pospravljalca");
+      // N3: napacni podpisi so lahko smetje z interneta. Alarm samo, ce kaksna od NASTAVLJENIH skrivnosti (platformni / connect endpoint) v zadnjem oknu (privzeto 60 min) ni imela
+      // NOBENEGA uspeha (zamenjana skrivnost, napacen endpoint) in je proces starejsi od okna (po deployu okno steje od zagona). V dnevnik samo ime endpointa, nikoli skrivnost,
+      // glava podpisa ali telo.
+      if (Date.now() - ZAGON_PROCESA > PODPIS_OKNO_MS) {
+        for (const [, ime] of nastavljene) {
+          if (!delavci.bilUspeh("stripe:podpis:" + ime, PODPIS_OKNO_MS)) delavci.pozorRedko("stripe:podpis:" + ime, `Stripe webhook (${ime}): napacen podpis in v zadnji uri NOBENEGA veljavnega za ta endpoint (preveri skrivnost webhooka in naslov v Stripovi nadzorni plosci); dogodki (spori, vracila, placila) ne pridejo, narocila ostajajo pending do pospravljalca`);
+        }
+      }
       return res.status(400).send("Invalid signature.");
     }
     // I36 (#227): dogodek iz DRUGEGA nacina ne sme spremeniti stanja ali sprozati klicev. `livemode` ima vsak pravi Stripov dogodek (manjka samo v lazni strezniku).
@@ -571,7 +576,7 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
   async function preveriEno(o, smemIsteci = true) {
     const s = stripe();
     if (!o.stripe_checkout_session_id) {
-      await pool.query("UPDATE orders SET status = 'failed', cancelled_at = NOW() WHERE id = $1 AND status = 'pending'", [o.id]);
+      await vTransakciji((c) => c.query("UPDATE orders SET status = 'failed', cancelled_at = NOW() WHERE id = $1 AND status = 'pending'", [o.id]));   // z roki (lock_timeout), kot ostale pisave pospravljalca
       console.log(`[stripe] pospravljeno: narocilo ${o.public_ref} brez seje -> failed`);
       return;
     }
@@ -580,7 +585,7 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
     // zato ga zapremo kot `cancelled` brez klica Stripa (sprozilec sprosti zalogo). Nikoli v obratni smeri (cs_live_ ob sandbox kljucu): tam bi lahko bilo placilo
     // v obdelavi in prekinitev bi izgubila denar.
     if (jeLive() && /^cs_test_/.test(o.stripe_checkout_session_id)) {
-      const r = await pool.query("UPDATE orders SET status = 'cancelled', cancelled_at = NOW() WHERE id = $1 AND status = 'pending' AND stripe_payment_intent_id IS NULL RETURNING public_ref", [o.id]);
+      let r; await vTransakciji(async (c) => { r = await c.query("UPDATE orders SET status = 'cancelled', cancelled_at = NOW() WHERE id = $1 AND status = 'pending' AND stripe_payment_intent_id IS NULL RETURNING public_ref", [o.id]); });
       if (r.rows.length) console.log(`[stripe] pospravljeno: narocilo ${r.rows[0].public_ref} ima sandbox sejo (${o.stripe_checkout_session_id}), kljuc je ziv -> cancelled`);
       return;
     }

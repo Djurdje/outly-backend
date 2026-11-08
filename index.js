@@ -1255,9 +1255,10 @@ async function izracunajZdravjeOpozoril() {
   let casovnik;
   try {
     const r = await Promise.race([adminNadzor.opozorila(), new Promise((_, no) => { casovnik = setTimeout(() => no(Object.assign(new Error("rok"), { code: "OPOZORILA_ROK" })), OPOZORILA_ZDRAVJE_ROK_MS); })]);
-    rdeceOk = !(r.tehnicna > 0);   // samo »tehnicno zdravje« (admin_nadzor.js TEHNICNE_VRSTE), ne vsako rdece opozorilo panela
+    rdeceOk = r.tehnicna === 0;   // samo »tehnicno zdravje« (admin_nadzor.js TEHNICNE_VRSTE), ne vsako rdece opozorilo panela
     opozorilaRdeceZadnje = { ok: rdeceOk, cas: Date.now() };
-    if (!rdeceOk) vzrok = `tehnicnih rdecih opozoril: ${r.tehnicna}`;
+    if (r.tehnicna === undefined) vzrok = "opozorila brez stevila tehnicnih (napaka izracuna)";
+    else if (!rdeceOk) vzrok = `tehnicnih rdecih opozoril: ${r.tehnicna}`;
   } catch (e) {
     if (e && e.code === "ADMIN_BUSY" && opozorilaRdeceZadnje && Date.now() - opozorilaRdeceZadnje.cas < 600000) rdeceOk = opozorilaRdeceZadnje.ok;
     else { rdeceOk = false; vzrok = `opozoril ni mogoce izracunati (${(e && (e.code || e.message)) || "napaka"})`; }
@@ -5171,6 +5172,7 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
 
 // Opozorila, seznam racunov in nadzorna plosca »Danes« (23. 10. 2026, #326): GET /admin/api/opozorila, /racuni, /danes (admin_nadzor.js; samo branje, glavni pool, nikoli skenPool).
 const adminNadzor = require("./admin_nadzor").ustvari({
+  gostPostaPoskusov: () => GOST_POSTA_POSKUSOV,   // const je definiran nizje (TDZ): vrednost se bere ob izracunu
   bazaDisk,
   pool, router: admin, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
 });
@@ -10019,6 +10021,7 @@ app.delete("/business/events/:id/tables/:tableId/hold", requireAuth, requireClub
 // končal pred več kot 24 h (end_at, sicer start_at + 12 h), se brišejo. Interval REZERVACIJE_CISCENJE_MS (privzeto 1 h; 0 = izklop).
 const REZERVACIJE_CISCENJE_MS = okoljeCelo("REZERVACIJE_CISCENJE_MS", 60 * 60 * 1000, 0, 24 * 60 * 60 * 1000);
 let rezervacijeCiscenjeTece = false;
+let gostZetoniTece = false;
 let rezervacijeUtrip = delavci.BREZ, gostZetoniUtrip = delavci.BREZ;   // srcni utrip (I70); registrira ga zagon spodaj
 async function pocistiRezervacije() {
   if (rezervacijeCiscenjeTece) return;
@@ -10044,8 +10047,10 @@ if (REZERVACIJE_CISCENJE_MS > 0) {
   gostZetoniUtrip = delavci.registriraj("gost_zetoni_ciscenje", { periodaMs: REZERVACIJE_CISCENJE_MS, zamikMs: zamikCiscenja });
   const pocistiVse = () => {   // gostujoci zetoni (migracija 033): isti urnik
     pocistiRezervacije();
+    if (gostZetoniTece) return;
+    gostZetoniTece = true;   // obvisel krog ne sprozi novih (S1, kot rezervacije_ciscenje)
     const k = gostZetoniUtrip.zacetek();
-    Promise.resolve(pocistiGostZetone()).catch(() => {}).finally(() => k.konec());
+    Promise.resolve(pocistiGostZetone()).catch(() => {}).finally(() => { k.konec(); gostZetoniTece = false; });
   };
   setTimeout(() => {
     pocistiVse();
