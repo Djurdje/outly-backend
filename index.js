@@ -5027,7 +5027,8 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
 
 // Opozorila, seznam racunov in nadzorna plosca »Danes« (23. 10. 2026, #326): GET /admin/api/opozorila, /racuni, /danes (admin_nadzor.js; samo branje, glavni pool, nikoli skenPool).
 const adminNadzor = require("./admin_nadzor").ustvari({
-  pool, router: admin, bazaDisk, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
+  bazaDisk,
+  pool, router: admin, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
 });
 // Samodejna objava osnutkov ob casu (#327, migracija 062, I59; samodejna_objava.js): delavec vsako minuto, glavni pool, nikoli skenPool. Isti koraki po objavi kot rocna objava
 // (predpomnilnik, obvestilo sledilcem); SAMODEJNA_OBJAVA_MS=0 izklopi delavca (PATCH publishAt ostane: osnutek se potem objavi rocno).
