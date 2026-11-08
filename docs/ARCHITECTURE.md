@@ -788,8 +788,8 @@ Cron `*/15` je prepočasen za vprašanje »ali je ta merge pokvaril produkcijo«
   (agent si je ne sme dodati); oznaka se bere živo, zato po njej zadostuje »Re-run« checka `testi`. Produkcija ali GitHub API nedosegljiva → samo opozorilo
   (izpad ne sme blokirati popravka). Omejitev: preverba velja ob zagonu CI; PR, zelen pred dogodkom, se lahko zmerga med njim.
 - **`roki.yml`** (ponedeljek 14:17 UTC + ročno): TLS `notAfter` za `outly.si` in backend (prag 14 in 7 dni, ker se obnavljata sama), potek domene `outly.si` prek RDAP
-  (IANA bootstrap kaže za `.si` na `https://rdap.register.si/`; rezerva `whois`; brez datuma = opozorilo »neznano«), `disk_pct` iz `/healthz/baza` (≥ 70 % alarm,
-  404 = opozorilo) in fiksni roki iz `_orodja/roki.json` (prag 60/30/7 dni; `"datum": null` = neznan, ob prvem zagonu en issue `martin` »Roki: manjkajo datumi«).
+  (IANA bootstrap kaže za `.si` na `https://rdap.register.si/`; rezerva `whois`; brez datuma = opozorilo »neznano«), `/healthz/baza` (samo `{"ok"}`: 503 ali `ok:false` = alarm »poglej opozorilo `baza_disk` v panelu«,
+  404 ali drugo = opozorilo) in fiksni roki iz `_orodja/roki.json` (prag 60/30/7 dni; `"datum": null` = neznan, ob prvem zagonu en issue `martin` »Roki: manjkajo datumi«).
   Alarm = issue `martin` + ntfy, brez podvajanja (komentar samo ob novem pragu); alarm zagona ne obarva rdeče, napaka pregleda samega pa. **Kaj stori Martin:** neobvezen
   secret `HC_URL_ROKI` (Healthchecks, Period 8 days, Grace 2 days; brez njega `::warning::`), vpis manjkajočih datumov v `_orodja/roki.json`, oznaka
   `migracija-med-dogodkom` po presoji. Pot `/healthz/baza` in preverba v `nadzor.yml` (deveta) prideta v ločenem PR-ju; `nadzor.yml` PR mora biti zmergan PO njem.
