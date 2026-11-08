@@ -113,10 +113,12 @@ jobs:
 
           # preveri_rok IME DATUM KAJ_PADE PRAG...   (pragi padajoce; alarm za najmanjsi prag, ki je dosezen; potekel = prag 0)
           preveri_rok() {
-            local ime="$1" datum="$2" kaj="$3" cilj dni prag stopnja="" OPIS
+            local ime="$1" datum="$2" kaj="$3" cilj sek dni prag stopnja="" OPIS
             shift 3
             cilj=$(date -u -d "$datum" +%s 2>/dev/null) || { echo "::warning::Rok '$ime': datum '$datum' ni veljaven."; return; }
-            dni=$(( (cilj - $(date -u +%s)) / 86400 ))
+            sek=$(( cilj - $(date -u +%s) ))
+            # Zaokrozevanje: potekel pred < 24 h bi s celoštevilskim deljenjem dal 0 dni; vsak pretekli rok je najmanj -1 dan (»potekel«).
+            if [ "$sek" -lt 0 ]; then dni=$(( -((-sek + 86399) / 86400) )); else dni=$(( sek / 86400 )); fi
             if [ "$dni" -lt 0 ]; then stopnja=0; else
               for prag in "$@"; do [ "$dni" -le "$prag" ] && stopnja="$prag"; done
             fi

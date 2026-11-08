@@ -17,7 +17,7 @@ Delovni postopek za vsako nalogo:
    workflow `Varnostna kopija baze`, po namernem padcu številk `potrdi_padec=true` potrdi Martin); v PR še število prizadetih vrstic po
    tabelah in pot nazaj (katera kopija v R2). Takšna migracija čaka Martinov DA (CLAUDE.md).
    **Ne med dogodkom:** PR z migracijo ne mergaj, ko dogodek teče ali se začne v manj kot 3 h (merge = deploy z migracijami) — preveri
-   `GET /agent/api/danes` (`nocoj`); če ni dosegljiv, javni `GET /events` (začetki dogodkov danes). Izjema: popravek izpada.
+   `GET /agent/api/danes` (`nocoj`); če ni dosegljiv, javni `GET /events` (začetki dogodkov danes). Izjema: popravek izpada (migracijo v oknu dogodka `Zascita` zavrne, dokler Martin ne doda oznake `migracija-med-dogodkom`; nujen popravek brez migracije ni prizadet).
 3. Koda v `index.js`: stolpce naštevaj (nikoli `SELECT *` na javnih poteh), validiraj vhod, vloge prek `requireAuth`/`requireRole`/`requireClub`,
    zneski v centih, JSONB prek `JSON.stringify(x)::jsonb`, napake kot `{ error: "koda", message }` (nikoli `e.message` ali sled sklada
    v odgovoru). POST/PATCH bere samo naštet seznam polj; polje, ki ga klicatelj **po svoji vlogi** ne sme nastaviti (uporabnik svoje

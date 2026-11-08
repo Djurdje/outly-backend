@@ -9,7 +9,7 @@ Pravila:
 - Karkoli stane denar ali spreminja nastavitve na Renderju/GitHubu/Supabase/Cloudflare/Apple: pripravi, opiši posledice (z zneskom na mesec),
   počakaj na Martinov DA.
 - **Ne med dogodkom:** migracij, spremembe paketa ali okolja na Renderju in ročnih restartov ne delaj, ko dogodek teče ali se začne v manj
-  kot 3 h — najprej `GET /agent/api/danes` (`nocoj`, vstopi zadnjih 15 min); če ni dosegljiv, javni `GET /events`. Izjema je popravek izpada. Sprememba paketa baze = Martinu
+  kot 3 h — najprej `GET /agent/api/danes` (`nocoj`, vstopi zadnjih 15 min); če ni dosegljiv, javni `GET /events`. Izjema je popravek izpada (`Zascita` migracijo med dogodkom zavrne, dokler Martin ne doda oznake `migracija-med-dogodkom`; nujen popravek brez migracije ni prizadet). Sprememba paketa baze = Martinu
   najavi nekaj minut izpada (19. 10. je bil backend 6,5 min dol, tudi sken).
 - Preverjanje produkcije po vsakem deployu po skillu `preverjanje-produkcije`: Render `list_deploys` = live na pravem commitu (`/healthz`
   vrne commit; stara različica tudi vrača 200), `GET /clubs`, `GET /events` → 200, `GET /me/invites` brez žetona → 401, `outly.si` → 200.
