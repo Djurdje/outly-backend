@@ -1,5 +1,5 @@
 "use strict";
-// Zasedenost diska baze (Render outly-db: disk 1 GB, autoscaling izklopljen; racuni_pdf hrani PDF-je v bazi). Poln disk = baza stoji = tudi sken na vratih.
+// Zasedenost diska baze (Render outly-db: disk 1 GB, storage autoscaling vklopljen 8. 11. 2026; racuni_pdf hrani PDF-je v bazi). Poln disk = baza stoji = tudi sken na vratih.
 // GET /healthz/baza (index.js), opozorilo `baza_disk` (admin_nadzor.js) in dnevnik POZOR (Sentry) uporabljajo ISTO meritev:
 //  - disk_pct = round(pg_database_size(current_database()) / (diskMb MiB) * 100); pg_database_size NE steje WAL in drugih datotek zunaj baze,
 //    zato je prava zasedenost diska nekoliko vecja od izmerjene (zato je meja opozorila 70 %, ne 90 %, ko Render sam poveca disk)
@@ -25,13 +25,20 @@ function ustvari(dep) {
 
   async function poizvedi() {
     let koncano = false, drzim = null, sproscena = false;
-    const sprosti = (c, unici) => { if (sproscena) return; sproscena = true; c.release(unici); };
+    const naNapako = () => {};
+    const sprosti = (c, unici) => {
+      if (sproscena) return;
+      sproscena = true;
+      c.off("error", naNapako);                      // poslusalec se ne kopici na odjemalcu, ki se vrne v pool (MaxListenersExceededWarning)
+      if (unici) c.on("error", () => {});            // pozen 'error' zavrzene povezave ne sme sesuti procesa
+      c.release(unici);
+    };
     let casovnik;
     const delo = (async () => {
       const c = await pool.connect();
       drzim = c;
       if (koncano) { sprosti(c, true); return null; }   // pool je povezavo dal prepozno: brez poizvedbe, povezava se unici
-      c.on("error", () => {});
+      c.on("error", naNapako);
       await c.query("BEGIN READ ONLY; SET LOCAL statement_timeout = '2s'; SET LOCAL idle_in_transaction_session_timeout = '5s'");
       const r = await c.query("SELECT pg_database_size(current_database()) AS bajti");
       await c.query("COMMIT");

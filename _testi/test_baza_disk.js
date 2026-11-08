@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * Zasedenost diska baze: GET /healthz/baza + opozorilo `baza_disk` (baza_disk.js, I68; Render outly-db: disk 1 GB, autoscaling izklopljen).
+ * Zasedenost diska baze: GET /healthz/baza + opozorilo `baza_disk` (baza_disk.js, I68; Render outly-db: disk 1 GB, storage autoscaling vklopljen 8. 11. 2026).
  * Zagon (lokalno, PG16, prazna baza z migracijami):
  *   DATABASE_URL="postgres://postgres:postgres@localhost:5432/outly" node _testi/test_baza_disk.js
  *
- *   B1  brez zetona: 200 { ok: true, disk_pct: <celo stevilo> } (SAMO ta dva kljuca), Cache-Control no-store; disk_pct = round(pg_database_size / (BAZA_DISK_MB MiB) * 100)
- *   B2  disk_pct >= BAZA_DISK_OPOZORILO_PCT -> 503 { ok: false, disk_pct }; meja je vkljucna (pct = meja -> 503, meja + 1 -> 200); POZOR v logu najvec 1x na proces
+ *   B1  brez zetona: 200 { ok: true } (SAMO kljuc ok; odstotek je samo za admina/agenta), Cache-Control no-store
+ *   B2  disk_pct >= BAZA_DISK_OPOZORILO_PCT -> 503 { ok: false } (brez disk_pct); meja je vkljucna (pct = meja -> 503, meja + 1 -> 200); POZOR v logu najvec 1x na proces
  *   B3  predpomnilnik: 40 hkratnih + 10 zaporednih klicev = ENA poizvedba pg_database_size; po izteku BAZA_DISK_VELJA_MS (samo test) nova
- *   B4  baza nedosegljiva (promet izgine, povezave ostanejo odprte) -> 503 { ok: false, disk_pct: null } v ~3 s, proces tece, po okrevanju spet 200
- *   B5  baza je nedosegljiva ze ob zagonu -> 503 { ok: false, disk_pct: null }, proces tece
+ *   B4  baza nedosegljiva (promet izgine, povezave ostanejo odprte) -> 503 { ok: false } v ~3 s, proces tece, po okrevanju spet 200
+ *   B5  baza je nedosegljiva ze ob zagonu -> 503 { ok: false }, proces tece
  *   B6  admin opozorila: baza_disk (rdece) SAMO nad mejo, besedilo samo z odstotkom; ni ga pod mejo; isto v /admin/api/danes (opozorila_rdeca)
  *   B7  enota: sočasni klici si delijo obljubo, uspeh se obdrzi, napaka ne dlje kot kratko, povezava ob roku se unici (release(true)), pozne povezave se ne izgubijo
  */
@@ -101,18 +101,12 @@ function posrednik() {
   // ---------------------------------------------------------------- B1
   console.log("# B1: GET /healthz/baza");
   let b = await zazeni(PORT, DB);
-  let pct1;
   try {
-    const pred = await velikost();
     const r = await klic(PORT, "/healthz/baza");
-    const po = await velikost();
     assert(r.status === 200, "brez zetona -> 200", r);
-    assert(r.body && r.body.ok === true && Number.isInteger(r.body.disk_pct), "telo { ok: true, disk_pct: celo stevilo }", r.body);
-    assert(r.body && Object.keys(r.body).sort().join() === "disk_pct,ok", "SAMO kljuca ok in disk_pct (brez bajtov, tabel, drugih podatkov)", r.body);
+    assert(r.body && r.body.ok === true, "telo { ok: true }", r.body);
+    assert(r.body && Object.keys(r.body).join() === "ok", "SAMO kljuc ok (brez disk_pct, bajtov, tabel)", r.body);
     assert(r.cache === "no-store", "Cache-Control: no-store", r.cache);
-    const pricakovano = [pred, po].map((x) => Math.round(x / (1024 * 1048576) * 100));
-    assert(r.body && r.body.disk_pct >= Math.min(...pricakovano) && r.body.disk_pct <= Math.max(...pricakovano), `disk_pct = round(velikost / (1024 MiB) * 100) (${r.body && r.body.disk_pct}, pricakovano ${pricakovano})`);
-    pct1 = r.body.disk_pct;
     assert(!/POZOR.*disk/i.test(b.log()), "pod mejo ni POZOR v logu");
   } finally { await b.ustavi(); }
 
@@ -122,7 +116,7 @@ function posrednik() {
   try {
     const r = await klic(PORT, "/healthz/baza");
     assert(r.status === 503, "BAZA_DISK_MB=1 -> 503", r);
-    assert(r.body && r.body.ok === false && Number.isInteger(r.body.disk_pct) && r.body.disk_pct >= 100 && Object.keys(r.body).sort().join() === "disk_pct,ok", "telo { ok: false, disk_pct >= 100 } (samo dva kljuca)", r.body);
+    assert(r.body && r.body.ok === false && Object.keys(r.body).join() === "ok", "telo { ok: false } (samo kljuc ok)", r.body);
     assert(r.cache === "no-store", "Cache-Control: no-store tudi pri 503", r.cache);
     for (let i = 0; i < 3; i++) await klic(PORT, "/healthz/baza");
     await spi(200);
@@ -134,27 +128,26 @@ function posrednik() {
   const velik = await velikost();
   const mb = Math.max(1, Math.ceil(velik / 1048576 / 0.5));   // baza zasede ~50 %
   b = await zazeni(PORT, DB, { BAZA_DISK_MB: String(mb), BAZA_DISK_OPOZORILO_PCT: "100" });
-  let p50;
+  const p50 = Math.round(velik / (mb * 1048576) * 100);
   try {
     const r = await klic(PORT, "/healthz/baza");
-    p50 = r.body && r.body.disk_pct;
     assert(r.status === 200 && p50 >= 40 && p50 <= 60, `BAZA_DISK_MB=${mb}: ~50 % pod mejo 100 -> 200`, r);
   } finally { await b.ustavi(); }
   b = await zazeni(PORT, DB, { BAZA_DISK_MB: String(mb), BAZA_DISK_OPOZORILO_PCT: String(p50) });
   try {
     const r = await klic(PORT, "/healthz/baza");
-    assert(r.status === 503 && r.body.ok === false && r.body.disk_pct === p50, `disk_pct = meja (${p50}) -> 503 (meja je vkljucna)`, r);
+    assert(r.status === 503 && r.body.ok === false, `disk_pct = meja (${p50}) -> 503 (meja je vkljucna)`, r);
   } finally { await b.ustavi(); }
   b = await zazeni(PORT, DB, { BAZA_DISK_MB: String(mb), BAZA_DISK_OPOZORILO_PCT: String(p50 + 1) });
   try {
     const r = await klic(PORT, "/healthz/baza");
-    assert(r.status === 200 && r.body.ok === true && r.body.disk_pct === p50, `disk_pct = meja - 1 -> 200`, r);
+    assert(r.status === 200 && r.body.ok === true, `disk_pct = meja - 1 -> 200`, r);
   } finally { await b.ustavi(); }
   // neveljavne vrednosti okolja -> privzeto (1024 MB, 70 %)
   b = await zazeni(PORT, DB, { BAZA_DISK_MB: "abc", BAZA_DISK_OPOZORILO_PCT: "0" });
   try {
     const r = await klic(PORT, "/healthz/baza");
-    assert(r.status === 200 && r.body.disk_pct === pct1, "neveljavni BAZA_DISK_MB / BAZA_DISK_OPOZORILO_PCT -> privzeti vrednosti", r);
+    assert(r.status === 200 && r.body.ok === true, "neveljavni BAZA_DISK_MB / BAZA_DISK_OPOZORILO_PCT -> privzeti vrednosti", r);
   } finally { await b.ustavi(); }
 
   // ---------------------------------------------------------------- B3
@@ -189,7 +182,7 @@ function posrednik() {
   try {
     pp.st.zamrznjeno = true;
     const r = await klic(PORT, "/healthz/baza", null, 15000);
-    assert(r.status === 503 && r.body && r.body.ok === false && r.body.disk_pct === null && Object.keys(r.body).sort().join() === "disk_pct,ok", "503 { ok: false, disk_pct: null }", r);
+    assert(r.status === 503 && r.body && r.body.ok === false && Object.keys(r.body).join() === "ok", "503 { ok: false }", r);
     assert(r.ms < 5000, `odgovor v < 5 s, ne visi (${r.ms} ms)`);
     assert((await klic(PORT, "/")).status === 200, "proces tece");
     pp.st.zamrznjeno = false;
@@ -205,7 +198,7 @@ function posrednik() {
   b = await zazeni(3522, "postgres://postgres:postgres@localhost:1/outly");
   try {
     const r = await klic(3522, "/healthz/baza");
-    assert(r.status === 503 && r.body && r.body.ok === false && r.body.disk_pct === null, "503 { ok: false, disk_pct: null }", r);
+    assert(r.status === 503 && r.body && r.body.ok === false && Object.keys(r.body).join() === "ok", "503 { ok: false }", r);
     assert(r.ms < 5000, `v < 5 s (${r.ms} ms)`);
     assert((await klic(3522, "/")).status === 200, "proces tece");
   } finally { await b.ustavi(); }
@@ -222,6 +215,9 @@ function posrednik() {
     const v = o.body && o.body.items ? o.body.items.filter((x) => x.vrsta === "baza_disk") : [];
     assert(o.status === 200 && v.length === 1, "nad mejo: natanko eno opozorilo baza_disk", o);
     assert(v[0] && v[0].resnost === "rdece", "resnost rdece", v[0]);
+    const pcNov = Math.round(await velikost() / 1048576 * 100);
+    const pcJ = v[0] ? Number((/je (\d+) % zaseden/.exec(v[0].besedilo) || [])[1]) : NaN;
+    assert(pcJ >= Math.round(velik / 1048576 * 100) && pcJ <= pcNov, `odstotek v besedilu po formuli (${pcJ} %, pricakovano ${Math.round(velik / 1048576 * 100)}-${pcNov})`, v[0] && v[0].besedilo);
     assert(v[0] && /\d+ ?%/.test(v[0].besedilo) && !/\d{4,} ?(B|bajt|MB)/i.test(v[0].besedilo), "besedilo ima odstotek, brez bajtov", v[0] && v[0].besedilo);
     assert(v[0] && Object.keys(v[0]).sort().join() === "besedilo,cilj_id,cilj_tip,resnost,vrsta", "polja samo kot ostala opozorila", v[0] && Object.keys(v[0]));
     const d = await klic(PORT, "/admin/api/danes", admin);
@@ -253,7 +249,7 @@ function posrednik() {
       dnevnik.connect++;
       if (o.connectCaka) await o.connectCaka;
       let sproscen = false;
-      return { on() {}, release: (u) => { sproscen = true; dnevnik.release.push(!!u); }, query: async (sql) => {
+      return { on() {}, off() {}, release: (u) => { sproscen = true; dnevnik.release.push(!!u); }, query: async (sql) => {
         dnevnik.q.push(String(sql).slice(0, 40));
         if (/pg_database_size/.test(sql)) { if (o.poizvedbaCaka) await o.poizvedbaCaka; if (o.napaka) throw new Error("kvar"); return { rows: [{ bajti: o.bajtov || 524288000 }] }; }
         return { rows: [] };
@@ -305,6 +301,25 @@ function posrednik() {
     assert(napake.length === 1, `POZOR 1x v 6 h (${napake.length})`);
     ura += 10; await spi(5); await m.izmeri(); ura += 6 * 3600 * 1000 + 1; await spi(5); await m.izmeri();
     assert(napake.length === 2 && /POZOR/.test(napake[1]), `po 6 h spet (${napake.length})`);
+  }
+
+  // N1: poslusalec 'error' se ne kopici na odjemalcu poola (max 1: vse meritve na isti povezavi)
+  {
+    const { Pool: P } = require("pg");
+    const p1 = new P({ connectionString: DB, max: 1 });
+    const opoz = []; const naOpozorilo = (w) => opoz.push(w.name); process.on("warning", naOpozorilo);
+    const m = ustvari({ pool: p1, diskMb: 1024, opozoriloPct: 99, log: { error() {} }, veljaMs: 1 });
+    const stej = async () => { const c = await p1.connect(); const n = c.listenerCount("error"); c.release(); return n; };
+    await m.izmeri(); await spi(5);
+    const zacetek = await stej();
+    let vrnjeni = 0;
+    for (let i = 0; i < 15; i++) { if ((await m.izmeri()) !== null) vrnjeni++; await spi(5); }
+    const konec = await stej();
+    await spi(50); process.off("warning", naOpozorilo);
+    assert(vrnjeni === 15, "15 meritev na poolu z max 1 uspe", vrnjeni);
+    assert(konec === zacetek, `stevilo poslusalcev error se ne poveca (${zacetek} -> ${konec})`);
+    assert(!opoz.includes("MaxListenersExceededWarning"), "brez MaxListenersExceededWarning", opoz);
+    await p1.end();
   }
 
   console.log(`\n${ok} ok, ${fail} napak`);

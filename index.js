@@ -1216,8 +1216,9 @@ app.get("/healthz/sken", async (req, res) => {
   res.status(ok ? 200 : 503).json({ ok });
 });
 
-// GET /healthz/baza: zasedenost diska baze (baza_disk.js, I68). Render outly-db ima disk 1 GB brez autoscalinga; poln disk = baza stoji (tudi sken).
-// Odgovor SAMO { ok, disk_pct } (nikoli bajti, imena tabel); 503 ob disk_pct >= BAZA_DISK_OPOZORILO_PCT ali nedosegljivi bazi (disk_pct null).
+// GET /healthz/baza: zasedenost diska baze (baza_disk.js, I68). Render outly-db ima disk 1 GB (storage autoscaling vklopljen 8. 11. 2026); poln disk = baza stoji (tudi sken).
+// Javni odgovor SAMO { ok } (brez odstotka: rast baze bi razkril obseg prodaje; odstotek je v opozorilu baza_disk za admina/agenta in v POZOR vrstici).
+// 503 = disk_pct >= BAZA_DISK_OPOZORILO_PCT ALI meritev ni uspela (baza nedosegljiva ali glavni pool zasicen > 3 s).
 // Meritev je v pomnilniku 5 min (najvec ena poizvedba na 5 min, glavni pool s kratkim rokom; NE skenPool, NE zdraviPool). Ni Renderjev Health Check.
 // Po povecanju diska na Renderju je treba BAZA_DISK_MB popraviti, sicer alarm laze (.env.example).
 const bazaDisk = require("./baza_disk").ustvari({
@@ -1228,9 +1229,8 @@ console.log(`[baza_disk] disk ${bazaDisk.diskMb} MB, opozorilo pri ${bazaDisk.op
 app.get("/healthz/baza", async (req, res) => {
   res.set("Cache-Control", "no-store");
   const disk_pct = await bazaDisk.izmeri();
-  if (disk_pct === null) return res.status(503).json({ ok: false, disk_pct: null });
-  const ok = disk_pct < bazaDisk.opozoriloPct;
-  res.status(ok ? 200 : 503).json({ ok, disk_pct });
+  const ok = disk_pct !== null && disk_pct < bazaDisk.opozoriloPct;
+  res.status(ok ? 200 : 503).json({ ok });
 });
 
 // Admin panel: statična stran v mapi admin/ (en HTML + JS, brez ogrodja).
