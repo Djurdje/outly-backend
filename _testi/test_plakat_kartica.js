@@ -9,6 +9,7 @@
  *      '' in null brisata; izpuscen kljuc ne spremeni; urejanje poster_url ne dotakne poster_card_url; neveljaven PATCH ne spremeni nicesar
  *  K2  izhod: poster_card_url (niz, nikoli null) v GET /events, ?lite=true, GET /events/:id, GET /search, GET /business/events, GET /me/favorites, GET /me/orders, POST /events/:id/orders
  *      (order), GET /me/tickets, GET /admin/api/events (seznam) in GET /admin/api/events/:id
+ *      (+ /me/plans, /me/club-events, /me/guest-lists, /me/guest-list-invites/received, /business/sales, /business/team/:userId/scans)
  *  K3  podvajanje (admin): kopija dobi poster_card_url izvora; neveljaven zapis v bazi se ne kopira ('')
  *  K4  stari zapisi (brez majhnega bannerja) dajo '' (ne null, ne izpuscenega polja)
  */
@@ -64,7 +65,7 @@ const NEVELJAVNI = ["javascript:alert(1)", "data:text/html;base64,PHNjcmlwdD4=",
   for (let i = 0; i < 50; i++) { try { await fetch(BASE + "/"); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
 
   try {
-    const T = { lastnik: zeton("lastnik@outly.si", uuid(1)), ana: zeton("ana@outly.si", uuid(2)), admin: zeton("admin@outly.si", uuid(3)) };
+    const T = { lastnik: zeton("lastnik@outly.si", uuid(1)), ana: zeton("ana@outly.si", uuid(2)), admin: zeton("admin@outly.si", uuid(3)), bor: zeton("bor@outly.si", uuid(4)) };
     for (const k of Object.keys(T)) { const r = await api("GET", "/me", T[k]); assert(r.status === 200, `GET /me ${k}`, r.body); }
     await pool.query("UPDATE users SET role='business' WHERE email='lastnik@outly.si'");
     await pool.query("UPDATE users SET role='admin' WHERE email='admin@outly.si'");
@@ -167,6 +168,33 @@ const NEVELJAVNI = ["javascript:alert(1)", "data:text/html;base64,PHNjcmlwdD4=",
     r = await api("GET", "/me/tickets", T.ana);
     const vst = (r.body.tickets || r.body)[0];
     assert(r.status === 200 && vst && vst.poster_card_url === KARTICA && typeof vst.poster_card_url === "string", "GET /me/tickets: poster_card_url", vst);
+
+    console.log("\n# K2 izhod: plani, obvestila, guest liste, prodaja, skeni");
+    r = await api("GET", "/me/plans", T.ana);
+    assert(r.status === 200 && (r.body.events || []).some((x) => x.id === E1 && x.poster_card_url === KARTICA), "GET /me/plans: poster_card_url", r.body);
+    const uid = async (email) => (await pool.query("SELECT id FROM users WHERE email = $1", [email])).rows[0].id;
+    await pool.query("INSERT INTO club_event_notifications (user_id, event_id) VALUES ($1, $2)", [await uid("ana@outly.si"), E1]);
+    r = await api("GET", "/me/club-events", T.ana);
+    assert(r.status === 200 && (r.body.notifications || []).some((x) => x.event_id === E1 && x.poster_card_url === KARTICA && x.poster_url === VELIK), "GET /me/club-events: poster_card_url", r.body);
+    r = await api("POST", "/admin/api/guest-lists", T.admin, { event_id: E1, user_id: await uid("ana@outly.si"), spots: 2 });
+    assert(r.status === 201 || r.status === 200, "admin ustvari guest listo (priprava)", r.body);
+    r = await api("GET", "/me/guest-lists", T.ana);
+    assert(r.status === 200 && (r.body.guest_lists || []).length === 1 && r.body.guest_lists[0].event.poster_card_url === KARTICA, "GET /me/guest-lists: event.poster_card_url", r.body);
+    const glId = (r.body.guest_lists || [{}])[0].id;
+    await pool.query("INSERT INTO friendships (user_a, user_b) VALUES (LEAST($1::int,$2::int), GREATEST($1::int,$2::int)) ON CONFLICT DO NOTHING", [await uid("ana@outly.si"), await uid("bor@outly.si")]);
+    r = await api("POST", `/me/guest-lists/${glId}/invites`, T.ana, { user_ids: [await uid("bor@outly.si")] });
+    assert(r.status === 200 || r.status === 201, "gostitelj povabi (priprava)", [r.status, r.body]);
+    r = await api("GET", "/me/guest-list-invites/received", T.bor);
+    assert(r.status === 200 && (r.body.invites || []).length === 1 && r.body.invites[0].event.poster_card_url === KARTICA, "GET /me/guest-list-invites/received: event.poster_card_url", r.body);
+    r = await api("GET", "/business/sales", T.lastnik);
+    e = poId(r.body, E1);
+    assert(r.status === 200 && e && e.poster_card_url === KARTICA, "GET /business/sales: poster_card_url", r.body && Object.keys(r.body));
+    const mt = (await api("GET", "/me/tickets", T.ana)).body; const serial = (mt.tickets || mt)[0].serial;
+    await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '1 hour', end_at = NOW() + INTERVAL '5 hours' WHERE id = $1", [E1]);   // sken je mogoc samo na dan dogodka
+    r = await api("POST", "/business/tickets/scan", T.lastnik, { serial });
+    assert(r.status === 200, "lastnik skenira vstopnico (priprava)", [r.status, r.body]);
+    r = await api("GET", `/business/team/${await uid("lastnik@outly.si")}/scans`, T.lastnik);
+    assert(r.status === 200 && (r.body.events || []).some((x) => x.id === E1 && x.poster_card_url === KARTICA), "GET /business/team/:userId/scans: poster_card_url", r.body);
 
     console.log("\n# K2 izhod: admin");
     r = await api("GET", "/admin/api/events", T.admin);

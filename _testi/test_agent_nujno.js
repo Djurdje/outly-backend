@@ -315,7 +315,7 @@ function nicOsebnega(ime, tekst) {
       await pool.query(`ALTER TABLE predlogi_dejanj ADD CONSTRAINT predlogi_dejanj_dejanje_check ${chk}`);
     }
     // #340 varovalke tudi ob nujni izvedbi: shranjene spremembe (vrstica mimo poti) z nevidnimi znaki ali tujim plakatom -> 400, nic se ne izvede
-    for (const [spr, koda] of [[{ poster_url: "https://evil.example/p.jpg" }, "plakat_ni_dovoljen"], [{ title: "Dogodek \u202Eizkl" }, "nevidni_znaki"]]) {
+    for (const [spr, koda] of [[{ poster_url: "https://evil.example/p.jpg" }, "plakat_ni_dovoljen"], [{ poster_card_url: "https://evil.example/k.jpg" }, "plakat_ni_dovoljen"], [{ title: "Dogodek \u202Eizkl" }, "nevidni_znaki"]]) {
       const id = (await pool.query("INSERT INTO predlogi_dejanj (agent_zeton_id, dejanje, cilj_tip, cilj_id, spremembe, razlog) VALUES ($1, 'event.uredi', 'event', $2, $3::jsonb, 'mimo poti') RETURNING id",
         [NUJNO_ID, E.izkl, JSON.stringify(spr)])).rows[0].id;
       const x = await izvedi(id, { potrditev: "potrjujem: uredi Dogodek izkl", seja: SEJA });
