@@ -547,7 +547,7 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   }
 
   function zazeni() {
-    if (TICK_MS > 0) { utripTek = delavci.registriraj("vracila_tek", { periodaMs: TICK_MS }); setInterval(() => { tek(); }, TICK_MS).unref(); }
+    if (TICK_MS > 0) { utripTek = delavci.registriraj("vracila_tek", { periodaMs: TICK_MS, rokMinMs: 20 * 60 * 1000 }); setInterval(() => { tek(); }, TICK_MS).unref(); }
   }
   const zbudi = () => { if (TICK_MS > 0) setTimeout(() => { tek(); }, 50).unref(); };
 

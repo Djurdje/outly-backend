@@ -118,7 +118,7 @@ function ustvari(dep) {
   async function krog() {
     if (tece) return { objavljenih: 0, preskocenih: 0, tece: true };
     tece = true;
-    const k = utrip.zacetek(() => { tece = false; });   // ob roku se zastavica sprosti; objavi() zaklene vrstico (FOR NO KEY UPDATE SKIP LOCKED), zato prekrivanje ne podvoji objave
+    const k = utrip.zacetek();   // obvisel krog zastavice ne sprosti (delavci.js)
     let objavljenih = 0, preskocenih = 0;
     try {
       let ids;
@@ -145,7 +145,7 @@ function ustvari(dep) {
           log.error(`[samodejna-objava] dogodek ${id}: ${(e && (e.code || e.message)) || e}`);   // zaklep (55P03), rok, povezava: naslednji krog
         }
       }
-    } finally { if (k.konec()) tece = false; }
+    } finally { k.konec(); tece = false; }
     return { objavljenih, preskocenih };
   }
 

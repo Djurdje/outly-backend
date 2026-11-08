@@ -589,10 +589,13 @@ function ustvari(dep) {
     for (const x of r.rows) await nujnoMailPoslji(x.id);
     await izcrpanAlarm();
   }
-  const utrip = delavci.registriraj("agent_nujno_mail", { periodaMs: NUJNO_MAIL_PONOVI_MS });   // I70; brez zastavice kroga (krogi se sme prekrivati: prevzem mail vrstice je v bazi)
+  const utrip = delavci.registriraj("agent_nujno_mail", { periodaMs: NUJNO_MAIL_PONOVI_MS });   // I70; zastavica kroga `nujnoTece`
+  let nujnoTece = false;   // obvisel krog ne sme sprozati novih (S1): vsak bi pustil zombi sejo
   const pospravljalec = setInterval(() => {
+    if (nujnoTece) return;
+    nujnoTece = true;
     const k = utrip.zacetek();
-    nujnoMailNeposlani().catch((e) => console.error("[agent-nujno] pospravljalec:", e && e.message)).finally(() => k.konec());
+    nujnoMailNeposlani().catch((e) => console.error("[agent-nujno] pospravljalec:", e && e.message)).finally(() => { k.konec(); nujnoTece = false; });
   }, NUJNO_MAIL_PONOVI_MS);
   if (pospravljalec.unref) pospravljalec.unref();
 

@@ -36,6 +36,8 @@ const racuni = require("./racuni");   // I52: dolg racuna (zakljuci) in dobropis
 const API_VERZIJA = "2025-03-31.basil";
 const CHECKOUT_MINUT = 30;   // najkrajsi rok, ki ga Stripe dovoli za expires_at
 const POSPRAVI_MS = 5 * 60 * 1000;
+const ZAGON_PROCESA = Date.now();
+const PODPIS_OKNO_MS = (() => { const n = Number.parseInt(process.env.STRIPE_PODPIS_OKNO_MS, 10); return Number.isInteger(n) && n >= 100 && n <= 86400000 ? n : 60 * 60 * 1000; })();   // < 60 min samo za teste
 
 let predpomnjen = null;
 function stripe() {
@@ -494,10 +496,11 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
     for (const sk of skrivnosti) {
       try { d = s.webhooks.constructEvent(req.body, podpis, sk); break; } catch (_) { /* naslednja skrivnost */ }
     }
+    if (d) delavci.uspeh("stripe:veljaven_podpis");
     if (!d) {
-      // Napacen podpis (zamenjana skrivnost, napacen endpoint): Stripe ponavlja in vse ostaja 400 brez sledi; spori, charge.refunded in account.updated ne pridejo
-      // (I70). Najvec 1x na 10 min na proces; NIKOLI glava podpisa ali telo (lahko vsebuje osebne podatke).
-      delavci.pozorRedko("stripe:podpis", "Stripe webhook: napacen podpis (preveri STRIPE_WEBHOOK_SECRET in naslov webhooka v Stripovi nadzorni plosci); dogodki (spori, vracila, placila) ne pridejo, narocila ostajajo pending do pospravljalca");
+      // N3: napacni podpisi brez enega samega veljavnega v zadnjem oknu (privzeto 60 min od zagona ali zadnjega veljavnega) so lahko smetje z interneta; alarm samo, ce
+      // veljavnih ni (zamenjana skrivnost, napacen endpoint). Po zagonu okno steje od zagona, da deploy med smetjem ne sproži alarma.
+      if (!delavci.bilUspeh("stripe:veljaven_podpis", PODPIS_OKNO_MS) && Date.now() - ZAGON_PROCESA > PODPIS_OKNO_MS) delavci.pozorRedko("stripe:podpis", "Stripe webhook: napacen podpis in v zadnji uri NOBENEGA veljavnega (preveri STRIPE_WEBHOOK_SECRET in naslov webhooka v Stripovi nadzorni plosci); dogodki (spori, vracila, placila) ne pridejo, narocila ostajajo pending do pospravljalca");
       return res.status(400).send("Invalid signature.");
     }
     // I36 (#227): dogodek iz DRUGEGA nacina ne sme spremeniti stanja ali sprozati klicev. `livemode` ima vsak pravi Stripov dogodek (manjka samo v lazni strezniku).
@@ -553,10 +556,13 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
 
   async function vTransakciji(fn) {
     const c = await pool.connect();
-    try { await c.query("BEGIN"); await fn(c); await c.query("COMMIT"); }
+    // Roki (S1, I70): transakcije pospravljalca/preverjanja ne smejo viseti za zaklepom vrstice (webhook, nakup); napaka = ponovitev v naslednjem krogu (zakljuci/prekini so idempotentni)
+    try { await c.query("BEGIN; SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '30s'; SET LOCAL idle_in_transaction_session_timeout = '60s'"); await fn(c); await c.query("COMMIT"); }
     catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
     finally { c.release(); }
   }
+  // Stripova omejitev hitrosti ali napaka povezave: preostanek kroga se opusti (naslednji krog nadaljuje), da ne bijemo v zid (L1)
+  const jeOmejitevStripa = (e) => !!e && (e.type === "StripeRateLimitError" || e.type === "StripeConnectionError" || e.statusCode === 429);
 
   // Eno cakajoce narocilo s sejo: vprasaj Stripe, kaj je res (pospravljalec in potekel checkout_url, #149). Brez seje -> failed.
   // Idempotentno: zakljuci/prekini zaklenita vrstico in ponovni klic ne naredi nicesar. Napaka (Stripe nedosegljiv) se vrze klicatelju.
@@ -618,11 +624,11 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
     const s = stripe();
     if (!s || tece) return;
     tece = true;
-    // ob roku (delavci.js) se zastavica sprosti: preveriEno je idempotentna (zakljuci/prekini zaklenita vrstico narocila), zato prekrivanje starega in novega kroga ne podvoji nicesar
-    const k = utrip.zacetek(() => { tece = false; });
+    const k = utrip.zacetek();   // obvisel krog zastavice NE sprosti (delavci.js, S1): sicer bi vsak rok pustil zombi sejo, ki caka na zaklep vrstice
     try {
       const konec = Date.now() + POSPRAVI_ROK_MS;
       const obdelana = [];
+      let stripeOpusti = false;
       for (let serija = 0; serija < POSPRAVI_SERIJ; serija++) {
         const r = await pool.query(
           `SELECT id, public_ref, stripe_checkout_session_id FROM orders
@@ -631,17 +637,19 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
                 OR (checkout_expires_at IS NULL AND created_at < NOW() - INTERVAL '15 minutes'))
               AND NOT (id = ANY($1::bigint[]))
             ORDER BY (checkout_url IS NULL AND stripe_checkout_session_id IS NOT NULL), created_at LIMIT 50`, [obdelana]);   // odlozena placila (v obdelavi) zadnja: ne stradajo drugih
+        let opusti = false;
         for (const o of r.rows) {
           obdelana.push(o.id);
           try { await preveriEno(o); }
-          catch (e) { console.error(`[stripe] pospravljanje narocila ${o.public_ref}:`, e.message); }
+          catch (e) { console.error(`[stripe] pospravljanje narocila ${o.public_ref}:`, e.message); if (jeOmejitevStripa(e)) { opusti = true; break; } }
           if (Date.now() > konec) break;
         }
+        if (opusti) { console.error("[stripe] pospravljanje: omejitev hitrosti ali povezave pri Stripu, preostanek kroga opuscen (naslednji krog nadaljuje)"); stripeOpusti = true; break; }
         if (r.rows.length < 50 || Date.now() > konec) break;
       }
-      await preveriPreklicane(s);
+      if (!stripeOpusti) await preveriPreklicane(s);
     } catch (e) { console.error("[stripe] pospravljanje:", e.message); }
-    finally { if (k.konec()) tece = false; }
+    finally { k.konec(); tece = false; }
   }
 
   // M4 (pregled #316, I53): narocilo, ki smo ga preklicali PRED iztekom seje (pavza prodaje, izbris racuna, seja ustvarjena po preklicu), ima lahko pri Stripu
@@ -674,7 +682,7 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
           await vTransakciji(async (c) => { await zakljuci(c, seja); });   // cancelled -> vrniNeaktivno (vracilo v vrsti), vstopnic ni
         }
         if (seja.status === "expired" || seja.status === "complete") preverjeniPreklici.set(String(o.id), zdaj);
-      } catch (e) { console.error(`[stripe] preverba preklicanega narocila ${o.public_ref}:`, e.message); }
+      } catch (e) { console.error(`[stripe] preverba preklicanega narocila ${o.public_ref}:`, e.message); if (jeOmejitevStripa(e)) break; }
     }
   }
 

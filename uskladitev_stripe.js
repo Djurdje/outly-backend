@@ -368,7 +368,7 @@ function ustvari(dep) {
   async function krog() {
     if (tece) return { obdelani: [], preskoceno: "tece" };
     tece = true;
-    const k = utrip.zacetek(() => { tece = false; });   // ob roku se zastavica sprosti; zahtevek dneva je atomaren v bazi, zakasneli stari proces ne povozi novejsega (I67)
+    const k = utrip.zacetek();   // obvisel krog zastavice ne sprosti (delavci.js)
     const obdelani = [];
     try {
       if (!jeLive() || !stripe()) return { obdelani, preskoceno: "ni_zivo" };
@@ -378,7 +378,7 @@ function ustvari(dep) {
     } catch (e) {
       log.error(`[uskladitev-stripe] krog: ${kodaNapake(e)}`);   // baza nedosegljiva ipd.: naslednji krog
       return { obdelani, napaka: kodaNapake(e) };
-    } finally { if (k.konec()) tece = false; }
+    } finally { k.konec(); tece = false; }
   }
 
   function zazeni() {

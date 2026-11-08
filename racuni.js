@@ -1172,8 +1172,11 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   // Pospravljalec: (1) placano platformno narocilo brez racuna, (2) vrnjen znesek brez dobropisa, (3) alarm za racune, ki predolgo niso potrjeni.
   // Samo narocila, placana PO uvedbi 054 (schema_migrations): racuna za nazaj ne izdajamo (pravna analiza 20. 10. 2026, razdelek 6; odloci Martin/racunovodkinja).
   let zadnjiAlarm = 0, zadnjaLuknja = 0, zadnjiPdfAlarm = 0;
+  let teceP = false;   // obvisel krog ne sme sprozati novih (S1): vsak bi pustil zombi sejo, ki caka na zaklep
   async function pospravi() {
-    const utrip = utripPospravi.zacetek();   // brez zastavice: pospravljalec se sme prekrivati (INSERT ... ON CONFLICT DO NOTHING, samo alarmi)
+    if (teceP) return;
+    teceP = true;
+    const utrip = utripPospravi.zacetek();
     try {
       const od = `(SELECT uporabljen FROM schema_migrations WHERE datoteka = '054_racuni.sql')`;
       const a = await poizvedba(
@@ -1229,7 +1232,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
         }
       }
     } catch (e) { console.error("[racuni] pospravljanje:", kratko(e)); }
-    finally { utrip.konec(); }
+    finally { utrip.konec(); teceP = false; }
   }
 
   function zazeni() {

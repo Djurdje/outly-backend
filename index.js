@@ -1239,8 +1239,8 @@ app.get("/healthz/baza", async (req, res) => {
 });
 
 // GET /healthz/opozorila (#403, I70): ena javna pot za zunanji nadzor (UptimeRobot, nadzor.yml). Odgovor SAMO { ok } (nikoli imena delavcev, stevila ali opisi).
-// ok:false, ce (a) kak periodicni delavec zaostaja (delavci.js: od zadnjega kroga je minilo vec kot max(3 x perioda, rok kroga)), ali (b) obstaja RDECE opozorilo iz
-// istega izracuna kot panel (adminNadzor.opozorila(): racun_napaka, stripe_razlika, spori_rok_blizu, baza_disk, narocila_visijo ...). 503, ko je ok:false.
+// ok:false, ce (a) kak periodicni delavec zaostaja (delavci.js: od zadnjega kroga je minilo vec kot max(3 x perioda, rok kroga)), ali (b) obstaja RDECE opozorilo »tehnicnega zdravja« iz
+// istega izracuna kot panel (adminNadzor.opozorila(); samo TEHNICNE_VRSTE iz admin_nadzor.js: baza_disk, narocila_visijo, nujno_mail_neposlan, gost_vstopnice_neposlane). 503, ko je ok:false.
 // Rezultat velja OPOZORILA_ZDRAVJE_VELJA_MS (60 s): najvec ena serija poizvedb na minuto ne glede na promet (sočasni klici si delijo obljubo). Izracun tece na GLAVNEM poolu
 // prek admin semaforja z roki poizvedb (admin_nadzor.js), NE skenPool in NE zdraviPool. Baza nedosegljiva / izracun ne uspe v roku = ok:false (503), proces ne pade.
 // Panel zaseden (ADMIN_BUSY: semafor, ne baza) ne sme biti alarm: velja zadnja znana presoja opozoril (najvec 10 min), delavci se vedno presodijo sveze.
@@ -1255,9 +1255,9 @@ async function izracunajZdravjeOpozoril() {
   let casovnik;
   try {
     const r = await Promise.race([adminNadzor.opozorila(), new Promise((_, no) => { casovnik = setTimeout(() => no(Object.assign(new Error("rok"), { code: "OPOZORILA_ROK" })), OPOZORILA_ZDRAVJE_ROK_MS); })]);
-    rdeceOk = r.stevci.rdece === 0;
+    rdeceOk = !(r.tehnicna > 0);   // samo »tehnicno zdravje« (admin_nadzor.js TEHNICNE_VRSTE), ne vsako rdece opozorilo panela
     opozorilaRdeceZadnje = { ok: rdeceOk, cas: Date.now() };
-    if (!rdeceOk) vzrok = `rdecih opozoril: ${r.stevci.rdece}`;
+    if (!rdeceOk) vzrok = `tehnicnih rdecih opozoril: ${r.tehnicna}`;
   } catch (e) {
     if (e && e.code === "ADMIN_BUSY" && opozorilaRdeceZadnje && Date.now() - opozorilaRdeceZadnje.cas < 600000) rdeceOk = opozorilaRdeceZadnje.ok;
     else { rdeceOk = false; vzrok = `opozoril ni mogoce izracunati (${(e && (e.code || e.message)) || "napaka"})`; }
@@ -7087,9 +7087,7 @@ let gostPostaUtrip = delavci.BREZ;   // srcni utrip (I70); registrira ga zagon s
 async function gostPosljiNeposlane() {
   if (!resend || gostPostaTece) return;
   gostPostaTece = true;
-  // Ob roku (delavci.js) se zastavica sprosti, da obvisel krog (npr. Resend brez odgovora) ne ustavi VSEH petih vrst mailov za vedno. Prekrivanje starega in novega kroga
-  // ne podvoji maila: vsaka vrsta prevzame vrstico v bazi (guest_mail_claimed_at / *_prevzeto z premorom pred ponovnim poskusom), kot ob ponovnem zagonu procesa.
-  const utripKroga = gostPostaUtrip.zacetek(() => { gostPostaTece = false; });
+  const utripKroga = gostPostaUtrip.zacetek();   // obvisel krog zastavice ne sprosti (delavci.js, S1); viden kot zaostal
   try {
     const r = await pool.query(
       `SELECT id FROM orders WHERE guest_email IS NOT NULL AND guest_mail_sent_at IS NULL AND status = 'paid'
@@ -7102,7 +7100,7 @@ async function gostPosljiNeposlane() {
     await vraciloIzStripaPosljiNeposlane();   // vracila iz Stripove nadzorne plosce (053, #309)
     await racunKupcuPosljiNeposlane();   // racuni in dobropisi kupcem (057, Issue #319, I55)
   } catch (e) { console.error("[gost] pospravljanje mailov:", e && e.message); }
-  finally { if (utripKroga.konec()) gostPostaTece = false; }
+  finally { utripKroga.konec(); gostPostaTece = false; }
 }
 // ---------------------------
 // POTRDILO O NAKUPU KUPCU Z RACUNOM — migracija 042, issue #95, invarianta I32
@@ -7854,7 +7852,8 @@ async function vracilaObvestilaNeposlana() {
 }
 // Prvi tek NE takoj po zagonu (glavni pool je takrat najbolj zaseden).
 if (GOST_POSTA_PONOVI_MS > 0) {
-  gostPostaUtrip = delavci.registriraj("gost_posta", { periodaMs: GOST_POSTA_PONOVI_MS });
+  // Brez Resenda krog takoj vrne (nic dela): delavec se ne registrira (N2). Pocasen Resend ne sme dati lazne »obvisel«: rok najmanj 20 min (N1).
+  if (resend) gostPostaUtrip = delavci.registriraj("gost_posta", { periodaMs: GOST_POSTA_PONOVI_MS, rokMinMs: 20 * 60 * 1000 });
   setInterval(gostPosljiNeposlane, GOST_POSTA_PONOVI_MS).unref();
 }
 // Hramba osebnih podatkov gosta (pravna analiza 5. 10. 2026, 2.3; roki so PREDPOSTAVKA, Martin jih lahko spremeni):
@@ -10024,7 +10023,7 @@ let rezervacijeUtrip = delavci.BREZ, gostZetoniUtrip = delavci.BREZ;   // srcni 
 async function pocistiRezervacije() {
   if (rezervacijeCiscenjeTece) return;
   rezervacijeCiscenjeTece = true;
-  const k = rezervacijeUtrip.zacetek(() => { rezervacijeCiscenjeTece = false; });   // DELETE je idempotenten: prekrivanje ne skodi
+  const k = rezervacijeUtrip.zacetek();
   try {
     const r = await pool.query(
       `DELETE FROM table_holds h USING events e
@@ -10033,7 +10032,8 @@ async function pocistiRezervacije() {
   } catch (e) {
     console.error("[rezervacije] pospravljanje ni uspelo:", e && e.message);
   } finally {
-    if (k.konec()) rezervacijeCiscenjeTece = false;
+    k.konec();
+    rezervacijeCiscenjeTece = false;
   }
 }
 if (REZERVACIJE_CISCENJE_MS > 0) {
