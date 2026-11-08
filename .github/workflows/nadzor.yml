@@ -57,9 +57,6 @@ jobs:
             NAPAKE="$PRED"; sleep 30
             preveri "backend sken"     "https://outly-backend-roy3.onrender.com/healthz/sken" 200 '"ok":true'
           fi
-          # Disk baze (#404): pot vrne 200 {"ok":true,...}, ko je disk baze pod mejo, in 503 {"ok":false,...}, ko je nad njo (Render outly-db
-          # ne sme zmanjkati prostora). Doda jo locen PR, ki mora biti zmergan PRED tem; do takrat bi pot dala 404 (= alarm), zato vrstnega reda ne zamenjaj.
-          preveri "backend baza"     "https://outly-backend-roy3.onrender.com/healthz/baza" 200 '"ok":true'
           preveri "outly.si"         "https://outly.si/"                                200 'Outly'
           preveri "outly.si /terms"  "https://outly.si/terms"                           200
           # javni (publishable) kljuc, isti kot v kodi aplikacije in spletne strani
@@ -127,7 +124,7 @@ jobs:
       # Pogoj je namenoma "napake == ''", ne samo success(): pri rocnem zagonu z test=true
       # ali test=routine korak "Preveri produkcijo" NE pade, tudi ce je produkcija res podrta
       # (exit 1 je pogojen s TEST=false). Z golim success() bi tak zagon poslal ping "vse OK"
-      # sredi resnicnega izpada in Healthchecks bi molcal. Prazen "napake" pomeni: vseh devet
+      # sredi resnicnega izpada in Healthchecks bi molcal. Prazen "napake" pomeni: vseh osem
       # preverb je bilo zelenih in to ni bil testni zagon.
       - name: Ping Healthchecks.io (mrtev cloveka drzalo)
         if: success() && steps.preveri.outputs.napake == ''

@@ -115,3 +115,87 @@ jobs:
 
           echo "::error::Manjka oznaka '$OZNAKA' — PR spreminja obcutljive datoteke (glej povzetek zagona)."
           exit 1
+
+      # Zapora migracij med dogodkom (issue #404 B). Ena resnica: TUKAJ, ne v testi.yml. Zascita teče z main kot pull_request_target (PR je ne
+      # more izklopiti), se sproži tudi ob `labeled`/`unlabeled` in je obvezen check, zato oznaka odobril-martin zapore NE odpre.
+      # PR, ki spreminja db/migracije/** (tudi preimenovanje IZ nje: previous_filename), pade, dokler na produkciji teče dogodek ali se zacne
+      # v manj kot PRED_H urah. Okno: od zacetka - PRED_H do (konec ali, brez veljavnega konca, zacetek + 12 h kot sken_okno.js) + PO_H.
+      # Zakaj -3 h in ne -12 h kot pri skenu: sken odpre vrata 12 h pred zacetkom zaradi zamud in pripravljanja, a migracija je nevarna le, ko
+      # tecejo nakupi/skeni v navali (ACCESS EXCLUSIVE na tickets/orders ~1 s v deployu); -12 h bi zaprlo migracije skoraj vsak teden vec dni,
+      # CLAUDE.md devops pa pozna pravilo »ne v manj kot 3 h do dogodka«.
+      # Preskok: SAMO oznaka `migracija-med-dogodkom`, ki jo doda Martin (agent si je ne sme dodati). Oznaka se bere ZIVO prek API-ja.
+      # Produkcija ali API nedosegljiva -> samo OPOZORILO (izpad ne sme blokirati popravka). Neveljaven datum enega dogodka -> tak dogodek
+      # SKRBNO steje kot »v oknu« (opozorilo + padec), ker ne moremo dokazati, da ne tece.
+      # NIKOLI checkout ali izvajanje kode PR-ja: beremo samo seznam datotek, oznake in javni GET /events.
+      # Preostala luknja: preverba velja ob zagonu. Oznaka ob 10:00 in samodejni merge ob 21:00 jo obideta -> agent za PR z migracijo NIKOLI ne
+      # uporabi auto-merge in tik pred merge-om znova pozene `Zascita` (Re-run); glej docs/ARCHITECTURE.md »Nadzor produkcije«.
+      - name: Zapora migracij med dogodkom
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PRED_H: "3"
+          PO_H: "1"
+          OZNAKA_PRESKOK: migracija-med-dogodkom
+        shell: bash
+        run: |
+          set -u
+          BASE="https://outly-backend-roy3.onrender.com"
+          opozorilo() { echo "::warning::Zapora migracij: $1 - preverba preskocena, check zaradi tega NE pade."; exit 0; }
+
+          DATOTEKE=$(gh api --paginate "repos/$REPO/pulls/$PR/files" 2>/dev/null) || opozorilo "seznama datotek PR-ja ni mogoce prebrati"
+          if ! jq -r '.[] | (.filename, (.previous_filename // empty))' <<<"$DATOTEKE" 2>/dev/null | grep -q '^db/migracije/'; then
+            echo "PR ne spreminja db/migracije/** - zapora se ne uporabi."
+            exit 0
+          fi
+          OZNAKE=$(gh api "repos/$REPO/pulls/$PR" --jq '[.labels[].name] | join("\n")' 2>/dev/null) || opozorilo "oznak PR-ja ni mogoce prebrati"
+          if grep -qx "$OZNAKA_PRESKOK" <<<"$OZNAKE"; then
+            echo "Oznaka $OZNAKA_PRESKOK je na PR-ju (dodal jo je Martin) - zapora preskocena."
+            exit 0
+          fi
+
+          # /events brez parametra je LIMIT 200 od najstarejsega: zato ?upcoming=true (prihajajoci) in ?upcoming=false (zadnjih 7 dni, tudi tekoci).
+          SEZNAM="[]"
+          for Q in true false; do
+            ODG=$(curl -sS --max-time 25 --retry 2 --retry-delay 5 --retry-all-errors -w '\n%{http_code}' "$BASE/events?upcoming=$Q" 2>/dev/null) || opozorilo "GET /events?upcoming=$Q ni dosegljiv"
+            STATUS="${ODG##*$'\n'}"; TELO="${ODG%$'\n'*}"
+            [ "$STATUS" = "200" ] || opozorilo "GET /events?upcoming=$Q vrne $STATUS"
+            SEZNAM=$(jq -c --argjson a "$SEZNAM" 'if type=="array" then $a + . else error("ni seznam") end' <<<"$TELO" 2>/dev/null) || opozorilo "odgovor /events?upcoming=$Q ni seznam"
+          done
+
+          # Vsak dogodek posebej (try): en pokvarjen datum ne podre preverbe. Vrstica: V = v oknu, ? = datuma ni mogoce prebrati (skrbno = v oknu).
+          NOW=$(date -u +%s)
+          TEKOCI=$(jq -r --argjson now "$NOW" --argjson pred "$((PRED_H * 3600))" --argjson po "$((PO_H * 3600))" '
+            def cas: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+            def ime: ((.title // "") | tostring | gsub("[^A-Za-z0-9 ._-]"; "") | .[0:60]);
+            .[] | . as $e
+            | (try (
+                ($e.start_at | cas) as $z
+                | ([ (try (($e.end_at // "") | select(length > 0) | cas) catch empty) ][0]) as $k0
+                | (if $k0 != null and $k0 > $z then $k0 else $z + 43200 end) as $k
+                | if $now >= ($z - $pred) and $now <= ($k + $po)
+                  then ["V", ($e.id | tostring), ($e | ime), (($z - $pred) | todate), (($k + $po) | todate)]
+                  else empty end
+              ) catch ["?", (try ($e.id | tostring) catch "?"), (try ($e | ime) catch ""), "", ""])
+            | @tsv
+          ' <<<"$SEZNAM" 2>/dev/null) || opozorilo "casov dogodkov ni mogoce izracunati"
+
+          if [ -z "$TEKOCI" ]; then
+            echo "Noben dogodek ne tece in se ne zacne v $PRED_H h - migracije so dovoljene."
+            exit 0
+          fi
+          while IFS=$'\t' read -r VRSTA ID IME OD DO; do
+            if [ "$VRSTA" = "?" ]; then
+              echo "::warning::Dogodek #$ID ($IME): datuma ni mogoce prebrati - skrbno steje kot dogodek v oknu."
+            else
+              echo "::error::Migracije so zaprte: dogodek #$ID ($IME) je v oknu zapore od $OD do $DO (UTC). Pocakaj do takrat ali prosi Martina za oznako $OZNAKA_PRESKOK (nato Re-run tega checka)."
+            fi
+          done <<<"$TEKOCI"
+          {
+            echo "### Zapora migracij: na produkciji tece dogodek ali se kmalu zacne"
+            echo
+            echo "PR spreminja \`db/migracije/**\`. Migracije so zaprte do konca okna (glej napake zagona). Oznaka \`odobril-martin\` zapore NE odpre;"
+            echo "preskoci jo samo oznaka \`$OZNAKA_PRESKOK\`, ki jo doda Martin. Po oznaki: Re-run checka \`zascita\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
