@@ -8,7 +8,9 @@
  *     GET /clubs brez q se ne steje
  * (b) predolg q se obreze na 64 znakov (iOS in splet dolzine ne omejujeta: napaka pri normalni rabi bi bila hujsa od obreza)
  * (c) casovna meja: poizvedba, ki obvisi (ACCESS EXCLUSIVE na clubs), da 503 + Retry-After, proces zivi, povezave se vrnejo v pool
- * (d) uspesen odgovor ima staro obliko {query, clubs, events, total}
+ * (d) neveljaven q (prekratek, NUL) ne porabi mejnega stevca; ISKANJE_NA_URO=0 -> privzeto
+ * (e) hkratna iskanja ob zaklepu: semafor ISKANJE_HKRATI, neodvisen /clubs hiter, 503 namesto 500
+ * (uspesen odgovor ima staro obliko {query, clubs, events, total})
  */
 const { spawn } = require("child_process");
 const { Pool } = require("pg");
@@ -119,6 +121,50 @@ async function klic(p, pot) {
     const cakajoci = (await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'outly_test_iskanje_meje' AND state = 'idle in transaction'")).rows[0].n;
     assert(cakajoci === 0, "nobena povezava ne ostane v odprti transakciji", cakajoci);
     await B.ustavi();
+
+    // ------------------------------------------------------------------
+    console.log("\n# (d) Neveljaven q ne porabi mejnega stevca; NUL bajt -> 400; ISKANJE_NA_URO=0 -> privzeto, ne »vse 429« (ISKANJE_NA_URO=3)");
+    await pool.query("TRUNCATE omejitve");
+    const D = await zazeni(3173, { ISKANJE_NA_URO: "3" });
+    const kratki = [];
+    for (let i = 0; i < 6; i++) kratki.push((await klic(D, "/search?q=a")).status);
+    assert(kratki.every((x) => x === 400), "6x prekratek q -> 400 (pred omejevalnikom)", kratki);
+    const nul = [(await klic(D, "/search?q=ab%00cd")).status, (await klic(D, "/clubs?q=%00")).status, (await klic(D, "/search?q=klub&q=a%00")).status];
+    assert(nul.every((x) => x === 400), "q z NUL bajtom -> 400 (ne 500)", nul);
+    const veljavni = [];
+    for (let i = 0; i < 4; i++) veljavni.push((await klic(D, "/search?q=klub" + i)).status);
+    assert(veljavni.join() === "200,200,200,429", "400 ni pojedel meje: 3x 200, 4. 429", veljavni);
+    await D.ustavi();
+    await pool.query("TRUNCATE omejitve");
+    const N0 = await zazeni(3174, { ISKANJE_NA_URO: "0" });
+    const nic = [];
+    for (let i = 0; i < 12; i++) nic.push((await klic(N0, "/search?q=klub" + i)).status);
+    assert(nic.every((x) => x === 200), "ISKANJE_NA_URO=0 -> privzeta meja, ne 429", nic);
+    await N0.ustavi();
+
+    // ------------------------------------------------------------------
+    console.log("\n# (e) Hkratna iskanja ob zaklenjeni tabeli events: semafor, /clubs brez q ostane hiter, brez 500");
+    await pool.query("TRUNCATE omejitve");
+    const E = await zazeni(3175, { ISKANJE_NA_URO: "100000", ISKANJE_MEJA_MS: "1500" });
+    const lock2 = await pool.connect();
+    await lock2.query("BEGIN");
+    await lock2.query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE");
+    const iskanja = Array.from({ length: 40 }, (_, i) => klic(E, "/search?q=hkrati" + i));
+    await spi(300);
+    const neodvisen = await klic(E, "/clubs?limit=7");
+    assert(neodvisen.status === 200 && neodvisen.ms < 1000, "neodvisen GET /clubs?limit=7 med iskanji: 200 v < 1 s", [neodvisen.status, neodvisen.ms]);
+    const kasneje = await klic(E, "/clubs?limit=7");
+    assert(kasneje.status === 200 && kasneje.ms < 1000, "se enkrat, ko iskanja ze potekajo/iztekajo: < 1 s", [kasneje.status, kasneje.ms]);
+    const rez2 = await Promise.all(iskanja);
+    const st2 = rez2.map((x) => x.status);
+    assert(st2.every((x) => x === 503), "vsa hkratna iskanja -> 503 (nobenega 500, nobenega obvisenega)", st2.join());
+    assert(rez2.every((x) => Number(x.retryAfter) >= 1), "503 ima Retry-After", rez2.map((x) => x.retryAfter).join());
+    const takoj = rez2.filter((x) => x.ms < 400).length;
+    assert(takoj >= 30, "nad mejo hkratnih iskanj 503 TAKOJ (brez cakanja v vrsti)", takoj);
+    await lock2.query("ROLLBACK"); lock2.release();
+    const po3 = await klic(E, "/search?q=klub");
+    assert(po3.status === 200, "po sprostitvi zaklepa iskanje spet 200 (mesta se sprostijo)", po3.status);
+    await E.ustavi();
   } catch (e) {
     fail++; console.log("  ✗ izjema:", e && e.stack || e);
   } finally {

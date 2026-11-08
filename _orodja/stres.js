@@ -1,5 +1,7 @@
 // Stresni test produkcije: samo javne GET poti (brez prijave, brez pisanja v bazo).
 // /search zahteva q z vsaj 2 znaki (sicer 400) - zato q=lj.
+// /search ima od #405 omejevalnik na IP (429, ISKANJE_NA_URO) in mejo hkratnih iskanj (503, ISKANJE_HKRATI): stresni test je en IP, zato 429 in 503 na
+// /search STEJEJO LOCENO (izpisano, niso napaka zmogljivosti in ne vplivajo na p95); ostale poti in vsak drug status na /search ostanejo napaka.
 // Uporaba: node _orodja/stres.js [osnova] [vzporedno] [sekunde]
 //   osnova     privzeto https://outly-backend-roy3.onrender.com
 //   vzporedno  stevilo hkratnih "uporabnikov" (1-100), privzeto 40 (kot test 11. 9. 2026)
@@ -44,11 +46,14 @@ async function main() {
 
   const casi = [];
   const statusi = {};
+  let iskanjeOmejeno = 0;   // 429/503 na /search: pricakovana zavrnitev meje iskanja (#405)
   const konec = Date.now() + sekunde * 1000;
   let i = 0;
   async function delavec() {
     while (Date.now() < konec) {
-      const { status, ms } = await poizvedi(poti[i++ % poti.length]);
+      const pot = poti[i++ % poti.length];
+      const { status, ms } = await poizvedi(pot);
+      if (pot.startsWith("/search") && (status === 429 || status === 503)) { iskanjeOmejeno++; continue; }
       statusi[status] = (statusi[status] || 0) + 1;
       casi.push(ms);
     }
@@ -67,6 +72,7 @@ async function main() {
     `Zahtevkov: ${skupaj} v ${trajanje.toFixed(1)} s = ${(skupaj / trajanje).toFixed(1)} req/s`,
     `Zakasnitev ms: p50 ${pct(50)} | p95 ${pct(95)} | p99 ${pct(99)} | max ${Math.round(casi[skupaj - 1] || 0)}`,
     `Statusi: ${JSON.stringify(statusi)}`,
+    `/search zavrnjen z mejo iskanja (429/503, ni napaka): ${iskanjeOmejeno}`,
     `Napake: ${odstotek.toFixed(2)} % (meja ${MAX_NAPAK} %), p95 meja ${MAX_P95} ms`,
   ].join("\n");
   console.log(porocilo);
