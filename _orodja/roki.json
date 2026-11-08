@@ -1,0 +1,25 @@
+{
+  "_opomba": "Fiksni roki, ki jih workflow roki.yml (tedensko) primerja z danasnjim datumom. datum = YYYY-MM-DD ali null (neznan: workflow odpre EN issue martin 'Roki: manjkajo datumi'). Potek domene outly.si in TLS certifikatov workflow bere sam (RDAP, openssl) - tu jih ni. Datoteka je JAVNA: nobenih skrivnosti, samo imena rokov in datumi. Prag: 60, 30, 7 dni.",
+  "roki": [
+    {
+      "ime": "Pošta Domenca MAX M",
+      "datum": "2027-05-01",
+      "kaj_pade": "Poslovni e-naslovi (npr. luka@outly.si) nehajo delovati; kontaktni naslov kluba in odgovori uporabnikom izginejo."
+    },
+    {
+      "ime": "iOS certifikat CI ~2027-09-20 (natančno ga meri outly-app)",
+      "datum": "2027-09-20",
+      "kaj_pade": "Korak »Podpisan arhiv« v outly-app pade: novih TestFlight gradenj ni, PR-ji ostanejo zeleni."
+    },
+    {
+      "ime": "Apple Developer članarina",
+      "datum": null,
+      "kaj_pade": "Aplikacija izgine iz App Storea in TestFlighta, novih gradenj ni."
+    },
+    {
+      "ime": "FURS certifikat v e-racuni.com",
+      "datum": null,
+      "kaj_pade": "Davcno potrjevanje racunov (ZDavPR) preneha delovati: racuni kupcem se ne izdajo."
+    }
+  ]
+}

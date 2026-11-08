@@ -772,6 +772,28 @@ Postopek ostane tu za primer ponovne postavitve:
 
 Po tem je alarm dvojen: nadzor javi, ko je produkcija pokvarjena, Healthchecks pa, ko je pokvarjen nadzor.
 
+### Po deployu, zapora migracij med dogodkom in pregled rokov (#404, #407)
+
+Cron `*/15` je prepočasen za vprašanje »ali je ta merge pokvaril produkcijo«, zato so trije dodatni mehanizmi:
+
+- **`po-deployu.yml`** (potisk na `main`, tudi ročno z `main`; `concurrency` s prekinitvijo starejšega zagona). Do 10 min vsakih 15 s bere
+  `GET /healthz`, dokler `commit` ni enak `${GITHUB_SHA::12}` (stara različica po padlem deployu vrača 200, zato 200 ni dokaz). Nato `/clubs` 200 z `"id"`,
+  `/events` 200, `/events/<id>` 200 za prvi dogodek (če seznam ni prazen), `/me/invites` brez žetona 401, `/healthz/sken` 200 `"ok":true`.
+  Ob napaki: rdeč zagon, push (`NTFY_TOPIC`) in issue z oznako `agent` z naslovom »Po deployu: produkcija ne ustreza po zadnjem merge-u v main«
+  (odprt issue z istim naslovom dobi komentar). **Samodejnega reverta ni** (PR, ki ga odpre `GITHUB_TOKEN`, ne sproži CI): v issueju piše, kateri commit revertati;
+  revert PR odpre agent. V dnevnik gredo samo statusi in commit (repo je javen).
+- **Zapora migracij** (prvi korak joba `testi` v `testi.yml`, samo `pull_request`). PR, ki spreminja `db/migracije/**`, pade, če po javnem
+  `GET /events?upcoming=true` + `?upcoming=false` kak dogodek teče: okno je od `MIGRACIJA_PRED_H` (3 h) pred začetkom do `MIGRACIJA_PO_H` (1 h) po koncu
+  (če `end_at` manjka ali je pred začetkom: začetek + 8 h). Sporočilo pove dogodek in do kdaj. **Preskok: oznaka `migracija-med-dogodkom`, ki jo doda samo Martin**
+  (agent si je ne sme dodati); oznaka se bere živo, zato po njej zadostuje »Re-run« checka `testi`. Produkcija ali GitHub API nedosegljiva → samo opozorilo
+  (izpad ne sme blokirati popravka). Omejitev: preverba velja ob zagonu CI; PR, zelen pred dogodkom, se lahko zmerga med njim.
+- **`roki.yml`** (ponedeljek 14:17 UTC + ročno): TLS `notAfter` za `outly.si` in backend (prag 14 in 7 dni, ker se obnavljata sama), potek domene `outly.si` prek RDAP
+  (IANA bootstrap kaže za `.si` na `https://rdap.register.si/`; rezerva `whois`; brez datuma = opozorilo »neznano«), `disk_pct` iz `/healthz/baza` (≥ 70 % alarm,
+  404 = opozorilo) in fiksni roki iz `_orodja/roki.json` (prag 60/30/7 dni; `"datum": null` = neznan, ob prvem zagonu en issue `martin` »Roki: manjkajo datumi«).
+  Alarm = issue `martin` + ntfy, brez podvajanja (komentar samo ob novem pragu); alarm zagona ne obarva rdeče, napaka pregleda samega pa. **Kaj stori Martin:** neobvezen
+  secret `HC_URL_ROKI` (Healthchecks, Period 8 days, Grace 2 days; brez njega `::warning::`), vpis manjkajočih datumov v `_orodja/roki.json`, oznaka
+  `migracija-med-dogodkom` po presoji. Pot `/healthz/baza` in preverba v `nadzor.yml` (deveta) prideta v ločenem PR-ju; `nadzor.yml` PR mora biti zmergan PO njem.
+
 ## Varnostne kopije in obnova
 
 Kopije so **izven Renderja** (od 30. 9. 2026 je baza plačljiva; dnevna šifrirana kopija v R2, DECISIONS 2026-10-02, zagoni `Varnostna kopija baze` v INCIDENTI 2026-10-24; obnova: skill `obnova-baze`).

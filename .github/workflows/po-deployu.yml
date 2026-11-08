@@ -1,0 +1,159 @@
+# Preverba produkcije takoj po merge-u v main (issue #404 A).
+#
+# Zakaj: Render ob vsakem merge-u zazene deploy (~60-90 s, migracije tecejo ob deployu). Padel deploy pusti STARO razlicico zivo in
+# ta vraca 200 (docs/INCIDENTI.md), zato 200 sam ne dokaze, da tece nova koda. /healthz vrne `commit` = prvih 12 znakov
+# RENDER_GIT_COMMIT (index.js COMMIT_KRATEK): ta mora biti enak prvim 12 znakom SHA tega zagona. Nadzor produkcije (vsakih 15 min) bi
+# padec ujel sele po do 15 minutah; ta workflow ga ujame v ~2-10 minutah in pove, KATERI commit ga je povzrocil.
+#
+# Kaj: (1) do 10 min vsakih 15 s bere /healthz, dokler `commit` ni enak ${GITHUB_SHA::12}; (2) hitri test: /clubs 200 z "id", /events 200,
+# /events/<id> 200 za prvi dogodek, /me/invites brez zetona 401, /healthz/sken 200 z "ok":true.
+# Ob napaki: zagon je rdec, push (ntfy, secret NTFY_TOPIC) in issue z oznako `agent` (ce odprt issue z istim naslovom ze obstaja, dobi
+# komentar). Samodejnega reverta NI: PR, ki ga odpre GITHUB_TOKEN, ne sprozi CI. V telesu issuea je napisano, kateri commit revertati.
+#
+# Repo je JAVEN: v dnevnik, issue in push gredo samo statusi, imena preverb in commit - nikoli telesa odgovorov.
+# Rocni zagon (workflow_dispatch) je smiseln samo z veje main (SHA te veje se primerja s produkcijo); z druge veje se zagon preskoci.
+name: Po deployu
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Novejsi potisk preklice starejsi zagon: ceka se zadnji commit (starejsi deploy je tako ali tako povozen).
+concurrency:
+  group: po-deployu
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  po-deployu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Preveri deploy in produkcijo
+        id: preveri
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -u
+          BASE="https://outly-backend-roy3.onrender.com"
+          CILJ="${GITHUB_SHA::12}"
+          NAPAKE=""
+          VPIS_NAPAK() {
+            {
+              echo "napake<<EOF"
+              printf '%s' "$NAPAKE"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          # 1) Ali je nova razlicica zivo? Render potrebuje ~60-90 s; zgornja meja 10 min.
+          ZIVO=0
+          TEKOCI=""
+          KONEC=$((SECONDS + 600))
+          while [ "$SECONDS" -lt "$KONEC" ]; do
+            TELO=$(curl -sS --max-time 10 -H 'X-Nadzor: outly' "$BASE/healthz" 2>/dev/null) || TELO=""
+            TEKOCI=$(jq -r '.commit // empty' <<<"$TELO" 2>/dev/null || true)
+            # commit je javni SHA; drugo ne gre v dnevnik. Zapis samo, ce je videti kot SHA.
+            if ! [[ "$TEKOCI" =~ ^[0-9a-f]{7,12}$ ]]; then TEKOCI=""; fi
+            if [ "$TEKOCI" = "$CILJ" ]; then ZIVO=1; break; fi
+            echo "caka: produkcija tece na '${TEKOCI:-?}', cilj $CILJ ($((KONEC - SECONDS)) s do meje)"
+            sleep 15
+          done
+          if [ "$ZIVO" != 1 ]; then
+            NAPAKE="deploy ni prisel v zivo (tece stara razlicica): po 10 min /healthz vraca commit '${TEKOCI:-neznan}', pricakovan $CILJ"$'\n'
+            VPIS_NAPAK
+            echo "::error::$NAPAKE"
+            exit 1
+          fi
+          echo "OK  deploy je zivo na $CILJ (po $SECONDS s)"
+
+          # 2) Hitri test. Takoj po zamenjavi instance lahko prva zahteva zgresi, zato curl ponovi (--retry 3).
+          preveri() { # ime url pricakovan_status [niz_v_odgovoru]
+            local ime="$1" url="$2" pricakovan="$3" niz="${4:-}" telo status
+            telo=$(curl -sS --max-time 25 --retry 3 --retry-delay 5 --retry-all-errors -H 'X-Nadzor: outly' -w '\n%{http_code}' "$url" 2>/dev/null) || telo=$'\n000'
+            status="${telo##*$'\n'}"
+            telo="${telo%$'\n'*}"
+            LASTNI_TELO="$telo"
+            if [ "$status" != "$pricakovan" ]; then
+              NAPAKE+="$ime: status $status (pricakovan $pricakovan)"$'\n'
+            elif [ -n "$niz" ] && ! grep -q -- "$niz" <<<"$telo"; then
+              NAPAKE+="$ime: odgovor brez '$niz'"$'\n'
+            else
+              echo "OK  $ime ($status)"
+            fi
+          }
+          LASTNI_TELO=""
+          preveri "/clubs"        "$BASE/clubs"            200 '"id"'
+          preveri "/events"       "$BASE/events"           200
+          # Prvi dogodek s seznama (seznam je lahko prazen: tedaj preverba ne velja). id mora biti celo stevilo (v URL gre samo to).
+          ID=$(jq -r 'if type=="array" and length>0 then (.[0].id|tostring) else empty end' <<<"$LASTNI_TELO" 2>/dev/null || true)
+          if [[ "$ID" =~ ^[0-9]{1,9}$ ]]; then
+            preveri "/events/<id>" "$BASE/events/$ID"      200
+          else
+            echo "OPOMBA: /events nima dogodkov (ali ni seznam), /events/<id> preskocen"
+          fi
+          preveri "/me/invites brez zetona" "$BASE/me/invites" 401
+          preveri "/healthz/sken" "$BASE/healthz/sken"     200 '"ok":true'
+
+          VPIS_NAPAK
+          if [ -n "$NAPAKE" ]; then
+            echo "::error::Deploy $CILJ je zivo, a hitri test je padel:"$'\n'"$NAPAKE"
+            exit 1
+          fi
+
+      - name: Push obvestilo na telefon (ntfy)
+        if: always() && steps.preveri.outputs.napake != ''
+        env:
+          TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NAPAKE: ${{ steps.preveri.outputs.napake }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TOPIC" ]; then echo "NTFY_TOPIC ni nastavljen - push preskocen"; exit 0; fi
+          curl -sS --max-time 20 \
+            -H "Title: Outly po deployu" \
+            -H "Priority: high" \
+            -H "Tags: rotating_light" \
+            -H "Click: $RUN_URL" \
+            -d "$NAPAKE" \
+            "https://ntfy.sh/$TOPIC" >/dev/null && echo "Push poslan." \
+            || echo "::warning::ntfy push ni uspel (to ni napaka produkcije)."
+
+      - name: Issue z oznako agent (ali komentar na odprtega)
+        if: always() && steps.preveri.outputs.napake != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAPAKE: ${{ steps.preveri.outputs.napake }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -u
+          NASLOV="Po deployu: produkcija ne ustreza po zadnjem merge-u v main"
+          TELO_FILE="$RUNNER_TEMP/issue-telo.md"
+          {
+            echo "Workflow \`Po deployu\` je po merge-u v \`main\` ($SHA) ugotovil napako:"
+            echo
+            echo '```'
+            printf '%s' "$NAPAKE"
+            echo '```'
+            echo
+            echo "Zagon: $RUN_URL"
+            echo
+            echo "**Kaj naredi agent (devops):** preveri \`/healthz\` (commit) in Render \`list_deploys\`. Ce je vzrok ta commit, naredi **revert PR** za \`$SHA\`"
+            echo "(\`git revert\`; samodejnega reverta ni, ker PR, ki ga odpre GITHUB_TOKEN, ne sprozi CI) in po merge-u znova preveri produkcijo."
+            echo "Ce je padla migracija, najprej preberi \`docs/INCIDENTI.md\` in skill \`preverjanje-produkcije\`."
+            echo
+            echo "---"
+            echo "_Generated by [Claude Code](https://claude.ai/code)_"
+          } > "$TELO_FILE"
+          STEVILKA=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label agent --limit 100 --json number,title \
+            | jq -r --arg t "$NASLOV" '[.[] | select(.title == $t)][0].number // empty')
+          if [ -n "$STEVILKA" ]; then
+            gh issue comment "$STEVILKA" --repo "$GITHUB_REPOSITORY" --body-file "$TELO_FILE" && echo "Komentar na issue #$STEVILKA."
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$NASLOV" --label agent --body-file "$TELO_FILE" && echo "Issue ustvarjen."
+          fi
+          rm -f "$TELO_FILE"

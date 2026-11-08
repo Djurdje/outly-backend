@@ -57,6 +57,9 @@ jobs:
             NAPAKE="$PRED"; sleep 30
             preveri "backend sken"     "https://outly-backend-roy3.onrender.com/healthz/sken" 200 '"ok":true'
           fi
+          # Disk baze (#404): pot vrne 200 {"ok":true,...}, ko je disk baze pod mejo, in 503 {"ok":false,...}, ko je nad njo (Render outly-db
+          # ne sme zmanjkati prostora). Doda jo locen PR, ki mora biti zmergan PRED tem; do takrat bi pot dala 404 (= alarm), zato vrstnega reda ne zamenjaj.
+          preveri "backend baza"     "https://outly-backend-roy3.onrender.com/healthz/baza" 200 '"ok":true'
           preveri "outly.si"         "https://outly.si/"                                200 'Outly'
           preveri "outly.si /terms"  "https://outly.si/terms"                           200
           # javni (publishable) kljuc, isti kot v kodi aplikacije in spletne strani
@@ -117,13 +120,14 @@ jobs:
 
       # Mrtev cloveka drzalo: ce ta workflow sploh NE stece (GitHub Actions v izpadu,
       # onemogocen cron po 60 dneh nedejavnosti, pokvarjen YAML), zgoraj nihce ne opozori —
-      # rdeca lucka rabi zagon. Healthchecks.io obrne logiko: ce pinga ni v 15 min + 20 min
-      # odloga, javi ON.
+      # rdeca lucka rabi zagon. Healthchecks.io obrne logiko: ce pinga ni v Periodi + Grace, javi ON.
+      # Nastavitev checka je Period 6 h / Grace 3 h (ne 15/20 min: GitHub cron v praksi tece na 4-5 ur;
+      # docs/ARCHITECTURE.md, razdelek »Nadzor produkcije«).
       #
       # Pogoj je namenoma "napake == ''", ne samo success(): pri rocnem zagonu z test=true
       # ali test=routine korak "Preveri produkcijo" NE pade, tudi ce je produkcija res podrta
       # (exit 1 je pogojen s TEST=false). Z golim success() bi tak zagon poslal ping "vse OK"
-      # sredi resnicnega izpada in Healthchecks bi molcal. Prazen "napake" pomeni: vseh osem
+      # sredi resnicnega izpada in Healthchecks bi molcal. Prazen "napake" pomeni: vseh devet
       # preverb je bilo zelenih in to ni bil testni zagon.
       - name: Ping Healthchecks.io (mrtev cloveka drzalo)
         if: success() && steps.preveri.outputs.napake == ''

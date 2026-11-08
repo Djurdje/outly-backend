@@ -16,6 +16,68 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/outly
       NODE_ENV: test
     steps:
+      # Zapora migracij med dogodkom (issue #404 B): PR, ki spreminja db/migracije/**, pade, dokler na produkciji tece dogodek
+      # ali se zacne v manj kot MIGRACIJA_PRED_H urah (migracije tecejo ob deployu, ~60-90 s zakleniti tickets/orders pa je lahko
+      # sken na vratih; CLAUDE.md devops: »ne med dogodkom«). Okno: od MIGRACIJA_PRED_H pred zacetkom do MIGRACIJA_PO_H po koncu
+      # (konec ni znan -> zacetek + 8 h). Vir: javni GET /events (?upcoming=true in ?upcoming=false = zadnjih 7 dni; brez parametra
+      # je LIMIT 200 od najstarejsega, zato ne).
+      # Preskok: oznaka `migracija-med-dogodkom` na PR-ju. Oznako doda SAMO Martin (agent si je ne sme dodati: s tem bi izklopil
+      # varovalo). Oznaka se bere ZIVO prek API-ja, zato po dodani oznaki zadostuje »Re-run« tega checka.
+      # Produkcija ali GitHub API nedosegljiva -> samo OPOZORILO, korak NE pade (izpad ne sme blokirati popravka).
+      # Omejitev: preverba velja ob zagonu CI; PR, ki je zelen pred dogodkom, se lahko zmerga med njim (auto-merge).
+      - name: Zapora migracij med dogodkom
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          MIGRACIJA_PRED_H: "3"
+          MIGRACIJA_PO_H: "1"
+        run: |
+          set -u
+          BASE="https://outly-backend-roy3.onrender.com"
+          API="repos/${GITHUB_REPOSITORY}"
+          opozorilo() { echo "::warning::Zapora migracij: $1 - preverba preskocena, check NE pade."; exit 0; }
+
+          FILES=$(gh api "$API/pulls/$PR/files" --paginate --jq '.[].filename' 2>/dev/null) || opozorilo "seznama datotek PR-ja ni mogoce prebrati"
+          if ! grep -q '^db/migracije/' <<<"$FILES"; then
+            echo "PR ne spreminja db/migracije/** - zapora se ne uporabi."
+            exit 0
+          fi
+          OZNAKE=$(gh api "$API/issues/$PR/labels" --jq '.[].name' 2>/dev/null) || opozorilo "oznak PR-ja ni mogoce prebrati"
+          if grep -qx 'migracija-med-dogodkom' <<<"$OZNAKE"; then
+            echo "Oznaka migracija-med-dogodkom je na PR-ju (dodal jo je Martin) - zapora preskocena."
+            exit 0
+          fi
+
+          SEZNAM="[]"
+          for Q in true false; do
+            ODG=$(curl -sS --max-time 25 --retry 2 --retry-delay 5 --retry-all-errors -w '\n%{http_code}' "$BASE/events?upcoming=$Q" 2>/dev/null) || opozorilo "GET /events?upcoming=$Q ni dosegljiv"
+            STATUS="${ODG##*$'\n'}"; TELO="${ODG%$'\n'*}"
+            [ "$STATUS" = "200" ] || opozorilo "GET /events?upcoming=$Q vrne $STATUS"
+            SEZNAM=$(jq -c --argjson a "$SEZNAM" 'if type=="array" then $a + . else error("ni seznam") end' <<<"$TELO" 2>/dev/null) || opozorilo "odgovor /events?upcoming=$Q ni seznam"
+          done
+
+          NOW=$(date -u +%s)
+          TEKOCI=$(jq -r --argjson now "$NOW" --argjson pred "$((MIGRACIJA_PRED_H * 3600))" --argjson po "$((MIGRACIJA_PO_H * 3600))" '
+            def cas: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+            .[]
+            | (.start_at | cas) as $z
+            | (((.end_at // "") | select(length > 0) | cas) // ($z + 28800)) as $k0
+            | (if $k0 > $z then $k0 else $z + 28800 end) as $k
+            | select($now >= ($z - $pred) and $now <= ($k + $po))
+            | [(.id | tostring), (((.title // "") | gsub("[^A-Za-z0-9 ._-]"; "") | .[0:60])), (($z - $pred) | todate), (($k + $po) | todate)] | @tsv
+          ' <<<"$SEZNAM" 2>/dev/null) || opozorilo "casov dogodkov ni mogoce izracunati"
+
+          if [ -z "$TEKOCI" ]; then
+            echo "Noben dogodek ne tece in se ne zacne v $MIGRACIJA_PRED_H h - migracije so dovoljene."
+            exit 0
+          fi
+          while IFS=$'\t' read -r ID IME OD DO; do
+            echo "::error::Migracije so zaprte: dogodek #$ID ($IME) je v oknu zapore od $OD do $DO (UTC). Pocakaj do takrat ali prosi Martina za oznako migracija-med-dogodkom in ponovno zazeni ta check."
+          done <<<"$TEKOCI"
+          exit 1
+
       - uses: actions/checkout@v4
       # PostgreSQL 16 je ze na runnerju (ubuntu-24.04: "PostgreSQL service is disabled by default"), zato slike ne prenasamo:
       # 9. 10. je Docker Hub, 12. 10. pa se AWS-ovo javno zrcalo vrnilo "toomanyrequests" in test je padel pred prvim testom.
