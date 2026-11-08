@@ -1,6 +1,6 @@
 // Admin panel, zavihek »Dogodki«: tok »ustvari → dopolni → preveri → objavi«, nalaganje plakata in podvajanje (#328, 23. 10. 2026; nacrt outly-hq
 // docs/ideje/2026-10-23-admin-panel-nadgradnja.md 2.2). Kos 1: gumb »Nov dogodek« (5 polj → osnutek prek POST /admin/api/events). Kos 2: v urejevalniku »Naloži sliko« (podpis
-// POST /uploads/cloudinary-signature, nalaganje neposredno na Cloudinary). Kos 3: »Pred objavo« (GET /admin/api/opozorila?dogodek=ID); rdeča ovira onemogoči »Objavi«.
+// POST /uploads/cloudinary-signature, nalaganje neposredno na Cloudinary; od #400 dva plakata, 4:5 in 3:4, z izrezom s fiksnim razmerjem pred nalaganjem). Kos 3: »Pred objavo« (GET /admin/api/opozorila?dogodek=ID); rdeča ovira onemogoči »Objavi«.
 // Kos 4: »Podvoji« (POST /admin/api/events/:id/duplicate, enkratno ali tedensko do 12 osnutkov).
 // Brez ogrodja in brez gradnje (DECISIONS 21. 10. 2026). Uporablja globalne funkcije iz index.html in dialog.js: klic, obvesti, h, datum, $, potrdi, pokaziZavihek.
 // XSS: podatki (naslov, ime kluba, besedilo opozorila) v DOM SAMO prek h() / textContent; brez innerHTML z nizi in brez inline-atributov (obdelovalniki samo kot funkcije; test_admin_xss.js).
@@ -9,7 +9,7 @@
   "use strict";
   const cele = (n) => (Number.isSafeInteger(Number(n)) ? Number(n) : 0);
   const NAJVEC_SLIKA = 10 * 1024 * 1024;     // bajtov, pred pomanjsanjem
-  const NAJVEC_STRAN = 1600;                 // px, daljsa stranica po pomanjsanju (canvas odstrani EXIF/GPS)
+  const IZREZ_SIRINA = 1080;                 // px, najvecja sirina izreza plakata (manjsih slik ne povecujemo); canvas odstrani EXIF/GPS
   const TRAJANJE_H = 6;                      // konec novega dogodka = zacetek + 6 h (uredljivo v urejevalniku)
   const NAJVEC_TEDNOV = 12;                  // skladno s POST /admin/api/events/:id/duplicate
 
@@ -125,27 +125,80 @@
     }
     return out;
   }
-  // Pomanjsa sliko v brskalniku (canvas = brez EXIF/GPS, manj podatkov); ob neuspehu NE posljemo izvirnika.
-  async function pomanjsaj(datoteka) {
-    const slabo = () => new Error("Slike ni mogoče pripraviti za nalaganje. Izberi JPEG, PNG ali WebP.");
-    const bitmap = await createImageBitmap(datoteka).catch(() => null);
-    if (!bitmap) throw slabo();
-    const faktor = Math.min(1, NAJVEC_STRAN / Math.max(bitmap.width, bitmap.height));
-    const c = document.createElement("canvas");
-    c.width = Math.max(1, Math.round(bitmap.width * faktor)); c.height = Math.max(1, Math.round(bitmap.height * faktor));
-    const g = c.getContext("2d");
-    g.fillStyle = "#ffffff"; g.fillRect(0, 0, c.width, c.height);   // prosojen PNG -> JPEG brez crnega ozadja
-    g.drawImage(bitmap, 0, 0, c.width, c.height);
-    if (bitmap.close) bitmap.close();
-    const blob = await new Promise((res) => { try { c.toBlob(res, "image/jpeg", 0.88); } catch (_) { res(null); } });
-    if (!blob) throw slabo();
-    return blob;
-  }
-  // -> https URL slike na Cloudinaryju
-  async function naloziNaCloudinary(datoteka) {
+  // Plakata sta dva (outly-backend#400): velik 4:5 (poster_url) in majhen 3:4 (poster_card_url). Slika se NE naloži takoj: najprej izrez s fiksnim razmerjem.
+  const OKVIRJI = [
+    { w: 4, h: 5, oznaka: "Plakat – velik (4:5)", vnos: "dge_poster", kje: "dge_plakat_orodja", pred: "dge_plakat" },
+    { w: 3, h: 4, oznaka: "Plakat – majhen (3:4)", vnos: "dge_poster_card", kje: "dge_plakat_kartica_orodja", pred: "dge_plakat_kartica" },
+  ];
+  async function preberiSliko(datoteka) {
     if (!datoteka || !/^image\//.test(datoteka.type || "")) throw new Error("Izberi sliko (JPEG, PNG ali WebP).");
     if (datoteka.size > NAJVEC_SLIKA) throw new Error("Slika je prevelika (največ 10 MB).");
-    const blob = await pomanjsaj(datoteka);
+    const bitmap = await createImageBitmap(datoteka).catch(() => null);
+    if (!bitmap) throw new Error("Slike ni mogoče prebrati. Izberi JPEG, PNG ali WebP.");
+    return bitmap;
+  }
+  // Urejevalnik izreza v potrditvenem oknu: okvir ima razmerje koncne slike (premik s povleci-in-spusti ali s puscicami, povecava z drsnikom ali +/-), zraven pomanjsan predogled.
+  // Vrne Blob (JPEG, tocno w:h, sirina najvec IZREZ_SIRINA, brez povecevanja) ali null (Preklici: nic se ne naloži). Canvas ne ohrani EXIF/GPS.
+  async function izrezi(bitmap, okvir) {
+    const pw = 240, ph = Math.round(pw * okvir.h / okvir.w);
+    const pokrij = Math.max(pw / bitmap.width, ph / bitmap.height);   // najmanjsa skala, pri kateri slika zapolni cel okvir (brez praznih robov)
+    let povecava = 1, ox = (pw - bitmap.width * pokrij) / 2, oy = (ph - bitmap.height * pokrij) / 2;
+    const skala = () => pokrij * povecava;
+    const platno = h("canvas", { width: String(pw), height: String(ph), class: "dg-izrez", tabindex: "0", role: "img", "aria-label": `Izrez ${okvir.w}:${okvir.h}: povleci sliko, puščice premikajo, + in − povečujeta` });
+    const mali = h("canvas", { width: "96", height: String(Math.round(96 * okvir.h / okvir.w)), class: "dg-izrez-mali", "aria-hidden": "true" });
+    const drsnik = h("input", { type: "range", min: "100", max: "400", step: "1", value: "100", "aria-label": "Povečava" });
+    const omeji = () => {
+      const s = skala();
+      ox = Math.min(0, Math.max(pw - bitmap.width * s, ox)); oy = Math.min(0, Math.max(ph - bitmap.height * s, oy));
+    };
+    const narisi = (c) => {
+      const g = c.getContext("2d"), f = c.width / pw, s = skala();
+      g.fillStyle = "#ffffff"; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(bitmap, ox * f, oy * f, bitmap.width * s * f, bitmap.height * s * f);
+    };
+    const osvezi = () => { omeji(); narisi(platno); narisi(mali); };
+    const povecaj = (nova) => {   // sredina okvirja ostane na isti tocki slike
+      const s0 = skala(), cx = (pw / 2 - ox) / s0, cy = (ph / 2 - oy) / s0;
+      povecava = Math.min(4, Math.max(1, nova)); drsnik.value = String(Math.round(povecava * 100));
+      const s1 = skala(); ox = pw / 2 - cx * s1; oy = ph / 2 - cy * s1;
+      osvezi();
+    };
+    drsnik.oninput = () => povecaj(Number(drsnik.value) / 100);
+    let vlek = null;
+    platno.onpointerdown = (e) => { vlek = { x: e.clientX, y: e.clientY, ox, oy }; if (platno.setPointerCapture) try { platno.setPointerCapture(e.pointerId); } catch (_) {} };
+    platno.onpointermove = (e) => {
+      if (!vlek) return;
+      const r = platno.getBoundingClientRect(), k = pw / (r.width || pw);
+      ox = vlek.ox + (e.clientX - vlek.x) * k; oy = vlek.oy + (e.clientY - vlek.y) * k; osvezi();
+    };
+    platno.onpointerup = platno.onpointercancel = () => { vlek = null; };
+    platno.onkeydown = (e) => {
+      const korak = { ArrowLeft: [8, 0], ArrowRight: [-8, 0], ArrowUp: [0, 8], ArrowDown: [0, -8] }[e.key];
+      if (korak) { e.preventDefault(); ox += korak[0]; oy += korak[1]; osvezi(); }
+      else if (e.key === "+" || e.key === "=") { e.preventDefault(); povecaj(povecava + 0.1); }
+      else if (e.key === "-") { e.preventDefault(); povecaj(povecava - 0.1); }
+    };
+    osvezi();
+    const izid = await potrdi({ naslov: `${okvir.oznaka}: izrez`, potrdiBesedilo: "Uporabi",
+      vsebina: [h("p", {}, `Povleci sliko na pravo mesto in jo po potrebi povečaj. Izrez ima razmerje ${okvir.w}:${okvir.h} in zapolni cel okvir. Slika se naloži šele, ko klikneš »Uporabi«.`),
+        h("div", { class: "dg-izrez-vrsta" }, platno, h("div", {}, h("span", { class: "pomoc" }, "Predogled v pravem razmerju"), mali)),
+        h("label", {}, "Povečava", drsnik)] });
+    if (!izid) return null;
+    const s = skala(), sx = Math.max(0, -ox / s), sy = Math.max(0, -oy / s), sw = pw / s, sh = ph / s;
+    let izW = Math.floor(Math.min(IZREZ_SIRINA, sw) / okvir.w) * okvir.w;   // večkratnik w: višina je tocno w:h
+    if (izW < okvir.w) izW = okvir.w;
+    const izH = izW / okvir.w * okvir.h;
+    const c = document.createElement("canvas");
+    c.width = izW; c.height = izH;
+    const g = c.getContext("2d");
+    g.fillStyle = "#ffffff"; g.fillRect(0, 0, izW, izH);   // prosojen PNG -> JPEG brez crnega ozadja
+    g.drawImage(bitmap, sx, sy, sw, sh, 0, 0, izW, izH);
+    const blob = await new Promise((res) => { try { c.toBlob(res, "image/jpeg", 0.88); } catch (_) { res(null); } });
+    if (!blob) throw new Error("Slike ni mogoče pripraviti za nalaganje. Izberi JPEG, PNG ali WebP.");
+    return blob;
+  }
+  // -> https URL slike na Cloudinaryju (blob: ze izrezan JPEG)
+  async function naloziBlob(blob) {
     const p = await klic("POST", "/uploads/cloudinary-signature");
     if (!p || !p.signature || !p.apiKey || !p.cloudName) throw new Error("Nalaganje slike ni na voljo (strežnik ni vrnil podpisa).");
     const f = new FormData();
@@ -160,26 +213,32 @@
     if (!odg.ok || typeof r.secure_url !== "string" || !/^https:\/\//.test(r.secure_url)) throw new Error(`Nalaganje slike ni uspelo (${cele(odg.status) || "napaka"}).`);
     return r.secure_url;
   }
-  function orodjaPlakata() {
-    const kje = $("dge_plakat_orodja");
+  function orodjaPlakata() { for (const okvir of OKVIRJI) orodjeZaPolje(okvir); }
+  function orodjeZaPolje(okvir) {
+    const kje = $(okvir.kje);
     if (!kje) return;
-    const izbira = h("input", { type: "file", accept: "image/*", class: "skrito", id: "dge_plakat_datoteka", "aria-label": "Izberi sliko plakata" });
-    const gumb = h("button", { type: "button", class: "tih mali", id: "dge_plakat_nalozi" }, "Naloži sliko");
+    const izbira = h("input", { type: "file", accept: "image/*", class: "skrito", id: okvir.pred + "_datoteka", "aria-label": "Izberi sliko: " + okvir.oznaka });
+    const gumb = h("button", { type: "button", class: "tih mali", id: okvir.pred + "_nalozi" }, "Naloži sliko");
     gumb.onclick = () => izbira.click();
     izbira.onchange = async () => {
       const d = izbira.files && izbira.files[0];
       izbira.value = "";
       if (!d) return;
-      gumb.disabled = true; gumb.textContent = "Nalagam …";
+      gumb.disabled = true;
+      let bitmap = null;
       try {
-        const url = await naloziNaCloudinary(d);
-        const vnos = $("dge_poster");
+        bitmap = await preberiSliko(d);
+        const blob = await izrezi(bitmap, okvir);
+        if (!blob) return;   // Preklici: nic se ne naloži
+        gumb.textContent = "Nalagam …";
+        const url = await naloziBlob(blob);
+        const vnos = $(okvir.vnos);
         if (vnos) { vnos.value = url; if (typeof vnos.oninput === "function") vnos.oninput(); }
         obvesti("Slika je naložena. Shrani spremembe, da se plakat zapiše.", "ok");
       } catch (e) { obvesti(e.message, "slabo"); }
-      finally { gumb.disabled = false; gumb.textContent = "Naloži sliko"; }
+      finally { if (bitmap && bitmap.close) bitmap.close(); gumb.disabled = false; gumb.textContent = "Naloži sliko"; }
     };
-    kje.replaceChildren(gumb, izbira, h("span", { class: "pomoc" }, "Slika (do 10 MB) se pomanjša in naloži na Cloudinary; URL se vpiše v polje zgoraj."));
+    kje.replaceChildren(gumb, izbira, h("span", { class: "pomoc" }, `Po izbiri slike odpreš izrez ${okvir.w}:${okvir.h}; naloži se šele po »Uporabi« (do 10 MB, največ 1080 px v širino). URL se vpiše v polje zgoraj.`));
   }
 
   // =====================================================================================================================
@@ -362,6 +421,6 @@
     g.onclick = () => { novDogodek(); };
     osvezi.parentNode.insertBefore(g, osvezi);
   }
-  window.novDogodek = { zaUrejevalnik, objavaBlokirana, vstaviGumb, novDogodek, podvoji, naloziNaCloudinary, parametriPodpisa };
+  window.novDogodek = { zaUrejevalnik, objavaBlokirana, vstaviGumb, novDogodek, podvoji, naloziBlob, izrezi, parametriPodpisa };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", vstaviGumb); else vstaviGumb();
 })();

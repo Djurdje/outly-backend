@@ -647,6 +647,16 @@ Martin 6. 11. 2026: podpisane so pogodbe s 5 klubi, aplikacija in splet jih poka
 - **Neveljavna datoteka:** `validiraj()` preveri slug, name, URL-je, instagram, tip in neznana polja. Proces zaradi tega **ne pade** (izpad cele aplikacije zaradi napake v seznamu bi bil neprimerna cena): ob zagonu vrne prazen seznam in izpiše napako; pred tem jo v CI ujame `_testi/test_kmalu_klubi.js` (v `npm test`), ki strogo preveri pravo datoteko.
 - **Test:** `_testi/test_kmalu_klubi.js`.
 
+## Dva bannerja dogodka (migracija 074, #400, 8. 11. 2026)
+
+Dogodek ima dva plakata: `poster_url` = **velik 4:5** (stran dogodka, »Big events«), `poster_card_url` = **majhen 3:4** (kartice in sličice). Odločitev: `docs/DECISIONS.md` 2026-11-08.
+
+- **Stolpec:** `events.poster_card_url TEXT NOT NULL DEFAULT ''` (074). `''` = ni majhnega bannerja; odjemalec vzame `poster_url`. Pomen `poster_url` se ne spremeni (samo dodajanje API-ja).
+- **Vhod:** `posterCardUrl` ali `poster_card_url` v `POST /events` (tudi `POST /admin/api/events`), `PATCH /events/:id` (tudi admin panel). Preverjanje je **enako kot `poster_url`** (`url_polja.js` `preveriUrlPolja`: samo http(s), 400 `{ error: "invalid_url", field: "poster_card_url" }`; I48), `''` briše, izpuščen ključ ne spremeni. Kot pri `poster_url` je `null` v PATCH enak izpuščenemu ključu. `POST /admin/api/events/:id/duplicate` kopira tudi `poster_card_url` (neveljaven zapis se ne kopira, `''`). Predlogi agenta (`event.uredi`, `event.nov_osnutek`): polje `posterCardUrl` na istem belem seznamu in z istim pravilom »samo naš Cloudinary« kot `posterUrl`.
+- **Izhod:** `poster_card_url` (niz, nikoli null) povsod, kjer odgovor vsebuje `poster_url` dogodka: `STOLPCI_DOGODKA` (`GET /events` + `lite`, `/events/:id`, `/business/events`, `/me/favorites`, `/me/plans`, `/me/friends/plans`), `GET /search`, naročila (`POST /events/:id/orders`, `GET /me/orders`, `GET /guest/order` in `order.event`), vstopnice (`GET /me/tickets`, `GET /guest/ticket` + `event`), guest liste (`GET /me/guest-lists`), obvestila (`/me/club-events`), `GET /me/guest-list-invites/received` (`event.poster_card_url`), skeni člana (`GET /business/team/:userId/scans`), poslovna prodaja po dogodkih (`GET /business/sales`), admin `GET /admin/api/events` in `/:id`. Vzdevek `event_poster_url` ima par `event_poster_card_url`.
+- **Namerno ne:** mail (`plakatZaMail`, ležeč plakat 2 : 1), `admin_nadzor.js` (opozorilo »brez plakata« gleda samo velik banner), `GET /agent/api/events` (agent vidi samo `has_poster` in novo `has_poster_card`, ne tujega URL-ja; I4/I56).
+- **Test:** `_testi/test_plakat_kartica.js` (+ razširitvi `test_agent_api.js`, `test_agent_predlogi.js`). Admin panel (`admin/dogodki.js`, `admin/nov-dogodek.js`): dve polji z merami 1080 × 1350 / 1080 × 1440 px, predogled v okvirjih 4:5 in 3:4, izrez s fiksnim razmerjem pred nalaganjem na Cloudinary.
+
 ## Poslovne invariante
 
 Stvari, ki se ne smejo zgoditi NIKOLI. Vsaka ima mehanizem v kodi, ki jo zagotavlja, in test, ki pade, če
