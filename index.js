@@ -56,6 +56,10 @@ setInterval(() => {
   if (p.zadetki + p.zgresitve + p.zdruzeno + p.razveljavitve > 0) {
     console.log(`[predpomnilnik] 60 s: zadetki=${p.zadetki} zgresitve=${p.zgresitve} zdruzeno=${p.zdruzeno} razveljavitve=${p.razveljavitve} izpodrivi=${p.izpodrivi} casovneMeje=${p.casovneMeje} kljucev=${p.kljucev}`);
   }
+  if (iskanjeStat.zavrnjeno + iskanjeStat.izteklo > 0) {
+    console.log(`[iskanje] 60 s: zavrnjeno(meja/vrsta)=${iskanjeStat.zavrnjeno} izteklo=${iskanjeStat.izteklo} najvecVrsta=${iskanjeStat.najvecVrsta} aktivnih=${iskanjAktivnih}`);
+  }
+  iskanjeStat.zavrnjeno = 0; iskanjeStat.izteklo = 0; iskanjeStat.najvecVrsta = 0;
 }, 60 * 1000).unref();
 // Vsak zapis v tem procesu izprazni predpomnilnik; izjeme so pogosti zapisi, ki javnih seznamov ne spremenijo.
 app.use(javniPredpomnilnik.razveljaviOdPisanja([
@@ -1910,6 +1914,96 @@ const GLAVE_OSEBNO = { "Cache-Control": "private", Vary: "Authorization" };
 function kljucId(vrsta, id) {
   return id.length > 15 ? null : JSON.stringify([vrsta, id]);
 }
+// Meje javnega iskanja (#405, I69): GET /search in GET /clubs?q= delata ILIKE '%q%' po opisu (brez indeksa) na glavnem poolu, nakljucen q
+// obide predpomnilnik. Zato: omejevalnik na IP (deljen kljuc obeh poti; GET /clubs brez q se ne steje), q najvec ISKANJE_Q_NAJVEC znakov
+// (daljsi se OBREZE, ne zavrne: odjemalca polja ne omejujeta, napaka pri lepljenju bi bila hujsa od obreza) in casovna meja poizvedbe.
+const ISKANJE_Q_NAJVEC = 64;
+const ISKANJE_NA_URO = okoljeCelo("ISKANJE_NA_URO", 2000, 1, 1000000);   // 0 ali neveljavno = privzeto (nikoli »vse 429«)
+// LASTEN pool iskanja (kot skenPool): iskanje glavnega poola NE uporablja, zato poplava iskanj ne more zasesti povezav nakupov in prijave.
+// Brez transakcije (navadni query): polodprt TCP ne more pustiti seje `idle in transaction` z AccessShareLock na clubs/events (migracija
+// ob deployu bi obvisela; pregled #412, 3. krog). Mejo drzi STREZNIK: statement_timeout (ISKANJE_MEJA_MS), lock_timeout (1 s: med
+// migracijo iskanje hitro dobi 503), idle_in_transaction_session_timeout (meja + 2 s: varovalo, ce bi kdaj nastala transakcija);
+// odjemalec: query_timeout (meja + 1 s; pool.query pokvarjeno povezavo unici). Zagonski parametri gredo v paket povezave kot pri skenPool.
+// Povezav do baze je zaradi tega +ISKANJE_HKRATI na instanco (privzeto 4).
+const ISKANJE_HKRATI = okoljeCelo("ISKANJE_HKRATI", 4, 1, 20);
+const ISKANJE_VRSTA = okoljeCelo("ISKANJE_VRSTA", 20, 0, 1000);
+const ISKANJE_CAKANJE_MS = okoljeCelo("ISKANJE_CAKANJE_MS", 500, 0, 10000);
+const ISKANJE_MEJA_MS = stevilkaIzOkolja("ISKANJE_MEJA_MS", 2000, 30000);   // 0 = brez meje
+const iskalniPool = novPool(ISKANJE_HKRATI, 2000, {
+  statement_timeout: ISKANJE_MEJA_MS || undefined,
+  lock_timeout: 1000,
+  query_timeout: ISKANJE_MEJA_MS ? ISKANJE_MEJA_MS + 1000 : undefined,
+  idle_in_transaction_session_timeout: ISKANJE_MEJA_MS ? ISKANJE_MEJA_MS + 2000 : undefined,
+});
+// Mesta (semafor v procesu) = velikost poola: iskanje z mestom vedno dobi povezavo brez cakanja, vsako drzi najvec eno hkrati (poizvedbi
+// /search zaporedno). Ko so mesta polna, iskanje ceka v omejeni vrsti (ISKANJE_VRSTA cakajocih, vsak najvec ISKANJE_CAKANJE_MS); nato
+// 503 + Retry-After + X-Iskanje: zasedeno. Odhod odjemalca iz vrste NI vezan na en zahtevek: delo je skupno vsem z istim kljucem
+// predpomnilnika (sledilci vodje), zato ga odhod prvega ne sme zrusiti; zapusceno delo traja najvec cakanje + mejo.
+const iskanjeStat = { zavrnjeno: 0, izteklo: 0, najvecVrsta: 0 };   // minutni dnevnik (spodaj); brez osebnih podatkov
+let iskanjAktivnih = 0;
+const iskanjeVrsta = [];
+function iskanjeZavrni(razlog) {
+  iskanjeStat.zavrnjeno++;
+  const e = new Error("iskanje: " + razlog); e.iskanjeZasedeno = true; return e;
+}
+function iskanjeSprosti() {
+  iskanjAktivnih--;
+  const c = iskanjeVrsta.shift();
+  if (c) { clearTimeout(c.t); iskanjAktivnih++; c.resolve(); }
+}
+function iskanjeMesto() {
+  if (iskanjAktivnih < ISKANJE_HKRATI) { iskanjAktivnih++; return Promise.resolve(); }
+  if (iskanjeVrsta.length >= ISKANJE_VRSTA || ISKANJE_CAKANJE_MS <= 0) return Promise.reject(iskanjeZavrni("vrsta polna"));
+  return new Promise((resolve, reject) => {
+    const c = { resolve };
+    c.t = setTimeout(() => { const k = iskanjeVrsta.indexOf(c); if (k >= 0) iskanjeVrsta.splice(k, 1); reject(iskanjeZavrni("rok cakanja na mesto")); }, ISKANJE_CAKANJE_MS);
+    iskanjeVrsta.push(c);
+    iskanjeStat.najvecVrsta = Math.max(iskanjeStat.najvecVrsta, iskanjeVrsta.length);
+  });
+}
+// 503 namesto 500: iztek stavka/zaklep (napakaZasedenosti), zavrnitev mesta, odjemalski rok (pg "Query read timeout") ali rok povezave iz poola.
+function jeIztekIskanja(e) { return !!e && (e.code === "57014" || /Query read timeout/i.test(String(e.message))); }
+// Prekinjena povezava med iskanjem (restart/vzdrzevanje baze, pg_terminate_backend, omrezje): 57P01-57P03 (admin shutdown, crash shutdown, cannot connect now),
+// 08xxx (connection exception), ECONNRESET/ECONNREFUSED/EPIPE, »Connection terminated« -> 503 (nikoli 500).
+const KODE_PREKINJENE_POVEZAVE = new Set(["57P01", "57P02", "57P03", "08000", "08001", "08003", "08004", "08006", "ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT"]);
+function napakaIskanja(e) {
+  return napakaZasedenosti(e) || !!(e && (e.iskanjeZasedeno || KODE_PREKINJENE_POVEZAVE.has(e.code)
+    || /Query read timeout|timeout exceeded when trying to connect|Connection terminated|terminating connection|ECONNRESET|ECONNREFUSED/i.test(String(e.message))));
+}
+// NUL bajt v nizovnem parametru, ki ga pot bere in gre v SQL (`names`), pg zavrne (500 v Sentry): 400. Neznani parametri ostanejo kot na main.
+// Prekratek q (/search) tudi 400. Oboje PRED omejevalnikom (ne porabi stevca).
+function preveriQIskanja(obvezen, imena) {
+  const NUL = String.fromCharCode(0);
+  const ima = (x) => (typeof x === "string" ? x.includes(NUL) : Array.isArray(x) ? x.some(ima) : false);
+  return (req, res, next) => {
+    if (imena.some((k) => ima(req.query[k]))) return res.status(400).send("Query contains invalid characters.");
+    if (obvezen && skrajsajQ(req.query.q).length < 2) return res.status(400).send("Query must be at least 2 characters.");
+    next();
+  };
+}
+const omejiIskanje = omeji({ kljuc: "iskanje-javno", najvec: ISKANJE_NA_URO, oknoSekund: 3600, priNapaki: "odpri" });
+const omejiIskanjeCeQ = (req, res, next) => (req.query.q ? omejiIskanje(req, res, next) : next());
+function skrajsajQ(surov) {
+  const q = String(surov || "").trim();
+  return q.length > ISKANJE_Q_NAJVEC ? Array.from(q).slice(0, ISKANJE_Q_NAJVEC).join("") : q;   // po kodnih tockah: ne prerezi surogatnega para
+}
+// Iskanje = eno mesto + poizvedbe ZAPOREDNO na iskalniPool (`delo(poizvedi)`); mesto se sprosti vedno.
+async function iskanje(delo) {
+  await iskanjeMesto();
+  try {
+    return await delo((sql, params) => iskalniPool.query(sql, params));
+  } catch (e) {
+    if (jeIztekIskanja(e)) iskanjeStat.izteklo++;
+    throw e;
+  } finally { iskanjeSprosti(); }
+}
+const ISKANJE_ZASEDENO = "Search is busy. Please try again shortly.";
+// Zavrnitev meje/vrste nosi glavo X-Iskanje: zasedeno (stres.js jo steje locena); iztek poizvedbe je 503 brez nje (prava napaka). Brez dnevnika na zahtevek (N2).
+function odgovoriIskanje503(e, res) {
+  if (e && e.iskanjeZasedeno) res.set("X-Iskanje", "zasedeno");
+  return res.status(503).set("Retry-After", "2").send(ISKANJE_ZASEDENO);
+}
+
 function kljucKlubov(q) {
   const { limit, offset, city, q: iskanje, withCoords } = q;
   if (nenavadniParametri([limit, offset, city, iskanje, withCoords])) return null;
@@ -1938,7 +2032,7 @@ function kljucIskanja(surovQ, surovLimit, q, limit) {
   return JSON.stringify(["search", q, limit]);
 }
 
-app.get("/clubs", async (req, res) => {
+app.get("/clubs", preveriQIskanja(false, ["q", "city"]), omejiIskanjeCeQ, async (req, res) => {
   try {
     // city je prosto besedilo, offset > 0 zaporedna vrednost (#210): loceni majhen proracun (`prosto`), da poplava ne izpodrine vrocih kljucev.
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucKlubov(req.query), async () => {
@@ -1950,7 +2044,7 @@ app.get("/clubs", async (req, res) => {
 
     if (req.query.city) { p.push(req.query.city); pogoji.push(`city ILIKE $${p.length}`); }
     if (req.query.q) {
-      p.push(`%${String(req.query.q).trim()}%`);
+      p.push(`%${skrajsajQ(req.query.q)}%`);
       pogoji.push(`(name ILIKE $${p.length} OR city ILIKE $${p.length} OR description ILIKE $${p.length})`);
     }
     // Zemljevid potrebuje samo klube s koordinatami.
@@ -1960,14 +2054,19 @@ app.get("/clubs", async (req, res) => {
 
     const kje = pogoji.length ? "WHERE " + pogoji.join(" AND ") : "";
 
-    const skupaj = await pool.query(`SELECT COUNT(*)::int AS n FROM clubs ${kje}`, p);
+    // z q (#405): mesto + ena povezava + casovna meja; brez q ostane pot nespremenjena (pool.query)
+    const delo = async (beri) => {
+      const skupaj = await beri(`SELECT COUNT(*)::int AS n FROM clubs ${kje}`, p);
 
-    p.push(limit); p.push(offset);
-    const r = await pool.query(
-      `SELECT ${JAVNI_STOLPCI_KLUBA} FROM clubs ${kje}
-       ORDER BY created_at DESC LIMIT $${p.length - 1} OFFSET $${p.length}`,
-      p
-    );
+      p.push(limit); p.push(offset);
+      const r = await beri(
+        `SELECT ${JAVNI_STOLPCI_KLUBA} FROM clubs ${kje}
+         ORDER BY created_at DESC LIMIT $${p.length - 1} OFFSET $${p.length}`,
+        p
+      );
+      return { skupaj, r };
+    };
+    const { skupaj, r } = req.query.q ? await iskanje(delo) : await delo((sql, par) => pool.query(sql, par));
 
     // Skupno stevilo v glavi, da telo ostane navaden seznam in se aplikaciji
     // ni treba spreminjati. Dekoder v Swiftu pricakuje [APIClub].
@@ -1975,6 +2074,7 @@ app.get("/clubs", async (req, res) => {
     }, { prosto: prostKljucKlubov(req.query) });
     return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
+    if (napakaIskanja(e)) return odgovoriIskanje503(e, res);
     console.error(e);
     res.status(500).send("Server error.");
   }
@@ -3526,9 +3626,9 @@ app.delete("/events/:id", requireAuth, requireClubUrednikDogodka(), async (req, 
 // ---------------------------
 // SearchView je doslej iskal na napravi, po prvih 100 klubih, ki jih je vrnil
 // strezik, in samo po klubih — ceprav polje obljublja "Search clubs or events".
-app.get("/search", async (req, res) => {
+app.get("/search", preveriQIskanja(true, ["q"]), omejiIskanje, async (req, res) => {
   try {
-    const q = String(req.query.q || "").trim();
+    const q = skrajsajQ(req.query.q);
     if (q.length < 2) return res.status(400).send("Query must be at least 2 characters.");
 
     const limit = stevilo(req.query.limit, 20, 50);
@@ -3536,8 +3636,8 @@ app.get("/search", async (req, res) => {
 
     // Odgovor ne zavisi od uporabnika (I17); iskalni nizi so prosto besedilo -> loceni proracun (`prosto`).
     const { vnos, stanje } = await javniPredpomnilnik.dobi(kljucIskanja(req.query.q, req.query.limit, q, limit), async () => {
-    const [klubi, dogodki] = await Promise.all([
-      pool.query(
+    const [klubi, dogodki] = await iskanje(async (poizvedi) => [
+      await poizvedi(
         `SELECT id, name, city, logo_url, lat, lng, genres, is_demo
          FROM clubs
          WHERE hidden = FALSE
@@ -3546,7 +3646,7 @@ app.get("/search", async (req, res) => {
          LIMIT $3`,
         [vzorec, `${q}%`, limit]
       ),
-      pool.query(
+      await poizvedi(
         `SELECT e.id, e.club_id, e.title, e.poster_url, e.start_at,
                 e.ticket_price_cents, e.currency, c.name AS club_name, c.is_demo, ${PRIZORISCE_E}
          FROM events e JOIN clubs c ON c.id = e.club_id ${PRIZORISCE_JOIN_JAVNO}
@@ -3567,6 +3667,7 @@ app.get("/search", async (req, res) => {
     }, { prosto: true });
     return javniPredpomnilnik.poslji(req, res, vnos, stanje);
   } catch (e) {
+    if (napakaIskanja(e)) return odgovoriIskanje503(e, res);
     console.error(e);
     return res.status(500).send("Server error.");
   }

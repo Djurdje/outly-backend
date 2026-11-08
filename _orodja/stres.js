@@ -1,5 +1,8 @@
 // Stresni test produkcije: samo javne GET poti (brez prijave, brez pisanja v bazo).
 // /search zahteva q z vsaj 2 znaki (sicer 400) - zato q=lj.
+// /search ima od #405 omejevalnik na IP (429, ISKANJE_NA_URO) in mesta za iskanja z omejeno vrsto (503 + glava X-Iskanje: zasedeno): stresni test je en
+// IP, zato 429 in 503 Z TO GLAVO STEJEJO LOCENO (izpisano, niso napaka in ne vplivajo na p95; > 20 % zavrnitev /search = opozorilo v izpisu).
+// 503 BREZ glave (iztek poizvedbe) in vsak drug status sta napaka.
 // Uporaba: node _orodja/stres.js [osnova] [vzporedno] [sekunde]
 //   osnova     privzeto https://outly-backend-roy3.onrender.com
 //   vzporedno  stevilo hkratnih "uporabnikov" (1-100), privzeto 40 (kot test 11. 9. 2026)
@@ -21,7 +24,7 @@ async function poizvedi(pot) {
   try {
     const r = await fetch(osnova + pot, { headers: { "X-Nadzor": "outly-stres" }, signal: AbortSignal.timeout(15000) });
     await r.arrayBuffer();
-    return { status: r.status, ms: performance.now() - t0 };
+    return { status: r.status, zasedeno: r.headers.get("x-iskanje") === "zasedeno", ms: performance.now() - t0 };
   } catch (e) {
     return { status: e.name === "TimeoutError" ? "timeout" : "omrezje", ms: performance.now() - t0 };
   }
@@ -44,11 +47,16 @@ async function main() {
 
   const casi = [];
   const statusi = {};
+  let iskanjeOmejeno = 0;   // 429 in 503 + X-Iskanje: zasedeno na /search: pricakovana zavrnitev meje iskanja (#405)
+  let iskanjSkupaj = 0;
   const konec = Date.now() + sekunde * 1000;
   let i = 0;
   async function delavec() {
     while (Date.now() < konec) {
-      const { status, ms } = await poizvedi(poti[i++ % poti.length]);
+      const pot = poti[i++ % poti.length];
+      const { status, ms, zasedeno } = await poizvedi(pot);
+      if (pot.startsWith("/search")) iskanjSkupaj++;
+      if (pot.startsWith("/search") && (status === 429 || (status === 503 && zasedeno))) { iskanjeOmejeno++; continue; }
       statusi[status] = (statusi[status] || 0) + 1;
       casi.push(ms);
     }
@@ -67,6 +75,8 @@ async function main() {
     `Zahtevkov: ${skupaj} v ${trajanje.toFixed(1)} s = ${(skupaj / trajanje).toFixed(1)} req/s`,
     `Zakasnitev ms: p50 ${pct(50)} | p95 ${pct(95)} | p99 ${pct(99)} | max ${Math.round(casi[skupaj - 1] || 0)}`,
     `Statusi: ${JSON.stringify(statusi)}`,
+    `/search zavrnjen z mejo iskanja (429 ali 503 z X-Iskanje, ni napaka): ${iskanjeOmejeno} od ${iskanjSkupaj}` +
+      (iskanjSkupaj && iskanjeOmejeno / iskanjSkupaj > 0.2 ? "  OPOZORILO: nad 20 % zavrnitev iskanja - meja iskanja je pod obremenitvijo ali prenizka" : ""),
     `Napake: ${odstotek.toFixed(2)} % (meja ${MAX_NAPAK} %), p95 meja ${MAX_P95} ms`,
   ].join("\n");
   console.log(porocilo);
