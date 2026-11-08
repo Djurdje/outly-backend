@@ -5172,7 +5172,7 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
 
 // Opozorila, seznam racunov in nadzorna plosca »Danes« (23. 10. 2026, #326): GET /admin/api/opozorila, /racuni, /danes (admin_nadzor.js; samo branje, glavni pool, nikoli skenPool).
 const adminNadzor = require("./admin_nadzor").ustvari({
-  gostPostaPoskusov: () => GOST_POSTA_POSKUSOV,   // const je definiran nizje (TDZ): vrednost se bere ob izracunu
+  gostPostaPoskusov: () => GOST_POSTA_POSKUSOV, gostKandidat: (a) => sqlGostKandidat(a),   // const je definiran nizje (TDZ): vrednost se bere ob izracunu
   bazaDisk,
   pool, router: admin, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
 });
@@ -6267,6 +6267,9 @@ const GOST_POSTA_REZERVA_MS = okoljeCelo("GOST_POSTA_REZERVA_MS", 30000, 0, 6000
 const GOST_POSTA_PREMOR_MIN_MS = GOST_POSTA_TIMEOUT_MS + GOST_POSTA_REZERVA_MS;
 const GOST_POSTA_PREMORI = [0, 1, 2.5, 7.5, 30, 90, 360, 720].map((x) => x === 0 ? 0 : Math.max(Math.round(x * GOST_POSTA_PREMOR_MS), GOST_POSTA_PREMOR_MIN_MS));
 const GOST_POSTA_POSKUSOV = GOST_POSTA_PREMORI.length;
+// »Kandidat za pošiljanje« gostovega maila z vstopnicami: ISTI pogoj uporabljata pospravljalec (izbor v gostPosljiNeposlane) in alarm gost_vstopnice_* (admin_nadzor.js, I70),
+// da se alarm ne more razhajati z delavcem (npr. delno vrnjeno naročilo: delavec ga ne pošilja, zato ni alarm). Alias tabele `orders` je argument.
+const sqlGostKandidat = (a) => `${a}.guest_email IS NOT NULL AND ${a}.guest_mail_sent_at IS NULL AND ${a}.status = 'paid' AND ${a}.guest_mail_attempts < ${GOST_POSTA_POSKUSOV} AND ${a}.paid_at > NOW() - INTERVAL '3 days'`;
 const GOST_PREVZEM_MS = okoljeCelo("GOST_PREVZEM_MS", 30000, 0, 3600000);   // kako pogosto /me/orders in /me/tickets znova iscejo gostujoca narocila
 const GOST_PREKLIC_OKNO_MS = okoljeCelo("GOST_PREKLIC_OKNO_MS", 5000, 0, 600000);   // najmanjsi razmik med Stripovimi klici za isto narocilo (preklic)
 const GOST_ZETON_VZOREC = /^[A-Za-z0-9_-]{43}$/;
@@ -7092,10 +7095,9 @@ async function gostPosljiNeposlane() {
   const utripKroga = gostPostaUtrip.zacetek();   // obvisel krog zastavice ne sprosti (delavci.js, S1); viden kot zaostal
   try {
     const r = await pool.query(
-      `SELECT id FROM orders WHERE guest_email IS NOT NULL AND guest_mail_sent_at IS NULL AND status = 'paid'
-          AND guest_mail_attempts < $1 AND paid_at > NOW() - INTERVAL '3 days'
-          AND (guest_mail_claimed_at IS NULL OR guest_mail_claimed_at < NOW() - ($2::bigint[])[guest_mail_attempts + 1] * INTERVAL '1 millisecond')
-        ORDER BY id LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);   // premor v SQL (isti pogoj kot pri zaklepu): najstarejsi v premoru ne stradajo novejsih
+      `SELECT o.id FROM orders o WHERE ${sqlGostKandidat("o")}
+          AND (o.guest_mail_claimed_at IS NULL OR o.guest_mail_claimed_at < NOW() - ($1::bigint[])[o.guest_mail_attempts + 1] * INTERVAL '1 millisecond')
+        ORDER BY o.id LIMIT 20`, [GOST_POSTA_PREMORI]);   // premor v SQL (isti pogoj kot pri zaklepu): najstarejsi v premoru ne stradajo novejsih
     for (const o of r.rows) await posljiGostuVstopnice(o.id);
     await prenosPosljiNeposlane();   // vstopnice, poslane prijateljem brez racuna (034)
     await potrdiloPosljiNeposlane();   // potrdila kupcem z racunom (042, #95)

@@ -164,23 +164,27 @@ const zdravje = (port) => klic(port, "/healthz/opozorila");
     await pocakaj();
     r = await zdravje(P1);
     assert(r.status === 200 && r.body.ok === true, "po odpravi spet 200", r);
-    // gost: placano narocilo, mail z vstopnicami ni poslan 30+ min
-    const gostPreizkus = async (ref, polja, oc503, besedilo) => {
-      await narocilo(ref, 40, { status: "paid", gost: "gost@primer.si", ...polja });
+    // gost: placano narocilo, mail z vstopnicami ni poslan 30+ min (brez delavca: RESEND_API_KEY ""; pospravljalec ga tu ne dotika)
+    const gostPreizkus = async (ref, n, polja, oc503) => {
+      for (let k = 0; k < n; k++) await narocilo(`${ref}-${k}`, 40, { status: "paid", gost: `gost${k}@primer.si`, ...polja, pi: polja.pi ? `${polja.pi}${k}` : undefined });
       await pocakaj();
       const rr = await zdravje(P1), pp = await panel();
-      assert(rr.status === (oc503 ? 503 : 200), besedilo, { rr, v: vrste(pp) });
-      await pool.query("DELETE FROM orders WHERE public_ref = $1", [ref]);
+      assert(rr.status === (oc503 ? 503 : 200), `${ref} x${n}: javni alarm ${oc503 ? "503" : "200"}`, { rr, v: vrste(pp) });
+      await pool.query("DELETE FROM orders WHERE public_ref LIKE $1", [ref + "-%"]);
       await pocakaj();
       return pp;
     };
-    let pg = await gostPreizkus("ALARM-GOST", {}, true, "gost: pospravljalec se poskusa, mail ni poslan 40 min -> 503");
-    assert(vrste(pg).includes("gost_vstopnice_neposlane") && pg.items.find((x) => x.vrsta === "gost_vstopnice_neposlane").resnost === "rdece", "gost_vstopnice_neposlane (rdece)", vrste(pg));
-    assert(!/gost@primer|ALARM-GOST/.test(JSON.stringify(pg)), "opozorilo gosta brez e-naslova in reference");
-    pg = await gostPreizkus("ALARM-GOST-DELNO", { status: "partially_refunded" }, true, "gost: delno vrnjeno narocilo brez maila -> 503");
-    pg = await gostPreizkus("ALARM-GOST-IZCRPAN", { poskusi: 8 }, false, "gost: izcrpani poskusi (lahko namenoma) -> 200");
-    assert(vrste(pg).includes("gost_vstopnice_izcrpane") && !vrste(pg).includes("gost_vstopnice_neposlane") && pg.items.find((x) => x.vrsta === "gost_vstopnice_izcrpane").resnost === "oranzno", "izcrpani poskusi: ORANZNO gost_vstopnice_izcrpane v panelu", vrste(pg));
-    pg = await gostPreizkus("ALARM-GOST-TEST", { pi: "test_pi_alarm" }, false, "gost: testni promet -> 200");
+    const ost = (pp, vrsta) => pp.items.find((x) => x.vrsta === vrsta);
+    let pg = await gostPreizkus("ALARM-G1", 1, {}, false);
+    assert(ost(pg, "gost_vstopnica_neposlana") && ost(pg, "gost_vstopnica_neposlana").resnost === "oranzno" && !vrste(pg).includes("gost_vstopnice_neposlane"), "natanko 1 gost brez maila: ORANZNO gost_vstopnica_neposlana, ne rdece", vrste(pg));
+    pg = await gostPreizkus("ALARM-G2", 2, {}, true);
+    assert(ost(pg, "gost_vstopnice_neposlane") && ost(pg, "gost_vstopnice_neposlane").resnost === "rdece", "2 gosta brez maila (vzorec izpada): RDECE gost_vstopnice_neposlane + 503", vrste(pg));
+    assert(!/gost\d@primer|ALARM-G2/.test(JSON.stringify(pg)), "opozorilo gosta brez e-naslova in reference");
+    pg = await gostPreizkus("ALARM-GD", 2, { status: "partially_refunded" }, false);
+    assert(!vrste(pg).some((v) => /^gost_/.test(v)), "delno vrnjeno (delavec ga ne posilja): ni v alarmu", vrste(pg));
+    pg = await gostPreizkus("ALARM-GI", 2, { poskusi: 8 }, false);
+    assert(ost(pg, "gost_vstopnice_izcrpane") && ost(pg, "gost_vstopnice_izcrpane").resnost === "oranzno" && !vrste(pg).includes("gost_vstopnice_neposlane"), "izcrpani poskusi: ORANZNO gost_vstopnice_izcrpane v panelu, 200", vrste(pg));
+    pg = await gostPreizkus("ALARM-GT", 2, { pi: "test_pi_alarm" }, false);
     assert(!vrste(pg).some((v) => /^gost_/.test(v)), "testni promet: nobenega gost_ opozorila", vrste(pg));
     await narocilo("ALARM-GOST", 40, { status: "paid", gost: "gost@primer.si" });
     await pool.query("UPDATE orders SET guest_mail_sent_at = NOW() WHERE public_ref = 'ALARM-GOST'");
@@ -265,6 +269,72 @@ const zdravje = (port) => klic(port, "/healthz/opozorila");
     const razlika = S.branja - pred;
     assert(razlika >= 1 && razlika <= 6, `ob 429 krog preneha po prvem narocilu (zahtevkov ${razlika}, brez prekinitve bi jih bilo ≥ 30)`, razlika);
   } finally { await b.ustavi(); }
+
+  // ------------------------------------------------------------ F: pravi pospravljalec gostove poste z lazno Resend
+  console.log("# F: pospravljalec gostove poste (lazni Resend) in alarm");
+  const P4 = 6916, RESEND_PORT = 6917;
+  await pool.query("TRUNCATE tickets, orders, events, clubs, users RESTART IDENTITY CASCADE");
+  const R = { napaka: true, poslano: [] };
+  const resendServer = http.createServer((req, res) => {
+    let d = ""; req.on("data", (x) => d += x);
+    req.on("end", () => {
+      if (R.napaka) { res.writeHead(422, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "validation_error", message: "stub", statusCode: 422 })); }
+      try { R.poslano.push(JSON.parse(d)); } catch { /* ni JSON */ }
+      res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "mail_" + R.poslano.length }));
+    });
+  });
+  await new Promise((r) => resendServer.listen(RESEND_PORT, r));
+  const uF = (await pool.query("INSERT INTO users (email, username, role) VALUES ('lf@x.si','lf','business') RETURNING id")).rows[0].id;
+  const kF = (await pool.query("INSERT INTO clubs (owner_user_id, name, city) VALUES ($1, 'Klub F', 'Ljubljana') RETURNING id", [uF])).rows[0].id;
+  const dF = (await pool.query("INSERT INTO events (club_id, title, status, start_at, end_at, ticket_price_cents, capacity, min_age) VALUES ($1, 'Gost F', 'published', NOW() + INTERVAL '3 days', NOW() + INTERVAL '3 days 6 hours', 1500, 50, 0) RETURNING id", [kF])).rows[0].id;
+  await pool.query("INSERT INTO users (email, username, role, supabase_uid) VALUES ('admin@outly.si','adminf','admin','00000000-0000-4000-8000-000000000001')");
+  const TF = zeton("admin@outly.si", "00000000-0000-4000-8000-000000000001");
+  b = await zazeni(P4, { RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>", OPOZORILA_ZDRAVJE_VELJA_MS: "300",
+    GOST_NAKUP_TEST: "1", GOST_NAKUP_NA_URO: "1000", GOST_POSTA_PONOVI_MS: "500", GOST_POSTA_PREMOR_MS: "400", GOST_POSTA_TIMEOUT_MS: "1000", GOST_POSTA_REZERVA_MS: "100", GOST_NEUSPESNI_NA_URO: "1000" });
+  try {
+    const kupi = async (email) => {
+      const r = await klic(P4, `/guest/events/${dF}/orders`, { metoda: "POST", glave: { "content-type": "application/json" }, telo: JSON.stringify({ email, quantity: 1, accept_terms: true, terms_version: "2026-10-01" }) });
+      assert(r.status === 201, `gostujoc nakup ${email}`, r);
+      const id = r.body.order.id;
+      // pravo (ne testno) placano narocilo pred 40 min; mail vrstice so ze v poskusih
+      await pool.query("UPDATE orders SET stripe_payment_intent_id = NULL, paid_at = NOW() - INTERVAL '40 minutes' WHERE id = $1", [id]);
+      return id;
+    };
+    const cakaj = async (pogoj, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await pogoj()) return true; await spi(150); } return false; };
+    const poskusi = async (id) => (await pool.query("SELECT guest_mail_attempts AS n FROM orders WHERE id = $1", [id])).rows[0].n;
+    const panelF = async () => (await klic(P4, "/admin/api/opozorila", { glave: { authorization: "Bearer " + TF } })).body;
+    const vrsteF = (o) => (o && o.items ? o.items.map((x) => x.vrsta) : []);
+    // (ii) en sam gost z napako Resenda: ORANZNO, javni 200
+    const id1 = await kupi("f1@primer.si");
+    assert(await cakaj(async () => (await poskusi(id1)) >= 1, 8000), "pospravljalec je poskusil poslati (attempts >= 1)");
+    await spi(500);
+    let rr = await zdravje(P4), pf = await panelF();
+    assert(rr.status === 200 && vrsteF(pf).includes("gost_vstopnica_neposlana") && !vrsteF(pf).includes("gost_vstopnice_neposlane"), "(ii) 1 naročilo z napako Resenda: 200 + ORANZNO gost_vstopnica_neposlana", { rr, v: vrsteF(pf) });
+    // (i) dve narocili z napako: po 1. poskusu 503 (rdece)
+    const id2 = await kupi("f2@primer.si");
+    assert(await cakaj(async () => (await poskusi(id2)) >= 1, 8000), "drugo naročilo: pospravljalec je poskusil");
+    await spi(500);
+    rr = await zdravje(P4); pf = await panelF();
+    assert(rr.status === 503 && vrsteF(pf).includes("gost_vstopnice_neposlane"), "(i) 2 naročili z napako Resenda: 503 + RDECE gost_vstopnice_neposlane", { rr, v: vrsteF(pf) });
+    R.napaka = false;
+    assert(await cakaj(async () => (await pool.query("SELECT COUNT(*)::int AS n FROM orders WHERE id = ANY($1) AND guest_mail_sent_at IS NOT NULL", [[id1, id2]])).rows[0].n === 2, 15000), "ko Resend spet dela, pospravljalec poslje oba maila");
+    await spi(500);
+    rr = await zdravje(P4);
+    assert(rr.status === 200, "po poslanih mailih spet 200", rr);
+    // (iii) delno vrnjeno brez maila: delavec ga ne posilja, alarma ni
+    R.napaka = true;
+    const id3 = await kupi("f3@primer.si"), id4 = await kupi("f4@primer.si");
+    await pool.query("UPDATE orders SET status = 'partially_refunded', refunded_cents = 100, guest_mail_attempts = 0, guest_mail_claimed_at = NULL WHERE id = ANY($1)", [[id3, id4]]);
+    await spi(2500);
+    const n34 = (await pool.query("SELECT COALESCE(SUM(guest_mail_attempts), 0)::int AS n FROM orders WHERE id = ANY($1)", [[id3, id4]])).rows[0].n;
+    pf = await panelF(); rr = await zdravje(P4);
+    assert(n34 === 0 && rr.status === 200 && !vrsteF(pf).some((v) => /^gost_/.test(v)), "(iii) delno vrnjeno brez maila: delavec ne poskusa, ni v alarmu", { n34, rr, v: vrsteF(pf) });
+    // (iv) izcrpani poskusi: oranzno
+    await pool.query("UPDATE orders SET status = 'paid', guest_mail_attempts = 8 WHERE id = ANY($1)", [[id3, id4]]);
+    await spi(500);
+    pf = await panelF(); rr = await zdravje(P4);
+    assert(rr.status === 200 && vrsteF(pf).includes("gost_vstopnice_izcrpane") && !vrsteF(pf).includes("gost_vstopnice_neposlane"), "(iv) izcrpani poskusi: 200 + ORANZNO gost_vstopnice_izcrpane", { rr, v: vrsteF(pf) });
+  } finally { await b.ustavi(); resendServer.close(); }
 
   console.log(`\n${ok} OK, ${fail} NAPAK`);
   await pool.end();

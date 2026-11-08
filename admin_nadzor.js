@@ -28,6 +28,8 @@ const STANJA_RACUNOV = ["caka", "izdan", "potrjen", "napaka", "preklican"];
 const RESNOST_VRSTNI_RED = { rdece: 0, oranzno: 1, rumeno: 2 };
 // Vrste rdecih opozoril, ki sprozijo JAVNI alarm GET /healthz/opozorila (I70, »tehnicno zdravje«: baza, naročila brez konca, mail Martinu, vstopnice gostov). Vse ostale rdece
 // vrste (poslovne: racun_napaka, spori, povrnitve ...) ostanejo samo v panelu, da kronicno rdeca vrstica ne naredi trajnega 503.
+// Prag za RDECE gost_vstopnice_neposlane: toliko kandidatov hkrati (en sam gost je samo oranzno v panelu).
+const GOST_ALARM_PRAG = 2;
 const TEHNICNE_VRSTE = ["baza_disk", "narocila_visijo", "nujno_mail_neposlan", "gost_vstopnice_neposlane"];
 
 // Besedilo napake izdajatelja racunov brez e-naslovov: ponudnik lahko v sporocilo vpise naslov kupca. Najprej zamenjamo e-naslove,
@@ -332,19 +334,24 @@ function ustvari(dep) {
            FROM orders WHERE status = 'pending' AND created_at < NOW() - INTERVAL '60 minutes'`)).rows[0];
       if (visijo.n > 0) dodaj("narocila_visijo", "rdece", "narocila", null, `${visijo.n} naročil čaka na plačilo več kot 60 minut (seja Stripa traja 30 min, pospravljalec doda 5 min): pospravljalec ali webhook morda ne delata, zaloga ostaja zasedena. Preveri Stripovo nadzorno ploščo in dnevnik.`, visijo.najstarejse);
       if (visijo.dolgo > 0) dodaj("placilo_v_obdelavi_dolgo", "oranzno", "narocila", null, `${visijo.dolgo} plačil je v obdelavi več kot 14 dni (odloženo plačilo, ki ga Stripe ni zaključil): preveri v Stripovi nadzorni plošči.`, visijo.najstarejse_dolgo);
-      // Gost ima vstopnice SAMO v mailu: placano (tudi delno vrnjeno) PRAVO naročilo gosta, katerega mail ni bil poslan 30+ min po placilu (pospravljalec poskusa do 3 dni).
-      // RDECE (tehnicno) samo, dokler pospravljalec se poskusa (guest_mail_attempts < GOST_POSTA_POSKUSOV): izcrpani poskusi so lahko NAMENOMA (testni promet nad mejo / isti naslov
-      // v 24 h, brezplacno nad mejo, trajno zavrnjen naslov; gostPostaIzcrpaj) in jih lahko sprozi kdorkoli, zato so samo ORANZNO v panelu (`gost_vstopnice_izcrpane`), ne v javnem alarmu.
-      // Testni promet (SQL_TESTNO_NAROCILO) ni nikoli alarm. Indeks orders_gost_posta_idx (status 'paid'; delno vrnjena po filtru).
-      const poskusov = typeof dep.gostPostaPoskusov === "function" ? dep.gostPostaPoskusov() : 7;
+      // Gost ima vstopnice SAMO v mailu. Kandidat = ISTI pogoj kot pospravljalec gostove poste (dep.gostKandidat = sqlGostKandidat v index.js: status 'paid', mail ni poslan,
+      // guest_mail_attempts < GOST_POSTA_POSKUSOV, plačano v zadnjih 3 dneh), prava (ne testna) naročila, plačana pred več kot 30 min. Indeks orders_gost_posta_idx.
+      //  - RDEČE (tehnično, javno) šele ob ≥ GOST_ALARM_PRAG kandidatih (vzorec izpada pošiljanja, ne posamezen naslov);
+      //  - natanko manj od praga: ORANŽNO `gost_vstopnica_neposlana` samo v panelu;
+      //  - izčrpani poskusi (lahko namenoma: testni promet nad mejo / isti naslov v 24 h, brezplačno nad mejo): ORANŽNO `gost_vstopnice_izcrpane` samo v panelu.
+      // Brez dep.gostKandidat / gostPostaPoskusov izračun pade (fail-closed: /healthz/opozorila 503), nikoli tihi nadomestek.
+      if (typeof dep.gostKandidat !== "function" || typeof dep.gostPostaPoskusov !== "function") throw new Error("admin_nadzor: manjka dep.gostKandidat / gostPostaPoskusov");
+      const poskusov = dep.gostPostaPoskusov();
       const gostMail = (await c.query(
-        `SELECT COUNT(*) FILTER (WHERE o.guest_mail_attempts < $1)::int AS n, MIN(o.paid_at) FILTER (WHERE o.guest_mail_attempts < $1) AS najstarejse,
-                COUNT(*) FILTER (WHERE o.guest_mail_attempts >= $1)::int AS izcrpano, MIN(o.paid_at) FILTER (WHERE o.guest_mail_attempts >= $1) AS najstarejse_izcrpano
-           FROM orders o
-          WHERE o.guest_email IS NOT NULL AND o.guest_mail_sent_at IS NULL AND o.status IN ('paid', 'partially_refunded') AND NOT ${SQL_TESTNO_NAROCILO}
-            AND o.paid_at < NOW() - INTERVAL '30 minutes' AND o.paid_at > NOW() - INTERVAL '3 days'`, [poskusov])).rows[0];
-      if (gostMail.n > 0) dodaj("gost_vstopnice_neposlane", "rdece", "narocila", null, `${gostMail.n} plačanih naročil gostov: mail z vstopnicami ni poslan več kot 30 minut po plačilu (gost ima vstopnice samo v mailu). Preveri Resend in dnevnik.`, gostMail.najstarejse);
-      if (gostMail.izcrpano > 0) dodaj("gost_vstopnice_izcrpane", "oranzno", "narocila", null, `${gostMail.izcrpano} plačanih naročil gostov: poskusi pošiljanja maila z vstopnicami so izčrpani (trajno zavrnjen naslov ali namenoma izpuščen mail); gost vstopnic morda nima. Preveri v dnevniku.`, gostMail.najstarejse_izcrpano);
+        `SELECT COUNT(*)::int AS n, MIN(o.paid_at) AS najstarejse FROM orders o
+          WHERE ${dep.gostKandidat("o")} AND NOT ${SQL_TESTNO_NAROCILO} AND o.paid_at < NOW() - INTERVAL '30 minutes'`)).rows[0];
+      const gostIzcrpano = (await c.query(
+        `SELECT COUNT(*)::int AS n, MIN(o.paid_at) AS najstarejse FROM orders o
+          WHERE o.guest_email IS NOT NULL AND o.guest_mail_sent_at IS NULL AND o.status = 'paid' AND o.guest_mail_attempts >= $1 AND o.paid_at > NOW() - INTERVAL '3 days'
+            AND NOT ${SQL_TESTNO_NAROCILO} AND o.paid_at < NOW() - INTERVAL '30 minutes'`, [poskusov])).rows[0];
+      if (gostMail.n >= GOST_ALARM_PRAG) dodaj("gost_vstopnice_neposlane", "rdece", "narocila", null, `${gostMail.n} plačanih naročil gostov: mail z vstopnicami ni poslan več kot 30 minut po plačilu (gost ima vstopnice samo v mailu). Preveri Resend in dnevnik.`, gostMail.najstarejse);
+      else if (gostMail.n > 0) dodaj("gost_vstopnica_neposlana", "oranzno", "narocila", null, `${gostMail.n} gost še nima maila z vstopnico (več kot 30 minut po plačilu): preveri naročilo.`, gostMail.najstarejse);
+      if (gostIzcrpano.n > 0) dodaj("gost_vstopnice_izcrpane", "oranzno", "narocila", null, `${gostIzcrpano.n} plačanih naročil gostov: poskusi pošiljanja maila z vstopnicami so izčrpani (npr. namenoma izpuščen mail); gost vstopnic morda nima. Preveri v dnevniku.`, gostIzcrpano.najstarejse);
       if (diskPct !== null && diskPct >= dep.bazaDisk.opozoriloPct) {
         dodaj("baza_disk", "rdece", "baza", null,
           `Disk baze je ${diskPct} % zaseden (meja opozorila ${dep.bazaDisk.opozoriloPct} %). Poln disk ustavi bazo, tudi sken na vratih: povečaj disk baze na Renderju (outly-db) in nato popravi BAZA_DISK_MB.`);
