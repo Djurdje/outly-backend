@@ -29,6 +29,7 @@
 //   - znesek 0 EUR: ne gre v Stripe (Checkout ima najmanjsi znesek), narocilo je takoj `paid` brez provizije (index.js, #191)
 "use strict";
 const Stripe = require("stripe");
+const delavci = require("./delavci");   // srcni utrip delavca in redki alarmi POZOR (I70)
 const racuni = require("./racuni");   // I52: dolg racuna (zakljuci) in dobropis (uveljaviVracilo) v isti transakciji; racuni.js placil ne uvaza (brez kroga)
 
 // Pripeta razlicica API-ja: oblika dogodkov in parametrov se ne spremeni z nadgradnjo paketa.
@@ -493,7 +494,12 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
     for (const sk of skrivnosti) {
       try { d = s.webhooks.constructEvent(req.body, podpis, sk); break; } catch (_) { /* naslednja skrivnost */ }
     }
-    if (!d) return res.status(400).send("Invalid signature.");
+    if (!d) {
+      // Napacen podpis (zamenjana skrivnost, napacen endpoint): Stripe ponavlja in vse ostaja 400 brez sledi; spori, charge.refunded in account.updated ne pridejo
+      // (I70). Najvec 1x na 10 min na proces; NIKOLI glava podpisa ali telo (lahko vsebuje osebne podatke).
+      delavci.pozorRedko("stripe:podpis", "Stripe webhook: napacen podpis (preveri STRIPE_WEBHOOK_SECRET in naslov webhooka v Stripovi nadzorni plosci); dogodki (spori, vracila, placila) ne pridejo, narocila ostajajo pending do pospravljalca");
+      return res.status(400).send("Invalid signature.");
+    }
     // I36 (#227): dogodek iz DRUGEGA nacina ne sme spremeniti stanja ali sprozati klicev. `livemode` ima vsak pravi Stripov dogodek (manjka samo v lazni strezniku).
     //  - sandbox dogodek ob sk_live_ (npr. webhook sandbox endpointa z napacno skrivnostjo): svezObjekt bi ga z zivim kljucem poiskal in dobil 404 -> 502 -> Stripe
     //    ponavlja dneve. Sandbox narocil z zivim kljucem tako ali tako ni mogoce zakljuciti, zato 200 in zanemari (pending sandbox narocila pospravi pospravljalec).
@@ -580,6 +586,8 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
     if (seja.status === "complete" && seja.payment_status === "paid") {
       let placano = null;
       await vTransakciji(async (c) => { placano = await zakljuci(c, seja); });
+      // Placana seja, katere narocilo je bilo se `pending`: webhook je izgubljen ali je zamujal (>= 2 min po roku seje). Samo public_ref, brez zneskov in kupca (I70).
+      if (placano) delavci.pozorRedko("stripe:izgubljen_webhook", `Stripe: narocilo ${o.public_ref} je bilo placano, a webhook ni prisel pravocasno (izgubljen ali zamujen); zakljuceno iz Stripa. Preveri webhook v Stripovi nadzorni plosci`);
       poPlacilu(placano);
     }
     else if (seja.status === "expired") await vTransakciji((c) => prekini(c, seja, "cancelled"));
@@ -600,24 +608,40 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
 
   // Narocila, ki cakajo predolgo (izgubljen webhook, padla seja): vprasaj Stripe, kaj je res.
   let tece = false;
+  let utrip = delavci.BREZ;   // srcni utrip (I70); nastavi zazeni()
+  // Serije po 50 v ISTEM krogu (po urnem izpadu webhooka se ne caka > 1 h na zadnje kupce): najvec POSPRAVI_SERIJ serij ali POSPRAVI_ROK_MS na krog
+  // (Stripova meja hitrosti: en GET na narocilo, zaporedno). Narocilo, ki ga je serija obdelala (tudi neuspesno ali ki ostane `pending`), se v krogu ne ponovi.
+  const okoljeCelo = (ime, privzeto, najmanj, najvec) => { const n = Number.parseInt(process.env[ime], 10); return Number.isInteger(n) && n >= najmanj && n <= najvec ? n : privzeto; };
+  const POSPRAVI_SERIJ = okoljeCelo("STRIPE_POSPRAVI_SERIJ", 10, 1, 100);
+  const POSPRAVI_ROK_MS = okoljeCelo("STRIPE_POSPRAVI_ROK_MS", 120000, 1000, 600000);
   async function pospravi() {
     const s = stripe();
     if (!s || tece) return;
     tece = true;
+    // ob roku (delavci.js) se zastavica sprosti: preveriEno je idempotentna (zakljuci/prekini zaklenita vrstico narocila), zato prekrivanje starega in novega kroga ne podvoji nicesar
+    const k = utrip.zacetek(() => { tece = false; });
     try {
-      const r = await pool.query(
-        `SELECT id, public_ref, stripe_checkout_session_id FROM orders
-          WHERE status = 'pending' AND stripe_payment_intent_id IS NULL
-            AND ((checkout_expires_at IS NOT NULL AND checkout_expires_at < NOW() - INTERVAL '5 minutes')
-              OR (checkout_expires_at IS NULL AND created_at < NOW() - INTERVAL '15 minutes'))
-          ORDER BY (checkout_url IS NULL AND stripe_checkout_session_id IS NOT NULL), created_at LIMIT 50`);   // odlozena placila (v obdelavi) zadnja: ne stradajo drugih
-      for (const o of r.rows) {
-        try { await preveriEno(o); }
-        catch (e) { console.error(`[stripe] pospravljanje narocila ${o.public_ref}:`, e.message); }
+      const konec = Date.now() + POSPRAVI_ROK_MS;
+      const obdelana = [];
+      for (let serija = 0; serija < POSPRAVI_SERIJ; serija++) {
+        const r = await pool.query(
+          `SELECT id, public_ref, stripe_checkout_session_id FROM orders
+            WHERE status = 'pending' AND stripe_payment_intent_id IS NULL
+              AND ((checkout_expires_at IS NOT NULL AND checkout_expires_at < NOW() - INTERVAL '5 minutes')
+                OR (checkout_expires_at IS NULL AND created_at < NOW() - INTERVAL '15 minutes'))
+              AND NOT (id = ANY($1::bigint[]))
+            ORDER BY (checkout_url IS NULL AND stripe_checkout_session_id IS NOT NULL), created_at LIMIT 50`, [obdelana]);   // odlozena placila (v obdelavi) zadnja: ne stradajo drugih
+        for (const o of r.rows) {
+          obdelana.push(o.id);
+          try { await preveriEno(o); }
+          catch (e) { console.error(`[stripe] pospravljanje narocila ${o.public_ref}:`, e.message); }
+          if (Date.now() > konec) break;
+        }
+        if (r.rows.length < 50 || Date.now() > konec) break;
       }
       await preveriPreklicane(s);
     } catch (e) { console.error("[stripe] pospravljanje:", e.message); }
-    finally { tece = false; }
+    finally { if (k.konec()) tece = false; }
   }
 
   // M4 (pregled #316, I53): narocilo, ki smo ga preklicali PRED iztekom seje (pavza prodaje, izbris racuna, seja ustvarjena po preklicu), ima lahko pri Stripu
@@ -716,7 +740,9 @@ function ustvari({ pool, naPlacano, naSporu, naVracilu, naVraciluIzStripa }) {
     }
     if (!process.env.STRIPE_WEBHOOK_SECRET) console.error("OPOZORILO: STRIPE_SECRET_KEY je nastavljen, STRIPE_WEBHOOK_SECRET pa ne - Stripe nakupi vracajo 503.");
     console.log(`[stripe] vklopljen (${jeSandbox() ? "SANDBOX" : "LIVE"}), API ${API_VERZIJA}`);
-    setInterval(() => { pospravi(); }, Number(process.env.STRIPE_POSPRAVI_MS) || POSPRAVI_MS).unref();
+    const perioda = Number(process.env.STRIPE_POSPRAVI_MS) || POSPRAVI_MS;
+    utrip = delavci.registriraj("stripe_pospravi", { periodaMs: perioda });
+    setInterval(() => { pospravi(); }, perioda).unref();
   }
 
   return { webhook, pospravi, zazeni, preveriPoteklo };

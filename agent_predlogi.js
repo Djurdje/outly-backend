@@ -18,6 +18,7 @@
 // Beli seznam (DEJANJA): urejanje besedila/plakata/zanrov, okno prodaje, objava (samo iz osnutka), ustavitev in zagon prodaje, nov dogodek kot osnutek, podvajanje.
 // NI: cena (denar odloci Martin), kapaciteta, starost, odpoved, vracila, vloge, klubi, uporabniki, izvoz, guest liste, racuni. Isti seznam varuje CHECK v bazi (059).
 // Ves vhod agenta je NEZAUPLJIV (prompt injection v opisih, imenih, razlogu): omejene dolzine in tipi, panel ga kaze samo kot besedilo, odgovor agentu gre skozi ocisti().
+const delavci = require("./delavci");   // srcni utrip (I70)
 
 const DEJANJA = new Map([
   ["event.uredi",          { cilj: "event", pot: "uredi",   polja: ["title", "description", "posterUrl", "genres"] }],
@@ -588,7 +589,11 @@ function ustvari(dep) {
     for (const x of r.rows) await nujnoMailPoslji(x.id);
     await izcrpanAlarm();
   }
-  const pospravljalec = setInterval(() => { nujnoMailNeposlani().catch((e) => console.error("[agent-nujno] pospravljalec:", e && e.message)); }, NUJNO_MAIL_PONOVI_MS);
+  const utrip = delavci.registriraj("agent_nujno_mail", { periodaMs: NUJNO_MAIL_PONOVI_MS });   // I70; brez zastavice kroga (krogi se sme prekrivati: prevzem mail vrstice je v bazi)
+  const pospravljalec = setInterval(() => {
+    const k = utrip.zacetek();
+    nujnoMailNeposlani().catch((e) => console.error("[agent-nujno] pospravljalec:", e && e.message)).finally(() => k.konec());
+  }, NUJNO_MAIL_PONOVI_MS);
   if (pospravljalec.unref) pospravljalec.unref();
 
   // --- panel: rdec pas (vsa nujna dejanja, ki jih admin se ni pregledal) in »Pregledal sem« ---

@@ -25,6 +25,7 @@
 "use strict";
 const crypto = require("crypto");
 const qrcode = require("qrcode-generator");
+const delavci = require("./delavci");
 
 const celo = (env, ime, privzeto, najmanj, najvec) => { const n = Number.parseInt(env[ime], 10); return Number.isInteger(n) && n >= najmanj && n <= najvec ? n : privzeto; };
 
@@ -1135,9 +1136,11 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   }
 
   let tece = false;
+  let utripTek = delavci.BREZ, utripPospravi = delavci.BREZ;   // srcni utrip (delavci.js, I70); nastavi zazeni()
   async function tek() {
     if (tece || !ponudnik) return 0;
     tece = true;
+    const utrip = utripTek.zacetek();   // brez sprostitve zastavice ob roku: racuni so denarna pot (prevzem vrstic je sicer v bazi z zetonom in najemom), alarm vseeno steje
     let skupaj = 0, imamNajem = false;
     try {
       if (stevilcenjePonudnik) {   // samo ce je delo, in samo en delavec v celem sistemu (K2)
@@ -1158,6 +1161,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
       if (stevilcenjePonudnik) { pdfKonec = Date.now() + PRORACUN_MS; await pdfFaza(); }
     } catch (e) { console.error("[racuni] tek:", kratko(e)); }
     finally {
+      utrip.konec();
       tece = false;
       if (imamNajem) await spustiNajem();
       if (zbir.length) izpisiZbir();
@@ -1169,6 +1173,7 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
   // Samo narocila, placana PO uvedbi 054 (schema_migrations): racuna za nazaj ne izdajamo (pravna analiza 20. 10. 2026, razdelek 6; odloci Martin/racunovodkinja).
   let zadnjiAlarm = 0, zadnjaLuknja = 0, zadnjiPdfAlarm = 0;
   async function pospravi() {
+    const utrip = utripPospravi.zacetek();   // brez zastavice: pospravljalec se sme prekrivati (INSERT ... ON CONFLICT DO NOTHING, samo alarmi)
     try {
       const od = `(SELECT uporabljen FROM schema_migrations WHERE datoteka = '054_racuni.sql')`;
       const a = await poizvedba(
@@ -1224,14 +1229,18 @@ function ustvari({ pool, env = process.env, ponudnik: vstavljen = null }) {   //
         }
       }
     } catch (e) { console.error("[racuni] pospravljanje:", kratko(e)); }
+    finally { utrip.konec(); }
   }
 
   function zazeni() {
     if (izbira.opozorilo) console.error(`[racuni] POZOR: ${izbira.opozorilo}.`);
     if (!ponudnik) console.log("[racuni] ponudnik izklopljen (RACUNI_PONUDNIK): racuni lastnih dogodkov se zapisujejo kot dolg (caka), stevilk in potrditev ni.");
     else console.log(`[racuni] ponudnik ${izbira.ime}${stevilcenjePonudnik ? ` (davcno stevilko dodeli ponudnik: ${ponudnik.prostor}-${ponudnik.naprava}-N, nas stevec se ne uporablja)` : ""}, delavec vsakih ${TICK_MS} ms, ${VZPOREDNO} hkratnih klicev, rok ${ROK_MS} ms.`);
-    if (ponudnik && TICK_MS > 0) setInterval(() => { tek(); }, TICK_MS).unref();
-    if (POSPRAVI_MS > 0) setTimeout(() => { pospravi(); setInterval(() => { pospravi(); }, POSPRAVI_MS).unref(); }, POSPRAVI_ZAMIK_MS).unref();
+    if (ponudnik && TICK_MS > 0) { utripTek = delavci.registriraj("racuni_tek", { periodaMs: TICK_MS }); setInterval(() => { tek(); }, TICK_MS).unref(); }
+    if (POSPRAVI_MS > 0) {
+      utripPospravi = delavci.registriraj("racuni_pospravi", { periodaMs: POSPRAVI_MS, zamikMs: POSPRAVI_ZAMIK_MS });
+      setTimeout(() => { pospravi(); setInterval(() => { pospravi(); }, POSPRAVI_MS).unref(); }, POSPRAVI_ZAMIK_MS).unref();
+    }
   }
 
   return { zazeni, tek, pospravi, ponudnik: izbira.ime };

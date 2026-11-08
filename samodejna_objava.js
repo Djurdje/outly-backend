@@ -14,6 +14,7 @@
 //  - Po COMMIT-u (kot rocna objava): izpraznitev predpomnilnikov in obvestilo sledilcem. Napaka obvestila ali pusha dogodka NE vrne v osnutek (I29): dogodek je ze objavljen.
 //  - admin_dejanja `event.publish_auto` v ISTI transakciji kot objava (brez admina: admin_user_id NULL).
 //  - Odjemalci in javni odgovori publish_at ne vidijo.
+const delavci = require("./delavci");   // srcni utrip (I70)
 
 const KANDIDATOV_NA_KROG = 20;
 const KANDIDATOV_BRANJE = 500;      // najvec toliko id-jev prebere ena poizvedba; od teh krog obravnava KANDIDATOV_NA_KROG, ki so bili najdlje nepoizkuseni
@@ -112,10 +113,12 @@ function ustvari(dep) {
     zapisiAdminDejanje({ query: q }, { user: {}, predlog: null }, dejanje, "event", id, prej, potem);
 
   let tece = false;
+  let utrip = delavci.BREZ;   // srcni utrip (I70); nastavi zazeni()
   // En krog delavca. Vrne { objavljenih, preskocenih } (test). Nikoli ne vrze.
   async function krog() {
     if (tece) return { objavljenih: 0, preskocenih: 0, tece: true };
     tece = true;
+    const k = utrip.zacetek(() => { tece = false; });   // ob roku se zastavica sprosti; objavi() zaklene vrstico (FOR NO KEY UPDATE SKIP LOCKED), zato prekrivanje ne podvoji objave
     let objavljenih = 0, preskocenih = 0;
     try {
       let ids;
@@ -142,13 +145,14 @@ function ustvari(dep) {
           log.error(`[samodejna-objava] dogodek ${id}: ${(e && (e.code || e.message)) || e}`);   // zaklep (55P03), rok, povezava: naslednji krog
         }
       }
-    } finally { tece = false; }
+    } finally { if (k.konec()) tece = false; }
     return { objavljenih, preskocenih };
   }
 
   // Zagon z intervalom; prvi krog ne takoj po zagonu (glavni pool je takrat najbolj zaseden: prvi nakupi, health check) in z nakljucnim zamikom (vec instanc).
   function zazeni(ms) {
     if (!(ms > 0)) return null;
+    utrip = delavci.registriraj("samodejna_objava", { periodaMs: ms, zamikMs: Math.min(ms, 20000) + Math.min(ms, 10000) });
     let interval = null;
     const prvi = setTimeout(() => { void krog(); interval = setInterval(() => { void krog(); }, ms); interval.unref(); },
       Math.min(ms, 20000) + Math.round(Math.random() * Math.min(ms, 10000)));
