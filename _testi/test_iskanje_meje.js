@@ -42,7 +42,7 @@ async function klic(p, pot) {
   const t0 = Date.now();
   const r = await fetch(p.base + pot, { signal: AbortSignal.timeout(6000) }).catch((e) => ({ status: 0, text: async () => String(e), headers: new Headers() }));   // obvisel klic = status 0
   const besedilo = await r.text();
-  return { status: r.status, besedilo, retryAfter: r.headers.get("retry-after"), ms: Date.now() - t0 };
+  return { status: r.status, besedilo, retryAfter: r.headers.get("retry-after"), iskanje: r.headers.get("x-iskanje"), ms: Date.now() - t0 };
 }
 
 (async () => {
@@ -111,6 +111,7 @@ async function klic(p, pot) {
     assert(rez.every((x) => Number(x.retryAfter) >= 1), "503 ima Retry-After", rez.map((x) => x.retryAfter));
     assert(rez.every((x) => x.ms < 3000), "klic traja ~mejo, ne deset sekund", rez.map((x) => x.ms));
     assert(rez.every((x) => !/error|stack|57014|statement/i.test(x.besedilo)), "telo 503 ne razkriva napake baze", rez[0].besedilo);
+    assert(rez.every((x) => x.iskanje === null), "503 ob izteku poizvedbe NIMA glave X-Iskanje (prava napaka, ne zavrnitev meje)", rez.map((x) => x.iskanje));
     const zivi = await klic(B, "/healthz");
     assert(B.umrl === null && zivi.status !== 0, "proces po iztekih zivi", zivi.status);
     await lock.query("ROLLBACK"); lock.release();
@@ -143,7 +144,7 @@ async function klic(p, pot) {
     await N0.ustavi();
 
     // ------------------------------------------------------------------
-    console.log("\n# (e) Hkratna iskanja ob zaklenjeni tabeli events: semafor, /clubs brez q ostane hiter, brez 500");
+    console.log("\n# (e) 40 hkratnih iskanj ob zaklenjeni tabeli events: mesta + omejena vrsta, /clubs brez q ostane hiter, brez 500");
     await pool.query("TRUNCATE omejitve");
     const E = await zazeni(3175, { ISKANJE_NA_URO: "100000", ISKANJE_MEJA_MS: "1500" });
     const lock2 = await pool.connect();
@@ -151,19 +152,49 @@ async function klic(p, pot) {
     await lock2.query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE");
     const iskanja = Array.from({ length: 40 }, (_, i) => klic(E, "/search?q=hkrati" + i));
     await spi(300);
+    // različen parameter pri vsakem klicu: nobeden ni zadetek predpomnilnika (N5)
     const neodvisen = await klic(E, "/clubs?limit=7");
     assert(neodvisen.status === 200 && neodvisen.ms < 1000, "neodvisen GET /clubs?limit=7 med iskanji: 200 v < 1 s", [neodvisen.status, neodvisen.ms]);
-    const kasneje = await klic(E, "/clubs?limit=7");
-    assert(kasneje.status === 200 && kasneje.ms < 1000, "se enkrat, ko iskanja ze potekajo/iztekajo: < 1 s", [kasneje.status, kasneje.ms]);
+    const kasneje = await klic(E, "/clubs?limit=8");
+    assert(kasneje.status === 200 && kasneje.ms < 1000, "drug (nepredpomnjen) GET /clubs?limit=8, ko iskanja ze potekajo/iztekajo: < 1 s", [kasneje.status, kasneje.ms]);
     const rez2 = await Promise.all(iskanja);
     const st2 = rez2.map((x) => x.status);
     assert(st2.every((x) => x === 503), "vsa hkratna iskanja -> 503 (nobenega 500, nobenega obvisenega)", st2.join());
     assert(rez2.every((x) => Number(x.retryAfter) >= 1), "503 ima Retry-After", rez2.map((x) => x.retryAfter).join());
-    const takoj = rez2.filter((x) => x.ms < 400).length;
-    assert(takoj >= 30, "nad mejo hkratnih iskanj 503 TAKOJ (brez cakanja v vrsti)", takoj);
+    assert(rez2.every((x) => x.ms < 3000), "vsa v roku (meja 1,5 s + vrsta 0,5 s)", rez2.map((x) => x.ms).join());
+    const takoj = rez2.filter((x) => x.ms < 400 && x.iskanje === "zasedeno").length;
+    assert(takoj >= 14, "mimo 4 mest + 20 v vrsti: preostali takoj 503 z X-Iskanje: zasedeno", takoj);
+    const izteklo = rez2.filter((x) => x.iskanje === null).length;
+    assert(izteklo === 4, "natanko 4 iskanja z mestom: iztek poizvedbe = 503 brez X-Iskanje", izteklo);
     await lock2.query("ROLLBACK"); lock2.release();
     const po3 = await klic(E, "/search?q=klub");
     assert(po3.status === 200, "po sprostitvi zaklepa iskanje spet 200 (mesta se sprostijo)", po3.status);
+    const nulCity = [(await klic(E, "/clubs?city=a%00b")).status, (await klic(E, "/search?q=klub&limit=1%00")).status, (await klic(E, "/clubs?withCoords=%00")).status];
+    assert(nulCity.every((x) => x === 400), "NUL v city/limit/withCoords -> 400 (ne 500)", nulCity);
+
+    // ------------------------------------------------------------------
+    console.log("\n# (f) Obremenitev z razlicnimi q (odprta zanka): delez 503 pri ~15 / ~50 / ~100 iskanj/s");
+    async function obremeni(p, hitrost, sekunde) {
+      const rez = [];
+      const korak = 1000 / hitrost, n = Math.round(hitrost * sekunde), t0 = Date.now();
+      const vse = [];
+      for (let i = 0; i < n; i++) {
+        const kdaj = t0 + i * korak;
+        await spi(Math.max(0, kdaj - Date.now()));
+        vse.push(klic(p, "/search?q=ob" + hitrost + "x" + i).then((x) => rez.push(x)));
+      }
+      await Promise.all(vse);
+      const nap = rez.filter((x) => x.status === 503).length;
+      return { n: rez.length, delez503: nap / rez.length, drugo: rez.filter((x) => x.status !== 200 && x.status !== 503).length };
+    }
+    const F = await zazeni(3176, { ISKANJE_NA_URO: "1000000" });
+    for (const h of [15, 50, 100]) {
+      const m = await obremeni(F, h, 4);
+      console.log(`    izmerjeno: ${h}/s -> ${m.n} zahtevkov, 503: ${(m.delez503 * 100).toFixed(1)} %, drugi statusi: ${m.drugo}`);
+      if (h <= 50) assert(m.delez503 < 0.01 && m.drugo === 0, `${h} iskanj/s z razlicnimi q: < 1 % 503, brez 500`, m);
+      else assert(m.drugo === 0, `${h} iskanj/s: brez 500`, m);
+    }
+    await F.ustavi();
     await E.ustavi();
   } catch (e) {
     fail++; console.log("  ✗ izjema:", e && e.stack || e);
