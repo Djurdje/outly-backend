@@ -117,8 +117,9 @@ jobs:
 
       # Mrtev cloveka drzalo: ce ta workflow sploh NE stece (GitHub Actions v izpadu,
       # onemogocen cron po 60 dneh nedejavnosti, pokvarjen YAML), zgoraj nihce ne opozori —
-      # rdeca lucka rabi zagon. Healthchecks.io obrne logiko: ce pinga ni v 15 min + 20 min
-      # odloga, javi ON.
+      # rdeca lucka rabi zagon. Healthchecks.io obrne logiko: ce pinga ni v Periodi + Grace, javi ON.
+      # Nastavitev checka je Period 6 h / Grace 3 h (ne 15/20 min: GitHub cron v praksi tece na 4-5 ur;
+      # docs/ARCHITECTURE.md, razdelek »Nadzor produkcije«).
       #
       # Pogoj je namenoma "napake == ''", ne samo success(): pri rocnem zagonu z test=true
       # ali test=routine korak "Preveri produkcijo" NE pade, tudi ce je produkcija res podrta
