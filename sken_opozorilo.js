@@ -1,8 +1,10 @@
 "use strict";
 // Opozorilo `sken_ni_pripravljen` (#406, 075, I71): ENA resnica za pogoj + mail Martinu (076).
 //  - SQL_SKEN_NEPRIPRAVLJEN: FROM/WHERE fragment, ki ga uporabljata panel (admin_nadzor.js) IN posiljalec maila (nikoli dve kopiji pogoja). Parameter $1 = okno v minutah.
-//  - ustvari(dep).krog(): kandidati -> prevzem v `sken_opozorila_poslana` (INSERT ... ON CONFLICT ... RETURNING; kdor dobi vrstico, poslje) -> mail -> poslano_at.
-//    Najvec 1 mail na dogodek tudi pri vec procesih in po restartu. Neuspeh (Resend { error }) = ponovitev po premoru, najvec SKEN_OPOZORILO_POSKUSOV.
+//  - ustvari(dep).krog(): kandidati -> prevzem `prevzemi` (kratka transakcija, SELECT ... FOR UPDATE OF s na vrstici `sken_opozorila_poslana`; Resend NI v transakciji)
+//    -> ponovni preizkus pogoja -> mail -> poslano_at (vezano na prevzeti start_at). Meje na dogodek za vedno: najvec SKEN_OPOZORILO_NAJVEC_POSKUSOV (10) zahtevkov
+//    k Resendu (absolutno) in SKEN_OPOZORILO_NAJVEC_MAILOV (3) POTRJENIH mailov (mail, ki ga Resend sprejme po nasem roku, se ne steje - zato je absolutna meja 10).
+//    Prestavitev >= 1 h in >= 1 h od zadnjega maila = nov mail; manjsi premik samo posodobi start_at. Neuspeh = premor, po 5 zaporednih POZOR + redka ponovitev.
 //  - GLAVNI pool z roki poizvedb (lock_timeout, statement_timeout), NIKOLI skenPool; sken na vratih od delavca ni odvisen. Brez prejemnika ali Resenda: samo POZOR (delavci.pozorRedko).
 const SKEN_PRIPRAVLJEN_OKNO_MIN = 120;   // dogodek se zacne v tolikem casu (ali ze tece), seznama za vrata pa ni prenesel nihce v 24 h
 const SKEN_OPOZORILO_POSKUSOV = 5;               // zaporednih neuspehov, nato POZOR + redka ponovitev
