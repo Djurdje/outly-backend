@@ -772,6 +772,35 @@ Postopek ostane tu za primer ponovne postavitve:
 
 Po tem je alarm dvojen: nadzor javi, ko je produkcija pokvarjena, Healthchecks pa, ko je pokvarjen nadzor.
 
+### Po deployu, zapora migracij med dogodkom in pregled rokov (#404, #407)
+
+Cron `*/15` je prepočasen za vprašanje »ali je ta merge pokvaril produkcijo«, zato so trije dodatni mehanizmi:
+
+- **`po-deployu.yml`** (potisk na `main`, tudi ročno z `main`; `concurrency` po veji s prekinitvijo starejšega zagona). Do 10 min vsakih 15 s bere
+  `GET /healthz`, dokler `commit` ni enak `${GITHUB_SHA::12}` (stara različica po padlem deployu vrača 200, zato 200 ni dokaz). Nato `/clubs` 200 z `"id"`,
+  `/events` 200, `/events/<id>` 200 za prvi dogodek (če seznam ni prazen), `/me/invites` brez žetona 401, `/healthz/sken` 200 `"ok":true` (drugi krog po 30 s kot v nadzoru).
+  Ob napaki: rdeč zagon, push (`NTFY_TOPIC`) in issue z oznako `agent` z naslovom »Po deployu: produkcija ne ustreza po zadnjem merge-u v main«
+  (odprt issue z istim naslovom dobi komentar; če seznama issueov ni mogoče prebrati, novega ne odpre). **Samodejnega reverta ni** (PR, ki ga odpre `GITHUB_TOKEN`, ne sproži CI):
+  v issueju piše, kateri commit revertati in da agent PREJ preveri v Renderju, ali deploy še teče (dolga migracija). Revert PR odpre agent. V dnevnik gredo samo statusi in commit (repo je javen).
+- **Zapora migracij med dogodkom** je korak v **`zascita.yml`** (ne v `testi.yml`: en vir resnice). Zascita teče z `main` kot `pull_request_target` (PR je ne more izklopiti),
+  se sproži tudi ob `labeled`/`unlabeled` in je obvezen check; brez checkouta kode PR-ja (bere samo seznam datotek, oznake in javni `GET /events`).
+  PR, ki spreminja `db/migracije/**` (tudi `previous_filename`), pade, če po `GET /events?upcoming=true` + `?upcoming=false` kak dogodek teče: okno je od začetka − 3 h do
+  (`end_at`, če je veljaven in po začetku, sicer začetek + 12 h kot `sken_okno.js`) + 1 h. Razlog za −3 h in ne −12 h kot pri skenu: sken odpre vrata zgodaj zaradi zamud in pospravljanja,
+  migracija pa je nevarna le v navali nakupov/skenov (ACCESS EXCLUSIVE na `tickets`/`orders` ~1 s v deployu), pravilo devops je »ne v manj kot 3 h do dogodka«; −12 h bi migracije zaprlo skoraj ves teden.
+  **Oznaka `odobril-martin` zapore NE odpre.** Preskoči jo samo oznaka `migracija-med-dogodkom`, ki jo doda Martin (agent si je ne sme dodati; oznako je treba ustvariti, še ne obstaja);
+  oznake se berejo žive, zato po njej zadostuje Re-run `Zascita`. Neveljaven datum enega dogodka: ta dogodek skrbno šteje kot »v oknu« (opozorilo + padec).
+  Produkcija ali GitHub API nedosegljiva → samo opozorilo (izpad ne sme blokirati popravka).
+  **Preostala luknja:** preverba velja ob zagonu (oznaka ob 10:00, samodejni merge ob 21:00 jo obideta). Zato za PR z migracijo agent **NIKOLI ne uporabi auto-merge** in tik pred merge-om
+  znova požene `Zascita` (Re-run) ter šele nato mergira.
+- **`roki.yml`** (ponedeljek 14:17 UTC + ročno): TLS `notAfter` za `outly.si` in backend (prag 14 in 7 dni, ker se obnavljata sama), potek domene `outly.si` prek RDAP
+  (IANA bootstrap kaže za `.si` na `https://rdap.register.si/`; rezerva `whois`; brez datuma = opozorilo »neznano«), `/healthz/baza` in fiksni roki iz `_orodja/roki.json`
+  (prag 60/30/7 dni; `"datum": null` = neznan, ob prvem zagonu en issue `martin` »Roki: manjkajo datumi«; iOS certifikat meri natančno outly-app `preverba-certifikata.yml`).
+  `/healthz/baza` vrne samo `{"ok"}` (200/503): 503 ali `ok:false` v **dveh krogih po 60 s** (503 je lahko tudi zasičen pool ob navali) = issue »poglej opozorilo `baza_disk` v panelu«;
+  404 ali drugo = opozorilo. **Disk NI v `nadzor.yml`**: trajno poln disk je Martinova odločitev o denarju in bi dneve sprožal Popravljalca (vzorec kopije baze #386); Martin doda UptimeRobot monitor (samo mail).
+  Alarm = issue `martin` + ntfy, brez podvajanja (marker s pragom in datumom; velja tudi za issue, zaprt v zadnjih 30 dneh; disk dobi ob okrevanju marker `-reset`, zato naslednji alarm ni utišan).
+  Alarm zagona ne obarva rdeče, napaka pregleda samega pa. **Kaj stori Martin:** neobvezen secret `HC_URL_ROKI` (Healthchecks, Period 8 days, Grace 2 days; brez njega `::warning::`),
+  vpis manjkajočih datumov v `_orodja/roki.json`, ustvari oznako `migracija-med-dogodkom` in jo po presoji doda.
+
 ## Varnostne kopije in obnova
 
 Kopije so **izven Renderja** (od 30. 9. 2026 je baza plačljiva; dnevna šifrirana kopija v R2, DECISIONS 2026-10-02, zagoni `Varnostna kopija baze` v INCIDENTI 2026-10-24; obnova: skill `obnova-baze`).

@@ -8,6 +8,10 @@ on:
   push:
     branches: [main]
 
+# Testi berejo samo kodo repozitorija (checkout, npm ci, Postgres na runnerju): drugih pravic GITHUB_TOKEN ne rabijo.
+permissions:
+  contents: read
+
 jobs:
   testi:
     runs-on: ubuntu-latest
