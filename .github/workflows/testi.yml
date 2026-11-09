@@ -1,5 +1,5 @@
 # Testi backenda ob vsakem PR-ju in potisku na main.
-# Dvigne PostgreSQL 16, pozene vse migracije na prazni bazi in nato testne skripte.
+# Dvigne PostgreSQL 16 (isti glavni razlicici kot produkcija, Render outly-db), pozene vse migracije na prazni bazi in nato testne skripte.
 # Rdec zagon = PR se ne sme zdruziti (zascita veje main zahteva ta check).
 name: Testi
 
@@ -14,7 +14,9 @@ permissions:
 
 jobs:
   testi:
-    runs-on: ubuntu-latest
+    # Pin na ubuntu-24.04, NE ubuntu-latest: GitHub "latest" postopno seli na 26.04, kjer je PostgreSQL 18 (9. 11. 2026: SQLSTATE 23001
+    # namesto 23503 v test_razpored.js, main je bil rdec brez spremembe kode). Rezultat testov ne sme biti odvisen od slike runnerja.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/outly
@@ -26,10 +28,20 @@ jobs:
       - name: PostgreSQL 16 (nameščen na runnerju, brez prenosa slike)
         run: |
           sudo systemctl start postgresql.service
-          for i in $(seq 1 30); do pg_isready -h localhost -p 5432 && break; sleep 1; done
+          for _ in $(seq 1 30); do pg_isready -h localhost -p 5432 && break; sleep 1; done
           sudo -u postgres psql -v ON_ERROR_STOP=1 -c "ALTER USER postgres PASSWORD 'postgres';"
           sudo -u postgres createdb -E UTF8 -T template0 outly
           psql "$DATABASE_URL" -Atc "select version(), current_setting('server_encoding')"
+      # Varovalo: testi morajo teci na isti glavni razlicici kot produkcija. Druga razlicica = rdec zagon z jasnim vzrokom,
+      # ne pa tiha selitev, ki spremeni SQLSTATE-e in sporocila napak (glej 9. 11. 2026).
+      - name: Preveri, da je PostgreSQL 16
+        run: |
+          v=$(psql "$DATABASE_URL" -Atc "show server_version_num")
+          echo "server_version_num=$v"
+          case "$v" in
+            16????) ;;
+            *) echo "::error::PostgreSQL ni 16 (server_version_num=$v); produkcija je 16. Runner: ${ImageOS:-?} ${ImageVersion:-?}"; exit 1 ;;
+          esac
       - uses: actions/setup-node@v4
         with:
           node-version: 22
