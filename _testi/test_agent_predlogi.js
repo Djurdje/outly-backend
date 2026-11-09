@@ -272,6 +272,13 @@ function nicOsebnega(ime, tekst) {
     r = await predlagaj(UREDI(E.e, { posterUrl: "https://res.cloudinary.com/outlytest/image/upload/v1/plakat.jpg" }));
     assert(r.status === 201 && r.body.predlog.prej.poster_url === "https://evil.test/plakat.jpg", "plakat iz nasega Cloudinaryja -> 201", [r.status, r.body]);
     await api(PORT, "POST", `/admin/api/predlogi/${r.body.predlog.id}/zavrni`, T.admin, {});
+    // majhen banner 3:4 (074, #400): enaka varovala kot za posterUrl (samo nas Cloudinary), prazen niz/null = odstrani
+    r = await predlagaj(UREDI(E.e, { posterCardUrl: "https://evil.test/kartica.jpg" }));
+    assert(r.status === 400 && r.body.error === "plakat_ni_dovoljen", "posterCardUrl s tujega gostitelja -> 400 plakat_ni_dovoljen", [r.status, r.body]);
+    r = await predlagaj({ dejanje: "event.nov_osnutek", cilj: { tip: "club", id: K1 }, spremembe: { title: "Nov", startAt: "2027-01-01T22:00:00Z", posterCardUrl: "https://evil.test/kartica.jpg" }, razlog: "nov dogodek" });
+    assert(r.status === 400 && r.body.error === "plakat_ni_dovoljen", "nov osnutek s tujim posterCardUrl -> 400 plakat_ni_dovoljen", [r.status, r.body]);
+    r = await predlagaj(UREDI(E.e, { posterCardUrl: "https://res.cloudinary.com/outlytest/image/upload/v1/kartica.jpg" }));
+    assert(r.status === 201 && r.body.predlog.prej.poster_card_url === "" && r.body.predlog.spremembe.poster_card_url === "https://res.cloudinary.com/outlytest/image/upload/v1/kartica.jpg", "posterCardUrl iz nasega Cloudinaryja -> 201 (prej '' -> potem URL)", [r.status, r.body]);
     r = await predlagaj(UREDI(E.e, { posterUrl: "" }));
     assert(r.status === 201, "odstranitev plakata (prazen niz) -> 201", [r.status, r.body]);
     await api(PORT, "POST", `/admin/api/predlogi/${r.body.predlog.id}/zavrni`, T.admin, {});

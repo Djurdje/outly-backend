@@ -122,7 +122,7 @@ let srv = null;
   const anaVst = (await api("GET", "/me/tickets", T.ana)).body.find(t => t.is_guest_list);
   assert(anaVst, "ana ima vstopnico guest liste v /me/tickets");
   assert(Object.keys(v1).sort().join() === "created_at,event,guest_list_id,host_avatar_url,host_username,id,ticket_id", "vrstica: natancno polja iz pogodbe", Object.keys(v1));
-  assert(Object.keys(v1.event).sort().join() === "club_name,id,poster_url,start_at,title", "event: natancno polja iz pogodbe", Object.keys(v1.event));
+  assert(Object.keys(v1.event).sort().join() === "club_name,id,poster_card_url,poster_url,start_at,title", "event: natancno polja iz pogodbe (poster_card_url od 074, #400)", Object.keys(v1.event));
   assert(v1.id === m1.id && typeof v1.id === "number" && v1.guest_list_id === L1 && typeof v1.guest_list_id === "number", "id = guest_list_members.id, guest_list_id = lista (stevili)", v1);
   assert(v1.ticket_id === anaVst.id && typeof v1.ticket_id === "number", "ticket_id = moja vstopnica (ista kot v GET /me/tickets)", [v1.ticket_id, anaVst.id]);
   assert(v1.host_username === "host" && v1.host_avatar_url === null, "host_username 'host', host_avatar_url null", v1);

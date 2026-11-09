@@ -10,7 +10,7 @@
     "event.ustavi_prodajo": "Ustavi prodajo", "event.zazeni_prodajo": "Zaženi prodajo", "event.nov_osnutek": "Nov dogodek (osnutek)", "event.podvoji": "Podvoji dogodek",
   };
   const POLJA = {
-    title: "naslov", description: "opis", poster_url: "plakat", posterUrl: "plakat", genres: "žanri", sales_open_at: "prodaja od", sales_close_at: "prodaja do",
+    title: "naslov", description: "opis", poster_url: "plakat", posterUrl: "plakat", poster_card_url: "plakat (majhen)", posterCardUrl: "plakat (majhen)", genres: "žanri", sales_open_at: "prodaja od", sales_close_at: "prodaja do",
     status: "stanje", sales_paused: "prodaja ustavljena", startAt: "začetek", endAt: "konec", ponovi: "ponovi", n: "število kopij",
     venueClubId: "gostiteljski klub", venueName: "prizorišče", venueAddress: "naslov prizorišča", venueCity: "kraj",
   };
@@ -23,7 +23,7 @@
   const odprti = new Set();   // id-ji predlogov, pri katerih je admin odprl celo besedilo
 
   const cele = (n) => (Number.isSafeInteger(Number(n)) ? Number(n) : 0);
-  const PLAKAT = new Set(["poster_url", "posterUrl"]);
+  const PLAKAT = new Set(["poster_url", "posterUrl", "poster_card_url", "posterCardUrl"]);
   // celo besedilo vrednosti (brez krajšanja)
   function besedilo(v, kljuc) {
     if (v === undefined || v === null || v === "") return "—";
