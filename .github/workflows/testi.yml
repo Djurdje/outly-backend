@@ -17,7 +17,8 @@ jobs:
     # Pin na ubuntu-24.04, NE ubuntu-latest: GitHub "latest" postopno seli na 26.04, kjer je PostgreSQL 18 (9. 11. 2026: SQLSTATE 23001
     # namesto 23503 v test_razpored.js, main je bil rdec brez spremembe kode). Rezultat testov ne sme biti odvisen od slike runnerja.
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # 25 min: na ubuntu-24.04 testi trajajo ~15 min (PR #418: 14 min 51 s; #416 job 129069193633 je presegel 15 min).
+    timeout-minutes: 25
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/outly
       NODE_ENV: test
