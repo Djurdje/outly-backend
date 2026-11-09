@@ -5194,6 +5194,7 @@ samodejnaObjava.zazeni(okoljeCelo("SAMODEJNA_OBJAVA_MS", 60000, 0, 3600000));
 // glavni pool z roki poizvedb, nikoli skenPool; najvec 1 mail na dogodek (evidenca v bazi). Prejemnik: OPOZORILA_MAIL, sicer AGENT_NUJNO_MAIL.
 require("./sken_opozorilo").ustvari({
   pool, delavci, imaResend: () => !!resend, posljiMail: (m) => gostResendPosli(m),
+  posljiRokMs: () => GOST_POSTA_TIMEOUT_MS + 1000,   // const je definiran nizje (TDZ): bere se ob krogu
 }).zazeni();
 // Dostop za agenta (Claude) z zetonom samo za branje (#330, 1. del; migracija 058; ARCHITECTURE »Dostop za agenta«, I56). Upravljanje zetonov: GET/POST /admin/api/agent-zetoni
 // (vloga admin, na routerju `admin`); poti za agenta: /agent/api/* (samo GET). Zeton agenta je na VSEH drugih poteh 403 že v requireAuthNa (brez baze).

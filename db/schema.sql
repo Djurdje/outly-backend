@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 4RgcAfg7TiztfoDUEa9KNIwgLzwPhvx81RJ8GT7yhjbqmnZTmTIqFI47MoZD97n
+\restrict fQiOmHArszfCl2LIuFuADrZilzzrbhzU3wp64ro86lH689J1ddMFOTBt3JSeF5j
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -1825,6 +1825,7 @@ CREATE TABLE public.schema_migrations (
 
 CREATE TABLE public.sken_opozorila_poslana (
     event_id integer NOT NULL,
+    start_at timestamp with time zone NOT NULL,
     prevzeto_at timestamp with time zone DEFAULT now() NOT NULL,
     poskusi integer DEFAULT 1 NOT NULL,
     poslano_at timestamp with time zone
@@ -4710,5 +4711,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 4RgcAfg7TiztfoDUEa9KNIwgLzwPhvx81RJ8GT7yhjbqmnZTmTIqFI47MoZD97n
+\unrestrict fQiOmHArszfCl2LIuFuADrZilzzrbhzU3wp64ro86lH689J1ddMFOTBt3JSeF5j
 

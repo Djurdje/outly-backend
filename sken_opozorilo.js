@@ -67,28 +67,35 @@ function ustvari(dep) {
   const log = dep.log || console;
   const PERIODA_MS = okoljeCelo(env, "SKEN_OPOZORILO_MS", 300000, 0, 3600000);          // 0 = izklop
   const PREMOR_MS = okoljeCelo(env, "SKEN_OPOZORILO_PREMOR_MS", 120000, 0, 3600000);     // premor pred ponovnim poskusom istega dogodka
+  const DOLGI_PREMOR_MS = okoljeCelo(env, "SKEN_OPOZORILO_DOLGI_PREMOR_MS", 1800000, 0, 86400000);   // po izcrpanih poskusih: redka ponovitev, dokler dogodek izpolnjuje pogoj
+  // Premor prevzema je VEDNO daljsi od najdaljsega posiljanja (rok Resenda + rezerva, kot GOST_POSTA_PREMOR_MIN_MS, #201): sicer bi drug proces pocasno posiljanje podvojil.
+  const rezervaMs = () => Number(typeof dep.posljiRokMs === "function" ? dep.posljiRokMs() : dep.posljiRokMs) || 0;
+  const premorMs = () => Math.max(PREMOR_MS, rezervaMs());
+  const dolgiPremorMs = () => Math.max(DOLGI_PREMOR_MS, premorMs());
   const PAKET = 20;                                                                       // najvec dogodkov na krog
   const prejemniki = () => String(env.OPOZORILA_MAIL || env.AGENT_NUJNO_MAIL || "").split(",").map((x) => x.trim()).filter((x) => /^[^@\s]+@[^@\s]+$/.test(x));
 
   // Kratka transakcija z roki (kot skenPrenosZabelezi, I71): zaklep ali pocasna baza krog le preskoci.
   async function vTx(fn) {
     const c = await pool.connect();
+    let napaka;
     try {
       await c.query("BEGIN");
       await c.query("SET LOCAL lock_timeout = '500ms'; SET LOCAL statement_timeout = '3000ms'");
       const r = await fn(c);
       await c.query("COMMIT");
       return r;
-    } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; }
-    finally { c.release(); }
+    } catch (e) { napaka = e; await c.query("ROLLBACK").catch(() => {}); throw e; }
+    finally { c.release(napaka); }   // po napaki povezavo zavrzemo (kot skenPrenosZabelezi)
   }
 
   async function krog() {
     if (pool.waitingCount > 0) return { preskoceno: true };   // pool caka na povezavo: nakupi imajo prednost
     const kand = (await vTx((c) => c.query(
       `SELECT e.id, e.title, c.name AS club_name, e.start_at ${SQL_SKEN_NEPRIPRAVLJEN}
-          AND NOT EXISTS (SELECT 1 FROM sken_opozorila_poslana s WHERE s.event_id = e.id AND (s.poslano_at IS NOT NULL OR s.poskusi >= $3))
-        ORDER BY e.start_at, e.id LIMIT $2`, [SKEN_PRIPRAVLJEN_OKNO_MIN, PAKET, SKEN_OPOZORILO_POSKUSOV]))).rows;
+          AND NOT EXISTS (SELECT 1 FROM sken_opozorila_poslana s WHERE s.event_id = e.id AND s.start_at = e.start_at
+                            AND (s.poslano_at IS NOT NULL OR s.prevzeto_at > NOW() - (CASE WHEN s.poskusi >= $3 THEN $5::bigint ELSE $4::bigint END) * INTERVAL '1 millisecond'))
+        ORDER BY e.start_at, e.id LIMIT $2`, [SKEN_PRIPRAVLJEN_OKNO_MIN, PAKET, SKEN_OPOZORILO_POSKUSOV, premorMs(), dolgiPremorMs()]))).rows;
     if (!kand.length) return { poslano: 0 };
     const naslovi = prejemniki();
     if (!naslovi.length || !dep.imaResend()) {
@@ -97,24 +104,36 @@ function ustvari(dep) {
     }
     let poslano = 0;
     for (const x of kand) {
+      // Prevzem (en stavek): nov dogodek; ISTI start_at -> ponovitev po premoru (po izcrpanih poskusih po dolgem premoru); DRUGACEN start_at (prestavitev) -> ponastavitev.
+      // start_at vzamemo iz events v istem stavku (ne iz JS Date: mikrosekunde).
       const k = await vTx((c) => c.query(
-        `INSERT INTO sken_opozorila_poslana AS s (event_id) VALUES ($1)
-         ON CONFLICT (event_id) DO UPDATE SET poskusi = s.poskusi + 1, prevzeto_at = NOW()
-          WHERE s.poslano_at IS NULL AND s.poskusi < $2 AND s.prevzeto_at < NOW() - ($3::int * INTERVAL '1 millisecond')
-         RETURNING s.poskusi`, [x.id, SKEN_OPOZORILO_POSKUSOV, PREMOR_MS]));
+        `INSERT INTO sken_opozorila_poslana AS s (event_id, start_at) SELECT e.id, e.start_at FROM events e WHERE e.id = $1
+         ON CONFLICT (event_id) DO UPDATE SET
+              poskusi = CASE WHEN s.start_at IS DISTINCT FROM EXCLUDED.start_at THEN 1 ELSE s.poskusi + 1 END,
+              poslano_at = CASE WHEN s.start_at IS DISTINCT FROM EXCLUDED.start_at THEN NULL ELSE s.poslano_at END,
+              start_at = EXCLUDED.start_at, prevzeto_at = NOW()
+          WHERE s.start_at IS DISTINCT FROM EXCLUDED.start_at
+             OR (s.poslano_at IS NULL AND s.prevzeto_at < NOW() - (CASE WHEN s.poskusi >= $2 THEN $4::bigint ELSE $3::bigint END) * INTERVAL '1 millisecond')
+         RETURNING s.poskusi`, [x.id, SKEN_OPOZORILO_POSKUSOV, premorMs(), dolgiPremorMs()]));
       if (!k.rows.length) continue;   // drug proces je prevzel ali je ze poslano / premor se ni potekel
       const poskus = k.rows[0].poskusi;
+      // Tik pred posiljanjem ponovno preverimo pogoj samo za ta dogodek (seznam medtem prenesen, dogodek odpovedan/prestavljen izven okna): ne posiljamo, prevzem sprostimo brez stetja.
+      const se = await vTx((c) => c.query(`SELECT 1 ${SQL_SKEN_NEPRIPRAVLJEN} AND e.id = $2`, [SKEN_PRIPRAVLJEN_OKNO_MIN, x.id]));
+      if (!se.rows.length) {
+        await vTx((c) => c.query("UPDATE sken_opozorila_poslana SET poskusi = GREATEST(poskusi - 1, 0), prevzeto_at = NOW() - INTERVAL '1 day' WHERE event_id = $1 AND poslano_at IS NULL", [x.id])).catch(() => {});
+        continue;
+      }
       const m = mailVsebina(x);
       let r;
       try { r = await dep.posljiMail({ to: naslovi, subject: m.zadeva, html: m.html, text: m.besedilo }); }
       catch (e) { r = { error: { message: e && e.message } }; }
       if (r && r.error) {   // Resend ob napaki NE vrze, vrne { error }; vrstica ostane (poskusi), ponovitev po premoru
         log.error(`[sken-opozorilo] mail za dogodek ${x.id} ni potrjen (poskus ${poskus}/${SKEN_OPOZORILO_POSKUSOV}): ${String(r.error.name || "")} ${String(r.error.message || "").slice(0, 100)}`);
-        if (poskus >= SKEN_OPOZORILO_POSKUSOV) delavci.pozorRedko(`sken-opozorilo:izcrpano:${x.id}`, `[sken-opozorilo] POZOR: mail Martinu za dogodek ${x.id} ni uspel ${SKEN_OPOZORILO_POSKUSOV}x; vrata brez skena brez povezave, preveri Resend in panel`, log);
+        if (poskus >= SKEN_OPOZORILO_POSKUSOV) delavci.pozorRedko(`sken-opozorilo:izcrpano:${x.id}`, `[sken-opozorilo] POZOR: mail Martinu za dogodek ${x.id} ni uspel ${poskus}x; vrata brez skena brez povezave, preveri Resend in panel`, log);
         continue;
       }
       for (let i = 0; ; i++) {
-        try { await pool.query("UPDATE sken_opozorila_poslana SET poslano_at = NOW() WHERE event_id = $1", [x.id]); break; }
+        try { await vTx((c) => c.query("UPDATE sken_opozorila_poslana SET poslano_at = NOW() WHERE event_id = $1", [x.id])); break; }   // z roki: obvisel zapis bi zaustavil delavca (I70)
         catch (e) { if (i >= 2) { log.error(`[sken-opozorilo] mail za dogodek ${x.id} je poslan, zapisa ni bilo mogoce narediti (${e && e.message}); po premoru lahko pride se enkrat`); break; } await new Promise((res) => setTimeout(res, 200)); }
       }
       poslano++;

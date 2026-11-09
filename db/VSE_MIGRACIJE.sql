@@ -4072,12 +4072,14 @@ COMMENT ON COLUMN sken_prenosi.zadnji_prenos IS 'Cas zadnjega uspesnega GET /bus
 -- Ko se sprozi opozorilo `sken_ni_pripravljen` (075), delavec `sken_opozorilo` (sken_opozorilo.js) poslje Martinu ENEGA maila na dogodek. Ta tabela je
 -- trajna evidenca: ne glede na stevilo procesov (Render autoscaling) in restarte mail za isti dogodek ne gre dvakrat.
 -- Prevzem: INSERT ... ON CONFLICT DO UPDATE ... WHERE (poslano_at IS NULL, poskusi < meja, prevzeto_at starejse od premora) RETURNING; kdor dobi vrstico, poslje.
--- Neuspel poskus (Resend vrne { error }) vrstice NE brise: poskusi ostane, ponovitev po premoru (najvec 5); poslano_at se zapise po uspehu.
+-- Neuspel poskus (Resend vrne { error }) vrstice NE brise: poskusi ostane, ponovitev po premoru (najvec 5, nato se redko po dolgem premoru); poslano_at se zapise po uspehu.
+-- Prestavljen dogodek (drug start_at) prevzem ponastavi: nov termin = nov mail.
 -- Samo DODAJANJE nove tabele: brez ALTER, UPDATE, DELETE. BREZ tujega kljuca na events (enaka utemeljitev kot 075: SHARE ROW EXCLUSIVE ob deployu in
 -- FOR KEY SHARE proti rezerviraj_zalogo med navalom). Indeks poleg PK ni potreben: vsaka poizvedba je po event_id.
 -- lock_timeout 800 ms spodaj kot 068-075 (migrate.js ob izteku ponovi).
 --
 -- sken_opozorila_poslana   Ena vrstica na dogodek (PK = event_id).
+--   start_at      Zacetek dogodka ob prevzemu; ce se klub kasneje prestavi, prevzem ponastavi poskuse in poslano_at.
 --   prevzeto_at   Cas zadnjega prevzema (poskusa posiljanja).
 --   poskusi       Stevilo prevzemov (poskusov posiljanja).
 --   poslano_at    Cas uspesno poslanega maila (NULL = se ni potrjen).
@@ -4087,6 +4089,7 @@ SET LOCAL lock_timeout = '800ms';
 
 CREATE TABLE IF NOT EXISTS sken_opozorila_poslana (
     event_id     INTEGER     PRIMARY KEY,
+    start_at     TIMESTAMPTZ NOT NULL,
     prevzeto_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     poskusi      INTEGER     NOT NULL DEFAULT 1,
     poslano_at   TIMESTAMPTZ
@@ -4175,7 +4178,7 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('073_stripe_uskladitve.sql', '5364ff4e21fe9d59'),
     ('074_poster_card_url.sql', 'd7f03c804f5ee269'),
     ('075_sken_prenosi.sql', '5f099b7f1db5147f'),
-    ('076_sken_opozorila_poslana.sql', 'e08b0ed61cf98f3d')
+    ('076_sken_opozorila_poslana.sql', '0f4d8e65de7659ee')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

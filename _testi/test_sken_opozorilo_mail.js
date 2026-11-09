@@ -10,7 +10,10 @@
  *  M4  vsebina: brez e-naslovov kupcev, HTML naslova in kluba ubezan, glava zadeve brez prelomov vrstic
  *  M5  nov dogodek pozneje -> mail ob naslednjem krogu; evidenca sken_opozorila_poslana
  *  M6  Resend { error } (422) -> ponovitev po premoru, na koncu 1 sprejet mail; trajna napaka -> najvec 5 poskusov, POZOR, nic ne pade
- *  M7  brez prejemnika: 0 mailov, `[sken-opozorilo] POZOR`, proces zivi; samo AGENT_NUJNO_MAIL -> mail gre tja
+ *  M8  prestavitev po poslanem mailu -> nov termin = nov mail; seznam prenesen med pošiljanjem -> ne pošlje, poskus se ne šteje
+ *  M9  počasen Resend (odgovor po 1 s, premor 300 ms) in dva procesa -> natanko 1 mail (premor prevzema je vedno > rok Resenda)
+ *  M10 Resend 429, 5xx in molk (iztek roka) -> ponovitev, na koncu natanko 1 sprejet mail; po 5 neuspehih mail ni izgubljen (redka ponovitev)
+ *  M7  brez prejemnika / brez Resenda: 0 mailov, `[sken-opozorilo] POZOR`, proces zivi; samo AGENT_NUJNO_MAIL -> mail gre tja
  */
 const crypto = require("crypto");
 const http = require("http");
@@ -19,7 +22,7 @@ const { Pool } = require("pg");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const JWKS_PORT = 6930, RESEND_PORT = 6931, PA = 6932, PB = 6933, PC = 6934, PD = 6935;
+const JWKS_PORT = 6930, RESEND_PORT = 6931, PA = 6932, PB = 6933, PC = 6934, PD = 6935, PE = 6936, PF = 6937, PH = 6938;
 const KID = "test-kid-sken-mail";
 const MAIL_OPOZ = "opozorila-martin@outly.test", MAIL_NUJNO = "nujno-martin@outly.test";
 const KUPEC = "kupec-skenmail@primer.si";
@@ -42,15 +45,24 @@ function jwt(email, sub) {
 }
 const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
-// Lazni Resend: R.vsi = vsi zahtevki, R.poslano = sprejeti; R.zavrni(m) -> true = 422 (dokazana zavrnitev PRED obdelavo)
-const R = { vsi: [], poslano: [], zavrni: () => false };
+// Lazni Resend: R.vsi = vsi zahtevki, R.poslano = sprejeti; R.zavrni(m) -> true = 422 (dokazana zavrnitev PRED obdelavo); R.nacin(m) -> "429" | "500" | "molk" (ne odgovori);
+// R.zakasnitev(m) = ms do odgovora; R.naPrejem(m) = kavelj ob prejemu zahtevka
+const R = { vsi: [], poslano: [], zavrni: () => false, nacin: () => null, zakasnitev: () => 0, naPrejem: () => {} };
 const resendServer = http.createServer((req, res) => {
   let d = ""; req.on("data", (x) => d += x);
   req.on("end", () => {
     if (req.method === "POST" && req.url === "/emails") {
-      const m = JSON.parse(d); R.vsi.push(m);
-      if (R.zavrni(m)) { res.writeHead(422, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "validation_error", message: "stub: zavrnjeno", statusCode: 422 })); }
-      R.poslano.push(m); res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ id: "mail_" + R.poslano.length }));
+      const m = JSON.parse(d); R.vsi.push(m); R.naPrejem(m);
+      const odgovori = () => {
+        const nacin = R.nacin(m);
+        if (nacin === "molk") return setTimeout(() => req.socket.destroy(), 4000);   // odjemalec odneha ob izteku roka
+        if (nacin === "429") { res.writeHead(429, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "rate_limit_exceeded", message: "stub: 429", statusCode: 429 })); }
+        if (nacin === "500") { res.writeHead(500, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "internal_server_error", message: "stub: 500", statusCode: 500 })); }
+        if (R.zavrni(m)) { res.writeHead(422, { "content-type": "application/json" }); return res.end(JSON.stringify({ name: "validation_error", message: "stub: zavrnjeno", statusCode: 422 })); }
+        R.poslano.push(m); res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ id: "mail_" + R.poslano.length }));
+      };
+      const z = R.zakasnitev(m);
+      return z > 0 ? setTimeout(odgovori, z) : odgovori();
     }
     res.writeHead(404, { "content-type": "application/json" }); res.end("{}");
   });
@@ -64,8 +76,8 @@ const spi = (ms) => new Promise((r) => setTimeout(r, ms));
 async function cakaj(pogoj, ms = 8000) { const t = Date.now() + ms; while (Date.now() < t) { if (await pogoj()) return true; await spi(80); } return false; }
 function zazeni(port, okolje) {
   const proc = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${JWKS_PORT}`, QR_SECRET: "test", STRIPE_SECRET_KEY: "", STRIPE_WEBHOOK_SECRET: "", TEST_PLACILA: "",
-    RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>", GOST_POSTA_TIMEOUT_MS: "1500",
-    ADMIN_NADZOR_PREDPOMNILNIK_MS: "0", REZERVACIJE_CISCENJE_MS: "0", OPOZORILA_MAIL: "", AGENT_NUJNO_MAIL: "", SKEN_OPOZORILO_MS: "300", SKEN_OPOZORILO_PREMOR_MS: "500", ...okolje },
+    RESEND_API_KEY: "re_test", RESEND_BASE_URL: `http://127.0.0.1:${RESEND_PORT}`, EMAIL_FROM: "Outly <test@outly.test>", GOST_POSTA_TIMEOUT_MS: "600",
+    ADMIN_NADZOR_PREDPOMNILNIK_MS: "0", REZERVACIJE_CISCENJE_MS: "0", OPOZORILA_MAIL: "", AGENT_NUJNO_MAIL: "", SKEN_OPOZORILO_MS: "300", SKEN_OPOZORILO_PREMOR_MS: "500", SKEN_OPOZORILO_DOLGI_PREMOR_MS: "6000", ...okolje },
     stdio: ["ignore", "pipe", "pipe"], cwd: require("path").join(__dirname, "..") });
   const o = { proc, log: "", port, ustavi: () => new Promise((r) => { if (proc.exitCode !== null || proc.signalCode !== null) return r(); proc.once("exit", r); proc.kill(); }) };
   proc.stdout.on("data", (d) => o.log += d); proc.stderr.on("data", (d) => o.log += d);
@@ -193,14 +205,65 @@ async function api(port, pot, token) {
     assert(ne && ne.poskusi === 2 && ne.poslano_at, "evidenca: poskusi 2, poslano_at nastavljen", ne);
     R.zavrni = (m) => String(m.subject).includes("Izcrpan Skenmail");
     E.izcrpan = await dogodek({ naslov: "Izcrpan Skenmail" });
-    assert(await cakaj(async () => ((await pool.query("SELECT poskusi FROM sken_opozorila_poslana WHERE event_id=$1", [E.izcrpan])).rows[0] || {}).poskusi === 5, 15000), "trajna napaka: 5 poskusov");
+    assert(await cakaj(async () => ((await pool.query("SELECT poskusi FROM sken_opozorila_poslana WHERE event_id=$1", [E.izcrpan])).rows[0] || {}).poskusi === 5, 25000), "trajna napaka: 5 poskusov");
     await spi(2500);
     const iz = (await pool.query("SELECT poskusi, poslano_at FROM sken_opozorila_poslana WHERE event_id=$1", [E.izcrpan])).rows[0];
-    assert(iz.poskusi === 5 && iz.poslano_at === null && zaDogodek(R.vsi, "Izcrpan Skenmail").length === 5, "po 5 poskusih se ustavi (brez neskoncne zanke)", [iz, zaDogodek(R.vsi, "Izcrpan Skenmail").length]);
+    assert(iz.poskusi === 5 && iz.poslano_at === null && zaDogodek(R.vsi, "Izcrpan Skenmail").length === 5, "po 5 poskusih ni hitre zanke (naslednji poskus sele po dolgem premoru)", [iz, zaDogodek(R.vsi, "Izcrpan Skenmail").length]);
     assert(/\[sken-opozorilo\] POZOR: mail Martinu za dogodek \d+ ni uspel 5x/.test(A2.log + B2.log), "po izcrpanju POZOR v dnevniku");
     assert(A2.proc.exitCode === null && B2.proc.exitCode === null && (await cakajStreznik(PA)), "procesa po napakah Resenda tecta");
-    R.zavrni = () => false;
+    R.zavrni = () => false;   // Resend spet dela: mail se po dolgem premoru NE izgubi
+    assert(await cakaj(() => zaDogodek(R.poslano, "Izcrpan Skenmail").length === 1, 15000), "po izcrpanih poskusih in popravljenem Resendu mail vseeno pride (redka ponovitev)");
+    await spi(1500);
+    assert(zaDogodek(R.poslano, "Izcrpan Skenmail").length === 1, "in je samo 1");
     await A2.ustavi(); await B2.ustavi();
+
+    // --- M8/M10: en proces z daljsim rokom Resenda ---
+    console.log("\n# M8: prestavitev in prenos med posiljanjem");
+    const evid = async (id) => (await pool.query("SELECT poskusi, poslano_at, start_at FROM sken_opozorila_poslana WHERE event_id=$1", [id])).rows[0];
+    const E1 = zaZagon(PE, { OPOZORILA_MAIL: MAIL_OPOZ, GOST_POSTA_TIMEOUT_MS: "1500" });   // premor prevzema vsaj 2500 ms
+    assert(await cakajStreznik(PE), "proces E tece");
+    R.zakasnitev = (m) => (String(m.subject).includes("Pocasen Prenos") ? 1200 : 0);
+    R.naPrejem = (m) => { if (String(m.subject).includes("Pocasen Prenos")) pool.query("INSERT INTO sken_prenosi (event_id, club_id, zadnji_prenos) VALUES ($1, $2, NOW()) ON CONFLICT DO NOTHING", [E.prenosmed, klub]).catch(() => {}); };
+    E.pocasen = await dogodek({ naslov: "Pocasen Prenos Skenmail", start: "NOW() + INTERVAL '20 minutes'" });
+    E.prenosmed = await dogodek({ naslov: "Prenosmed Skenmail", start: "NOW() + INTERVAL '40 minutes'" });
+    assert(await cakaj(() => zaDogodek(R.poslano, "Pocasen Prenos").length === 1, 10000), "pocasen dogodek: mail pride");
+    await spi(1500);
+    const pm = await evid(E.prenosmed);
+    assert(zaDogodek(R.vsi, "Prenosmed").length === 0, "seznam prenesen med posiljanjem prejsnjega: mail se NE poslje");
+    assert(pm && pm.poskusi === 0 && pm.poslano_at === null, "prevzem sprosten brez stetja poskusa", pm);
+    const p1 = await evid(E.pocasen);
+    R.zakasnitev = () => 0;
+    await pool.query("UPDATE events SET start_at = start_at + INTERVAL '7 minutes' WHERE id=$1", [E.pocasen]);
+    assert(await cakaj(() => zaDogodek(R.poslano, "Pocasen Prenos").length === 2, 8000), "prestavljen dogodek (nov start_at): nov mail");
+    await spi(1500);
+    const p2 = await evid(E.pocasen), nov = (await pool.query("SELECT start_at FROM events WHERE id=$1", [E.pocasen])).rows[0].start_at;
+    assert(zaDogodek(R.poslano, "Pocasen Prenos").length === 2, "po prestavitvi natanko 1 dodaten mail (skupaj 2)");
+    assert(p2.poskusi === 1 && p2.poslano_at && new Date(p2.start_at).getTime() === new Date(nov).getTime() && new Date(p2.start_at).getTime() !== new Date(p1.start_at).getTime(), "evidenca: nov start_at, poskusi ponastavljen na 1, poslano_at", [p1, p2]);
+
+    console.log("\n# M10: Resend 429, 5xx in molk");
+    const rezim = ["429", "500", "molk"];
+    R.nacin = (m) => (String(m.subject).includes("Rezim Skenmail") ? rezim.shift() || null : null);
+    E.rezim = await dogodek({ naslov: "Rezim Skenmail" });
+    assert(await cakaj(() => zaDogodek(R.poslano, "Rezim Skenmail").length >= 1, 25000), "po 429, 5xx in iztekli roku (molk) ponovitev uspe");
+    await spi(1500);
+    const rz = await evid(E.rezim);
+    assert(zaDogodek(R.vsi, "Rezim Skenmail").length === 4 && zaDogodek(R.poslano, "Rezim Skenmail").length === 1, "4 zahtevki, natanko 1 sprejet mail", [zaDogodek(R.vsi, "Rezim Skenmail").length, zaDogodek(R.poslano, "Rezim Skenmail").length]);
+    assert(rz.poskusi === 4 && rz.poslano_at, "evidenca: poskusi 4, poslano_at", rz);
+    assert(E1.proc.exitCode === null, "proces E po napakah tece");
+    R.nacin = () => null;
+    await E1.ustavi();
+
+    console.log("\n# M9: pocasen Resend, dva procesa");
+    R.zakasnitev = (m) => (String(m.subject).includes("Pocasen Dva") ? 1000 : 0);
+    const E2 = zaZagon(PE, { OPOZORILA_MAIL: MAIL_OPOZ, GOST_POSTA_TIMEOUT_MS: "3000", SKEN_OPOZORILO_PREMOR_MS: "300" });   // nastavljen premor 300 ms << odgovor 1000 ms; ucinkovit >= 4000 ms
+    const F2 = zaZagon(PF, { OPOZORILA_MAIL: MAIL_OPOZ, GOST_POSTA_TIMEOUT_MS: "3000", SKEN_OPOZORILO_PREMOR_MS: "300" });
+    assert(await cakajStreznik(PE) && await cakajStreznik(PF), "procesa E2 in F2 tecta");
+    E.pocasen2 = await dogodek({ naslov: "Pocasen Dva Skenmail", start: "NOW() + INTERVAL '25 minutes'" });
+    assert(await cakaj(() => zaDogodek(R.poslano, "Pocasen Dva").length >= 1, 8000), "pocasen mail pride");
+    await spi(5500);   // vec krogov obeh procesov, tudi po preteku nastavljenega premora
+    assert(zaDogodek(R.vsi, "Pocasen Dva").length === 1 && zaDogodek(R.poslano, "Pocasen Dva").length === 1, "natanko 1 mail (ni dvojnika med pocasnim posiljanjem)", [zaDogodek(R.vsi, "Pocasen Dva").length, zaDogodek(R.poslano, "Pocasen Dva").length]);
+    R.zakasnitev = () => 0;
+    await E2.ustavi(); await F2.ustavi();
 
     // --- M7: brez prejemnika / samo AGENT_NUJNO_MAIL ---
     console.log("\n# M7: brez prejemnika");
@@ -215,6 +278,13 @@ async function api(port, pot, token) {
     assert(C.proc.exitCode === null && (await fetch(`http://127.0.0.1:${PC}/`).then((r) => r.status < 500, () => false)), "proces ne pade");
     assert((C.log.match(/\[sken-opozorilo\] POZOR: \d+ dogodkov/g) || []).length === 1, "POZOR najvec 1x (pozorRedko)", (C.log.match(/\[sken-opozorilo\] POZOR/g) || []).length);
     await C.ustavi();
+    const H = zaZagon(PH, { OPOZORILA_MAIL: MAIL_OPOZ, RESEND_API_KEY: "" });
+    assert(await cakajStreznik(PH), "proces H (prejemnik, a brez RESEND_API_KEY) tece");
+    assert(await cakaj(() => /\[sken-opozorilo\] POZOR: \d+ dogodkov/.test(H.log), 4000), "brez Resenda: POZOR v dnevniku", H.log.slice(-300));
+    await spi(800);
+    assert(R.vsi.length === prej && (await pool.query("SELECT COUNT(*)::int AS n FROM sken_opozorila_poslana")).rows[0].n === 0, "brez Resenda: 0 mailov in brez vpisa v evidenco");
+    assert(H.proc.exitCode === null, "brez Resenda: proces ne pade");
+    await H.ustavi();
     const D = zaZagon(PD, { AGENT_NUJNO_MAIL: MAIL_NUJNO });
     assert(await cakajStreznik(PD), "proces D (samo AGENT_NUJNO_MAIL) tece");
     assert(await cakaj(() => R.poslano.some((m) => prejemniki(m).includes(MAIL_NUJNO)), 6000), "rezerva: mail gre na AGENT_NUJNO_MAIL");
@@ -223,7 +293,7 @@ async function api(port, pot, token) {
     fail++; console.log("  ✗ izjema:", e && e.stack || e);
   } finally {
     for (const p of procesi) await p.ustavi();
-    jwksServer.close(); resendServer.close();
+    jwksServer.close(); if (resendServer.closeAllConnections) resendServer.closeAllConnections(); resendServer.close();
     await pool.end();
   }
   console.log(`\n${ok} ok, ${fail} fail`);
