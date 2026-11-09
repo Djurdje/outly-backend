@@ -4067,6 +4067,34 @@ CREATE TABLE IF NOT EXISTS sken_prenosi (
 COMMENT ON TABLE sken_prenosi IS 'Zadnji uspesen prenos seznama vstopnic za sken brez povezave na dogodek (075, I71); brez osebnih podatkov.';
 COMMENT ON COLUMN sken_prenosi.zadnji_prenos IS 'Cas zadnjega uspesnega GET /business/events/:id/scan-list (200 ali 304), najvec ena posodobitev na 60 s na dogodek na proces (075).';
 
+-- 076_sken_opozorila_poslana.sql
+-- EVIDENCA MAILOV »SKEN BREZ POVEZAVE NI PRIPRAVLJEN« (outly-backend#406, invarianta I71).
+-- Ko se sprozi opozorilo `sken_ni_pripravljen` (075), delavec `sken_opozorilo` (sken_opozorilo.js) poslje Martinu ENEGA maila na dogodek. Ta tabela je
+-- trajna evidenca: ne glede na stevilo procesov (Render autoscaling) in restarte mail za isti dogodek ne gre dvakrat.
+-- Prevzem: INSERT ... ON CONFLICT DO UPDATE ... WHERE (poslano_at IS NULL, poskusi < meja, prevzeto_at starejse od premora) RETURNING; kdor dobi vrstico, poslje.
+-- Neuspel poskus (Resend vrne { error }) vrstice NE brise: poskusi ostane, ponovitev po premoru (najvec 5); poslano_at se zapise po uspehu.
+-- Samo DODAJANJE nove tabele: brez ALTER, UPDATE, DELETE. BREZ tujega kljuca na events (enaka utemeljitev kot 075: SHARE ROW EXCLUSIVE ob deployu in
+-- FOR KEY SHARE proti rezerviraj_zalogo med navalom). Indeks poleg PK ni potreben: vsaka poizvedba je po event_id.
+-- lock_timeout 800 ms spodaj kot 068-075 (migrate.js ob izteku ponovi).
+--
+-- sken_opozorila_poslana   Ena vrstica na dogodek (PK = event_id).
+--   prevzeto_at   Cas zadnjega prevzema (poskusa posiljanja).
+--   poskusi       Stevilo prevzemov (poskusov posiljanja).
+--   poslano_at    Cas uspesno poslanega maila (NULL = se ni potrjen).
+-- NIKAKRSNIH osebnih podatkov: brez e-naslovov in kupcev.
+
+SET LOCAL lock_timeout = '800ms';
+
+CREATE TABLE IF NOT EXISTS sken_opozorila_poslana (
+    event_id     INTEGER     PRIMARY KEY,
+    prevzeto_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    poskusi      INTEGER     NOT NULL DEFAULT 1,
+    poslano_at   TIMESTAMPTZ
+);
+
+COMMENT ON TABLE sken_opozorila_poslana IS 'Evidenca maila Martinu »sken brez povezave ni pripravljen« na dogodek (076, I71); brez osebnih podatkov.';
+COMMENT ON COLUMN sken_opozorila_poslana.poslano_at IS 'Cas uspesno poslanega maila; NULL = prevzeto, a ni potrjeno (ponovitev po premoru, najvec 5 poskusov).';
+
 -- =============================================================================
 -- Vpis v evidenco
 -- =============================================================================
@@ -4146,7 +4174,8 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('072_indeksi_tujih_kljucev_tickets.sql', '5b90b5672f3e2225'),
     ('073_stripe_uskladitve.sql', '5364ff4e21fe9d59'),
     ('074_poster_card_url.sql', 'd7f03c804f5ee269'),
-    ('075_sken_prenosi.sql', '5f099b7f1db5147f')
+    ('075_sken_prenosi.sql', '5f099b7f1db5147f'),
+    ('076_sken_opozorila_poslana.sql', 'e08b0ed61cf98f3d')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;

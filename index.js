@@ -5190,6 +5190,11 @@ const samodejnaObjava = require("./samodejna_objava").ustvari({
   naObjavljen: async (id, klubId) => { razprodanoPozabi("v:" + id); javniPredpomnilnik.razveljavi(); await obvestiSledilce(id, klubId); },
 });
 samodejnaObjava.zazeni(okoljeCelo("SAMODEJNA_OBJAVA_MS", 60000, 0, 3600000));
+// Mail Martinu, ko se sprozi opozorilo `sken_ni_pripravljen` (#406, migracija 076, I71; sken_opozorilo.js): delavec vsakih SKEN_OPOZORILO_MS (privzeto 5 min, 0 = izklop),
+// glavni pool z roki poizvedb, nikoli skenPool; najvec 1 mail na dogodek (evidenca v bazi). Prejemnik: OPOZORILA_MAIL, sicer AGENT_NUJNO_MAIL.
+require("./sken_opozorilo").ustvari({
+  pool, delavci, imaResend: () => !!resend, posljiMail: (m) => gostResendPosli(m),
+}).zazeni();
 // Dostop za agenta (Claude) z zetonom samo za branje (#330, 1. del; migracija 058; ARCHITECTURE »Dostop za agenta«, I56). Upravljanje zetonov: GET/POST /admin/api/agent-zetoni
 // (vloga admin, na routerju `admin`); poti za agenta: /agent/api/* (samo GET). Zeton agenta je na VSEH drugih poteh 403 že v requireAuthNa (brez baze).
 const agentApi = require("./agent_api").ustvari({

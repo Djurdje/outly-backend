@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–075, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–076, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict uYEbuev8JWDBDefmsvHt8hqe1MonrMkR95gWmihXCCFizKaENOzlBsHtmrfkEso
+\restrict 4RgcAfg7TiztfoDUEa9KNIwgLzwPhvx81RJ8GT7yhjbqmnZTmTIqFI47MoZD97n
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -1820,6 +1820,32 @@ CREATE TABLE public.schema_migrations (
 
 
 --
+-- Name: sken_opozorila_poslana; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sken_opozorila_poslana (
+    event_id integer NOT NULL,
+    prevzeto_at timestamp with time zone DEFAULT now() NOT NULL,
+    poskusi integer DEFAULT 1 NOT NULL,
+    poslano_at timestamp with time zone
+);
+
+
+--
+-- Name: TABLE sken_opozorila_poslana; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.sken_opozorila_poslana IS 'Evidenca maila Martinu »sken brez povezave ni pripravljen« na dogodek (076, I71); brez osebnih podatkov.';
+
+
+--
+-- Name: COLUMN sken_opozorila_poslana.poslano_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.sken_opozorila_poslana.poslano_at IS 'Cas uspesno poslanega maila; NULL = prevzeto, a ni potrjeno (ponovitev po premoru, najvec 5 poskusov).';
+
+
+--
 -- Name: sken_prenosi; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2895,6 +2921,14 @@ ALTER TABLE ONLY public.reports
 
 ALTER TABLE ONLY public.schema_migrations
     ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (datoteka);
+
+
+--
+-- Name: sken_opozorila_poslana sken_opozorila_poslana_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sken_opozorila_poslana
+    ADD CONSTRAINT sken_opozorila_poslana_pkey PRIMARY KEY (event_id);
 
 
 --
@@ -4676,5 +4710,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict uYEbuev8JWDBDefmsvHt8hqe1MonrMkR95gWmihXCCFizKaENOzlBsHtmrfkEso
+\unrestrict 4RgcAfg7TiztfoDUEa9KNIwgLzwPhvx81RJ8GT7yhjbqmnZTmTIqFI47MoZD97n
 
