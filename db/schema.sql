@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–074, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–075, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict a1UGfXehKbLU6gLX6RxYnav3K52nyDSlR5D80898C2XEI16lcE2rzbXX9740tM8
+\restrict uYEbuev8JWDBDefmsvHt8hqe1MonrMkR95gWmihXCCFizKaENOzlBsHtmrfkEso
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -1820,6 +1820,32 @@ CREATE TABLE public.schema_migrations (
 
 
 --
+-- Name: sken_prenosi; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sken_prenosi (
+    event_id integer NOT NULL,
+    club_id integer NOT NULL,
+    zadnji_prenos timestamp with time zone NOT NULL,
+    prenosov integer DEFAULT 1 NOT NULL
+);
+
+
+--
+-- Name: TABLE sken_prenosi; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.sken_prenosi IS 'Zadnji uspesen prenos seznama vstopnic za sken brez povezave na dogodek (075, I71); brez osebnih podatkov.';
+
+
+--
+-- Name: COLUMN sken_prenosi.zadnji_prenos; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.sken_prenosi.zadnji_prenos IS 'Cas zadnjega uspesnega GET /business/events/:id/scan-list (200 ali 304), najvec ena posodobitev na 60 s na dogodek na proces (075).';
+
+
+--
 -- Name: spori; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2869,6 +2895,14 @@ ALTER TABLE ONLY public.reports
 
 ALTER TABLE ONLY public.schema_migrations
     ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (datoteka);
+
+
+--
+-- Name: sken_prenosi sken_prenosi_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sken_prenosi
+    ADD CONSTRAINT sken_prenosi_pkey PRIMARY KEY (event_id);
 
 
 --
@@ -4642,5 +4676,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict a1UGfXehKbLU6gLX6RxYnav3K52nyDSlR5D80898C2XEI16lcE2rzbXX9740tM8
+\unrestrict uYEbuev8JWDBDefmsvHt8hqe1MonrMkR95gWmihXCCFizKaENOzlBsHtmrfkEso
 

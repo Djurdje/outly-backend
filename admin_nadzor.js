@@ -19,6 +19,7 @@ const NAJVEC_ZNAKOV_NAPAKE = 300;
 const NAJVEC_VRSTIC_NAPAKA = 100;     // racunov v stanju napaka, ki jih opozorila naštejejo posamično (stevci vedno stejejo vse)
 const NAJVEC_OPOZORIL = 500;          // zgornja meja odgovora (stevci stejejo vse)
 const OKNO_PLAKATA_DNI = 14;
+const SKEN_PRIPRAVLJEN_OKNO_MIN = 120;   // opozorilo `sken_ni_pripravljen`: dogodek se zacne v tolikem casu (ali ze tece), seznama za vrata pa ni prenesel nihce v 24 h (#406, I71)
 const ROK_SPORA_URE = 72;   // spor v needs_response z rokom za dokaze v manj kot toliko urah (ali ze potecenim) -> rdece opozorilo `spori_rok_blizu` (#374); zamujen rok = izgubljen spor
 const USKLADITEV_OKNO_DNI = 7;        // razlika iz dnevne uskladitve Stripe <-> baza ostane rdeca toliko dni (naslednji ujemajoc dan je NE skrije; #374 tocka 2, I67)
 const USKLADITEV_NAPAKA_OKNO_DNI = 30; // dan v stanju `napaka` ostane oranzno opozorilo toliko dni (delavec ga po OKNO_DNI = 7 vec ne poskusa; brez tega bi po 7 dneh tiho izginil, dan pa bi ostal neusklajen)
@@ -264,6 +265,28 @@ function ustvari(dep) {
             }
           }
         }
+      }
+
+      // Sken brez povezave ni pripravljen (#406, 075, I71): objavljen dogodek, ki se zacne v < 2 h (ali ze tece), ima veljavne vstopnice (kupljene ali guest lista: placano narocilo),
+      // a seznama za vrata (scan-list) v zadnjih 24 h ni prenesel noben telefon kluba. Samo ime dogodka in stevilo; NI tehnicno zdravje.
+      if (dogodekId === null) {
+        const sken = (await c.query(
+          `SELECT e.id, left(e.title, 80) AS title, left(c.name, 60) AS club_name, e.start_at, COUNT(*) OVER ()::int AS skupaj
+             FROM events e JOIN clubs c ON c.id = e.club_id
+            WHERE e.status = 'published' AND NOT c.hidden
+              AND e.start_at <= NOW() + ($1::int * INTERVAL '1 minute')
+              AND e.start_at > NOW() - INTERVAL '7 days'   -- spodnja meja za indeks events_start_idx (brez nje bere vse pretekle dogodke); dogodek, daljsi od 7 dni, ni zajet
+              AND COALESCE(e.end_at, e.start_at + INTERVAL '18 hours') > NOW()   -- brez konca kot sken (I25) in seznam dogodkov: zacetek + 18 h
+              AND EXISTS (SELECT 1 FROM tickets t JOIN orders o ON o.id = t.order_id
+                           WHERE t.event_id = e.id AND t.status = 'valid' AND o.status IN ('paid', 'partially_refunded'))
+              AND NOT EXISTS (SELECT 1 FROM sken_prenosi sp WHERE sp.event_id = e.id AND sp.zadnji_prenos > NOW() - INTERVAL '24 hours')
+            ORDER BY e.start_at, e.id LIMIT $2`, [SKEN_PRIPRAVLJEN_OKNO_MIN, NAJVEC_VRSTIC_NAPAKA])).rows;
+        for (const x of sken) {
+          dodaj("sken_ni_pripravljen", "oranzno", "dogodek", x.id,
+            `»${String(x.title).slice(0, 80)}« (${String(x.club_name).slice(0, 60)}): začetek v manj kot ${SKEN_PRIPRAVLJEN_OKNO_MIN / 60} h (ali že teče), noben telefon kluba še ni prenesel seznama vstopnic za sken brez povezave (zadnjih 24 h). Ob izpadu omrežja na vratih sken brez povezave ne bo deloval: klub naj na dogodku odpre skener, ko ima internet (sporočilo klubu pošlje Martin).`,
+            x.start_at);
+        }
+        if (sken.length > 0) dodatno.oranzno += Math.max(0, sken[0].skupaj - sken.length);
       }
 
       // 3. obstojeci stevci (kot v /summary) + neposlana potrdila kupcem (I32)

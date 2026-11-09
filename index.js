@@ -9084,6 +9084,42 @@ app.get("/business/scan-key", requireAuthSken, requireClubSken("owner", "manager
   });
 });
 
+// Zabelezen prenos seznama za vrata (075 sken_prenosi, #406, I71): strezniku mora biti znano, ali je kateri telefon kluba seznam prenesel, sicer
+// opozorilo `sken_ni_pripravljen` ne more reci, da vrata brez povezave ne bodo delala. Zapis je ogenj-in-pozabi PO poslanem odgovoru, na GLAVNEM poolu
+// (ne skenPool: sken in scan-list od te tabele nista odvisna), z lock_timeout/statement_timeout; najvec en zapis na dogodek na 60 s na proces (pomnilnik).
+// Napaka zapisa je samo dnevnik (console.warn: brez POZOR/Sentry), nikoli napaka skena. Brez osebnih podatkov (samo event_id, club_id, cas).
+const SKEN_PRENOS_RAZMIK_MS = okoljeCelo("SKEN_PRENOS_RAZMIK_MS", 60 * 1000, 0, 3600 * 1000);   // privzeto 60 s; okolje samo za test
+const skenPrenosZadnji = new Map();   // event_id -> cas zadnjega poskusa zapisa (ms)
+function skenPrenosZabelezi(eventId, clubId, ob = Date.now()) {
+  try {
+    const prej = skenPrenosZadnji.get(eventId);
+    if (prej !== undefined && ob - prej < SKEN_PRENOS_RAZMIK_MS) return;
+    // Pool je zaseden ali poln (nakup v navali): zapis ni vazen, preskoci; poskus ostane nezabelezen, naslednji scan-list poskusi znova.
+    if (pool.waitingCount > 0 || (pool.idleCount === 0 && pool.totalCount >= PG_POOL_MAX)) return;
+    skenPrenosZadnji.set(eventId, ob);
+    if (skenPrenosZadnji.size > 5000) {   // meja pomnilnika: pobrisi vnose, starejse od razmika
+      for (const [k, t] of skenPrenosZadnji) if (ob - t >= SKEN_PRENOS_RAZMIK_MS) skenPrenosZadnji.delete(k);
+    }
+    (async () => {
+      const c = await pool.connect();
+      let napaka = false;
+      try {
+        await c.query("BEGIN");
+        await c.query("SET LOCAL lock_timeout = '500ms'");
+        await c.query("SET LOCAL statement_timeout = '1500ms'");
+        await c.query(
+          `INSERT INTO sken_prenosi (event_id, club_id, zadnji_prenos) VALUES ($1, $2, NOW())
+           ON CONFLICT (event_id) DO UPDATE SET zadnji_prenos = NOW(), club_id = EXCLUDED.club_id, prenosov = sken_prenosi.prenosov + 1`, [eventId, clubId]);
+        await c.query("COMMIT");
+      } catch (e) {
+        napaka = true;
+        await c.query("ROLLBACK").catch(() => {});
+        console.warn(`[sken] zapis prenosa seznama ni uspel (ni napaka skena): ${e && e.code ? e.code : "napaka"}`);
+      } finally { c.release(napaka); }
+    })().catch((e) => console.warn(`[sken] zapis prenosa seznama ni uspel (ni napaka skena): ${e && e.code ? e.code : "povezava"}`));
+  } catch (_) { /* nikoli ne vrzi v pot odgovora */ }
+}
+
 // GET /business/events/:id/scan-list — VSE vstopnice dogodka za preverjanje brez povezave. Koda vstopnice (podpis v2) je veljavna
 // za vsako naročilo, zato mora biti na seznamu tudi vstopnica vrnjenega/preklicanega/neplačanega naročila: status "unpaid"
 // (odjemalec ga obravnava kot rdeče); če je vstopnica sama refunded ali void, ostane ta status.
@@ -9134,6 +9170,7 @@ app.get("/business/events/:id/scan-list", requireAuthSken, requireClubSken("owne
     const etag = 'W/"' + crypto.createHash("sha256").update(JSON.stringify([kid, tickets, transferred_serials])).digest("base64url").slice(0, 27) + '"';
     res.set("ETag", etag);
     res.set("Cache-Control", "private, no-cache");
+    res.once("finish", () => { if (res.statusCode === 200 || res.statusCode === 304) skenPrenosZabelezi(id, Number(klub)); });   // 075/I71: 304 (nespremenjen seznam) steje
     return res.json({ event_id: id, generated_at: new Date().toISOString(), kid, tickets, transferred_serials });
   } catch (e) { return odgovoriNaNapako(res, e, "GET /business/events/:id/scan-list"); }
 });
