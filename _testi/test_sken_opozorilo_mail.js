@@ -10,9 +10,12 @@
  *  M4  vsebina: brez e-naslovov kupcev, HTML naslova in kluba ubezan, glava zadeve brez prelomov vrstic
  *  M5  nov dogodek pozneje -> mail ob naslednjem krogu; evidenca sken_opozorila_poslana
  *  M6  Resend { error } (422) -> ponovitev po premoru, na koncu 1 sprejet mail; trajna napaka -> najvec 5 poskusov, POZOR, nic ne pade
- *  M8  prestavitev po poslanem mailu -> nov termin = nov mail; seznam prenesen med pošiljanjem -> ne pošlje, poskus se ne šteje
+ *  M8  velika prestavitev (>= 1 h, > 1 h po mailu) -> nov mail; seznam prenesen med pošiljanjem -> ne pošlje, poskus se ne šteje
  *  M9  počasen Resend (odgovor po 1 s, premor 300 ms) in dva procesa -> natanko 1 mail (premor prevzema je vedno > rok Resenda)
  *  M10 Resend 429, 5xx in molk (iztek roka) -> ponovitev, na koncu natanko 1 sprejet mail; po 5 neuspehih mail ni izgubljen (redka ponovitev)
+ *  M11 lastnik premika dogodek vsako minuto za 1 min (10 krogov) -> 1 mail; M12 premik >= 1 h po > 1 h -> 2. mail, takoj nato spet -> ne
+ *  M13 5 velikih premikov -> TRDA MEJA 3 maili; M14 pocasen Resend, ki sprejme po roku, vedno -> najvec 10 zahtevkov (trda meja), POZOR
+ *  M15 prestavitev med pocasnim posiljanjem: stari mail ne oznaci novega termina kot poslanega
  *  M7  brez prejemnika / brez Resenda: 0 mailov, `[sken-opozorilo] POZOR`, proces zivi; samo AGENT_NUJNO_MAIL -> mail gre tja
  */
 const crypto = require("crypto");
@@ -219,7 +222,7 @@ async function api(port, pot, token) {
 
     // --- M8/M10: en proces z daljsim rokom Resenda ---
     console.log("\n# M8: prestavitev in prenos med posiljanjem");
-    const evid = async (id) => (await pool.query("SELECT poskusi, poslano_at, start_at FROM sken_opozorila_poslana WHERE event_id=$1", [id])).rows[0];
+    const evid = async (id) => (await pool.query("SELECT poskusi, poslano_at, start_at, poslanih FROM sken_opozorila_poslana WHERE event_id=$1", [id])).rows[0];
     const E1 = zaZagon(PE, { OPOZORILA_MAIL: MAIL_OPOZ, GOST_POSTA_TIMEOUT_MS: "1500" });   // premor prevzema vsaj 2500 ms
     assert(await cakajStreznik(PE), "proces E tece");
     R.zakasnitev = (m) => (String(m.subject).includes("Pocasen Prenos") ? 1200 : 0);
@@ -233,8 +236,9 @@ async function api(port, pot, token) {
     assert(pm && pm.poskusi === 0 && pm.poslano_at === null, "prevzem sprosten brez stetja poskusa", pm);
     const p1 = await evid(E.pocasen);
     R.zakasnitev = () => 0;
-    await pool.query("UPDATE events SET start_at = start_at + INTERVAL '7 minutes' WHERE id=$1", [E.pocasen]);
-    assert(await cakaj(() => zaDogodek(R.poslano, "Pocasen Prenos").length === 2, 8000), "prestavljen dogodek (nov start_at): nov mail");
+    await pool.query("UPDATE sken_opozorila_poslana SET zadnji_mail_at = NOW() - INTERVAL '2 hours' WHERE event_id=$1", [E.pocasen]);   // od zadnjega maila minila > 1 h
+    await pool.query("UPDATE events SET start_at = start_at + INTERVAL '90 minutes' WHERE id=$1", [E.pocasen]);   // premik >= 1 h, se vedno v oknu 2 h
+    assert(await cakaj(() => zaDogodek(R.poslano, "Pocasen Prenos").length === 2, 8000), "velika prestavitev dolgo po zadnjem mailu: nov mail");
     await spi(1500);
     const p2 = await evid(E.pocasen), nov = (await pool.query("SELECT start_at FROM events WHERE id=$1", [E.pocasen])).rows[0].start_at;
     assert(zaDogodek(R.poslano, "Pocasen Prenos").length === 2, "po prestavitvi natanko 1 dodaten mail (skupaj 2)");
@@ -264,6 +268,72 @@ async function api(port, pot, token) {
     assert(zaDogodek(R.vsi, "Pocasen Dva").length === 1 && zaDogodek(R.poslano, "Pocasen Dva").length === 1, "natanko 1 mail (ni dvojnika med pocasnim posiljanjem)", [zaDogodek(R.vsi, "Pocasen Dva").length, zaDogodek(R.poslano, "Pocasen Dva").length]);
     R.zakasnitev = () => 0;
     await E2.ustavi(); await F2.ustavi();
+
+    // --- M11-M13: premiki, trda meja ---
+    console.log("\n# M11-M13: premiki in trda meja");
+    const E3 = zaZagon(PE, { OPOZORILA_MAIL: MAIL_OPOZ });
+    assert(await cakajStreznik(PE), "proces E3 tece");
+    const stMailov = (n) => zaDogodek(R.poslano, n).length;
+    E.min = await dogodek({ naslov: "Minutni Skenmail", start: "NOW() + INTERVAL '30 minutes'" });
+    assert(await cakaj(() => stMailov("Minutni Skenmail") === 1, 8000), "M11: prvi mail");
+    for (let i = 0; i < 10; i++) { await pool.query("UPDATE events SET start_at = start_at + INTERVAL '1 minute' WHERE id=$1", [E.min]); await spi(400); }
+    const mn = await evid(E.min), mnEv = (await pool.query("SELECT start_at FROM events WHERE id=$1", [E.min])).rows[0].start_at;
+    assert(stMailov("Minutni Skenmail") === 1 && zaDogodek(R.vsi, "Minutni Skenmail").length === 1, "M11: 10 premikov po 1 min -> se vedno 1 mail", stMailov("Minutni Skenmail"));
+    assert(new Date(mn.start_at).getTime() === new Date(mnEv).getTime(), "M11: start_at v evidenci sledi dogodku (brez novega maila)");
+    E.velik = await dogodek({ naslov: "Velik Skenmail", start: "NOW() + INTERVAL '10 minutes'" });
+    assert(await cakaj(() => stMailov("Velik Skenmail") === 1, 8000), "M12: prvi mail");
+    await pool.query("UPDATE sken_opozorila_poslana SET zadnji_mail_at = NOW() - INTERVAL '2 hours' WHERE event_id=$1", [E.velik]);
+    await pool.query("UPDATE events SET start_at = NOW() + INTERVAL '90 minutes' WHERE id=$1", [E.velik]);
+    assert(await cakaj(() => stMailov("Velik Skenmail") === 2, 8000), "M12: premik >= 1 h po > 1 h od maila -> 2. mail");
+    await pool.query("UPDATE events SET start_at = NOW() + INTERVAL '10 minutes' WHERE id=$1", [E.velik]);   // takoj spet velik premik, a manj kot 1 h od zadnjega maila
+    await spi(1500);
+    assert(stMailov("Velik Skenmail") === 2, "M12: velik premik < 1 h po mailu -> brez novega maila", stMailov("Velik Skenmail"));
+    E.meja = await dogodek({ naslov: "Meja Skenmail", start: "NOW() + INTERVAL '10 minutes'" });
+    assert(await cakaj(() => stMailov("Meja Skenmail") === 1, 8000), "M13: prvi mail");
+    for (let i = 0; i < 5; i++) {
+      await pool.query("UPDATE sken_opozorila_poslana SET zadnji_mail_at = NOW() - INTERVAL '2 hours' WHERE event_id=$1", [E.meja]);
+      await pool.query(`UPDATE events SET start_at = NOW() + INTERVAL '${i % 2 === 0 ? 90 : 10} minutes' WHERE id=$1`, [E.meja]);
+      await spi(1100);
+    }
+    const mj = await evid(E.meja);
+    assert(stMailov("Meja Skenmail") === 3, "M13: 5 velikih premikov -> skupaj najvec 3 maili (trda meja)", stMailov("Meja Skenmail"));
+    assert((await pool.query("SELECT poslanih FROM sken_opozorila_poslana WHERE event_id=$1", [E.meja])).rows[0].poslanih === 3, "M13: poslanih = 3");
+    assert(/\[sken-opozorilo\] POZOR: dogodek \d+: dosezena trda meja 3 poslanih mailov/.test(E3.log), "M13: POZOR ob dosezeni meji");
+    await E3.ustavi();
+
+    console.log("\n# M14: pocasen Resend, ki sprejme po roku");
+    const E4 = zaZagon(PE, { OPOZORILA_MAIL: MAIL_OPOZ, GOST_POSTA_TIMEOUT_MS: "400", SKEN_OPOZORILO_DOLGI_PREMOR_MS: "1000" });   // ucinkovit premor 1400 ms
+    R.zakasnitev = (m) => (String(m.subject).includes("Ves Dan") ? 800 : 0);
+    assert(await cakajStreznik(PE), "proces E4 tece");
+    E.vesdan = await dogodek({ naslov: "Ves Dan Skenmail", start: "NOW() + INTERVAL '35 minutes'" });
+    assert(await cakaj(() => zaDogodek(R.vsi, "Ves Dan").length >= 10, 40000), "M14: doseženih 10 zahtevkov");
+    await spi(4500);
+    const vd = await evid(E.vesdan), vdn = (await pool.query("SELECT poskusi_skupaj, poslanih FROM sken_opozorila_poslana WHERE event_id=$1", [E.vesdan])).rows[0];
+    assert(zaDogodek(R.vsi, "Ves Dan").length === 10, "M14: natanko 10 zahtevkov in ne vec (trda meja)", zaDogodek(R.vsi, "Ves Dan").length);
+    assert(vdn.poskusi_skupaj === 10 && vdn.poslanih === 0, "M14: poskusi_skupaj 10, poslanih 0 (nas odjemalec je vsak poskus steje za neuspel)", vdn);
+    assert(/\[sken-opozorilo\] POZOR: dogodek \d+: dosezena trda meja 10 poskusov/.test(E4.log), "M14: POZOR ob dosezeni meji");
+    await E4.ustavi();
+    R.zakasnitev = () => 0;
+
+    console.log("\n# M15: prestavitev med pocasnim posiljanjem");
+    let dirka = 0;
+    R.zakasnitev = (m) => (String(m.subject).includes("Dirka") && ++dirka === 1 ? 1500 : 0);
+    let premaknjen = false;
+    R.naPrejem = (m) => { if (String(m.subject).includes("Dirka") && !premaknjen) { premaknjen = true; pool.query("UPDATE events SET start_at = start_at + INTERVAL '1 minute' WHERE id=$1", [E.dirka]).catch(() => {}); } };
+    const E5 = zaZagon(PE, { OPOZORILA_MAIL: MAIL_OPOZ, GOST_POSTA_TIMEOUT_MS: "3000", SKEN_OPOZORILO_PREMOR_MS: "300" });
+    const F5 = zaZagon(PF, { OPOZORILA_MAIL: MAIL_OPOZ, GOST_POSTA_TIMEOUT_MS: "3000", SKEN_OPOZORILO_PREMOR_MS: "300" });
+    assert(await cakajStreznik(PE) && await cakajStreznik(PF), "procesa E5 in F5 tecta");
+    E.dirka = await dogodek({ naslov: "Dirka Skenmail", start: "NOW() + INTERVAL '45 minutes'" });
+    assert(await cakaj(async () => ((await evid(E.dirka)) || {}).poslanih === 1, 10000), "M15: prvi (pocasen) mail je koncan");
+    const dk = await evid(E.dirka), dkEv = (await pool.query("SELECT start_at FROM events WHERE id=$1", [E.dirka])).rows[0].start_at;
+    assert(new Date(dk.start_at).getTime() === new Date(dkEv).getTime() && dk.poslano_at === null, "M15: stari mail NE oznaci prestavljenega termina kot poslanega (poslano_at ostane NULL)", dk);
+    assert(await cakaj(() => stMailov("Dirka Skenmail") === 2, 12000), "M15: mail za nov termin pride naknadno");
+    await spi(500);
+    const prvi = zaDogodek(R.poslano, "Dirka")[0].text, drugi = zaDogodek(R.poslano, "Dirka")[1].text;
+    assert(prvi !== drugi, "M15: drugi mail ima nov cas zacetka");
+    assert((await evid(E.dirka)).poslano_at, "M15: po mailu za nov termin je poslano_at nastavljen");
+    R.zakasnitev = () => 0; R.naPrejem = () => {};
+    await E5.ustavi(); await F5.ustavi();
 
     // --- M7: brez prejemnika / samo AGENT_NUJNO_MAIL ---
     console.log("\n# M7: brez prejemnika");

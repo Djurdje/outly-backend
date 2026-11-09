@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict fQiOmHArszfCl2LIuFuADrZilzzrbhzU3wp64ro86lH689J1ddMFOTBt3JSeF5j
+\restrict Filxoz9AEImHy4nLavJwjm4hCONV05YbzbyQVyLTANFy37Le5Tm4tmM9VkPwksT
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -1828,7 +1828,10 @@ CREATE TABLE public.sken_opozorila_poslana (
     start_at timestamp with time zone NOT NULL,
     prevzeto_at timestamp with time zone DEFAULT now() NOT NULL,
     poskusi integer DEFAULT 1 NOT NULL,
-    poslano_at timestamp with time zone
+    poslano_at timestamp with time zone,
+    poslanih integer DEFAULT 0 NOT NULL,
+    poskusi_skupaj integer DEFAULT 1 NOT NULL,
+    zadnji_mail_at timestamp with time zone
 );
 
 
@@ -1843,7 +1846,7 @@ COMMENT ON TABLE public.sken_opozorila_poslana IS 'Evidenca maila Martinu »sken
 -- Name: COLUMN sken_opozorila_poslana.poslano_at; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.sken_opozorila_poslana.poslano_at IS 'Cas uspesno poslanega maila; NULL = prevzeto, a ni potrjeno (ponovitev po premoru, najvec 5 poskusov).';
+COMMENT ON COLUMN public.sken_opozorila_poslana.poslano_at IS 'Cas uspesno poslanega maila za trenutni termin; NULL = prevzeto, a ni potrjeno (ponovitev po premoru; trda meja poskusi_skupaj 10).';
 
 
 --
@@ -4711,5 +4714,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict fQiOmHArszfCl2LIuFuADrZilzzrbhzU3wp64ro86lH689J1ddMFOTBt3JSeF5j
+\unrestrict Filxoz9AEImHy4nLavJwjm4hCONV05YbzbyQVyLTANFy37Le5Tm4tmM9VkPwksT
 
