@@ -21,23 +21,23 @@
 const delavci = require("./delavci");   // srcni utrip (I70)
 
 const DEJANJA = new Map([
-  ["event.uredi",          { cilj: "event", pot: "uredi",   polja: ["title", "description", "posterUrl", "genres"] }],
+  ["event.uredi",          { cilj: "event", pot: "uredi",   polja: ["title", "description", "posterUrl", "posterCardUrl", "genres"] }],
   ["event.okno_prodaje",   { cilj: "event", pot: "uredi",   polja: ["salesOpenAt", "salesCloseAt"] }],
   ["event.objavi",         { cilj: "event", pot: "uredi",   polja: [], fiksno: { status: "published" } }],
   ["event.ustavi_prodajo", { cilj: "event", pot: "uredi",   polja: [], fiksno: { salesPaused: true } }],
   ["event.zazeni_prodajo", { cilj: "event", pot: "uredi",   polja: [], fiksno: { salesPaused: false } }],
-  ["event.nov_osnutek",    { cilj: "club",  pot: "ustvari", polja: ["title", "description", "posterUrl", "startAt", "endAt", "genres", "venueClubId", "venueName", "venueAddress", "venueCity"] }],
+  ["event.nov_osnutek",    { cilj: "club",  pot: "ustvari", polja: ["title", "description", "posterUrl", "posterCardUrl", "startAt", "endAt", "genres", "venueClubId", "venueName", "venueAddress", "venueCity"] }],
   ["event.podvoji",        { cilj: "event", pot: "podvoji", polja: ["startAt", "ponovi", "n"] }],
 ]);
 // Stolpci, ki jih urediDogodek lahko spremeni iz zgornjih polj: samo ti gredo v posnetek `prej` (imena stolpcev v SQL samo s tega seznama).
-const STOLPCI_PREJ = new Set(["title", "description", "poster_url", "genres", "sales_open_at", "sales_close_at", "status", "sales_paused"]);
+const STOLPCI_PREJ = new Set(["title", "description", "poster_url", "poster_card_url", "genres", "sales_open_at", "sales_close_at", "status", "sales_paused"]);
 const STANJA = ["caka", "potrjen", "zavrnjen", "potekel", "neuspel"];
 const SPREMEMBE_NAJVEC = 20000;      // znakov JSON (naslov z 95 000 znaki ne pride niti do validacije poti)
 const PREJ_NAJVEC = 200000;          // znakov JSON posnetka (opis v bazi nima omejitve)
 const RAZLOG_NAJVEC = 1000;
 const ZAKLEP_RAZRED = 73120;         // advisory (razred, id zetona): stetje cakajocih in vstavljanje zaporedno tudi cez instance; 73110/73112 sta nakup/pavza
 // Besedila, ki morajo biti niz (obstojeca PATCH pot sprejme npr. opis null/stevilo; predlog je strozji, pot ostane nespremenjena za iOS/splet).
-const BESEDILNA = new Set(["title", "description", "venueName", "venueAddress", "venueCity", "posterUrl"]);
+const BESEDILNA = new Set(["title", "description", "venueName", "venueAddress", "venueCity", "posterUrl", "posterCardUrl"]);
 // Bidi kontrolni znaki in znaki nicelne sirine: z njimi bi agent besedilo v panelu prikazal drugace, kot je shranjeno (prevara pri »prej -> potem«).
 // (pregled #340 N2/N2b: tudi U+061C arabska oznaka smeri, U+00AD mehki vezaj, U+034F, locila vrstice/odstavka U+2028/U+2029, U+2060-U+2064)
 const NEVIDNI = /[\u00AD\u034F\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
@@ -210,13 +210,13 @@ function ustvari(dep) {
       if (tuje.length) return napaka(400, "sprememba_ni_dovoljena", "These fields can't be changed by an agent proposal.", { polja: tuje.slice(0, 10).map((k) => k.slice(0, 40)) });
       // N8: opis null = »pocisti opis« (stolpec je NOT NULL DEFAULT ''; obstojeca pot bi z null padla v bazi)
       if (spr.description === null) spr.description = "";
-      const napacenTip = Object.keys(spr).filter((k) => BESEDILNA.has(k) && typeof spr[k] !== "string" && !(k === "posterUrl" && spr[k] === null));
+      const napacenTip = Object.keys(spr).filter((k) => BESEDILNA.has(k) && typeof spr[k] !== "string" && !((k === "posterUrl" || k === "posterCardUrl") && spr[k] === null));
       if (napacenTip.length) return napaka(400, "neveljaven_tip", "These fields must be text.", { polja: napacenTip });
       if (imaNevidne(spr)) return napaka(400, "nevidni_znaki", "Invisible or bidirectional control characters are not allowed in a proposal.");
       if (opis.pot === "uredi" && !opis.fiksno && !Object.keys(spr).length) return napaka(400, "brez_spremembe", "Nothing to change.");
       try {
         const pr = await delo(req, () => pripravi(b.dejanje, opis, ciljId, spr));
-        if (!plakatDovoljen(opis.pot === "uredi" ? pr.spremembe.poster_url : spr.posterUrl)) {
+        if (!plakatDovoljen(opis.pot === "uredi" ? pr.spremembe.poster_url : spr.posterUrl) || !plakatDovoljen(opis.pot === "uredi" ? pr.spremembe.poster_card_url : spr.posterCardUrl)) {
           return napaka(400, "plakat_ni_dovoljen", "A proposed poster must be an https image uploaded to Outly's Cloudinary (res.cloudinary.com).");
         }
         const vrstica = await delo(req, async () => {
@@ -282,7 +282,7 @@ function ustvari(dep) {
         // (vrstica bi lahko nastala mimo poti ali pred spremembo okolja); validacijo obstojece poti (naslov, URL, okno) ponovi izvedba sama.
         const sprN = p.spremembe && typeof p.spremembe === "object" && !Array.isArray(p.spremembe) ? p.spremembe : {};
         if (imaNevidne(sprN)) return napaka(400, "nevidni_znaki", "Invisible or bidirectional control characters are not allowed in a proposal.");
-        if (!plakatDovoljen(sprN.poster_url !== undefined ? sprN.poster_url : sprN.posterUrl)) {
+        if (!plakatDovoljen(sprN.poster_url !== undefined ? sprN.poster_url : sprN.posterUrl) || !plakatDovoljen(sprN.poster_card_url !== undefined ? sprN.poster_card_url : sprN.posterCardUrl)) {
           return napaka(400, "plakat_ni_dovoljen", "A proposed poster must be an https image uploaded to Outly's Cloudinary (res.cloudinary.com).");
         }
         if (p.stanje !== "caka") return napaka(409, "predlog_ne_caka", "This proposal is no longer waiting for approval.", { stanje: p.stanje });

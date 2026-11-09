@@ -8,7 +8,7 @@
   "use strict";
   const STANJA = { published: ["objavljen", "ok"], draft: ["osnutek", "siva"], cancelled: ["odpovedan", "slabo"] };
   const POLJA = {   // ime v dnevniku -> berljivo ime
-    title: "Naslov", description: "Opis", poster_url: "Plakat", start_at: "Začetek", end_at: "Konec", min_age: "Starost", genres: "Žanri",
+    title: "Naslov", description: "Opis", poster_url: "Plakat (velik 4:5)", poster_card_url: "Plakat (majhen 3:4)", start_at: "Začetek", end_at: "Konec", min_age: "Starost", genres: "Žanri",
     status: "Stanje", ticket_price_cents: "Cena vstopnice", currency: "Valuta", ticket_url: "Zunanja prodaja", capacity: "Kapaciteta",
     recap_video_url: "Posnetek", sales_paused: "Prodaja", venue_club_id: "Gostitelj", venue_name: "Prizorišče", venue_address: "Naslov prizorišča",
     venue_city: "Mesto prizorišča", venue_lat: "Lat", venue_lng: "Lng", sales_open_at: "Prodaja od", sales_close_at: "Prodaja do",
@@ -161,7 +161,7 @@
   function izObrazca() {
     const v = (id) => $(id).value;
     return {
-      title: v("dge_title").trim(), description: v("dge_description"), posterUrl: v("dge_poster").trim(),
+      title: v("dge_title").trim(), description: v("dge_description"), posterUrl: v("dge_poster").trim(), posterCardUrl: v("dge_poster_card").trim(),
       startAt: izLokalnega(v("dge_start")), endAt: izLokalnega(v("dge_end")), minAge: v("dge_minAge").trim() === "" ? NaN : Number(v("dge_minAge")),
       genres: [...document.querySelectorAll("#dge_genres input:checked")].map((x) => x.value),
       ticketPriceCents: centi(v("dge_price")), currency: v("dge_currency").trim().toUpperCase(), ticketUrl: v("dge_ticketUrl").trim(),
@@ -174,7 +174,7 @@
     };
   }
   const KLJUCI = [   // camel -> snake (dogodek iz GET /admin/api/events/:id)
-    ["title", "title"], ["description", "description"], ["posterUrl", "poster_url"], ["startAt", "start_at"], ["endAt", "end_at"], ["minAge", "min_age"],
+    ["title", "title"], ["description", "description"], ["posterUrl", "poster_url"], ["posterCardUrl", "poster_card_url"], ["startAt", "start_at"], ["endAt", "end_at"], ["minAge", "min_age"],
     ["genres", "genres"], ["ticketPriceCents", "ticket_price_cents"], ["currency", "currency"], ["ticketUrl", "ticket_url"], ["capacity", "capacity"],
     ["recapVideoUrl", "recap_video_url"], ["salesOpenAt", "sales_open_at"], ["salesCloseAt", "sales_close_at"], ["publishAt", "publish_at"], ["venueName", "venue_name"], ["venueAddress", "venue_address"], ["venueCity", "venue_city"],
   ];
@@ -199,7 +199,7 @@
     const { seznamS } = spremembe();
     const sprem = new Set(seznamS.map((x) => x[0]));
     for (const [c, s] of KLJUCI) {
-      const id = { title: "dge_title", description: "dge_description", posterUrl: "dge_poster", startAt: "dge_start", endAt: "dge_end", minAge: "dge_minAge", genres: "dge_genres",
+      const id = { title: "dge_title", description: "dge_description", posterUrl: "dge_poster", posterCardUrl: "dge_poster_card", startAt: "dge_start", endAt: "dge_end", minAge: "dge_minAge", genres: "dge_genres",
         ticketPriceCents: "dge_price", currency: "dge_currency", ticketUrl: "dge_ticketUrl", capacity: "dge_capacity", recapVideoUrl: "dge_recap",
         salesOpenAt: "dge_salesOpen", salesCloseAt: "dge_salesClose", publishAt: "dge_publishAt", venueName: "dge_venueName", venueAddress: "dge_venueAddress", venueCity: "dge_venueCity" }[c];
       const ovoj = $(id) && $(id).parentElement;
@@ -207,9 +207,11 @@
     }
     $("dge_shrani").disabled = !seznamS.length;
     $("dge_stanje").textContent = seznamS.length ? `Neshranjenih sprememb: ${seznamS.length}` : "Vse je shranjeno.";
-    const pu = $("dge_poster").value.trim();
-    const img = $("dge_plakatSlika");
-    if (/^https:\/\//.test(pu)) { img.src = pu; img.classList.remove("skrito"); } else img.classList.add("skrito");
+    // predogled v okvirjih, kot jih kaze aplikacija: velik 4:5, majhen 3:4 (object-fit: cover = izrez sredine); brez majhnega bannerja kartica vzame izrez sredine velikega
+    const predogled = (img, url) => { if (/^https:\/\//.test(url)) { img.src = url; img.classList.remove("skrito"); } else img.classList.add("skrito"); };
+    const pu = $("dge_poster").value.trim(), pk = $("dge_poster_card").value.trim();
+    predogled($("dge_plakatSlika"), pu);
+    predogled($("dge_plakatKarticaSlika"), pk || pu);
   }
 
   function stikalo(e) {
@@ -387,6 +389,7 @@
       const opis = h("textarea", { rows: "4" }); opis.value = e.description || "";
       const naslov = vnos({ maxlength: "200" }); naslov.value = e.title || "";
       const plakat = vnos({ placeholder: "https://res.cloudinary.com/…", inputmode: "url" }); plakat.value = e.poster_url || "";
+      const plakatK = vnos({ placeholder: "https://res.cloudinary.com/… (prazno = izrez sredine velikega)", inputmode: "url" }); plakatK.value = e.poster_card_url || "";
       const zac = vnos({ type: "datetime-local" }); zac.value = lokalno(e.start_at);
       const kon = vnos({ type: "datetime-local" }); kon.value = lokalno(e.end_at);
       const starost = vnos({ inputmode: "numeric" }); starost.value = String(e.min_age ?? "");
@@ -404,7 +407,8 @@
 
       const shraniG = h("button", { type: "button", id: "dge_shrani" }, "Shrani spremembe"); shraniG.onclick = shrani;
       const zavrzi = h("button", { type: "button", class: "tih" }, "Zavrzi"); zavrzi.onclick = () => { trenutni = null; odpri(id); };
-      const img = h("img", { id: "dge_plakatSlika", class: "dg-plakat skrito", alt: "Predogled plakata" });
+      const img = h("img", { id: "dge_plakatSlika", class: "dg-plakat velik skrito", alt: "Predogled velikega plakata (4:5)" });
+      const imgK = h("img", { id: "dge_plakatKarticaSlika", class: "dg-plakat skrito", alt: "Predogled majhnega plakata (3:4)" });
 
       okvir.replaceChildren(
         h("div", { class: "skupina" },
@@ -434,7 +438,10 @@
               e.status === "draft" ? polje("dge_publishAt", "Objavi samodejno ob", objavaOb, "Prazno = brez samodejne objave. Pred začetkom dogodka; ob času se opravi pregled »Pred objavo« (rdeča ovira = ostane osnutek). Čas tvojega brskalnika, v seznamu po ljubljanskem času.") : null,
               polje("dge_currency", "Valuta", valuta), polje("dge_minAge", "Najnižja starost", starost),
               polje("dge_ticketUrl", "Zunanja prodaja (URL)", zun, "Samo, če vstopnic ne prodaja Outly.", true),
-              h("div", { class: "siroko" }, h("label", { for: "dge_poster" }, "Plakat (URL)"), h("div", { class: "vrsta", style: "align-items:flex-start;flex-wrap:nowrap" }, img, plakat), h("div", { class: "vrsta", id: "dge_plakat_orodja", style: "margin-top:6px" })),
+              h("div", { class: "siroko" }, h("label", { for: "dge_poster" }, "Plakat – velik (4:5)"), h("div", { class: "vrsta", style: "align-items:flex-start;flex-wrap:nowrap" }, img, plakat),
+                h("span", { class: "pomoc" }, "Priporočeno 1080 × 1350 px (4:5). Stran dogodka in »Big events«."), h("div", { class: "vrsta", id: "dge_plakat_orodja", style: "margin-top:6px" })),
+              h("div", { class: "siroko" }, h("label", { for: "dge_poster_card" }, "Plakat – majhen (3:4)"), h("div", { class: "vrsta", style: "align-items:flex-start;flex-wrap:nowrap" }, imgK, plakatK),
+                h("span", { class: "pomoc" }, "Priporočeno 1080 × 1440 px (3:4). Kartice in sličice; neobvezno, brez njega aplikacija vzame izrez sredine velikega."), h("div", { class: "vrsta", id: "dge_plakat_kartica_orodja", style: "margin-top:6px" })),
               polje("dge_description", "Opis", opis, null, true),
               h("div", { class: "siroko" }, h("label", {}, "Žanri"), zanriPolje),
               polje("dge_venueName", "Prizorišče (prosto vpisano)", vIme, e.venue_club_id ? "Dogodek gostuje pri klubu na Outlyju; vpis prizorišča to zamenja." : null),
@@ -442,7 +449,7 @@
               polje("dge_recap", "Posnetek po dogodku (https)", posnetek, "Samo končan dogodek med tremi najbolj prodanimi v klubu.", true))),
           h("div", { class: "dg-shrani" }, shraniG, zavrzi, h("span", { id: "dge_stanje", class: "stanje", "aria-live": "polite" }))),
         h("div", { class: "skupina" }, h("h2", {}, "Zgodovina sprememb"), zgodovina(d.audit || [])));
-      for (const [vn, idp] of [[naslov, "dge_title"], [opis, "dge_description"], [plakat, "dge_poster"], [zac, "dge_start"], [kon, "dge_end"], [starost, "dge_minAge"],
+      for (const [vn, idp] of [[naslov, "dge_title"], [opis, "dge_description"], [plakat, "dge_poster"], [plakatK, "dge_poster_card"], [zac, "dge_start"], [kon, "dge_end"], [starost, "dge_minAge"],
         [cenaV, "dge_price"], [valuta, "dge_currency"], [zun, "dge_ticketUrl"], [kap, "dge_capacity"], [prodajaOd, "dge_salesOpen"], [prodajaDo, "dge_salesClose"], [objavaOb, "dge_publishAt"], [posnetek, "dge_recap"], [vIme, "dge_venueName"], [vNaslov, "dge_venueAddress"], [vMesto, "dge_venueCity"]]) {
         vn.id = idp; vn.oninput = oznaciSpremenjeno;
       }

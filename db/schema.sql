@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–073, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–074, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -898,6 +898,7 @@ CREATE TABLE public.events (
     sales_paused boolean DEFAULT false NOT NULL,
     publish_at timestamp with time zone,
     vip_payment text DEFAULT 'app'::text NOT NULL,
+    poster_card_url text DEFAULT ''::text NOT NULL,
     CONSTRAINT events_capacity_chk CHECK (((capacity IS NULL) OR (capacity > 0))),
     CONSTRAINT events_end_chk CHECK (((end_at IS NULL) OR (end_at > start_at))),
     CONSTRAINT events_floor_plan_chk CHECK (((floor_plan IS NULL) OR (jsonb_typeof(floor_plan) = 'object'::text))),
@@ -969,6 +970,13 @@ COMMENT ON COLUMN public.events.publish_at IS 'Samodejna objava osnutka ob tem c
 --
 
 COMMENT ON COLUMN public.events.vip_payment IS 'Kako se placa VIP miza (067): app = v aplikaciji (narocilo, vstopnice); door = z gotovino na VIP vratih (gost mizo v aplikaciji samo rezervira: table_holds source app).';
+
+
+--
+-- Name: COLUMN events.poster_card_url; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.events.poster_card_url IS 'Majhen banner 3:4 za kartice (074, #400); prazen niz = ni (odjemalec vzame poster_url, velik banner 4:5). Preverjanje URL-ja enako kot poster_url (url_polja.js).';
 
 
 --
