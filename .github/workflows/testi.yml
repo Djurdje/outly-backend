@@ -18,7 +18,8 @@ jobs:
     # PG 18 krsitev ON DELETE RESTRICT javi kot 23001 namesto 23503 in test_razpored.js je padel na main brez spremembe kode.
     # Ob nadgradnji produkcijske baze spremeni runner IN spodnjo pricakovano razlicico skupaj.
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # 25 min: na ubuntu-24.04 cel npm test (110 skript) traja ~15,5 min (9. 11. 2026); 15 je bilo tik pod robom (PR-ji pred tem 14 min).
+    timeout-minutes: 25
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/outly
       NODE_ENV: test
