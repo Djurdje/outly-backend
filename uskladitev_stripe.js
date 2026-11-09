@@ -32,6 +32,7 @@
 //    Izjema od (a): naboj za narocilo, ki ga je zakljuci() preklical in v CELOTI vrnil (`cancelled|failed` + vrstica `vracila` z razlogom `inactive_order`, stanje `opravljeno`, isti PI + amount_refunded >= amount),
 //    je pricakovan izid, ne razlika (steje se v `vrnjeno_neaktivno_stevilo` rezultata in dnevniku). Delno vrnjeno ali brez vrstice `vracila` ostane razlika.
 //  - Vsote (informativno): stevilo, bruto, vrnjeno, provizija; Stripova vracila in spori dneva.
+const delavci = require("./delavci");   // srcni utrip (I70)
 
 const ZIVO_OD = /^\d{4}-\d{2}-\d{2}$/.test(process.env.STRIPE_USKLADITEV_OD || "") ? process.env.STRIPE_USKLADITEV_OD : "2026-10-19";
 const OKNO_DNI = 7;
@@ -362,10 +363,12 @@ function ustvari(dep) {
   }
 
   let tece = false;
+  let utrip = delavci.BREZ;   // srcni utrip (I70); nastavi zazeni()
   // En krog delavca. Nikoli ne vrze. Vrne { obdelani: [...], preskoceno? }.
   async function krog() {
     if (tece) return { obdelani: [], preskoceno: "tece" };
     tece = true;
+    const k = utrip.zacetek();   // obvisel krog zastavice ne sprosti (delavci.js)
     const obdelani = [];
     try {
       if (!jeLive() || !stripe()) return { obdelani, preskoceno: "ni_zivo" };
@@ -375,7 +378,7 @@ function ustvari(dep) {
     } catch (e) {
       log.error(`[uskladitev-stripe] krog: ${kodaNapake(e)}`);   // baza nedosegljiva ipd.: naslednji krog
       return { obdelani, napaka: kodaNapake(e) };
-    } finally { tece = false; }
+    } finally { k.konec(); tece = false; }
   }
 
   function zazeni() {
@@ -383,6 +386,7 @@ function ustvari(dep) {
     const tik = Number.isInteger(Number(process.env.STRIPE_USKLADITEV_TIK_MS)) && Number(process.env.STRIPE_USKLADITEV_TIK_MS) >= 100 ? Number(process.env.STRIPE_USKLADITEV_TIK_MS) : 30 * 60 * 1000;
     const zagon = process.env.STRIPE_USKLADITEV_ZAGON_MS !== undefined && Number.isInteger(Number(process.env.STRIPE_USKLADITEV_ZAGON_MS)) && Number(process.env.STRIPE_USKLADITEV_ZAGON_MS) >= 0
       ? Number(process.env.STRIPE_USKLADITEV_ZAGON_MS) : 120000 + Math.round(Math.random() * 480000);
+    utrip = delavci.registriraj("uskladitev_stripe", { periodaMs: tik, zamikMs: zagon });
     let interval = null;
     const prvi = setTimeout(() => { void krog(); interval = setInterval(() => { void krog(); }, tik); interval.unref(); }, zagon);
     prvi.unref();

@@ -276,7 +276,7 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
     const usmerjevalnik = { get() {} };
     const nic = () => null;
     const modul = ustvari({ pool, router: usmerjevalnik, SQL_TESTNO_NAROCILO: SQL_TESTNO, razlogNerazpolozljivosti: nic, nacinPlacilaZ: nic, sqlKlubStripePripravljen: () => "NULL::boolean AS club_stripe_ready, NULL::jsonb AS club_seller_raw",
-      VIP_OD_CENTOV: "NULL", odgovoriNaNapako: nic, env: { ADMIN_NADZOR_PREDPOMNILNIK_MS: "0" } });
+      VIP_OD_CENTOV: "NULL", odgovoriNaNapako: nic, gostKandidat: () => "FALSE", gostPostaPoskusov: () => 8, env: { ADMIN_NADZOR_PREDPOMNILNIK_MS: "0" } });
     const vzorci = [
       Date.UTC(2031, 6, 16, 8, 0), Date.UTC(2031, 6, 15, 23, 30), Date.UTC(2031, 6, 15, 22, 0), Date.UTC(2031, 6, 15, 21, 59, 59), Date.UTC(2031, 0, 16, 8, 0), Date.UTC(2031, 0, 15, 23, 30), Date.UTC(2031, 0, 15, 23, 0), Date.UTC(2031, 0, 15, 22, 59, 59),
       Date.UTC(2031, 2, 29, 12, 0), Date.UTC(2031, 2, 30, 0, 30), Date.UTC(2031, 2, 29, 23, 0), Date.UTC(2031, 2, 30, 21, 59), Date.UTC(2031, 2, 30, 22, 0), Date.UTC(2031, 2, 31, 12, 0),
@@ -406,7 +406,7 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
     const lazniModul = (pool4, env) => {
       const rute = {};
       const modul = ustvari({ pool: pool4, router: { get: (p, h) => { rute[p] = h; } }, SQL_TESTNO_NAROCILO: SQL_TESTNO, razlogNerazpolozljivosti: nic4, nacinPlacilaZ: nic4,
-        sqlKlubStripePripravljen: () => "NULL::boolean AS club_stripe_ready, NULL::jsonb AS club_seller_raw", VIP_OD_CENTOV: "NULL", odgovoriNaNapako: (res) => res.status(500).json({ error: "napaka" }), env });
+        sqlKlubStripePripravljen: () => "NULL::boolean AS club_stripe_ready, NULL::jsonb AS club_seller_raw", VIP_OD_CENTOV: "NULL", gostKandidat: () => "FALSE", gostPostaPoskusov: () => 8, odgovoriNaNapako: (res) => res.status(500).json({ error: "napaka" }), env });
       return { modul, rute };
     };
     {

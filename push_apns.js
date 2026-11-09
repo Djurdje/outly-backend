@@ -13,6 +13,7 @@
 // 403 InvalidProviderToken in push ne dela, ne da bi karkoli drugega javilo napako.
 const http2 = require("http2");
 const crypto = require("crypto");
+const delavci = require("./delavci");   // redki alarmi POZOR (I70)
 
 // Razlogi 400, pri katerih zeton nikoli vec ne bo veljal (410 je neveljaven vedno). DeviceTokenNotForTopic NI med njimi: to je napaka
 // NASTAVITVE (APNS_TOPIC ne ustreza bundle ID-ju), ne zetona; oznacitev bi ob napacnem topicu pobila vse zetone (opozorilo v dnevnik).
@@ -235,6 +236,8 @@ function ustvariApns(okolje = process.env, dnevnik = console) {
         if (!r.ok && !neveljaven) {
           const namig = r.status === 403 ? " (preveri APNS_KEY_ID, APNS_TEAM_ID in APNS_KEY_P8 na Renderju; ob preklicu kljuca je treba nov kljuc)"
             : r.razlog === "DeviceTokenNotForTopic" ? ` (preveri APNS_TOPIC = bundle ID aplikacije, zdaj ${topic}; zetonov NE oznacujem kot neveljavnih)` : "";
+          // Preklican ali pokvarjen kljuc (InvalidProviderToken) / podpis, ki ga APNs vedno zavrne (ExpiredProviderToken tudi po osvezitvi): vsa potisna obvestila tiho odpadejo (I70).
+          if (r.status === 403 && (r.razlog === "InvalidProviderToken" || r.razlog === "ExpiredProviderToken")) delavci.pozorRedko("apns:kljuc", `APNs zavrnil ponudnikov zeton (${r.razlog}): potisna obvestila ne delajo; preveri APNS_KEY_ID, APNS_TEAM_ID in APNS_KEY_P8 na Renderju (kljuc preklican?)`, dnevnik);
           opozori("zavrnitev:" + r.status + ":" + r.razlog, `[push] APNs: status ${r.status || "brez odgovora"} razlog ${r.razlog || "?"}${namig}`);
         }
         return { ok: r.ok, status: r.status, razlog: r.razlog || null, neveljaven };

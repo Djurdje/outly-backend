@@ -26,6 +26,11 @@ const USKLADITEV_ZASTARELA_DNI = 2;   // zadnja uspesna uskladitev starejsa od t
 const ZAMUDA_OBJAVE_MS = 3 * 60 * 1000;   // osnutek z minulim publish_at toliko casa po roku ni objavljen -> rdece opozorilo (delavec teče vsako minuto, samodejna_objava.js)
 const STANJA_RACUNOV = ["caka", "izdan", "potrjen", "napaka", "preklican"];
 const RESNOST_VRSTNI_RED = { rdece: 0, oranzno: 1, rumeno: 2 };
+// Vrste rdecih opozoril, ki sprozijo JAVNI alarm GET /healthz/opozorila (I70, »tehnicno zdravje«: baza, naročila brez konca, mail Martinu, vstopnice gostov). Vse ostale rdece
+// vrste (poslovne: racun_napaka, spori, povrnitve ...) ostanejo samo v panelu, da kronicno rdeca vrstica ne naredi trajnega 503.
+// Prag za RDECE gost_vstopnice_neposlane: toliko kandidatov hkrati (en sam gost je samo oranzno v panelu).
+const GOST_ALARM_PRAG = 2;
+const TEHNICNE_VRSTE = ["baza_disk", "narocila_visijo", "nujno_mail_neposlan", "gost_vstopnice_neposlane"];
 
 // Besedilo napake izdajatelja racunov brez e-naslovov: ponudnik lahko v sporocilo vpise naslov kupca. Najprej zamenjamo e-naslove,
 // nato vsak preostali @ (ne sme ga biti v odgovoru), sele nato skrajsamo (odrezan naslov bi sicer pustil del naslova).
@@ -317,6 +322,36 @@ function ustvari(dep) {
           `Agent je v nujnem načinu izvedel dejanje (predlog ${x.id}), mail Martinu pa ni potrjeno poslan (${x.nujno_mail_poskusi} poskusov). Preveri dejanje v rdečem pasu na vrhu panela in klikni »Pregledal sem«.`,
           x.nujno_at);
       }
+      // Placilna seja Stripa traja 30 min, pospravljalec doda 5 min: `pending` starejse od 60 min (rezerva) = pospravljalec ne dela, Stripe ne odgovarja ali webhook ni prisel,
+      // zaloga in miza pa ostajata zasedeni (I70). IZLOCENO: placilo v obdelavi (odlozeno placilo: seja opravljena, denar na poti; `oznaciVObdelavi` nastavi checkout_url NULL
+      // ob obstojeci seji) - to je lahko dneve normalno; ce traja > 14 dni, ORANZNO `placilo_v_obdelavi_dolgo`. Samo stevilo in najstarejsi cas, brez kupcev in referenc.
+      // Indeks orders_pending_idx (created_at WHERE status = 'pending').
+      const visijo = (await c.query(
+        `SELECT COUNT(*) FILTER (WHERE NOT (checkout_url IS NULL AND stripe_checkout_session_id IS NOT NULL))::int AS n,
+                MIN(created_at) FILTER (WHERE NOT (checkout_url IS NULL AND stripe_checkout_session_id IS NOT NULL)) AS najstarejse,
+                COUNT(*) FILTER (WHERE checkout_url IS NULL AND stripe_checkout_session_id IS NOT NULL AND created_at < NOW() - INTERVAL '14 days')::int AS dolgo,
+                MIN(created_at) FILTER (WHERE checkout_url IS NULL AND stripe_checkout_session_id IS NOT NULL AND created_at < NOW() - INTERVAL '14 days') AS najstarejse_dolgo
+           FROM orders WHERE status = 'pending' AND created_at < NOW() - INTERVAL '60 minutes'`)).rows[0];
+      if (visijo.n > 0) dodaj("narocila_visijo", "rdece", "narocila", null, `${visijo.n} naročil čaka na plačilo več kot 60 minut (seja Stripa traja 30 min, pospravljalec doda 5 min): pospravljalec ali webhook morda ne delata, zaloga ostaja zasedena. Preveri Stripovo nadzorno ploščo in dnevnik.`, visijo.najstarejse);
+      if (visijo.dolgo > 0) dodaj("placilo_v_obdelavi_dolgo", "oranzno", "narocila", null, `${visijo.dolgo} plačil je v obdelavi več kot 14 dni (odloženo plačilo, ki ga Stripe ni zaključil): preveri v Stripovi nadzorni plošči.`, visijo.najstarejse_dolgo);
+      // Gost ima vstopnice SAMO v mailu. Kandidat = ISTI pogoj kot pospravljalec gostove poste (dep.gostKandidat = sqlGostKandidat v index.js: status 'paid', mail ni poslan,
+      // guest_mail_attempts < GOST_POSTA_POSKUSOV, plačano v zadnjih 3 dneh), prava (ne testna) naročila, plačana pred več kot 30 min. Indeks orders_gost_posta_idx.
+      //  - RDEČE (tehnično, javno) šele ob ≥ GOST_ALARM_PRAG kandidatih (vzorec izpada pošiljanja, ne posamezen naslov);
+      //  - natanko manj od praga: ORANŽNO `gost_vstopnica_neposlana` samo v panelu;
+      //  - izčrpani poskusi (lahko namenoma: testni promet nad mejo / isti naslov v 24 h, brezplačno nad mejo): ORANŽNO `gost_vstopnice_izcrpane` samo v panelu.
+      // Brez dep.gostKandidat / gostPostaPoskusov izračun pade (fail-closed: /healthz/opozorila 503), nikoli tihi nadomestek.
+      if (typeof dep.gostKandidat !== "function" || typeof dep.gostPostaPoskusov !== "function") throw new Error("admin_nadzor: manjka dep.gostKandidat / gostPostaPoskusov");
+      const poskusov = dep.gostPostaPoskusov();
+      const gostMail = (await c.query(
+        `SELECT COUNT(*)::int AS n, MIN(o.paid_at) AS najstarejse FROM orders o
+          WHERE ${dep.gostKandidat("o")} AND NOT ${SQL_TESTNO_NAROCILO} AND o.paid_at < NOW() - INTERVAL '30 minutes'`)).rows[0];
+      const gostIzcrpano = (await c.query(
+        `SELECT COUNT(*)::int AS n, MIN(o.paid_at) AS najstarejse FROM orders o
+          WHERE o.guest_email IS NOT NULL AND o.guest_mail_sent_at IS NULL AND o.status = 'paid' AND o.guest_mail_attempts >= $1 AND o.paid_at > NOW() - INTERVAL '3 days'
+            AND NOT ${SQL_TESTNO_NAROCILO} AND o.paid_at < NOW() - INTERVAL '30 minutes'`, [poskusov])).rows[0];
+      if (gostMail.n >= GOST_ALARM_PRAG) dodaj("gost_vstopnice_neposlane", "rdece", "narocila", null, `${gostMail.n} plačanih naročil gostov: mail z vstopnicami ni poslan več kot 30 minut po plačilu (gost ima vstopnice samo v mailu). Preveri Resend in dnevnik.`, gostMail.najstarejse);
+      else if (gostMail.n > 0) dodaj("gost_vstopnica_neposlana", "oranzno", "narocila", null, `${gostMail.n} gost še nima maila z vstopnico (več kot 30 minut po plačilu): preveri naročilo.`, gostMail.najstarejse);
+      if (gostIzcrpano.n > 0) dodaj("gost_vstopnice_izcrpane", "oranzno", "narocila", null, `${gostIzcrpano.n} plačanih naročil gostov: poskusi pošiljanja maila z vstopnicami so izčrpani (npr. namenoma izpuščen mail); gost vstopnic morda nima. Preveri v dnevniku.`, gostIzcrpano.najstarejse);
       if (diskPct !== null && diskPct >= dep.bazaDisk.opozoriloPct) {
         dodaj("baza_disk", "rdece", "baza", null,
           `Disk baze je ${diskPct} % zaseden (meja opozorila ${dep.bazaDisk.opozoriloPct} %). Poln disk ustavi bazo, tudi sken na vratih: povečaj disk baze na Renderju (outly-db) in nato popravi BAZA_DISK_MB.`);
@@ -332,7 +367,10 @@ function ustvari(dep) {
       const stevci = { rdece: dodatno.rdece, oranzno: dodatno.oranzno, rumeno: dodatno.rumeno };
       for (const o of items) stevci[o.resnost]++;
       items.sort((a, b) => RESNOST_VRSTNI_RED[a.resnost] - RESNOST_VRSTNI_RED[b.resnost]);   // sort je stabilen: znotraj resnosti ostane vrstni red (cas dogodka)
-      return { items: items.slice(0, NAJVEC_OPOZORIL), stevci };
+      const rezultat = { items: items.slice(0, NAJVEC_OPOZORIL), stevci };
+      // Stevilo RDECIH opozoril »tehnicnega zdravja« (TEHNICNE_VRSTE) pred rezanjem seznama: za GET /healthz/opozorila (I70). Ni enumerable: ne pride v JSON odgovor.
+      Object.defineProperty(rezultat, "tehnicna", { value: items.filter((o) => o.resnost === "rdece" && TEHNICNE_VRSTE.includes(o.vrsta)).length, enumerable: false });
+      return rezultat;
     });
   }
   // Zadnje izracunano stevilo rdecih (summary ga vzame brez lastnega izracuna in brez cakanja: sicer null).
@@ -498,4 +536,4 @@ function ustvari(dep) {
   return { opozorila, danes, danesNaCas: izracunajDanes, rdeceStevilo, racuni: racuniSeznam, zaAgenta, zaDelavca };
 }
 
-module.exports = { ustvari, ociscenaNapaka, prodajnoStanje, STANJA_RACUNOV };
+module.exports = { TEHNICNE_VRSTE, ustvari, ociscenaNapaka, prodajnoStanje, STANJA_RACUNOV };

@@ -31,6 +31,7 @@
 // Ko je `stripe_vracilo_id` zapisan, se korak A in njegove preverbe NIKOLI ne ponovijo (webhook je naroceno medtem lahko ze oznacil `refunded`): nadaljuje se s korakom B.
 "use strict";
 const placila = require("./placila_stripe");
+const delavci = require("./delavci");   // srcni utrip (I70)
 const racuni = require("./racuni");   // I52: izid vracila -> dobropis se izda sele za izvedeno vracilo
 
 const celo = (ime, privzeto, najmanj, najvec) => { const n = Number.parseInt(process.env[ime], 10); return Number.isInteger(n) && n >= najmanj && n <= najvec ? n : privzeto; };
@@ -522,9 +523,11 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
   }
 
   let tece = false;
+  let utripTek = delavci.BREZ;   // nastavi zazeni()
   async function tek() {
     if (tece) return;
     tece = true;
+    const utrip = utripTek.zacetek();   // brez sprostitve zastavice ob roku: vracila so denar (prevzem vrstic je v bazi, a ne vemo, da stari krog ne dela vec); alarm steje
     preverbTek = 0;
     try {
       await pomeni();
@@ -540,11 +543,11 @@ function ustvari({ pool, naKoncano, posljiNeposlane }) {
       await obdelajSpore();
       if (posljiNeposlane) await posljiNeposlane();
     } catch (e) { console.error("[vracila] tek:", e && e.message); }
-    finally { tece = false; }
+    finally { utrip.konec(); tece = false; }
   }
 
   function zazeni() {
-    if (TICK_MS > 0) setInterval(() => { tek(); }, TICK_MS).unref();
+    if (TICK_MS > 0) { utripTek = delavci.registriraj("vracila_tek", { periodaMs: TICK_MS, rokMinMs: 20 * 60 * 1000 }); setInterval(() => { tek(); }, TICK_MS).unref(); }
   }
   const zbudi = () => { if (TICK_MS > 0) setTimeout(() => { tek(); }, 50).unref(); };
 

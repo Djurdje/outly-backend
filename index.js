@@ -1,5 +1,6 @@
 // Sentry (#87): vklopljen SAMO ob SENTRY_DSN v okolju (sicer se paket ne naloži); zagon prvi, da ujame tudi napake pri nalaganju modulov.
 const sentry = require("./sentry");
+const delavci = require("./delavci");   // srcni utrip periodicnih delavcev + redki alarmi POZOR (#403, I70)
 sentry.zagon();
 const express = require("express");
 const cors = require("cors");
@@ -1234,6 +1235,49 @@ app.get("/healthz/baza", async (req, res) => {
   res.set("Cache-Control", "no-store");
   const disk_pct = await bazaDisk.izmeri();
   const ok = disk_pct !== null && disk_pct < bazaDisk.opozoriloPct;
+  res.status(ok ? 200 : 503).json({ ok });
+});
+
+// GET /healthz/opozorila (#403, I70): ena javna pot za zunanji nadzor (UptimeRobot, nadzor.yml). Odgovor SAMO { ok } (nikoli imena delavcev, stevila ali opisi).
+// ok:false, ce (a) kak periodicni delavec zaostaja (delavci.js: od zadnjega kroga je minilo vec kot max(3 x perioda, rok kroga)), ali (b) obstaja RDECE opozorilo »tehnicnega zdravja« iz
+// istega izracuna kot panel (adminNadzor.opozorila(); samo TEHNICNE_VRSTE iz admin_nadzor.js: baza_disk, narocila_visijo, nujno_mail_neposlan, gost_vstopnice_neposlane). 503, ko je ok:false.
+// Rezultat velja OPOZORILA_ZDRAVJE_VELJA_MS (60 s): najvec ena serija poizvedb na minuto ne glede na promet (sočasni klici si delijo obljubo). Izracun tece na GLAVNEM poolu
+// prek admin semaforja z roki poizvedb (admin_nadzor.js), NE skenPool in NE zdraviPool. Baza nedosegljiva / izracun ne uspe v roku = ok:false (503), proces ne pade.
+// Panel zaseden (ADMIN_BUSY: semafor, ne baza) ne sme biti alarm: velja zadnja znana presoja opozoril (najvec 10 min), delavci se vedno presodijo sveze.
+const OPOZORILA_ZDRAVJE_VELJA_MS = okoljeCelo("OPOZORILA_ZDRAVJE_VELJA_MS", 60000, 0, 3600000);   // < 60 s samo za teste
+const OPOZORILA_ZDRAVJE_ROK_MS = 15000;
+let opozorilaZdravjeZadnje = null;       // { ok, do }
+let opozorilaZdravjePoizvedba = null;    // tekoci izracun (Promise<boolean>)
+let opozorilaRdeceZadnje = null;         // { ok: brez rdecih, cas }: zadnja uspesna presoja opozoril
+async function izracunajZdravjeOpozoril() {
+  const zaostali = delavci.zaostali();
+  let rdeceOk = false, vzrok = null;
+  let casovnik;
+  try {
+    const r = await Promise.race([adminNadzor.opozorila(), new Promise((_, no) => { casovnik = setTimeout(() => no(Object.assign(new Error("rok"), { code: "OPOZORILA_ROK" })), OPOZORILA_ZDRAVJE_ROK_MS); })]);
+    rdeceOk = r.tehnicna === 0;   // samo »tehnicno zdravje« (admin_nadzor.js TEHNICNE_VRSTE), ne vsako rdece opozorilo panela
+    opozorilaRdeceZadnje = { ok: rdeceOk, cas: Date.now() };
+    if (r.tehnicna === undefined) vzrok = "opozorila brez stevila tehnicnih (napaka izracuna)";
+    else if (!rdeceOk) vzrok = `tehnicnih rdecih opozoril: ${r.tehnicna}`;
+  } catch (e) {
+    if (e && e.code === "ADMIN_BUSY" && opozorilaRdeceZadnje && Date.now() - opozorilaRdeceZadnje.cas < 600000) rdeceOk = opozorilaRdeceZadnje.ok;
+    else { rdeceOk = false; vzrok = `opozoril ni mogoce izracunati (${(e && (e.code || e.message)) || "napaka"})`; }
+  } finally { clearTimeout(casovnik); }
+  if (zaostali.length) vzrok = `zaostali delavci: ${zaostali.join(", ")}${vzrok ? "; " + vzrok : ""}`;
+  const ok = zaostali.length === 0 && rdeceOk;
+  const prej = opozorilaZdravjeZadnje ? opozorilaZdravjeZadnje.ok : true;
+  if (!ok && (prej || vzrok !== opozorilaZdravjeZadnje.vzrok)) console.error(`[healthz/opozorila] ok:false (${vzrok})`);
+  opozorilaZdravjeZadnje = { ok, vzrok, do: Date.now() + OPOZORILA_ZDRAVJE_VELJA_MS };
+  return ok;
+}
+app.get("/healthz/opozorila", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  let ok;
+  if (opozorilaZdravjeZadnje && opozorilaZdravjeZadnje.do > Date.now()) ok = opozorilaZdravjeZadnje.ok;
+  else {
+    if (!opozorilaZdravjePoizvedba) opozorilaZdravjePoizvedba = izracunajZdravjeOpozoril().catch(() => false).finally(() => { opozorilaZdravjePoizvedba = null; });
+    ok = await opozorilaZdravjePoizvedba;
+  }
   res.status(ok ? 200 : 503).json({ ok });
 });
 
@@ -5135,6 +5179,7 @@ app.get("/admin/api/export", requireAuthIzvoz, requireRole("admin", "backup"), a
 
 // Opozorila, seznam racunov in nadzorna plosca »Danes« (23. 10. 2026, #326): GET /admin/api/opozorila, /racuni, /danes (admin_nadzor.js; samo branje, glavni pool, nikoli skenPool).
 const adminNadzor = require("./admin_nadzor").ustvari({
+  gostPostaPoskusov: () => GOST_POSTA_POSKUSOV, gostKandidat: (a) => sqlGostKandidat(a),   // const je definiran nizje (TDZ): vrednost se bere ob izracunu
   bazaDisk,
   pool, router: admin, SQL_TESTNO_NAROCILO, razlogNerazpolozljivosti, nacinPlacilaZ: (klubImaStripe) => placilaStripe.nacinPlacilaZ(klubImaStripe), sqlKlubStripePripravljen, VIP_OD_CENTOV, odgovoriNaNapako,
 });
@@ -6229,6 +6274,9 @@ const GOST_POSTA_REZERVA_MS = okoljeCelo("GOST_POSTA_REZERVA_MS", 30000, 0, 6000
 const GOST_POSTA_PREMOR_MIN_MS = GOST_POSTA_TIMEOUT_MS + GOST_POSTA_REZERVA_MS;
 const GOST_POSTA_PREMORI = [0, 1, 2.5, 7.5, 30, 90, 360, 720].map((x) => x === 0 ? 0 : Math.max(Math.round(x * GOST_POSTA_PREMOR_MS), GOST_POSTA_PREMOR_MIN_MS));
 const GOST_POSTA_POSKUSOV = GOST_POSTA_PREMORI.length;
+// »Kandidat za pošiljanje« gostovega maila z vstopnicami: ISTI pogoj uporabljata pospravljalec (izbor v gostPosljiNeposlane) in alarm gost_vstopnice_* (admin_nadzor.js, I70),
+// da se alarm ne more razhajati z delavcem (npr. delno vrnjeno naročilo: delavec ga ne pošilja, zato ni alarm). Alias tabele `orders` je argument.
+const sqlGostKandidat = (a) => `${a}.guest_email IS NOT NULL AND ${a}.guest_mail_sent_at IS NULL AND ${a}.status = 'paid' AND ${a}.guest_mail_attempts < ${GOST_POSTA_POSKUSOV} AND ${a}.paid_at > NOW() - INTERVAL '3 days'`;
 const GOST_PREVZEM_MS = okoljeCelo("GOST_PREVZEM_MS", 30000, 0, 3600000);   // kako pogosto /me/orders in /me/tickets znova iscejo gostujoca narocila
 const GOST_PREKLIC_OKNO_MS = okoljeCelo("GOST_PREKLIC_OKNO_MS", 5000, 0, 600000);   // najmanjsi razmik med Stripovimi klici za isto narocilo (preklic)
 const GOST_ZETON_VZOREC = /^[A-Za-z0-9_-]{43}$/;
@@ -7047,22 +7095,23 @@ async function gostPosljiEnoPosto(oid) {
 }
 // Pospravljalec: placana gostujoca narocila brez poslanega maila (Resend je padel, proces se je ugasnil med placilom in mailom).
 let gostPostaTece = false;
+let gostPostaUtrip = delavci.BREZ;   // srcni utrip (I70); registrira ga zagon spodaj
 async function gostPosljiNeposlane() {
   if (!resend || gostPostaTece) return;
   gostPostaTece = true;
+  const utripKroga = gostPostaUtrip.zacetek();   // obvisel krog zastavice ne sprosti (delavci.js, S1); viden kot zaostal
   try {
     const r = await pool.query(
-      `SELECT id FROM orders WHERE guest_email IS NOT NULL AND guest_mail_sent_at IS NULL AND status = 'paid'
-          AND guest_mail_attempts < $1 AND paid_at > NOW() - INTERVAL '3 days'
-          AND (guest_mail_claimed_at IS NULL OR guest_mail_claimed_at < NOW() - ($2::bigint[])[guest_mail_attempts + 1] * INTERVAL '1 millisecond')
-        ORDER BY id LIMIT 20`, [GOST_POSTA_POSKUSOV, GOST_POSTA_PREMORI]);   // premor v SQL (isti pogoj kot pri zaklepu): najstarejsi v premoru ne stradajo novejsih
+      `SELECT o.id FROM orders o WHERE ${sqlGostKandidat("o")}
+          AND (o.guest_mail_claimed_at IS NULL OR o.guest_mail_claimed_at < NOW() - ($1::bigint[])[o.guest_mail_attempts + 1] * INTERVAL '1 millisecond')
+        ORDER BY o.id LIMIT 20`, [GOST_POSTA_PREMORI]);   // premor v SQL (isti pogoj kot pri zaklepu): najstarejsi v premoru ne stradajo novejsih
     for (const o of r.rows) await posljiGostuVstopnice(o.id);
     await prenosPosljiNeposlane();   // vstopnice, poslane prijateljem brez racuna (034)
     await potrdiloPosljiNeposlane();   // potrdila kupcem z racunom (042, #95)
     await vraciloIzStripaPosljiNeposlane();   // vracila iz Stripove nadzorne plosce (053, #309)
     await racunKupcuPosljiNeposlane();   // racuni in dobropisi kupcem (057, Issue #319, I55)
   } catch (e) { console.error("[gost] pospravljanje mailov:", e && e.message); }
-  finally { gostPostaTece = false; }
+  finally { utripKroga.konec(); gostPostaTece = false; }
 }
 // ---------------------------
 // POTRDILO O NAKUPU KUPCU Z RACUNOM — migracija 042, issue #95, invarianta I32
@@ -7813,7 +7862,11 @@ async function vracilaObvestilaNeposlana() {
   for (const x of sp.rows) await posljiSporLastniku(x.id);
 }
 // Prvi tek NE takoj po zagonu (glavni pool je takrat najbolj zaseden).
-if (GOST_POSTA_PONOVI_MS > 0) setInterval(gostPosljiNeposlane, GOST_POSTA_PONOVI_MS).unref();
+if (GOST_POSTA_PONOVI_MS > 0) {
+  // Brez Resenda krog takoj vrne (nic dela): delavec se ne registrira (N2). Pocasen Resend ne sme dati lazne »obvisel«: rok najmanj 20 min (N1).
+  if (resend) gostPostaUtrip = delavci.registriraj("gost_posta", { periodaMs: GOST_POSTA_PONOVI_MS, rokMinMs: 20 * 60 * 1000 });
+  setInterval(gostPosljiNeposlane, GOST_POSTA_PONOVI_MS).unref();
+}
 // Hramba osebnih podatkov gosta (pravna analiza 5. 10. 2026, 2.3; roki so PREDPOSTAVKA, Martin jih lahko spremeni):
 //   * potekli zetoni (konec dogodka + 30 dni) se brisejo (poizvedba po zetonu jih ze zavrne, to je higiena);
 //   * neplacana (cancelled/failed) gostujoca narocila: e-naslov se anonimizira 24 h po preklicu (pogodbe ni; e-naslov je rabil samo pravilu »1 neplacano«);
@@ -9977,9 +10030,12 @@ app.delete("/business/events/:id/tables/:tableId/hold", requireAuth, requireClub
 // končal pred več kot 24 h (end_at, sicer start_at + 12 h), se brišejo. Interval REZERVACIJE_CISCENJE_MS (privzeto 1 h; 0 = izklop).
 const REZERVACIJE_CISCENJE_MS = okoljeCelo("REZERVACIJE_CISCENJE_MS", 60 * 60 * 1000, 0, 24 * 60 * 60 * 1000);
 let rezervacijeCiscenjeTece = false;
+let gostZetoniTece = false;
+let rezervacijeUtrip = delavci.BREZ, gostZetoniUtrip = delavci.BREZ;   // srcni utrip (I70); registrira ga zagon spodaj
 async function pocistiRezervacije() {
   if (rezervacijeCiscenjeTece) return;
   rezervacijeCiscenjeTece = true;
+  const k = rezervacijeUtrip.zacetek();
   try {
     const r = await pool.query(
       `DELETE FROM table_holds h USING events e
@@ -9988,13 +10044,23 @@ async function pocistiRezervacije() {
   } catch (e) {
     console.error("[rezervacije] pospravljanje ni uspelo:", e && e.message);
   } finally {
+    k.konec();
     rezervacijeCiscenjeTece = false;
   }
 }
 if (REZERVACIJE_CISCENJE_MS > 0) {
   // Prvi tek NE takoj po zagonu (glavni pool je takrat najbolj zaseden: prvi nakupi, health check, sken): vsaj 5 min + nakljucnih do 60 s
   // (pri kratkem intervalu za teste sorazmerno krajse). Pospravljanje ni nujno, zato ne tekmuje z nakupi ob zagonu.
-  const pocistiVse = () => { pocistiRezervacije(); pocistiGostZetone(); };   // gostujoci zetoni (migracija 033): isti urnik
+  const zamikCiscenja = Math.min(REZERVACIJE_CISCENJE_MS, 5 * 60 * 1000) + Math.min(REZERVACIJE_CISCENJE_MS, 60 * 1000);
+  rezervacijeUtrip = delavci.registriraj("rezervacije_ciscenje", { periodaMs: REZERVACIJE_CISCENJE_MS, zamikMs: zamikCiscenja });
+  gostZetoniUtrip = delavci.registriraj("gost_zetoni_ciscenje", { periodaMs: REZERVACIJE_CISCENJE_MS, zamikMs: zamikCiscenja });
+  const pocistiVse = () => {   // gostujoci zetoni (migracija 033): isti urnik
+    pocistiRezervacije();
+    if (gostZetoniTece) return;
+    gostZetoniTece = true;   // obvisel krog ne sprozi novih (S1, kot rezervacije_ciscenje)
+    const k = gostZetoniUtrip.zacetek();
+    Promise.resolve(pocistiGostZetone()).catch(() => {}).finally(() => { k.konec(); gostZetoniTece = false; });
+  };
   setTimeout(() => {
     pocistiVse();
     setInterval(pocistiVse, REZERVACIJE_CISCENJE_MS).unref();
