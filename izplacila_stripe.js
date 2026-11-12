@@ -102,21 +102,28 @@ function ustvari(dep) {
     // Dogodki kluba z denarjem tega racuna, ki morda se niso sprosceni: konec v zadnjih 20 dneh ali v prihodnosti ali odpovedan (narocila mlajsa od `najdlje` dni).
     const ev = await pool.query(
       `SELECT e.id AS event_id, e.status, ${KONEC} AS konec, (od.event_id IS NOT NULL) AS prej,
-              COALESCE(SUM(GREATEST(0, o.total_cents - COALESCE(o.refunded_cents, 0) - COALESCE(o.application_fee_cents, 0))), 0)::bigint AS neto
+              COALESCE(SUM(GREATEST(0, o.total_cents - COALESCE(o.refunded_cents, 0) - COALESCE(o.application_fee_cents, 0)))
+                FILTER (WHERE o.paid_at > $4::timestamptz - ($3::int * INTERVAL '1 day')), 0)::bigint AS neto,
+              COALESCE(SUM(GREATEST(0, o.total_cents - COALESCE(o.refunded_cents, 0) - COALESCE(o.application_fee_cents, 0)))
+                FILTER (WHERE o.paid_at <= $4::timestamptz - ($3::int * INTERVAL '1 day')), 0)::bigint AS neto_star
          FROM events e JOIN orders o ON o.event_id = e.id
          LEFT JOIN izplacila_odobritve od ON od.event_id = e.id
         WHERE e.club_id = $1 AND (e.status = 'cancelled' OR ${KONEC} > $4::timestamptz - INTERVAL '20 days')
           AND o.stripe_account_id = $2 AND o.status IN ('paid', 'partially_refunded') AND o.total_cents > 0 AND o.guest_list_id IS NULL
-          AND COALESCE(o.stripe_payment_intent_id, '') NOT LIKE 'test\\_%' AND o.paid_at > $4::timestamptz - ($3::int * INTERVAL '1 day')
+          AND COALESCE(o.stripe_payment_intent_id, '') NOT LIKE 'test\\_%' AND o.paid_at > $4::timestamptz - INTERVAL '120 days'
         GROUP BY e.id, e.status, e.end_at, e.start_at, od.event_id`, [klubId, racun, najdlje, zdaj]);
     const nesproscen = new Set();
-    const podrobnosti = [];
+    const podrobnosti = [], rokHrambe = [];
     let vsota = 0;
     for (const x of ev.rows) {
       if (sproscen({ status: x.status, konec: x.konec, prej: x.prej }, zdaj, n)) continue;
       nesproscen.add(Number(x.event_id));
       const c = Number(x.neto) || 0;
       if (c > 0) { vsota += c; podrobnosti.push({ event_id: Number(x.event_id), cents: c, vrsta: "dogodek" }); }
+      // Pogodba 7. clen (»Ce Stripe sredstev ne dovoli zadrzati do konca dogodka, jih izplaca prej«): denar nesproscenega dogodka, star vec kot `najdlje` dni,
+      // se NE zadrzi (gre ven s tem izplacilom); zapis v podrobnosti (vrsta rok_hrambe, ne steje v zadrzano) in POZOR v izplacajRacun.
+      const star = Number(x.neto_star) || 0;
+      if (star > 0) { podrobnosti.push({ event_id: Number(x.event_id), cents: star, vrsta: "rok_hrambe" }); rokHrambe.push({ event_id: Number(x.event_id), cents: star }); }
     }
     // Odprti spori (tudi poizvedbe: lahko preidejo v spor) in izgubljeni s se neopravljeno povrnitvijo od kluba.
     const sp = await pool.query(
@@ -136,7 +143,7 @@ function ustvari(dep) {
       const c = Number(x.cents) || 0;
       if (c > 0) { vsota += c; podrobnosti.push({ event_id: Number(x.event_id), cents: c, vrsta: "vracilo" }); }
     }
-    return { zadrzano: vsota, podrobnosti };
+    return { zadrzano: vsota, podrobnosti, rokHrambe };
   }
 
   const eur = (seznam) => (Array.isArray(seznam) ? seznam : []).filter((x) => String(x.currency || "").toLowerCase() === "eur").reduce((a, x) => a + (Number(x.amount) || 0), 0);
@@ -174,6 +181,15 @@ function ustvari(dep) {
         { stripeAccount: racun, idempotencyKey: kljuc(id) });
       await pool.query("UPDATE izplacila SET stanje = 'poslano', payout_id = $2, stripe_stanje = $3, posodobljeno_at = NOW() WHERE id = $1", [id, p.id, String(p.status || "").slice(0, 30) || null]);
       log.log(`[izplacila] klub ${klubId}: izplacilo ${id} ${znesek} c (na voljo ${naVoljo}, zadrzano ${zad.zadrzano}, v cakanju ${vCakanju})`);
+      // Pogodba 7. clen: denar prihodnjega dogodka, ki ga Stripe ne dovoli drzati dlje (> IZPLACILA_NAJDLJE_DNI po placilu), je sel ven s tem izplacilom.
+      // Zapis je v podrobnosti (vrsta rok_hrambe); POZOR (Sentry) samo prvic za dogodek (prejsnja poslana/placana izplacila ga ze nosijo -> brez ponavljanja vsako uro).
+      if (zad.rokHrambe.length) {
+        const prej = new Set((await pool.query(
+          `SELECT DISTINCT (x->>'event_id')::int AS e FROM izplacila i, jsonb_array_elements(i.podrobnosti) x
+            WHERE i.stripe_account_id = $1 AND i.id <> $2 AND i.stanje IN ('poslano', 'placano') AND x->>'vrsta' = 'rok_hrambe'`, [racun, id])).rows.map((x) => x.e));
+        const novi = zad.rokHrambe.filter((x) => !prej.has(x.event_id));
+        if (novi.length) log.error(`[izplacila] POZOR: klub ${klubId}: denar prihodnjih dogodkov je bil na racunu kluba vec kot ${najdljeDni()} dni (Stripe dovoli najvec 90), zato je izplacan PRED dogodkom z izplacilom ${id} (pogodba 7. clen): ${novi.map((x) => `dogodek ${x.event_id}: ${x.cents} c`).join(", ")}. Ob odpovedi ali sporu vracilo pokrije klub iz drugega denarja.`);
+      }
       return { stanje: "poslano", znesek, zadrzano: zad.zadrzano };
     } catch (e) {
       // Je Stripe izplacilo morda vseeno ustvaril (rok omrezja)? Poisci po metadata; sicer vrstica ni_uspelo (naslednji krog naredi novo z novim stanjem).

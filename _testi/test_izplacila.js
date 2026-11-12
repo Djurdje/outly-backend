@@ -10,6 +10,7 @@
  *   4  samo prihodnji dogodek -> ni izplacila; koncan + 2 delovna dneva -> izplacilo TOCNO neto tega dogodka (Stripe-Account, idempotentni kljuc); naslednji krog nic
  *   5  zadrzanje: odprt spor (znesek + pristojbine; na nesproscenem dogodku samo pristojbine), izgubljen spor s cakajoco povrnitvijo, vracilo inactive_order, odpovedan dogodek,
  *      dogodek 1 delovni dan po koncu; v_cakanju (pending) pokrije zadrzano; testno/tuje/platformno narocilo ne steje; narocilo starejse od 85 dni se ne zadrzi
+ *   5b rok hrambe (pogodba 7. clen): denar prihodnjega dogodka, starejsi od 85 dni, gre ven, zapis rok_hrambe, POZOR enkrat
  *   6  admin odobri prej -> denar dogodka gre ven
  *   7  socasnost: dva hkratna krogi/racuni = eno izplacilo; zavrnjeno izplacilo -> ni_uspelo + POZOR + 24 h premor; napaka po ustvarjanju -> posvojeno po metadata
  *   8  izid: paid -> placano, failed -> ni_uspelo + POZOR; obviselo v_teku -> posvojeno ali zaprto; racun brez payouts_enabled se preskoci
@@ -246,6 +247,19 @@ async function main() {
     F.stanje.acct_k1 = { a: 2500, p: 0 };
     await I.krog();
     assert(klici("/v1/payouts", "POST").length === 0, "na voljo manj kot zadrzano, nic v cakanju: ni izplacila");
+
+    console.log("\n# 5b Rok hrambe (pogodba 7. clen): denar prihodnjega dogodka, star > 85 dni, gre ven z zapisom in POZOR enkrat");
+    await ciste();
+    F.stanje.acct_k1 = { a: zad + 4000, p: 0 };
+    r = await I.izplacajRacun(s, K1, "acct_k1");
+    vr = (await pool.query("SELECT znesek_cents, podrobnosti FROM izplacila WHERE stanje = 'poslano'")).rows;
+    const rh = vr.length ? vr[0].podrobnosti.filter((x) => x.vrsta === "rok_hrambe") : [];
+    assert(r.stanje === "poslano" && r.znesek === 4000 && rh.length === 1 && rh[0].event_id === E2 && rh[0].cents === 4000, "izplacan TOCNO denar, star vec kot 85 dni; zapisan kot rok_hrambe", { r, vr });
+    const pozorRh = () => dnevnik.filter((x) => /izplacan PRED dogodkom/.test(x) && x.includes(`dogodek ${E2}: 4000 c`)).length;
+    assert(pozorRh() === 1, "POZOR adminu (Sentry) ob izplacilu pred dogodkom", dnevnik);
+    F.stanje.acct_k1.a += 500;
+    r = await I.izplacajRacun(s, K1, "acct_k1");
+    assert(r.stanje === "poslano" && r.znesek === 500 && pozorRh() === 1, "naslednje izplacilo: brez ponovnega POZOR za isti dogodek", { r, n: pozorRh() });
 
     console.log("\n# 6 Admin odobri prej");
     await ciste();
