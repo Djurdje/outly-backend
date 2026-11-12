@@ -246,6 +246,21 @@
     await odpri(cele(e.id));
   }
 
+  async function izplacajPrej() {
+    const e = trenutni.event, s = trenutni.stats;
+    const ok = await potrdi({
+      naslov: "Izplačam klubu prej?", nevarno: true, potrdiBesedilo: "Izplačaj prej", razlog: "obvezen",
+      vsebina: [h("p", {}, `Kupnina za »${e.title}« (${cele(s.paid_orders)} plačanih naročil, ${cena(s.paid_cents)}) gre klubu na banko ob naslednjem krogu izplačil, ne šele po dogodku.`),
+        h("p", {}, "Če dogodek pozneje odpovemo ali pride spor, mora vračilo pokriti klub iz drugega denarja; tega dejanja ni mogoče preklicati.")],
+    });
+    if (!ok) return;
+    await varno(async () => {
+      const r = await klic("POST", "/admin/api/events/" + cele(e.id) + "/payout-early", { reason: ok.razlog });
+      obvesti(r && r.enabled === false ? "Odobreno. Izplačila po dogodku še niso vklopljena (IZPLACILA_PO_DOGODKU), Stripe izplačuje samodejno." : "Izplačilo klubu odobreno prej.", "ok");
+    });
+    await odpri(cele(e.id));
+  }
+
   async function spremeniStanje(novo) {
     const e = trenutni.event, s = trenutni.stats;
     let ok;
@@ -346,7 +361,7 @@
   function zgodovina(vrstice) {
     if (!vrstice.length) return h("div", { class: "prazno" }, "Admin tega dogodka še ni spreminjal.");
     const IME = { "event.update": "Urejeno", "event.publish": "Objavljeno", "event.unpublish": "Med osnutke", "event.cancel": "Odpovedano", "event.delete": "Izbrisano",
-      "event.sales_pause": "Prodaja ustavljena", "event.sales_resume": "Prodaja spet teče", "event.duplicate": "Podvojeno", "event.publish_auto": "Objavljeno samodejno" };
+      "event.sales_pause": "Prodaja ustavljena", "event.sales_resume": "Prodaja spet teče", "event.duplicate": "Podvojeno", "event.publish_auto": "Objavljeno samodejno", "event.payout_early": "Izplačilo klubu prej" };
     return h("ul", { class: "dg-zgodovina" }, vrstice.map((a) => {
       const prej = a.prej || {}, potem = a.potem || {};
       const kljuci = [...new Set([...Object.keys(prej), ...Object.keys(potem)])];
@@ -378,6 +393,8 @@
       if (e.status !== "published") { const g = h("button", { type: "button", id: "dge_objavi", class: "dobro mali" }, "Objavi"); g.onclick = () => spremeniStanje("published"); gumbi.push(g); }
       if (e.status === "published") { const g = h("button", { type: "button", class: "tih mali" }, "Med osnutke"); g.onclick = () => spremeniStanje("draft"); gumbi.push(g); }
       if (e.status !== "cancelled") { const g = h("button", { type: "button", class: "nevarno mali" }, "Odpovej dogodek"); g.onclick = () => spremeniStanje("cancelled"); gumbi.push(g); }
+      // #424 A (I72): izplacilo kupnine klubu pred rokom (sicer N delovnih dni po koncu dogodka); sled v dnevniku (event.payout_early).
+      if (e.status !== "cancelled" && !s.payout_early_at) { const g = h("button", { type: "button", class: "tih mali" }, "Izplačaj klubu prej"); g.onclick = () => izplacajPrej(); gumbi.push(g); }
       // Pravo brisanje (brisanje.js, I63): samo ce dogodek nima pravega prometa; sicer razlaga in »Odpovej dogodek« zgoraj.
       if (window.brisanje) gumbi.push(window.brisanje.dogodekGumb(e, { odpovej: () => spremeniStanje("cancelled"), po: () => pojdi(null) }));
 

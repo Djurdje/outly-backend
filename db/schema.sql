@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–076, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–077, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -15,7 +15,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Filxoz9AEImHy4nLavJwjm4hCONV05YbzbyQVyLTANFy37Le5Tm4tmM9VkPwksT
+\restrict wWaCVoghwkSfvEoSAS9zOj0RfopldHfV1IR7iJYqvAeLsPsdFx1DspEZfMppKaj
 
 -- Dumped from database version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
@@ -1196,6 +1196,101 @@ CREATE TABLE public.help_feedback (
 --
 
 COMMENT ON TABLE public.help_feedback IS 'Odzivi »Was this helpful?« pod clanki pomoci (049): en glas na uporabnika na clanek, ponovni glas prepise. article = id clanka iz aplikacije (brez tujega kljuca). CASCADE ob izbrisu racuna.';
+
+
+--
+-- Name: izplacila; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.izplacila (
+    id bigint NOT NULL,
+    club_id integer NOT NULL,
+    stripe_account_id text NOT NULL,
+    livemode boolean NOT NULL,
+    stanje text DEFAULT 'v_teku'::text NOT NULL,
+    znesek_cents integer,
+    valuta character(3) DEFAULT 'EUR'::bpchar NOT NULL,
+    zadrzano_cents bigint,
+    na_voljo_cents bigint,
+    v_cakanju_cents bigint,
+    podrobnosti jsonb,
+    payout_id text,
+    stripe_stanje text,
+    napaka text,
+    ustvarjeno_at timestamp with time zone DEFAULT now() NOT NULL,
+    prevzeto_at timestamp with time zone DEFAULT now() NOT NULL,
+    posodobljeno_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT izplacila_stanje_chk CHECK ((stanje = ANY (ARRAY['v_teku'::text, 'poslano'::text, 'placano'::text, 'ni_uspelo'::text]))),
+    CONSTRAINT izplacila_znesek_chk CHECK (((znesek_cents IS NULL) OR (znesek_cents > 0)))
+);
+
+
+--
+-- Name: TABLE izplacila; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.izplacila IS 'Izplacila Connect racunov klubov na banko po dogodku (077, #424 A, I72); brez osebnih podatkov.';
+
+
+--
+-- Name: izplacila_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.izplacila_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: izplacila_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.izplacila_id_seq OWNED BY public.izplacila.id;
+
+
+--
+-- Name: izplacila_odobritve; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.izplacila_odobritve (
+    event_id integer NOT NULL,
+    admin_user_id integer,
+    odobreno_at timestamp with time zone DEFAULT now() NOT NULL,
+    razlog text NOT NULL
+);
+
+
+--
+-- Name: TABLE izplacila_odobritve; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.izplacila_odobritve IS 'Admin je izplacilo denarja dogodka odobril pred rokom (077, #424 A); sled v admin_dejanja.';
+
+
+--
+-- Name: izplacila_racuni; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.izplacila_racuni (
+    stripe_account_id text NOT NULL,
+    club_id integer NOT NULL,
+    livemode boolean NOT NULL,
+    rocno_at timestamp with time zone,
+    poskusi integer DEFAULT 0 NOT NULL,
+    naslednji_at timestamp with time zone DEFAULT now() NOT NULL,
+    napaka text,
+    posodobljen_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE izplacila_racuni; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.izplacila_racuni IS 'Connect racuni klubov z rocnim urnikom izplacil (077, #424 A).';
 
 
 --
@@ -2547,6 +2642,13 @@ ALTER TABLE ONLY public.guest_lists ALTER COLUMN id SET DEFAULT nextval('public.
 
 
 --
+-- Name: izplacila id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.izplacila ALTER COLUMN id SET DEFAULT nextval('public.izplacila_id_seq'::regclass);
+
+
+--
 -- Name: orders id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -2821,6 +2923,30 @@ ALTER TABLE ONLY public.guest_lists
 
 ALTER TABLE ONLY public.help_feedback
     ADD CONSTRAINT help_feedback_pkey PRIMARY KEY (user_id, article);
+
+
+--
+-- Name: izplacila_odobritve izplacila_odobritve_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.izplacila_odobritve
+    ADD CONSTRAINT izplacila_odobritve_pkey PRIMARY KEY (event_id);
+
+
+--
+-- Name: izplacila izplacila_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.izplacila
+    ADD CONSTRAINT izplacila_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: izplacila_racuni izplacila_racuni_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.izplacila_racuni
+    ADD CONSTRAINT izplacila_racuni_pkey PRIMARY KEY (stripe_account_id);
 
 
 --
@@ -3451,6 +3577,41 @@ CREATE INDEX guest_lists_host_user_idx ON public.guest_lists USING btree (host_u
 --
 
 CREATE INDEX help_feedback_article_idx ON public.help_feedback USING btree (article);
+
+
+--
+-- Name: izplacila_klub_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX izplacila_klub_idx ON public.izplacila USING btree (club_id, ustvarjeno_at DESC);
+
+
+--
+-- Name: izplacila_poslano_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX izplacila_poslano_idx ON public.izplacila USING btree (posodobljeno_at) WHERE (stanje = 'poslano'::text);
+
+
+--
+-- Name: izplacila_racun_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX izplacila_racun_idx ON public.izplacila USING btree (stripe_account_id, posodobljeno_at DESC);
+
+
+--
+-- Name: izplacila_racuni_klub_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX izplacila_racuni_klub_idx ON public.izplacila_racuni USING btree (club_id);
+
+
+--
+-- Name: izplacila_v_teku_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX izplacila_v_teku_key ON public.izplacila USING btree (stripe_account_id) WHERE (stanje = 'v_teku'::text);
 
 
 --
@@ -4714,5 +4875,5 @@ ALTER TABLE ONLY public.vracila
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Filxoz9AEImHy4nLavJwjm4hCONV05YbzbyQVyLTANFy37Le5Tm4tmM9VkPwksT
+\unrestrict wWaCVoghwkSfvEoSAS9zOj0RfopldHfV1IR7iJYqvAeLsPsdFx1DspEZfMppKaj
 

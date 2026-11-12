@@ -4551,7 +4551,8 @@ admin.get("/events/:id", async (req, res) => {
               (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}) AS test_paid_orders,
               (SELECT COALESCE(SUM(o.total_cents - o.refunded_cents), 0)::int FROM orders o WHERE o.event_id = $1 AND o.status IN ('paid','partially_refunded') AND o.guest_list_id IS NULL AND ${SQL_TESTNO_NAROCILO}) AS test_paid_cents,
               (SELECT COUNT(*)::int FROM orders o WHERE o.event_id = $1 AND o.status = 'pending') AS pending_orders,
-              (SELECT COUNT(*)::int FROM tickets t WHERE t.event_id = $1 AND t.status = 'used') AS checked_in`, [id])).rows[0];
+              (SELECT COUNT(*)::int FROM tickets t WHERE t.event_id = $1 AND t.status = 'used') AS checked_in,
+              (SELECT odobreno_at FROM izplacila_odobritve WHERE event_id = $1) AS payout_early_at`, [id])).rows[0];
     const dn = await c.query(
       `SELECT a.id, a.cas, a.dejanje, a.prej, a.potem, a.razlog, u.email AS admin_email, a.nujno, a.agent_zeton_id
          FROM admin_dejanja a LEFT JOIN users u ON u.id = a.admin_user_id
@@ -5260,6 +5261,12 @@ require("./racuni").ustvari({ pool }).zazeni();
 const uskladitevStripe = require("./uskladitev_stripe").ustvari({ pool, SQL_TESTNO_NAROCILO, stripe: placilaStripe.stripe, jeLive: placilaStripe.jeLive, odgovoriNaNapako });
 uskladitevStripe.registriraj(admin);
 uskladitevStripe.zazeni();
+// Izplacila klubom sele po dogodku (#424 A, Martin 8. 11. 2026, migracija 077, I72; izplacila_stripe.js): rocni urnik Connect racunov in delavec izplacil na glavnem poolu
+// (nikoli skenPool). Vklop IZPLACILA_PO_DOGODKU=1 (Martin); sicer brez klicev Stripa. Admin: GET /admin/api/payouts, POST /admin/api/events/:id/payout-early.
+const izplacila = require("./izplacila_stripe");
+const izplacilaKlubom = izplacila.ustvari({ pool, stripe: placilaStripe.stripe, jeLive: placilaStripe.jeLive, zapisiAdminDejanje, celoId4, odgovoriNaNapako });
+izplacilaKlubom.registriraj(admin);
+izplacilaKlubom.zazeni();
 app.post("/stripe/webhook", express.raw({ type: "*/*", limit: "1mb" }), stripePlacila.webhook);
 
 // Klub, za katerega gre (requireClub). Admin brez izbranega kluba ga mora izbrati (glava X-Outly-Club).
@@ -5302,11 +5309,18 @@ async function stripeRacunKluba(s, k, userId) {
       capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
       business_profile: { name: k.name },
       metadata: { club_id: String(k.id) },
+      // #424 A (I72): ob vklopu IZPLACILA_PO_DOGODKU nov racun takoj dobi rocna izplacila (denar ostane na racunu kluba do sprostitve dogodka).
+      ...(izplacila.vklopljeno() ? { settings: izplacila.nastavitveRacuna() } : {}),
     });
     const ziv = placilaStripe.jeLive();
     await c.query(
       `UPDATE clubs SET stripe_account_id=$2, stripe_account_livemode=$3, stripe_charges_enabled=FALSE, stripe_payouts_enabled=FALSE, stripe_onboarded_at=NULL
         WHERE id=$1`, [k.id, nov.id, ziv]);
+    if (izplacila.vklopljeno()) {
+      await c.query(
+        `INSERT INTO izplacila_racuni (stripe_account_id, club_id, livemode, rocno_at) VALUES ($1, $2, $3, CASE WHEN $4::boolean THEN NOW() END)
+         ON CONFLICT (stripe_account_id) DO NOTHING`, [nov.id, k.id, ziv, izplacila.jeRocen(nov)]);
+    }
     await c.query("COMMIT");
     console.log(`[stripe] klub ${k.id}: nov Connect racun (${ziv ? "LIVE" : "sandbox"}${ze && ze.stripe_account_id ? ", nadomesca racun iz drugega nacina" : ""})`);
     return nov.id;

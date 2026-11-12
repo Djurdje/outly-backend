@@ -289,6 +289,14 @@ async function posodobiKlub(c, racun) {
             stripe_onboarded_at = CASE WHEN $4 AND stripe_onboarded_at IS NULL THEN NOW() ELSE stripe_onboarded_at END
       WHERE stripe_account_id = $1 AND COALESCE(stripe_account_livemode, FALSE) = $5`,
     [racun.id, !!racun.charges_enabled, !!racun.payouts_enabled, !!racun.details_submitted, jeLive()]);
+  // #424 A (I72, izplacila_stripe.js): racun, ki je imel potrjena rocna izplacila, ima zdaj drugacen urnik (sprememba v Stripu) -> delavec ga takoj nastavi znova.
+  const int = racun.settings && racun.settings.payouts && racun.settings.payouts.schedule ? racun.settings.payouts.schedule.interval : null;
+  if (int && int !== "manual") {
+    const r = await c.query(
+      `UPDATE izplacila_racuni SET rocno_at = NULL, naslednji_at = NOW(), napaka = $2, posodobljen_at = NOW() WHERE stripe_account_id = $1 AND rocno_at IS NOT NULL RETURNING club_id`,
+      [racun.id, `account.updated: urnik izplacil ${String(int).slice(0, 20)}, ne manual`]);
+    if (r.rowCount) console.error(`[izplacila] POZOR: klub ${r.rows[0].club_id}: Connect racun ima urnik izplacil »${int}« namesto rocnega; delavec ga nastavi znova (do takrat Stripe izplacuje samodejno).`);
+  }
 }
 
 // Stanje narocila po vracilu: refunded_cents (nikoli navzdol), stanje, ob polnem vracilu vstopnice `refunded`. Ena funkcija za webhook `charge.refunded`
