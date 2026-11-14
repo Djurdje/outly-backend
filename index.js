@@ -653,7 +653,7 @@ const POLJA_SEJE = "id, email, username, role";
 // (prepovedana_imena.js). Tu ne moremo vrniti 400 (vrstica nastane med overitvijo seje,
 // uporabnik bi ostal brez računa), zato prepovedano ime iz metapodatkov tiho nadomesti »user«
 // (NE del e-naslova: ta bi postal javno ime, ki si ga uporabnik ni izbral); uporabnik ga zamenja
-// prek PATCH /me. Manjkajoče ali neveljavno ime: del e-naslova; isti filter velja tudi zanj
+// prek PATCH /me. Manjkajoče ali neveljavno ime: del e-naslova (razen Applovega skritega naslova: »user«); isti filter velja tudi zanj
 // (»admin@…« ne postane »admin«), sicer »user«.
 function predlogImena(p) {
   const meta = p.user_metadata || {};
@@ -662,6 +662,9 @@ function predlogImena(p) {
     if (!jePrepovedanoIme(zeljeno)) return zeljeno;
     return "user";   // izbrano ime je prepovedano: del e-naslova bi postal javno ime brez obvestila
   }
+  // Applov »Hide My Email« (@privaterelay.appleid.com): lokalni del je nakljucen niz, ki bi postal javno ime → »user«
+  // (nov racun izbere ime prek PATCH /me; trk imena dobi pripono spodaj). Google/Apple z pravim naslovom: kot doslej.
+  if (/@privaterelay\.appleid\.com$/i.test(String(p.email).trim())) return "user";
   const osnova = String(p.email).split("@")[0].replace(/[^a-zA-Z0-9_]/g, "").slice(0, 16);
   return (osnova.length >= 3 && !jePrepovedanoIme(osnova) ? osnova : "user") ;
 }
