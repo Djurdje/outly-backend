@@ -653,7 +653,7 @@ const POLJA_SEJE = "id, email, username, role";
 // (prepovedana_imena.js). Tu ne moremo vrniti 400 (vrstica nastane med overitvijo seje,
 // uporabnik bi ostal brez računa), zato prepovedano ime iz metapodatkov tiho nadomesti »user«
 // (NE del e-naslova: ta bi postal javno ime, ki si ga uporabnik ni izbral); uporabnik ga zamenja
-// prek PATCH /me. Manjkajoče ali neveljavno ime: del e-naslova; isti filter velja tudi zanj
+// prek PATCH /me. Manjkajoče ali neveljavno ime: del e-naslova (razen Applovega skritega naslova: »user«); isti filter velja tudi zanj
 // (»admin@…« ne postane »admin«), sicer »user«.
 function predlogImena(p) {
   const meta = p.user_metadata || {};
@@ -662,6 +662,9 @@ function predlogImena(p) {
     if (!jePrepovedanoIme(zeljeno)) return zeljeno;
     return "user";   // izbrano ime je prepovedano: del e-naslova bi postal javno ime brez obvestila
   }
+  // Applov »Hide My Email« (@privaterelay.appleid.com): lokalni del je nakljucen niz, ki bi postal javno ime → »user«
+  // (nov racun izbere ime prek PATCH /me; trk imena dobi pripono spodaj). Google/Apple z pravim naslovom: kot doslej.
+  if (/@privaterelay\.appleid\.com$/i.test(String(p.email).trim())) return "user";
   const osnova = String(p.email).split("@")[0].replace(/[^a-zA-Z0-9_]/g, "").slice(0, 16);
   return (osnova.length >= 3 && !jePrepovedanoIme(osnova) ? osnova : "user") ;
 }
@@ -810,8 +813,12 @@ async function uporabnikIzSupabase(p, db = pool, token = null) {
   if (r2.rows.length) return r2.rows[0];
 
   const ime = predlogImena(p);
-  for (let poskus = 0; poskus < 4; poskus++) {
-    const kandidat = poskus === 0 ? ime : `${ime.slice(0, 14)}_${crypto.randomInt(1000, 9999)}`;
+  // Trk imena: pripona iz SAMIH STEVK (odjemalca prepoznata nadomestno ime kot ^user(_\d+)?$). Za »user« (Applov skriti naslov in prepovedana imena:
+  // vsi delijo isti bazen) 8 stevk (90 milijonov), sicer 4 (ime je ze razlicno, trk redek); skupaj najvec 20 znakov (pravilo 3-20).
+  const dolPripone = ime === "user" ? 8 : 4;
+  for (let poskus = 0; poskus < 6; poskus++) {
+    const pripona = crypto.randomInt(10 ** (dolPripone - 1), 10 ** dolPripone);
+    const kandidat = poskus === 0 ? ime : `${ime.slice(0, 19 - dolPripone)}_${pripona}`;
     try {
       const r3 = await db.query(
         `INSERT INTO users (email, password_hash, username, email_verified, supabase_uid)
@@ -863,7 +870,7 @@ async function razberiUporabnika(token, db = pool) {
   }
   const u = await uporabnikIzSupabase(p, db, token);
   return { userId: u.id, email: u.email, username: u.username, role: u.role, auth: "supabase",
-           supabaseToken: token, supabaseSub: p.sub.toLowerCase(), supabaseExp: p.exp };
+           supabaseToken: token, supabaseSub: p.sub.toLowerCase(), supabaseExp: p.exp, supabaseAmr: p.amr };
 }
 
 // Skupna logika; `db` je pool, prek katerega gre iskanje uporabnika (glavni pool ali skenPool za poti skena).
@@ -1633,17 +1640,39 @@ async function izbrisiSupabaseRacun(token) {
   if (!r.ok) throw new Error("delete_my_account " + r.status + " " + (await r.text()).slice(0, 200));
 }
 
+// Ponovna overitev za racun BREZ gesla (Google/Apple), DELETE /me { reauth: "provider" }: JWT `amr` (podpisan, torej ni ponarejen) mora imeti
+// vnos { method: "oauth", timestamp } mlajsi od IZBRIS_REAUTH_SEKUND (privzeto 300 s). GoTrue za id_token in PKCE prijavo zapise method "oauth"
+// (models/amr.go, token_oidc.go:346, external.go:109); timestamp = cas zadnje prijave te metode v seji, osvezitev zetona ga NE spremeni
+// (osvezitev doda samo nov zeton z amr iz iste seje), zato star zeton po osvezitvi ni »svez«. Nov zeton = nova prijava pri ponudniku.
+const IZBRIS_REAUTH_SEKUND = (() => {
+  const v = Number(process.env.IZBRIS_REAUTH_SEKUND);
+  if (!process.env.IZBRIS_REAUTH_SEKUND) return 300;
+  if (Number.isInteger(v) && v >= 60 && v <= 900) return v;
+  console.warn(`[izbris] IZBRIS_REAUTH_SEKUND=${JSON.stringify(process.env.IZBRIS_REAUTH_SEKUND)} izven mej 60-900: uporabljeno 300`);
+  return 300;
+})();
+function svezaPrijavaPonudnika(amr, zdaj = Math.floor(Date.now() / 1000)) {
+  if (!Array.isArray(amr)) return false;
+  return amr.some((e) => e && typeof e === "object" && e.method === "oauth" && Number.isInteger(e.timestamp)
+    && e.timestamp <= zdaj + 60 && zdaj - e.timestamp <= IZBRIS_REAUTH_SEKUND);
+}
+
 app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3600 }), async (req, res) => {
   let supabaseIzbrisan = false;   // po izbrisu pri Supabase ponovitev ni vec mogoca (zeton neveljaven) -> napaka zasedenosti NE sme vrniti 503 "poskusi znova"
   try {
     const { password } = req.body || {};
     const supabase = true;
 
-    if (typeof password !== "string" || !password) {
+    const brezGesla = typeof password !== "string" || !password;
+    if (brezGesla && (req.body || {}).reauth !== "provider") {
       return res.status(400).send("Password required to delete account.");
     }
+    if (brezGesla && !svezaPrijavaPonudnika(req.user.supabaseAmr)) {
+      // POZOR: v `message` NE sme biti besede »token«: odjemalca ob »token« v 401 osvezita sejo ali uporabnika odjavita (outly-app APIClient+Account, splet api.js).
+      return res.status(401).json({ error: "reauth_required", message: "Sign in again with Google or Apple, then retry deleting the account." });
+    }
 
-    {
+    if (!brezGesla) {
       // Ponovna prijava pri Supabase s trenutnim geslom: ukraden žeton (velja
       // do ure) sam ne sme zadostovati za nepovraten izbris.
       const r = await fetch(SUPABASE_ISS + "/token?grant_type=password", {
