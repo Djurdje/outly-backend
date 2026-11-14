@@ -127,7 +127,7 @@ kar ni več past, gre v nov arhiv `docs/arhiv/STATE-do-<datum>.md`. **Odprte nal
 - **Meja:** po prevzemu v račun se serial NE zamenja (PDF/koda v mailu veljata naprej); ugovor prejemnika (21(4)) gre z odgovorom na mail (ročno), gumba »Zavrni vstopnico« ni.
 - **Postopek: ugovor/izbris prejemnika** (odgovor na mail ali zahteva): admin (račun z vlogo admin) pokliče `POST /admin/api/guest-tickets/erase` z `{ "email": "<naslov>" }`; odgovor `{ tickets, transfers }`. Povezava preneha delovati, vstopnica in koda v mailu veljata naprej (vrnitev pošiljatelju ročno). Ni v admin panelu.
 
-## Guest lista (od 8. 10. 2026; I24) → `docs/arhiv/STATE-do-2026-11-14.md` (premaknjeno zaradi meje 200 vrstic; pasti veljajo še)
+## Guest lista (I24) → `docs/arhiv/STATE-do-2026-11-14.md`. **Pasti:** naročilo guest liste JE vrstica `orders` (total 0, `paid`): vsaka agregacija PRODAJE mora imeti `o.guest_list_id IS NULL`; `checked_in` šteje tudi guest listo; števec in seznam vabil delita pogoje (`GUEST_LISTA_NEPREBRANA_*`)
 
 ## Prijava z Googlom in Applom (14. 11. 2026; ARCHITECTURE »Prijava z Googlom in Applom«, I72, DECISIONS 2026-11-14)
 

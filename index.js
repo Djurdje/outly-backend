@@ -813,8 +813,12 @@ async function uporabnikIzSupabase(p, db = pool, token = null) {
   if (r2.rows.length) return r2.rows[0];
 
   const ime = predlogImena(p);
-  for (let poskus = 0; poskus < 4; poskus++) {
-    const kandidat = poskus === 0 ? ime : `${ime.slice(0, 14)}_${crypto.randomInt(1000, 9999)}`;
+  // Trk imena: pripona iz SAMIH STEVK (odjemalca prepoznata nadomestno ime kot ^user(_\d+)?$). Za »user« (Applov skriti naslov in prepovedana imena:
+  // vsi delijo isti bazen) 8 stevk (90 milijonov), sicer 4 (ime je ze razlicno, trk redek); skupaj najvec 20 znakov (pravilo 3-20).
+  const dolPripone = ime === "user" ? 8 : 4;
+  for (let poskus = 0; poskus < 6; poskus++) {
+    const pripona = crypto.randomInt(10 ** (dolPripone - 1), 10 ** dolPripone);
+    const kandidat = poskus === 0 ? ime : `${ime.slice(0, 19 - dolPripone)}_${pripona}`;
     try {
       const r3 = await db.query(
         `INSERT INTO users (email, password_hash, username, email_verified, supabase_uid)
@@ -1640,7 +1644,13 @@ async function izbrisiSupabaseRacun(token) {
 // vnos { method: "oauth", timestamp } mlajsi od IZBRIS_REAUTH_SEKUND (privzeto 300 s). GoTrue za id_token in PKCE prijavo zapise method "oauth"
 // (models/amr.go, token_oidc.go:346, external.go:109); timestamp = cas zadnje prijave te metode v seji, osvezitev zetona ga NE spremeni
 // (osvezitev doda samo nov zeton z amr iz iste seje), zato star zeton po osvezitvi ni »svez«. Nov zeton = nova prijava pri ponudniku.
-const IZBRIS_REAUTH_SEKUND = Number(process.env.IZBRIS_REAUTH_SEKUND) || 300;
+const IZBRIS_REAUTH_SEKUND = (() => {
+  const v = Number(process.env.IZBRIS_REAUTH_SEKUND);
+  if (!process.env.IZBRIS_REAUTH_SEKUND) return 300;
+  if (Number.isInteger(v) && v >= 60 && v <= 900) return v;
+  console.warn(`[izbris] IZBRIS_REAUTH_SEKUND=${JSON.stringify(process.env.IZBRIS_REAUTH_SEKUND)} izven mej 60-900: uporabljeno 300`);
+  return 300;
+})();
 function svezaPrijavaPonudnika(amr, zdaj = Math.floor(Date.now() / 1000)) {
   if (!Array.isArray(amr)) return false;
   return amr.some((e) => e && typeof e === "object" && e.method === "oauth" && Number.isInteger(e.timestamp)
@@ -1658,6 +1668,7 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       return res.status(400).send("Password required to delete account.");
     }
     if (brezGesla && !svezaPrijavaPonudnika(req.user.supabaseAmr)) {
+      // POZOR: v `message` NE sme biti besede »token«: odjemalca ob »token« v 401 osvezita sejo ali uporabnika odjavita (outly-app APIClient+Account, splet api.js).
       return res.status(401).json({ error: "reauth_required", message: "Sign in again with Google or Apple, then retry deleting the account." });
     }
 

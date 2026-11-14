@@ -3,7 +3,7 @@
  * Izbris racuna za racun brez gesla (Google/Apple), DELETE /me { reauth: "provider" } (14. 11. 2026; ARCHITECTURE »Prijava z Googlom in Applom« tocka 8, I73).
  * Zagon: DATABASE_URL="postgres://postgres@localhost:5446/postgres" node _testi/test_izbris_ponudnik.js
  *
- * Lazni »Supabase« (JWKS, /auth/v1/user, /auth/v1/settings, /auth/v1/token?grant_type=password, /rest/v1/rpc/delete_my_account) na 3364, backend na 3363.
+ * Lazni »Supabase« (JWKS, /auth/v1/user, /auth/v1/settings, /auth/v1/token?grant_type=password, /rest/v1/rpc/delete_my_account) na 3862, backend na 3861.
  * Oblika `amr` po supabase/auth (models/sessions.go:72-76 AMREntry {method, timestamp, provider?}; timestamp = updated_at zahtevka v mfa_amr_claims, ki ga
  * osvezitev zetona NE spremeni; `id_token` in PKCE prijava zapisujeta method "oauth", models/amr.go + token_oidc.go:346, external.go:109).
  * Varovalo: ukraden zeton (velja do ure) sam ne sme zadostovati za nepovraten izbris -> amr oauth mora biti mlajsi od 300 s.
@@ -15,7 +15,7 @@ const { Pool } = require("pg");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const PORT = 3363, STUB_PORT = 3364;
+const PORT = 3861, STUB_PORT = 3862;
 const BASE = `http://127.0.0.1:${PORT}`;
 const kp = () => crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
 const { publicKey, privateKey } = kp();
@@ -103,7 +103,8 @@ function assert(cond, msg, extra) { if (cond) { ok++; console.log("  ✓", msg);
     ["svez token_refresh + star oauth", [{ method: "token_refresh", timestamp: zdaj() - 5 }, { method: "oauth", timestamp: zdaj() - 4000 }]],
     ["amr kot niz (stara oblika)", ["oauth"]],
     ["brez amr", undefined],
-    ["timestamp v prihodnosti", [{ method: "oauth", timestamp: zdaj() + 3600 }]],
+    ["timestamp v prihodnosti (+3600 s)", [{ method: "oauth", timestamp: zdaj() + 3600 }]],
+    ["timestamp +61 s (zavrnjen)", [{ method: "oauth", timestamp: zdaj() + 61 }]],
     ["timestamp kot niz", [{ method: "oauth", timestamp: String(zdaj()) }]],
     ["amr ni polje", { method: "oauth", timestamp: zdaj() }],
   ];
@@ -114,6 +115,10 @@ function assert(cond, msg, extra) { if (cond) { ok++; console.log("  ✓", msg);
     assert(r.status === 401 && r.body.error === "reauth_required" && await obstaja(u.id), `${ime}: 401 reauth_required, vrstica ostane`, r);
   }
   assert(stub.rpc === 0, "noben od teh ni poklical Supabase RPC");
+  assert(!/token/i.test(String(r.body.message)), "message 401 reauth_required NE vsebuje »token« (odjemalca ob »token« osvezita/odjavita sejo)", r.body.message);
+  u = await racun(n++, oauth(20));
+  r = await api("DELETE", "/me", zeton(u.sub, u.email, [{ method: "oauth", timestamp: zdaj() + 59 }]), { reauth: "provider" });
+  assert(r.status === 200, "timestamp +59 s (zamik ure med Supabase in nami) je sprejet", r);
 
   console.log("\n# (4) brez gesla in brez reauth -> 400 (obstojece besedilo); neznan reauth -> 400");
   u = await racun(30, oauth(5));

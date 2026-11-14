@@ -22,7 +22,7 @@ const { Pool } = require("pg");
 
 const DB = process.env.DATABASE_URL;
 if (!DB) { console.error("DATABASE_URL manjka"); process.exit(1); }
-const PORT = 3361, STUB_PORT = 3362;
+const PORT = 3851, STUB_PORT = 3852;
 const BASE = `http://127.0.0.1:${PORT}`;
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
@@ -112,7 +112,20 @@ async function api(method, path, token, body) {
   s = uuid(3); relay = "abc_def_123_xyz@PrivateRelay.AppleID.com";
   stub.odgovori.set(s, potrjen(s, relay.toLowerCase(), "apple"));
   r = await api("GET", "/me", apple(s, relay.toLowerCase(), "true"));
-  assert(r.status === 200 && /^user_\d{4}$/.test(r.body.username), "drugi relay uporabnik: »user_NNNN« (trk imena, 23505 -> pripona)", r.body.username);
+  assert(r.status === 200 && /^user_\d{8}$/.test(r.body.username), "drugi relay uporabnik: »user_NNNNNNNN« (8 stevk, trk imena 23505 -> pripona)", r.body.username);
+
+  console.log("\n# (2b) bazen imen »user_…« ni omejen: starih 9000 imen user_1000..user_9999 je zasedenih, novi relay uporabniki vseeno uspejo");
+  await pool.query("INSERT INTO users (email, username, email_verified) SELECT 'stari' || g || '@outly.invalid', 'user_' || g, true FROM generate_series(1000, 9999) g");
+  const imena = new Set();
+  for (let i = 0; i < 12; i++) {
+    const sx = uuid(100 + i), rl = `rel${i}x${i}q@privaterelay.appleid.com`;
+    stub.odgovori.set(sx, potrjen(sx, rl, "apple"));
+    const rr = await api("GET", "/me", apple(sx, rl, true));
+    if (!(rr.status === 200 && /^user_\d{8}$/.test(rr.body.username))) assert(false, "relay uporabnik " + i, rr);
+    imena.add(rr.body && rr.body.username);
+  }
+  assert(imena.size === 12, "12 relay uporabnikov: 12 razlicnih imen user_NNNNNNNN (nobenega 503)", [...imena]);
+  await pool.query("DELETE FROM users WHERE email LIKE 'stari%@outly.invalid'");
 
   console.log("\n# (3) Apple z deljenim pravim naslovom (is_private_email=false) -> del e-naslova kot pri Googlu");
   s = uuid(4);
