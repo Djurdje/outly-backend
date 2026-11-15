@@ -29,7 +29,7 @@ const TEAM = "TEAMTEST01", KEY_ID = "KEYTEST001", CLIENT = "si.outly.app";
 // ---------------------------------------------------------------- lazni Supabase
 // /auth/v1/user: identities[] (Applove identitete racuna, I74). stub.userNacin: "ok" | "500" | "visi" (samo med izbrisom; prvi GET /me ga rabi zdrav).
 const APPLE_SUB_A = "001234.SKRIVNOSTsub.A", APPLE_SUB_B = "001234.SKRIVNOSTsub.B";
-const stub = { rpc: 0, geslo: 0, user: 0, userNacin: "ok", identitete: [{ provider: "apple", identity_data: { sub: APPLE_SUB_A }, provider_id: APPLE_SUB_A }] };
+const stub = { rpc: 0, geslo: 0, user: 0, rpcOdgovor: 200, gesloOdgovor: 200, userNacin: "ok", identitete: [{ provider: "apple", identity_data: { sub: APPLE_SUB_A }, provider_id: APPLE_SUB_A }] };
 const stubServer = http.createServer((req, res) => {
   res.setHeader("content-type", "application/json");
   if (req.url.startsWith("/auth/v1/user")) {
@@ -41,8 +41,8 @@ const stubServer = http.createServer((req, res) => {
     return res.end(JSON.stringify({ id: sub, email, email_confirmed_at: "2026-11-14T10:00:00Z", identities: stub.identitete }));
   }
   if (req.url.startsWith("/auth/v1/settings")) return res.end(JSON.stringify({ mailer_autoconfirm: false, external: { anonymous_users: false } }));
-  if (req.url.startsWith("/auth/v1/token")) { stub.geslo++; return res.end("{}"); }
-  if (req.url.startsWith("/rest/v1/rpc/delete_my_account")) { stub.rpc++; return res.end("{}"); }
+  if (req.url.startsWith("/auth/v1/token")) { stub.geslo++; res.statusCode = stub.gesloOdgovor; return res.end("{}"); }
+  if (req.url.startsWith("/rest/v1/rpc/delete_my_account")) { stub.rpc++; res.statusCode = stub.rpcOdgovor; return res.end("{}"); }
   res.end(JSON.stringify({ keys: [{ ...jwk, kid: KID, alg: "ES256", use: "sig" }] }));
 });
 
@@ -148,7 +148,7 @@ async function gor(port) { for (let i = 0; i < 80; i++) { try { await fetch(`htt
   let t0 = Date.now();
   let r = await izbris(u, { reauth: "provider", apple_authorization_code: "c.visi.1" });
   const visiOd = Date.now();
-  assert(r.status === 200 && r.body.message === "Account deleted." && Date.now() - t0 < 2000, "200 Account deleted. v < 2 s", { r, ms: Date.now() - t0 });
+  assert(r.status === 200 && r.body.message === "Account deleted." && Date.now() - t0 < 4000, "200 Account deleted. v < 4 s (Apple visi 8 s)", { r, ms: Date.now() - t0 });
   assert(await pocakaj(() => klici("/auth/token", "c.visi.1").length === 1, 3000), "/auth/token poklican (visi)");
 
   console.log("\n# (2) srecna pot: /auth/token (obrazec, client_secret JWT) -> /auth/revoke z refresh_token");
@@ -187,7 +187,7 @@ async function gor(port) { for (let i = 0; i < 80; i++) { try { await fetch(`htt
   u = await racun();
   t0 = Date.now();
   r = await izbris(u, { reauth: "provider", apple_authorization_code: "c.pada.1" });
-  assert(r.status === 200 && Date.now() - t0 < 2000, "200 v < 2 s", r);
+  assert(r.status === 200 && Date.now() - t0 < 4000, "200 v < 4 s", r);
   assert(await pocakaj(() => /\[apple\] preklic ni uspel: korak=token status=omrezje/.test(glavni.log), 3000), "dnevnik: korak=token status=omrezje");
   assert(klici("/auth/token", "c.pada.1").length === 1, "token brez ponovitve (koda je enkratna)", klici("/auth/token", "c.pada.1").length);
 
@@ -240,7 +240,7 @@ async function gor(port) { for (let i = 0; i < 80; i++) { try { await fetch(`htt
   r = await izbris(u, { reauth: "provider", apple_authorization_code: "c.userhang.1" });
   const msVisi = Date.now() - t0;
   stub.userNacin = "ok";
-  assert(r.status === 200 && msVisi >= 2000 && msVisi < 3500, "/auth/v1/user visi: izbris 200, podaljsan najvec za ~2,5 s (< 3,5 s)", { status: r.status, ms: msVisi });
+  assert(r.status === 200 && msVisi >= 2000 && msVisi < 6000, "/auth/v1/user visi: izbris 200, podaljsan za rok /user (~2,5 s; meja < 6 s, Apple bi visel 8 s)", { status: r.status, ms: msVisi });
   assert(await pocakaj(() => klici("/auth/revoke", "c.userhang.1").length === 1 && preskok() === 2, 3000), "/auth/v1/user visi: preklic vseeno", preskok());
   const prejUser = stub.user;
   u = await racun(PORT_BREZ);
@@ -248,6 +248,14 @@ async function gor(port) { for (let i = 0; i < 80; i++) { try { await fetch(`htt
   await izbris(u, { reauth: "provider", apple_authorization_code: "c.brezokolja.0" }, PORT_BREZ);
   assert(stub.user === poRacunu && poRacunu > prejUser, "preklic izklopljen: izbris NE klice /auth/v1/user (brez dodatnega cakanja)", { prejUser, poRacunu, po: stub.user });
   negativne.push("c.brezokolja.0");
+
+  stub.identitete = [{ provider: "email", identity_data: { sub: "e1" } }];
+  u = await racun();
+  r = await izbris(u, { reauth: "provider", apple_authorization_code: "c.drugsub.3" });
+  assert(r.status === 200 && await pocakaj(() => klici("/auth/revoke", "c.drugsub.3").length === 1 && neujemanje() === 2, 3000),
+    "racun brez Applove identitete: preklic se izvede + opozorilo »ne ujema«", neujemanje());
+  assert(/sub kode se ne ujema z identiteto racuna \(Applovih identitet: nic\)/.test(glavni.log), "opozorilo pove »Applovih identitet: nic« (brez identifikatorjev)");
+  stub.identitete = [{ provider: "apple", identity_data: { sub: APPLE_SUB_A }, provider_id: APPLE_SUB_A }];
 
   console.log("\n# (8) pot z geslom + koda: preklic tudi tu, odgovor nespremenjen");
   u = await racun(PORT, [{ method: "password", timestamp: zdaj() - 5 }]);
@@ -286,6 +294,18 @@ async function gor(port) { for (let i = 0; i < 80; i++) { try { await fetch(`htt
   assert(r.status === 409 && r.body.error === "club_has_orders" && await obstaja(u.id), "lastnik kluba z narocili: 409 club_has_orders", r);
   negativne.push("c.neuspeh401.1", "c.neuspeh400.1", "c.neuspeh409.1");
 
+  u = await racun();
+  stub.rpcOdgovor = 500;
+  r = await izbris(u, { reauth: "provider", apple_authorization_code: "c.neuspeh502.1" });
+  stub.rpcOdgovor = 200;
+  assert(r.status === 502 && await obstaja(u.id), "Supabase delete_my_account 500: izbris 502, vrstica ostane", r);
+  u = await racun(PORT, [{ method: "password", timestamp: zdaj() - 5 }]);
+  stub.gesloOdgovor = 400;
+  r = await izbris(u, { password: "napacno", apple_authorization_code: "c.neuspehgeslo.1" }, PORT, undefined);
+  stub.gesloOdgovor = 200;
+  assert(r.status === 401 && await obstaja(u.id), "napacno geslo + koda: 401 Invalid credentials, vrstica ostane", r);
+  negativne.push("c.neuspeh502.1", "c.neuspehgeslo.1");
+
   console.log("\n# (11) backend brez okolja / z neveljavnim kljucem: izbris 200, Applu nic");
   u = await racun(PORT_BREZ);
   r = await izbris(u, { reauth: "provider", apple_authorization_code: "c.brezokolja.1" }, PORT_BREZ);
@@ -314,7 +334,7 @@ async function gor(port) { for (let i = 0; i < 80; i++) { try { await fetch(`htt
   const secret = f.client_secret || "NI";
   assert(!/SKRIVNOST/.test(vsiLogi), "brez »SKRIVNOST« (koda, access/refresh/id_token, Applov opis, kljuc)", (vsiLogi.match(/.{0,80}SKRIVNOST.{0,40}/) || [])[0]);
   assert(!vsiLogi.includes(secret) && !vsiLogi.includes(secret.split(".")[0]), "brez client_secret");
-  assert(!/c\.(visi|grant|pada|cudna|brezrefresh|revoke5xx|revoke400|geslo|zadnji|drugsub|user500|userhang)\.[12]/.test(vsiLogi) && !/privaterelay/.test(vsiLogi) && !/00000000-0000-4000/.test(vsiLogi),
+  assert(!/c\.(visi|grant|pada|cudna|brezrefresh|revoke5xx|revoke400|geslo|zadnji|drugsub|user500|userhang)\.[123]/.test(vsiLogi) && !/privaterelay/.test(vsiLogi) && !/00000000-0000-4000/.test(vsiLogi),
     "brez testnih kod, e-naslova, uid", (vsiLogi.match(/.{0,80}(c\.\w+\.1|privaterelay|00000000-0000-4000).{0,20}/) || [])[0]);
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);

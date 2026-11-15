@@ -1767,6 +1767,9 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       }
 
       await odjemalec.query("COMMIT");
+      // I74: preklic Applovih zetonov TAKOJ po uspesnem COMMIT-u (pred ostalim pospravljanjem: izjema tam ga ne sme prepreciti), ne da bi odgovor cakal;
+      // obljuba nikoli ne zavrne, neuspeh ne vpliva na izbris.
+      if (appleKoda && APPLE_PREKLIC.vklopljen) applePreklic.preklici(APPLE_PREKLIC, appleKoda, sentry.porociOpozorilo, appleIdentiteteRacuna);
       if (supabase) izbrisaniSub.set(req.user.supabaseSub, req.user.supabaseExp);
       // Po COMMIT-u: odprte Checkout seje zapremo pri Stripu (kupec ne more vec placati). Napaka ni usodna (seja je ze `complete`/potekla, Stripe nedosegljiv):
       // racun je izbrisan, narocilo je `cancelled`, morebitno placilo pa vrne zakljuci() (varovalo). Ne cakamo odgovora uporabniku. Sandbox seja ob zivem kljucu: Stripe je ne pozna.
@@ -1779,8 +1782,6 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
             .catch((e) => console.log(`[me] izbris racuna: seja ${n.stripe_checkout_session_id} ni zaprta (${e && e.message}); ce bo placana, vrne zakljuci()`));
         }
       }
-      // I74: preklic Applovih zetonov SAMO po uspesnem COMMIT-u, ne da bi odgovor cakal; obljuba nikoli ne zavrne, neuspeh ne vpliva na izbris.
-      if (appleKoda && APPLE_PREKLIC.vklopljen) applePreklic.preklici(APPLE_PREKLIC, appleKoda, sentry.porociOpozorilo, appleIdentiteteRacuna);
       return res.status(200).json({ message: "Account deleted." });
     } catch (e) {
       await odjemalec.query("ROLLBACK").catch(() => {});
