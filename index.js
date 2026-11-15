@@ -1,5 +1,6 @@
 // Sentry (#87): vklopljen SAMO ob SENTRY_DSN v okolju (sicer se paket ne naloži); zagon prvi, da ujame tudi napake pri nalaganju modulov.
 const sentry = require("./sentry");
+const applePreklic = require("./apple_preklic");
 const delavci = require("./delavci");   // srcni utrip periodicnih delavcev + redki alarmi POZOR (#403, I70)
 sentry.zagon();
 const express = require("express");
@@ -1651,6 +1652,9 @@ const IZBRIS_REAUTH_SEKUND = (() => {
   console.warn(`[izbris] IZBRIS_REAUTH_SEKUND=${JSON.stringify(process.env.IZBRIS_REAUTH_SEKUND)} izven mej 60-900: uporabljeno 300`);
   return 300;
 })();
+// Preklic Applovih zetonov po izbrisu (Issue #427, I74): apple_preklic.js; brez okolja APPLE_* ENO opozorilo ob zagonu, izbris dela kot prej.
+const APPLE_PREKLIC = applePreklic.nastavi();
+
 function svezaPrijavaPonudnika(amr, zdaj = Math.floor(Date.now() / 1000)) {
   if (!Array.isArray(amr)) return false;
   return amr.some((e) => e && typeof e === "object" && e.method === "oauth" && Number.isInteger(e.timestamp)
@@ -1662,6 +1666,7 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
   try {
     const { password } = req.body || {};
     const supabase = true;
+    const appleKoda = applePreklic.veljavnaKoda((req.body || {}).apple_authorization_code);   // neobvezno (I74); neveljavna oblika = prezrto
 
     const brezGesla = typeof password !== "string" || !password;
     if (brezGesla && (req.body || {}).reauth !== "provider") {
@@ -1770,6 +1775,8 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
             .catch((e) => console.log(`[me] izbris racuna: seja ${n.stripe_checkout_session_id} ni zaprta (${e && e.message}); ce bo placana, vrne zakljuci()`));
         }
       }
+      // I74: preklic Applovih zetonov SAMO po uspesnem COMMIT-u, ne da bi odgovor cakal; obljuba nikoli ne zavrne, neuspeh ne vpliva na izbris.
+      if (appleKoda && APPLE_PREKLIC.vklopljen) applePreklic.preklici(APPLE_PREKLIC, appleKoda, sentry.porociOpozorilo);
       return res.status(200).json({ message: "Account deleted." });
     } catch (e) {
       await odjemalec.query("ROLLBACK").catch(() => {});
