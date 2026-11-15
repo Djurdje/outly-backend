@@ -1,5 +1,6 @@
 // Sentry (#87): vklopljen SAMO ob SENTRY_DSN v okolju (sicer se paket ne naloži); zagon prvi, da ujame tudi napake pri nalaganju modulov.
 const sentry = require("./sentry");
+const applePreklic = require("./apple_preklic");
 const delavci = require("./delavci");   // srcni utrip periodicnih delavcev + redki alarmi POZOR (#403, I70)
 sentry.zagon();
 const express = require("express");
@@ -1651,6 +1652,9 @@ const IZBRIS_REAUTH_SEKUND = (() => {
   console.warn(`[izbris] IZBRIS_REAUTH_SEKUND=${JSON.stringify(process.env.IZBRIS_REAUTH_SEKUND)} izven mej 60-900: uporabljeno 300`);
   return 300;
 })();
+// Preklic Applovih zetonov po izbrisu (Issue #427, I74): apple_preklic.js; brez okolja APPLE_* ENO opozorilo ob zagonu, izbris dela kot prej.
+const APPLE_PREKLIC = applePreklic.nastavi();
+
 function svezaPrijavaPonudnika(amr, zdaj = Math.floor(Date.now() / 1000)) {
   if (!Array.isArray(amr)) return false;
   return amr.some((e) => e && typeof e === "object" && e.method === "oauth" && Number.isInteger(e.timestamp)
@@ -1662,6 +1666,7 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
   try {
     const { password } = req.body || {};
     const supabase = true;
+    const appleKoda = applePreklic.veljavnaKoda((req.body || {}).apple_authorization_code);   // neobvezno (I74); neveljavna oblika = prezrto
 
     const brezGesla = typeof password !== "string" || !password;
     if (brezGesla && (req.body || {}).reauth !== "provider") {
@@ -1671,6 +1676,9 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       // POZOR: v `message` NE sme biti besede »token«: odjemalca ob »token« v 401 osvezita sejo ali uporabnika odjavita (outly-app APIClient+Account, splet api.js).
       return res.status(401).json({ error: "reauth_required", message: "Sign in again with Google or Apple, then retry deleting the account." });
     }
+
+    // I74: Applove identitete racuna (GET /auth/v1/user) PRED izbrisom pri Supabase, vzporedno s preverbo gesla; neuspeh = null (preklic vseeno).
+    const appleIdentitete = appleKoda && APPLE_PREKLIC.vklopljen ? applePreklic.appleIdentitete(SUPABASE_ISS, SUPABASE_KEY, req.user.supabaseToken) : null;
 
     if (!brezGesla) {
       // Ponovna prijava pri Supabase s trenutnim geslom: ukraden žeton (velja
@@ -1690,6 +1698,7 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
     // (ali v prvih trenutkih po zagonu) pustila izbris brez anonimizacije naracil. Sta v igri dve nasprotujoci si zahtevi:
     // Apple hoce, da uporabnik racun izbrise; davcni predpisi hocejo, da se
     // racun o nakupu ohrani. Resitev je anonimizacija, ne izbris naracil.
+    const appleIdentiteteRacuna = appleIdentitete ? await appleIdentitete : null;   // pred BEGIN: ne drzimo transakcije odprte (najvec 2,5 s)
     const odjemalec = await pool.connect();
     try {
       await odjemalec.query("BEGIN");
@@ -1758,6 +1767,9 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       }
 
       await odjemalec.query("COMMIT");
+      // I74: preklic Applovih zetonov TAKOJ po uspesnem COMMIT-u (pred ostalim pospravljanjem: izjema tam ga ne sme prepreciti), ne da bi odgovor cakal;
+      // obljuba nikoli ne zavrne, neuspeh ne vpliva na izbris.
+      if (appleKoda && APPLE_PREKLIC.vklopljen) applePreklic.preklici(APPLE_PREKLIC, appleKoda, sentry.porociOpozorilo, appleIdentiteteRacuna);
       if (supabase) izbrisaniSub.set(req.user.supabaseSub, req.user.supabaseExp);
       // Po COMMIT-u: odprte Checkout seje zapremo pri Stripu (kupec ne more vec placati). Napaka ni usodna (seja je ze `complete`/potekla, Stripe nedosegljiv):
       // racun je izbrisan, narocilo je `cancelled`, morebitno placilo pa vrne zakljuci() (varovalo). Ne cakamo odgovora uporabniku. Sandbox seja ob zivem kljucu: Stripe je ne pozna.
