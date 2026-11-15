@@ -1677,6 +1677,9 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
       return res.status(401).json({ error: "reauth_required", message: "Sign in again with Google or Apple, then retry deleting the account." });
     }
 
+    // I74: Applove identitete racuna (GET /auth/v1/user) PRED izbrisom pri Supabase, vzporedno s preverbo gesla; neuspeh = null (preklic vseeno).
+    const appleIdentitete = appleKoda && APPLE_PREKLIC.vklopljen ? applePreklic.appleIdentitete(SUPABASE_ISS, SUPABASE_KEY, req.user.supabaseToken) : null;
+
     if (!brezGesla) {
       // Ponovna prijava pri Supabase s trenutnim geslom: ukraden žeton (velja
       // do ure) sam ne sme zadostovati za nepovraten izbris.
@@ -1695,6 +1698,7 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
     // (ali v prvih trenutkih po zagonu) pustila izbris brez anonimizacije naracil. Sta v igri dve nasprotujoci si zahtevi:
     // Apple hoce, da uporabnik racun izbrise; davcni predpisi hocejo, da se
     // racun o nakupu ohrani. Resitev je anonimizacija, ne izbris naracil.
+    const appleIdentiteteRacuna = appleIdentitete ? await appleIdentitete : null;   // pred BEGIN: ne drzimo transakcije odprte (najvec 2,5 s)
     const odjemalec = await pool.connect();
     try {
       await odjemalec.query("BEGIN");
@@ -1776,7 +1780,7 @@ app.delete("/me", requireAuth, omeji({ kljuc: "delete", najvec: 5, oknoSekund: 3
         }
       }
       // I74: preklic Applovih zetonov SAMO po uspesnem COMMIT-u, ne da bi odgovor cakal; obljuba nikoli ne zavrne, neuspeh ne vpliva na izbris.
-      if (appleKoda && APPLE_PREKLIC.vklopljen) applePreklic.preklici(APPLE_PREKLIC, appleKoda, sentry.porociOpozorilo);
+      if (appleKoda && APPLE_PREKLIC.vklopljen) applePreklic.preklici(APPLE_PREKLIC, appleKoda, sentry.porociOpozorilo, appleIdentiteteRacuna);
       return res.status(200).json({ message: "Account deleted." });
     } catch (e) {
       await odjemalec.query("ROLLBACK").catch(() => {});

@@ -6,7 +6,7 @@
  * Lazni »Supabase« (JWKS, /auth/v1/user, /settings, /token?grant_type=password, /rest/v1/rpc/delete_my_account) na 3872,
  * lazni »Apple« (/auth/token, /auth/revoke) na 3873 prek APPLE_AUTH_URL, backend z okoljem Apple na 3871,
  * backend brez okolja na 3874, backend z neveljavnim kljucem na 3875. Testni EC kljuc (P-256) se generira v testu.
- * Obnasanje laznega Appla doloci koda sama (vsebuje »grant«, »visi«, »pada«, »brezrefresh«, »revoke5xx«, »revoke400«).
+ * Obnasanje laznega Appla doloci koda sama (vsebuje »grant«, »visi«, »pada«, »brezrefresh«, »revoke5xx«, »revoke400«, »drugsub« = id_token z drugim sub).
  * Negativni primeri (Applu nic) se preverijo na koncu: koda se ne sme pojaviti med klici laznega Appla (vrstni red: klic gre
  * pred odgovor 200, zadnji pozitivni primer pa caka svoj klic z rokom) - brez fiksnega cakanja.
  */
@@ -27,13 +27,18 @@ const P8_B64 = Buffer.from(apple.privateKey.export({ format: "pem", type: "pkcs8
 const TEAM = "TEAMTEST01", KEY_ID = "KEYTEST001", CLIENT = "si.outly.app";
 
 // ---------------------------------------------------------------- lazni Supabase
-const stub = { rpc: 0, geslo: 0 };
+// /auth/v1/user: identities[] (Applove identitete racuna, I74). stub.userNacin: "ok" | "500" | "visi" (samo med izbrisom; prvi GET /me ga rabi zdrav).
+const APPLE_SUB_A = "001234.SKRIVNOSTsub.A", APPLE_SUB_B = "001234.SKRIVNOSTsub.B";
+const stub = { rpc: 0, geslo: 0, user: 0, userNacin: "ok", identitete: [{ provider: "apple", identity_data: { sub: APPLE_SUB_A }, provider_id: APPLE_SUB_A }] };
 const stubServer = http.createServer((req, res) => {
   res.setHeader("content-type", "application/json");
   if (req.url.startsWith("/auth/v1/user")) {
+    stub.user++;
+    if (stub.userNacin === "500") { res.statusCode = 500; return res.end("{}"); }
+    if (stub.userNacin === "visi") return;   // nikoli ne odgovori
     let sub = "?", email = "?";
     try { const p = JSON.parse(Buffer.from(String(req.headers.authorization || "").split(".")[1], "base64url")); sub = p.sub; email = p.email; } catch (_) {}
-    return res.end(JSON.stringify({ id: sub, email, email_confirmed_at: "2026-11-14T10:00:00Z" }));
+    return res.end(JSON.stringify({ id: sub, email, email_confirmed_at: "2026-11-14T10:00:00Z", identities: stub.identitete }));
   }
   if (req.url.startsWith("/auth/v1/settings")) return res.end(JSON.stringify({ mailer_autoconfirm: false, external: { anonymous_users: false } }));
   if (req.url.startsWith("/auth/v1/token")) { stub.geslo++; return res.end("{}"); }
@@ -59,7 +64,7 @@ const appleServer = http.createServer((req, res) => {
       if (k.includes("pada")) { req.socket.destroy(); return; }                              // nedosegljiv / prekinjena povezava
       if (k.includes("grant")) return odg(400, { error: "invalid_grant", error_description: "SKRIVNOSTopis" });
       if (k.includes("cudna")) return odg(400, { error: "SKRIVNOSTnapaka@primer.si" });   // neznana koda napake -> »drugo«
-      const id_token = [b64u({ alg: "RS256", kid: "x" }), b64u({ iss: "https://appleid.apple.com", aud: CLIENT, sub: "001234.SKRIVNOSTsub.0001", email: "SKRIVNOST@privaterelay.appleid.com" }), "SKRIVNOSTpodpis"].join(".");
+      const id_token = [b64u({ alg: "RS256", kid: "x" }), b64u({ iss: "https://appleid.apple.com", aud: CLIENT, sub: k.includes("drugsub") ? APPLE_SUB_B : APPLE_SUB_A, email: "SKRIVNOST@privaterelay.appleid.com" }), "SKRIVNOSTpodpis"].join(".");
       const t = { access_token: "a.SKRIVNOSTdostop." + k, token_type: "Bearer", expires_in: 3600, id_token };
       if (!k.includes("brezrefresh")) t.refresh_token = "r.SKRIVNOSTosvezitev." + k;
       return odg(200, t);
@@ -93,11 +98,13 @@ const klici = (pot, koda) => appleKlici.filter((k) => k.pot === pot && (koda ===
 let ok = 0, fail = 0;
 function assert(cond, msg, extra) { if (cond) { ok++; console.log("  ✓", msg); } else { fail++; console.log("  ✗", msg, extra !== undefined ? JSON.stringify(extra) : ""); } }
 
+const procesi = [];   // ob padcu testa jih ubijemo (brez osirotelih backendov na portih)
 function zazeni(port, env) {
   const s = { log: "" };
   s.proc = spawn("node", ["index.js"], { env: { ...process.env, PORT: String(port), SUPABASE_URL: `http://127.0.0.1:${STUB_PORT}`,
     SUPABASE_PUBLISHABLE_KEY: "sb_publishable_testni_kljuc", RESEND_API_KEY: "", QR_SECRET: "test", SENTRY_DSN: "",
     APPLE_TEAM_ID: "", APPLE_SIWA_KEY_ID: "", APPLE_SIWA_KEY_P8: "", APPLE_SIWA_CLIENT_ID: "", APPLE_AUTH_URL: "", ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  procesi.push(s.proc);
   s.proc.stdout.on("data", (d) => s.log += d); s.proc.stderr.on("data", (d) => s.log += d);
   return s;
 }
@@ -208,6 +215,40 @@ async function gor(port) { for (let i = 0; i < 80; i++) { try { await fetch(`htt
   assert(await pocakaj(() => /korak=revoke status=400 napaka=invalid_client/.test(glavni.log), 3000), "dnevnik: korak=revoke status=400 napaka=invalid_client");
   assert(klici("/auth/revoke", "c.revoke400.1").length === 1, "revoke 400: brez ponovitve");
 
+  console.log("\n# (7b) identiteta racuna (GET /auth/v1/user identities[] apple) vs sub iz Applovega id_token");
+  const neujemanje = () => (glavni.log.match(/\[apple\] sub kode se ne ujema z identiteto racuna/g) || []).length;
+  const preskok = () => (glavni.log.match(/\[apple\] primerjava identitete preskocena \(identitete racuna niso znane\)/g) || []).length;
+  assert(neujemanje() === 0 && preskok() === 0, "do zdaj (sub se ujema): brez opozorila o neujemanju/preskoku", { n: neujemanje(), p: preskok() });
+  u = await racun();
+  r = await izbris(u, { reauth: "provider", apple_authorization_code: "c.drugsub.1" });
+  assert(r.status === 200, "drug Apple ID (B) za racun z identiteto A: 200", r);
+  assert(await pocakaj(() => klici("/auth/revoke", "c.drugsub.1").length === 1 && neujemanje() === 1, 3000), "neujemanje: preklic VSEENO izveden + ENO opozorilo brez identifikatorjev", neujemanje());
+  stub.identitete = [{ provider: "google", identity_data: { sub: "g1" } }, { provider: "apple", identity_data: { sub: "001234.drugi.X" }, provider_id: "001234.drugi.X" }, { provider: "apple", identity_data: { sub: APPLE_SUB_B }, provider_id: APPLE_SUB_B }];
+  u = await racun();
+  r = await izbris(u, { reauth: "provider", apple_authorization_code: "c.drugsub.2" });
+  assert(await pocakaj(() => klici("/auth/revoke", "c.drugsub.2").length === 1, 3000) && neujemanje() === 1, "vec Applovih identitet, ena se ujema: brez opozorila", neujemanje());
+  stub.identitete = [{ provider: "apple", identity_data: { sub: APPLE_SUB_A }, provider_id: APPLE_SUB_A }];
+  u = await racun();
+  stub.userNacin = "500";
+  r = await izbris(u, { reauth: "provider", apple_authorization_code: "c.user500.1" });
+  stub.userNacin = "ok";
+  assert(r.status === 200, "/auth/v1/user 500: izbris 200", r);
+  assert(await pocakaj(() => klici("/auth/revoke", "c.user500.1").length === 1 && preskok() === 1, 3000), "/auth/v1/user 500: preklic vseeno, opozorilo »identitete racuna niso znane«", preskok());
+  u = await racun();
+  stub.userNacin = "visi";
+  t0 = Date.now();
+  r = await izbris(u, { reauth: "provider", apple_authorization_code: "c.userhang.1" });
+  const msVisi = Date.now() - t0;
+  stub.userNacin = "ok";
+  assert(r.status === 200 && msVisi >= 2000 && msVisi < 3500, "/auth/v1/user visi: izbris 200, podaljsan najvec za ~2,5 s (< 3,5 s)", { status: r.status, ms: msVisi });
+  assert(await pocakaj(() => klici("/auth/revoke", "c.userhang.1").length === 1 && preskok() === 2, 3000), "/auth/v1/user visi: preklic vseeno", preskok());
+  const prejUser = stub.user;
+  u = await racun(PORT_BREZ);
+  const poRacunu = stub.user;
+  await izbris(u, { reauth: "provider", apple_authorization_code: "c.brezokolja.0" }, PORT_BREZ);
+  assert(stub.user === poRacunu && poRacunu > prejUser, "preklic izklopljen: izbris NE klice /auth/v1/user (brez dodatnega cakanja)", { prejUser, poRacunu, po: stub.user });
+  negativne.push("c.brezokolja.0");
+
   console.log("\n# (8) pot z geslom + koda: preklic tudi tu, odgovor nespremenjen");
   u = await racun(PORT, [{ method: "password", timestamp: zdaj() - 5 }]);
   r = await izbris(u, { password: "pravo", apple_authorization_code: "c.geslo.1" }, PORT, undefined);
@@ -273,7 +314,7 @@ async function gor(port) { for (let i = 0; i < 80; i++) { try { await fetch(`htt
   const secret = f.client_secret || "NI";
   assert(!/SKRIVNOST/.test(vsiLogi), "brez »SKRIVNOST« (koda, access/refresh/id_token, Applov opis, kljuc)", (vsiLogi.match(/.{0,80}SKRIVNOST.{0,40}/) || [])[0]);
   assert(!vsiLogi.includes(secret) && !vsiLogi.includes(secret.split(".")[0]), "brez client_secret");
-  assert(!/c\.(visi|grant|pada|cudna|brezrefresh|revoke5xx|revoke400|geslo|zadnji)\.1/.test(vsiLogi) && !/privaterelay/.test(vsiLogi) && !/00000000-0000-4000/.test(vsiLogi),
+  assert(!/c\.(visi|grant|pada|cudna|brezrefresh|revoke5xx|revoke400|geslo|zadnji|drugsub|user500|userhang)\.[12]/.test(vsiLogi) && !/privaterelay/.test(vsiLogi) && !/00000000-0000-4000/.test(vsiLogi),
     "brez testnih kod, e-naslova, uid", (vsiLogi.match(/.{0,80}(c\.\w+\.1|privaterelay|00000000-0000-4000).{0,20}/) || [])[0]);
 
   console.log(`\nSkupaj: ${ok} OK, ${fail} napak`);
@@ -283,4 +324,4 @@ async function gor(port) { for (let i = 0; i < 80; i++) { try { await fetch(`htt
   for (const s of [stubServer, appleServer]) { s.closeAllConnections && s.closeAllConnections(); s.close(); }
   await pool.end();
   process.exit(fail ? 1 : 0);
-})().catch((e) => { console.error(e); process.exit(1); });
+})().catch((e) => { console.error(e); for (const p of procesi) { try { p.kill(); } catch (_) {} } process.exit(1); });

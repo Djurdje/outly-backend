@@ -88,14 +88,53 @@ const zapisiNeuspeh = (korak, izid, porociOpozorilo) => {
   try { porociOpozorilo && porociOpozorilo(vrstica, "apple-preklic"); } catch (_) { /* nikoli */ }
 };
 
+// Applove identitete racuna iz ne-zapisljivega vira: GET {SUPABASE}/auth/v1/user z uporabnikovim zetonom (identities[] s provider "apple";
+// identity_data.sub / provider_id = Applov sub). user_metadata.sub v JWT NI vir: uporabnik ga piše sam (updateUser({ data })).
+// Klic mora biti PRED izbrisom pri Supabase (potem identitet ni vec). Vrne seznam subov ([] = racun nima Applove identitete) ali null
+// (neznano: izpad, rok, ne-200, slabo telo). Nikoli ne vrze. Rok IDENTITETE_ROK_MS (izbris podaljsa najvec za toliko).
+const IDENTITETE_ROK_MS = 2500;
+async function appleIdentitete(supabaseIss, apikey, token, rokMs = IDENTITETE_ROK_MS) {
+  try {
+    const r = await fetch(supabaseIss + "/user", { headers: { apikey, Authorization: "Bearer " + token }, signal: AbortSignal.timeout(rokMs) });
+    if (!r.ok) return null;
+    const u = await r.json();
+    if (!u || !Array.isArray(u.identities)) return null;
+    const subi = [];
+    for (const i of u.identities) {
+      if (!i || i.provider !== "apple") continue;
+      for (const v of [i.identity_data && i.identity_data.sub, i.provider_id, i.id]) if (typeof v === "string" && v) subi.push(v);
+    }
+    return subi;
+  } catch (_) { return null; }
+}
+
+// `sub` iz Applovega id_token (odgovor /auth/token, prejet neposredno od Appla prek TLS z nasim client_secret: podpisa ni treba preverjati,
+// samo dekodiramo telo). Vrne niz ali null.
+function subIzIdTokena(idToken) {
+  try {
+    const p = JSON.parse(Buffer.from(String(idToken).split(".")[1], "base64url").toString("utf8"));
+    return p && typeof p.sub === "string" && p.sub ? p.sub : null;
+  } catch (_) { return null; }
+}
+
 // Izmenjava kode in preklic. Vrne obljubo, ki se VEDNO razresi (true = preklicano, false = ne).
-async function preklici(n, koda, porociOpozorilo) {
+// `identitete`: rezultat appleIdentitete (seznam ali null). Neujemanje NE ustavi preklica (I74, ARCHITECTURE tocka 8): koda je od Apple ID-ja,
+// ki ga je uporabnik pravkar potrdil na napravi; preklic zadene samo povezavo tega Apple ID-ja z Outlyjem. Zapise se samo opozorilo brez identifikatorjev.
+async function preklici(n, koda, porociOpozorilo, identitete = null) {
   try {
     if (!n || !n.vklopljen || !koda) return false;
     const secret = clientSecret(n);
     const t = await klic(n, "/auth/token", { client_id: n.clientId, client_secret: secret, code: koda, grant_type: "authorization_code" });
     if (!t.ok) { zapisiNeuspeh("token", t, porociOpozorilo); return false; }
     const telo = t.telo || {};
+    const sub = subIzIdTokena(telo.id_token);
+    if (!Array.isArray(identitete) || !sub) {
+      console.warn(`[apple] primerjava identitete preskocena (${!Array.isArray(identitete) ? "identitete racuna niso znane" : "id_token brez sub"}); preklic se vseeno izvede`);
+    } else if (!identitete.includes(sub)) {
+      const vrstica = `[apple] sub kode se ne ujema z identiteto racuna (Applovih identitet: ${identitete.length > 0 ? "vsaj ena" : "nic"}); preklic se vseeno izvede`;
+      console.warn(vrstica);
+      try { porociOpozorilo && porociOpozorilo(vrstica, "apple-preklic"); } catch (_) { /* nikoli */ }
+    }
     const zeton = typeof telo.refresh_token === "string" && telo.refresh_token ? { token: telo.refresh_token, hint: "refresh_token" }
       : typeof telo.access_token === "string" && telo.access_token ? { token: telo.access_token, hint: "access_token" } : null;
     if (!zeton) { zapisiNeuspeh("token", { status: t.status, napaka: "brez_zetona" }, porociOpozorilo); return false; }
@@ -112,4 +151,4 @@ async function preklici(n, koda, porociOpozorilo) {
   }
 }
 
-module.exports = { nastavi, veljavnaKoda, preklici, clientSecret, ROK_MS };
+module.exports = { nastavi, veljavnaKoda, preklici, appleIdentitete, subIzIdTokena, clientSecret, ROK_MS, IDENTITETE_ROK_MS };
