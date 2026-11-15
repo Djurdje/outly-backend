@@ -98,20 +98,22 @@ function assert(cond, msg, extra) { if (cond) { ok++; console.log("  ✓", msg);
 
   console.log("\n# (3) amr brez ponudnika ali neveljaven -> 401 reauth_required");
   reset();
+  // amr se izracuna sele tik pred zahtevo (funkcija): seznam, izracunan vnaprej, je ob prehodu sekunde med
+  // primeri +61 premaknil na +60 (sprejeto) - main 8dd62ca rdec 15. 11. 2026. +62 = 1 s rezerve med podpisom in preverbo.
   const primeri = [
-    ["samo password (svez)", [{ method: "password", timestamp: zdaj() - 5 }]],
-    ["svez token_refresh + star oauth", [{ method: "token_refresh", timestamp: zdaj() - 5 }, { method: "oauth", timestamp: zdaj() - 4000 }]],
-    ["amr kot niz (stara oblika)", ["oauth"]],
-    ["brez amr", undefined],
-    ["timestamp v prihodnosti (+3600 s)", [{ method: "oauth", timestamp: zdaj() + 3600 }]],
-    ["timestamp +61 s (zavrnjen)", [{ method: "oauth", timestamp: zdaj() + 61 }]],
-    ["timestamp kot niz", [{ method: "oauth", timestamp: String(zdaj()) }]],
-    ["amr ni polje", { method: "oauth", timestamp: zdaj() }],
+    ["samo password (svez)", () => [{ method: "password", timestamp: zdaj() - 5 }]],
+    ["svez token_refresh + star oauth", () => [{ method: "token_refresh", timestamp: zdaj() - 5 }, { method: "oauth", timestamp: zdaj() - 4000 }]],
+    ["amr kot niz (stara oblika)", () => ["oauth"]],
+    ["brez amr", () => undefined],
+    ["timestamp v prihodnosti (+3600 s)", () => [{ method: "oauth", timestamp: zdaj() + 3600 }]],
+    ["timestamp +62 s (zavrnjen)", () => [{ method: "oauth", timestamp: zdaj() + 62 }]],
+    ["timestamp kot niz", () => [{ method: "oauth", timestamp: String(zdaj()) }]],
+    ["amr ni polje", () => ({ method: "oauth", timestamp: zdaj() })],
   ];
   let n = 10;
-  for (const [ime, amr] of primeri) {
+  for (const [ime, amrFn] of primeri) {
     u = await racun(n++, oauth(20));
-    r = await api("DELETE", "/me", zeton(u.sub, u.email, amr), { reauth: "provider" });
+    r = await api("DELETE", "/me", zeton(u.sub, u.email, amrFn()), { reauth: "provider" });
     assert(r.status === 401 && r.body.error === "reauth_required" && await obstaja(u.id), `${ime}: 401 reauth_required, vrstica ostane`, r);
   }
   assert(stub.rpc === 0, "noben od teh ni poklical Supabase RPC");
