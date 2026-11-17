@@ -300,6 +300,19 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   izbrani čip, stikalo, cena, fokus), **polna modra ploskev samo na glavnem gumbu**. Pravilo »8-pt mreža« koda ne drži
   (najpogostejši razmiki 10, 12, 14, 18); nova koda naj sledi obstoječim vrednostim, ne dokumentu. *vir/dokaz*: izvleček
   design sistema iz kode 19. 9. (kanvas, tabla »Analiza«).
+- 2026-11-17: **Spletna aplikacija /app sledi videzu iOS aplikacije.** Ozadje zaslonov črno (`#000`), kartice in vrstice
+  prosojna bela 8 % brez obrobe, vse, kar leži nad vsebino (listi, meniji, lepljive vrstice, spodnja vrstica), neprosojno;
+  spodnja vrstica kot kapsula s polnimi ikonami; Profil in podzasloni kot ločene kartice brez puščic; Checkout s kartico
+  »vstopnice«. **Zamegljen Home kot ozadje zavihkov Search in Profile** (in zaslonov, odprtih iz njiju), kot iOS
+  `Ozadje.swift`: statična kopija DOM, `filter:blur(22px)`, brez `backdrop-filter`, plast samo ob novem CSS; ni je na
+  prijavi, onboardingu, poslovnih zaslonih (skener) in gostovih zaslonih. Zatemnitev **80 %** (iOS 60 %) je odločitev
+  menedžerja, ne Martinova: posnetek iOS s telefona je temnejši od spleta pri 60 % in sivo besedilo nad zamegljenimi belimi
+  plakati je pri 80 % ≥ 4,5:1 (Martin na vprašanje 17. 11. ni odgovoril).
+  *vir/dokaz*: Martin, seja https://claude.ai/code/session_01HirCpXaWaJUMJv8mi4MLpF, 17. 11. 2026, dobesedno: »greva narediti
+  malo lepsi dizajn za wabapp ker je zdej na aplikaciji ful bolsi kokr na sopletu oz bl clean« in »webapp nima tako da kakroli
+  odpres nor pforile view ali searc da se homescreen zatezlbura in je to ubistvu ozadje ce ves ko sva takrat delala to na
+  appu«; outly_webpage #118, #120; tabele razlik `outly-hq/docs/ideje/2026-11-17-prenova-app/`; odprto: outly_webpage #122 ·
+  *velja dokler*: Martin ne odloči drugače (80 %: dokler Martin plasti ne pregleda na telefonu) · *nadomeščena z*: —
 
 ## Infrastruktura (odločeno 14. 9. 2026 po sestanku z investitorji)
 
