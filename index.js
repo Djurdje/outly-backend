@@ -784,6 +784,22 @@ function potrdiEmailPriViru(token, uid, email) {
   return p;
 }
 
+// Nov racun sledi uradnim profilom Outly (clubs.is_official; Martin 22. 11. 2026, DECISIONS 2026-11-22). Klic SAMO takoj za uspesnim INSERT-om v users:
+// kdor pozneje odsledi (DELETE /clubs/:id/follow), ga nic ne prijavi znova (ne prijava, ne GET /me). Best-effort: napaka (ali izteklo trajanje) se ulovi,
+// prvi klic in prijava ne padeta. Eno samo vstavljanje brez obvestil in pusha. Isti pogoj kot migracija 077: viden (ne hidden) in ne demo.
+async function samodejnoSledenjeUradnim(db, userId) {
+  try {
+    await db.query(
+      `INSERT INTO club_follows (club_id, user_id)
+       SELECT id, $1 FROM clubs WHERE is_official AND NOT hidden AND NOT is_demo
+       ON CONFLICT (club_id, user_id) DO NOTHING`,
+      [userId]
+    );
+  } catch (e) {
+    console.error("[sledenje] samodejno sledenje uradnemu profilu ni uspelo, user", userId, e && e.code);
+  }
+}
+
 // Lokalna vrstica za Supabasov račun:
 //   1. po supabase_uid (vroča pot, brez klica navzven),
 //   2. po e-naslovu (obstoječi račun iz časov lastne prijave → poveže se),
@@ -826,6 +842,7 @@ async function uporabnikIzSupabase(p, db = pool, token = null) {
          VALUES ($1, NULL, $2, true, $3) RETURNING ${POLJA_SEJE}`,
         [email, kandidat, uid]
       );
+      await samodejnoSledenjeUradnim(db, r3.rows[0].id);
       return r3.rows[0];
     } catch (e) {
       if (e && e.code === "23505") {
