@@ -786,12 +786,12 @@ function potrdiEmailPriViru(token, uid, email) {
 
 // Nov racun sledi uradnim profilom Outly (clubs.is_official; Martin 22. 11. 2026, DECISIONS 2026-11-22). Klic SAMO takoj za uspesnim INSERT-om v users:
 // kdor pozneje odsledi (DELETE /clubs/:id/follow), ga nic ne prijavi znova (ne prijava, ne GET /me). Best-effort: napaka (ali izteklo trajanje) se ulovi,
-// prvi klic in prijava ne padeta. Eno samo vstavljanje brez obvestil in pusha. Isti pogoj kot migracija 077: viden (ne hidden) in ne demo.
+// prvi klic in prijava ne padeta. Eno samo vstavljanje brez obvestil in pusha; samodejno = TRUE: tak sledilec dobi zvonec, push NE (Martin 23. 11. 2026, obvestiSledilce). Isti pogoj kot migracija 077: viden (ne hidden) in ne demo.
 async function samodejnoSledenjeUradnim(db, userId) {
   try {
     await db.query(
-      `INSERT INTO club_follows (club_id, user_id)
-       SELECT id, $1 FROM clubs WHERE is_official AND NOT hidden AND NOT is_demo
+      `INSERT INTO club_follows (club_id, user_id, samodejno)
+       SELECT id, $1, TRUE FROM clubs WHERE is_official AND NOT hidden AND NOT is_demo
        ON CONFLICT (club_id, user_id) DO NOTHING`,
       [userId]
     );
@@ -2342,8 +2342,10 @@ app.put("/clubs/:id/follow", requireAuth, async (req, res) => {
   try {
     const clubId = await vidnoKlubId(req, res);
     if (!clubId) return;
+    // Izrecni Follow = privolitev: tudi ze obstojeca samodejna vrstica (077) postane izbrana (samodejno = FALSE, od zdaj dobi push). Brez pisanja, ce je ze FALSE.
     await pool.query(
-      "INSERT INTO club_follows (club_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+      `INSERT INTO club_follows (club_id, user_id) VALUES ($1,$2)
+       ON CONFLICT (club_id, user_id) DO UPDATE SET samodejno = FALSE WHERE club_follows.samodejno`,
       [clubId, req.user.userId]
     );
     return res.status(200).json({ following: true, followers_count: await steviloSledilcev(clubId) });
@@ -3313,15 +3315,19 @@ async function ustvariDogodek(req, res, opcije = {}) {
 // Vsakemu sledilcu kluba vstavi obvestilo o dogodku. UNIQUE (user_id, event_id) poskrbi,
 // da ponovna objava (draft -> published -> draft -> published) ne podvoji zvonca.
 // Push (040): samo tisti, ki so pravkar dobili NOVO vrstico (RETURNING), po commitu stavka, brez await (I29).
+// Samodejni sledilci (club_follows.samodejno, 077: uradni profil Outly) dobijo zvonec, push NE (Martin 23. 11. 2026; pravna presoja 22. 11.: push brez izrecne privolitve).
 async function obvestiSledilce(eventId, clubId) {
   const r = await pool.query(
-    `INSERT INTO club_event_notifications (user_id, event_id)
-     SELECT f.user_id, $1 FROM club_follows f WHERE f.club_id = $2
-     ON CONFLICT (user_id, event_id) DO NOTHING
-     RETURNING user_id`,
+    `WITH nova AS (
+       INSERT INTO club_event_notifications (user_id, event_id)
+       SELECT f.user_id, $1 FROM club_follows f WHERE f.club_id = $2
+       ON CONFLICT (user_id, event_id) DO NOTHING
+       RETURNING user_id)
+     SELECT nova.user_id, f.samodejno FROM nova JOIN club_follows f ON f.club_id = $2 AND f.user_id = nova.user_id`,
     [eventId, clubId]
   );
-  if (r.rows.length) void pushObjavaDogodka(eventId, r.rows.map((x) => x.user_id));
+  const zaPush = r.rows.filter((x) => !x.samodejno).map((x) => x.user_id);
+  if (zaPush.length) void pushObjavaDogodka(eventId, zaPush);
 }
 
 // ---------------------------

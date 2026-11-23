@@ -364,7 +364,7 @@ Martin (issue #183, 9. 10. 2026: ključ in Render secrets nastavljeni): ob dogod
 | `outly.type` | sprožilec | prejemnik | `outly.id` |
 |---|---|---|---|
 | `ticket_received` | `POST /tickets/:id/transfer` na uporabnika z računom (ne gost) | prejemnik | id vstopnice |
-| `club_event` | objava dogodka (`POST /events` published ali `PATCH` draft → published; `obvestiSledilce`) | sledilci kluba, ki so pravkar dobili NOVO vrstico v zvoncu (`RETURNING user_id`: ponovna objava ne pošlje znova); skriti klub ne | id dogodka |
+| `club_event` | objava dogodka (`POST /events` published ali `PATCH` draft → published; `obvestiSledilce`) | sledilci kluba, ki so pravkar dobili NOVO vrstico v zvoncu (`RETURNING user_id`: ponovna objava ne pošlje znova) in so sledili sami (`club_follows.samodejno = FALSE`; samodejni sledilci uradnega profila Outly, 077, dobijo samo zvonec; DECISIONS 2026-11-22); skriti klub ne | id dogodka |
 | `guest_list_invite` | `POST /me/guest-lists/:id/invites` | vsak povabljenec | id **vstopnice** povabljenca (`ticket_id`, denarnica) |
 | `table_service` | nova strežba v `/business/tickets/scan` ali `scan-batch` (`STREZBA_CTE` vrne `id`), samo če je v zvoncu vidna (`STREZBA_ZVONEC_CAS`: skupen pogoj s števcem in seznamom, od 2 h pred začetkom) | lastnik + `manager` + `bartender` kluba strežbe, **NE vratar** | id strežbe |
 
