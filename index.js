@@ -784,6 +784,37 @@ function potrdiEmailPriViru(token, uid, email) {
   return p;
 }
 
+// Nov racun sledi uradnim profilom Outly (clubs.is_official; Martin 22. 11. 2026, DECISIONS 2026-11-22). Klic SAMO takoj za uspesnim INSERT-om v users:
+// kdor pozneje odsledi (DELETE /clubs/:id/follow), ga nic ne prijavi znova (ne prijava, ne GET /me). Best-effort: napaka se ulovi, prvi klic in prijava ne padeta.
+// Eno samo vstavljanje brez obvestil in pusha; samodejno = TRUE: tak sledilec dobi zvonec, push NE (Martin 23. 11. 2026, obvestiSledilce). Isti pogoj kot migracija 078: viden in ne demo.
+// MEJA CASA (S2 pregleda): glavni pool nima lock_timeout/statement_timeout, zato bi poznejsa migracija z zaklepom na clubs/club_follows zadrzala prvi klic do 120 s.
+// Zato lastna povezava + kratka transakcija (SET LOCAL lock_timeout 500 ms, statement_timeout 2 s): po najvec ~2 s gre prijava naprej brez sledenja (sledi rocno).
+// Drug `db` (testni odjemalec, ze zacet) ostane navadna poizvedba brez mej.
+const SLEDENJE_SQL = `INSERT INTO club_follows (club_id, user_id, samodejno)
+       SELECT id, $1, TRUE FROM clubs WHERE is_official AND NOT hidden AND NOT is_demo
+       ON CONFLICT (club_id, user_id) DO NOTHING`;
+async function samodejnoSledenjeUradnim(db, userId) {
+  let c = null;
+  try {
+    if (!(db instanceof Pool)) { await db.query(SLEDENJE_SQL, [userId]); return; }
+    c = await db.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("SET LOCAL lock_timeout = '500ms'");
+      await c.query("SET LOCAL statement_timeout = '2s'");
+      await c.query(SLEDENJE_SQL, [userId]);
+      await c.query("COMMIT");
+    } catch (e) {
+      try { await c.query("ROLLBACK"); } catch (_) { /* povezava je padla: release spodaj */ }
+      throw e;
+    }
+  } catch (e) {
+    console.error("[sledenje] samodejno sledenje uradnemu profilu ni uspelo, user", userId, e && e.code);
+  } finally {
+    if (c) c.release();
+  }
+}
+
 // Lokalna vrstica za Supabasov račun:
 //   1. po supabase_uid (vroča pot, brez klica navzven),
 //   2. po e-naslovu (obstoječi račun iz časov lastne prijave → poveže se),
@@ -826,6 +857,7 @@ async function uporabnikIzSupabase(p, db = pool, token = null) {
          VALUES ($1, NULL, $2, true, $3) RETURNING ${POLJA_SEJE}`,
         [email, kandidat, uid]
       );
+      await samodejnoSledenjeUradnim(db, r3.rows[0].id);
       return r3.rows[0];
     } catch (e) {
       if (e && e.code === "23505") {
@@ -2325,8 +2357,10 @@ app.put("/clubs/:id/follow", requireAuth, async (req, res) => {
   try {
     const clubId = await vidnoKlubId(req, res);
     if (!clubId) return;
+    // Izrecni Follow = privolitev: tudi ze obstojeca samodejna vrstica (077) postane izbrana (samodejno = FALSE, od zdaj dobi push). Brez pisanja, ce je ze FALSE.
     await pool.query(
-      "INSERT INTO club_follows (club_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+      `INSERT INTO club_follows (club_id, user_id) VALUES ($1,$2)
+       ON CONFLICT (club_id, user_id) DO UPDATE SET samodejno = FALSE WHERE club_follows.samodejno`,
       [clubId, req.user.userId]
     );
     return res.status(200).json({ following: true, followers_count: await steviloSledilcev(clubId) });
@@ -3296,15 +3330,19 @@ async function ustvariDogodek(req, res, opcije = {}) {
 // Vsakemu sledilcu kluba vstavi obvestilo o dogodku. UNIQUE (user_id, event_id) poskrbi,
 // da ponovna objava (draft -> published -> draft -> published) ne podvoji zvonca.
 // Push (040): samo tisti, ki so pravkar dobili NOVO vrstico (RETURNING), po commitu stavka, brez await (I29).
+// Samodejni sledilci (club_follows.samodejno, 077: uradni profil Outly) dobijo zvonec, push NE (Martin 23. 11. 2026; pravna presoja 22. 11.: push brez izrecne privolitve).
 async function obvestiSledilce(eventId, clubId) {
   const r = await pool.query(
-    `INSERT INTO club_event_notifications (user_id, event_id)
-     SELECT f.user_id, $1 FROM club_follows f WHERE f.club_id = $2
-     ON CONFLICT (user_id, event_id) DO NOTHING
-     RETURNING user_id`,
+    `WITH nova AS (
+       INSERT INTO club_event_notifications (user_id, event_id)
+       SELECT f.user_id, $1 FROM club_follows f WHERE f.club_id = $2
+       ON CONFLICT (user_id, event_id) DO NOTHING
+       RETURNING user_id)
+     SELECT nova.user_id, f.samodejno FROM nova JOIN club_follows f ON f.club_id = $2 AND f.user_id = nova.user_id`,
     [eventId, clubId]
   );
-  if (r.rows.length) void pushObjavaDogodka(eventId, r.rows.map((x) => x.user_id));
+  const zaPush = r.rows.filter((x) => !x.samodejno).map((x) => x.user_id);
+  if (zaPush.length) void pushObjavaDogodka(eventId, zaPush);
 }
 
 // ---------------------------
@@ -11399,7 +11437,7 @@ app.get("/business/activity", requireAuth, requireClub("owner", "manager"), asyn
          FROM view_counts WHERE club_id = $1 AND event_id IS NOT NULL`, [klub]),
       pool.query(
         `SELECT COUNT(*)::int AS vsi,
-                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days')::int AS n7d
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND NOT samodejno)::int AS n7d
          FROM club_follows WHERE club_id = $1`, [klub]),
       pool.query(
         `WITH ekipa AS (
