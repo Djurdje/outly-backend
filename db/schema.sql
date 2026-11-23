@@ -455,7 +455,7 @@ CREATE TABLE public.club_follows (
 -- Name: COLUMN club_follows.samodejno; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.club_follows.samodejno IS 'TRUE = sledenje vstavil sistem (uradni profil Outly, 077), uporabnik ga ni izbral: zvonec da, push ne. PUT /clubs/:id/follow ga nastavi na FALSE.';
+COMMENT ON COLUMN public.club_follows.samodejno IS 'TRUE = sledenje vstavil sistem (uradni profil Outly, 077/078), uporabnik ga ni izbral: zvonec da, push ne. PUT /clubs/:id/follow ga nastavi na FALSE.';
 
 
 --

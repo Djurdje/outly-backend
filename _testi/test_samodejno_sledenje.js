@@ -4,7 +4,8 @@
  *  - NOV uporabnik (vrstica v `users` nastane ob prvem klicu z Supabasovim zetonom) sledi vsem klubom z is_official = TRUE,
  *    ki niso skriti in niso demo; samo ob nastanku (kdor odsledi, ga ne prijavi nic znova);
  *  - napaka pri sledenju ne podre prvega klica; brez uradnega kluba prvi klic dela;
- *  - migracija 077 doda sledenje obstojecim racunom, brez obvestil; ponovni zagon ne naredi nic;
+ *  - migracija 077 doda SAMO stolpec club_follows.samodejno (obstojece vrstice FALSE; vpis obstojecih racunov = 078, _testi/test_vpis_uradni_078.js);
+ *  - GET /business/activity: followers_new_7d steje samo izbrane (N2); zadrzan zaklep na club_follows ne zadrzi prvega klica (S2, lock_timeout 500 ms);
  *  - PUSH (Martin 23. 11. 2026 »brez pusha«): samodejni sledilec (club_follows.samodejno = TRUE) dobi ob objavi dogodka uradnega kluba zvonec, push NE;
  *    kdor je sledil sam (PUT /clubs/:id/follow, tudi po odsledenju ali na ze obstojeci samodejni vrstici) dobi oboje; obstojeca izbrana vrstica ostane
  *    samodejno = FALSE tudi po migraciji. LAZNI APNs po vzorcu test_push.js (http2 + samopodpisan certifikat iz openssl, NODE_EXTRA_CA_CERTS).
@@ -201,31 +202,46 @@ async function api(method, path_, token, body, glave) {
     assert(r.status === 200, "naslednji klic dela", r.body);
     assert((await stSledenj("bor@outly.si")) === 0, "bor ni (vec) prijavljen samodejno: samo ob nastanku");
 
-    console.log("\n# Migracija 077 za obstojece racune");
-    const sql = fs.readFileSync(path.join(__dirname, "..", "db", "migracije", "077_sledenje_uradnemu_profilu.sql"), "utf8");
-    await pool.query("INSERT INTO users (email, username, email_verified) VALUES ('stari1@outly.si','stari1',true), ('stari2@outly.si','stari2',true)");
-    await pool.query("INSERT INTO club_follows (club_id, user_id) SELECT 1, id FROM users WHERE email='stari1@outly.si'");   // prava izbira pred 077 (samodejno privzeto FALSE)
-    await pool.query("INSERT INTO club_event_notifications (user_id, event_id) SELECT 1, 1 WHERE FALSE");
-    const obvestilPred = (await pool.query("SELECT COUNT(*)::int AS n FROM club_event_notifications")).rows[0].n;
-    const nUsers = (await pool.query("SELECT COUNT(*)::int AS n FROM users")).rows[0].n;
-    await pool.query(sql);
-    const po = (await pool.query("SELECT COUNT(*)::int AS n FROM club_follows WHERE club_id=1")).rows[0].n;
-    assert(po === nUsers, `vsi racuni (${nUsers}) sledijo uradnemu klubu`, po);
-    assert((await stSledilcev(2)) === 1 && (await stSledilcev(3)) === 0 && (await stSledilcev(4)) === 0, "migracija ne dodaja navadnemu (le sam1, ki je sledil sam), skritemu, demo");
-    assert((await pool.query("SELECT COUNT(*)::int AS n FROM club_event_notifications")).rows[0].n === obvestilPred, "migracija ne ustvari obvestil");
-    const zdaj = (await pool.query("SELECT COUNT(*)::int AS n FROM club_follows")).rows[0].n;
-    await pool.query(sql);
-    assert((await pool.query("SELECT COUNT(*)::int AS n FROM club_follows")).rows[0].n === zdaj, "ponovni zagon migracije ne naredi nic");
-    assert((await samodejno("stari1@outly.si")) === false, "migracija: obstojeca izbrana vrstica ostane samodejno = FALSE");
-    assert((await samodejno("stari2@outly.si")) === true, "migracija: dodana vrstica ima samodejno = TRUE");
-    const izbrani = (await pool.query("SELECT u.email FROM club_follows f JOIN users u ON u.id=f.user_id WHERE f.club_id=1 AND NOT f.samodejno ORDER BY u.email")).rows.map(x => x.email);
-    assert(JSON.stringify(izbrani) === JSON.stringify(["rocni@outly.si", "sam2@outly.si", "stari1@outly.si"]), "migracija: samodejno = FALSE ostanejo samo izbrane vrstice", izbrani);
+    console.log("\n# N2: GET /business/activity steje kot nove sledilce samo izbrane (samodejno = FALSE)");
+    r = await api("GET", "/business/activity", T.lastnik);
+    assert(r.status === 200 && r.body.followers_count === 5, "followers_count = vsi sledilci (5, tudi samodejni: sam1, rocni, sam2, sam3, lastnik2)", r.body);
+    assert(r.body.followers_new_7d === 2, "followers_new_7d = samo izbrani (rocni, sam2), ne samodejni", r.body.followers_new_7d);
+    assert(Object.keys(r.body).sort().join() === "clicks_events,clicks_events_7d,clicks_profile,clicks_profile_7d,followers_count,followers_new_7d,staff", "oblika odgovora nespremenjena", Object.keys(r.body));
 
-    console.log("\n# Migracija brez uradnega kluba uspe");
-    await pool.query("UPDATE clubs SET is_official = FALSE");
-    await pool.query("TRUNCATE club_follows");
+    console.log("\n# S2: zadrzan zaklep na club_follows ne zadrzi prvega klica dlje od meje (lock_timeout 500 ms)");
+    const zadrzi = new (require("pg").Client)({ connectionString: DB });
+    await zadrzi.connect();
+    await zadrzi.query("BEGIN");
+    await zadrzi.query("LOCK TABLE club_follows IN ACCESS EXCLUSIVE MODE");
+    let ms = 0;
+    try {
+      T.zaklep = zeton("zaklep@outly.si", uuid(30));
+      const t0 = Date.now();
+      r = await api("GET", "/me", T.zaklep);
+      ms = Date.now() - t0;
+    } finally {
+      await zadrzi.query("ROLLBACK");
+      await zadrzi.end();
+    }
+    assert(r.status === 200 && r.body.email === "zaklep@outly.si", "prvi klic ob zadrzanem zaklepu -> 200", r);
+    assert(ms < 4000, `prvi klic ni zadrzan do konca zaklepa (${ms} ms < 4000 ms: meja 500 ms + zacetek racuna)`, ms);
+    assert((await stSledenj("zaklep@outly.si")) === 0, "ob zaklepu racun ostane brez sledenja (sledi rocno)");
+    assert(/\[sledenje\]/.test(log.split("\n").filter(x => /55P03|\[sledenje\]/.test(x)).join("\n")), "izteklo trajanje je zabelezeno");
+    r = await api("PUT", "/clubs/1/follow", T.zaklep);
+    assert(r.status === 200 && (await samodejno("zaklep@outly.si")) === false, "po zaklepu rocni Follow dela (FALSE)");
+
+    console.log("\n# Migracija 077: samo stolpec, obstojece vrstice se ne spremenijo");
+    const sql = fs.readFileSync(path.join(__dirname, "..", "db", "migracije", "077_club_follows_samodejno.sql"), "utf8");
+    assert(!/\bINSERT\b|\bUPDATE\b|\bDELETE\b/i.test(sql.replace(/^--.*$/gm, "")), "077 ne vsebuje INSERT/UPDATE/DELETE (vpis obstojecih racunov je 078)");
+    const pred = (await pool.query("SELECT club_id, user_id, samodejno FROM club_follows ORDER BY club_id, user_id")).rows;
+    await pool.query("ALTER TABLE club_follows DROP COLUMN samodejno");
     await pool.query(sql);
-    assert((await pool.query("SELECT COUNT(*)::int AS n FROM club_follows")).rows[0].n === 0, "brez uradnega kluba migracija ne naredi nic");
+    const po1 = (await pool.query("SELECT club_id, user_id, samodejno FROM club_follows ORDER BY club_id, user_id")).rows;
+    assert(po1.length === pred.length && po1.every(v => v.samodejno === false), "po ponovni uporabi 077 imajo vse obstojece vrstice samodejno = FALSE (izbrane)", po1.length);
+    await pool.query(sql);
+    assert(JSON.stringify((await pool.query("SELECT club_id, user_id, samodejno FROM club_follows ORDER BY club_id, user_id")).rows) === JSON.stringify(po1), "ponovni zagon 077 ne naredi nic");
+    const col = (await pool.query("SELECT is_nullable, column_default FROM information_schema.columns WHERE table_name='club_follows' AND column_name='samodejno'")).rows[0];
+    assert(col && col.is_nullable === "NO" && /false/i.test(col.column_default), "stolpec NOT NULL DEFAULT false", col);
   } finally {
     srv.kill();
     jwksServer.close();

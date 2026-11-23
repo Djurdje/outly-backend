@@ -785,18 +785,33 @@ function potrdiEmailPriViru(token, uid, email) {
 }
 
 // Nov racun sledi uradnim profilom Outly (clubs.is_official; Martin 22. 11. 2026, DECISIONS 2026-11-22). Klic SAMO takoj za uspesnim INSERT-om v users:
-// kdor pozneje odsledi (DELETE /clubs/:id/follow), ga nic ne prijavi znova (ne prijava, ne GET /me). Best-effort: napaka (ali izteklo trajanje) se ulovi,
-// prvi klic in prijava ne padeta. Eno samo vstavljanje brez obvestil in pusha; samodejno = TRUE: tak sledilec dobi zvonec, push NE (Martin 23. 11. 2026, obvestiSledilce). Isti pogoj kot migracija 077: viden (ne hidden) in ne demo.
-async function samodejnoSledenjeUradnim(db, userId) {
-  try {
-    await db.query(
-      `INSERT INTO club_follows (club_id, user_id, samodejno)
+// kdor pozneje odsledi (DELETE /clubs/:id/follow), ga nic ne prijavi znova (ne prijava, ne GET /me). Best-effort: napaka se ulovi, prvi klic in prijava ne padeta.
+// Eno samo vstavljanje brez obvestil in pusha; samodejno = TRUE: tak sledilec dobi zvonec, push NE (Martin 23. 11. 2026, obvestiSledilce). Isti pogoj kot migracija 078: viden in ne demo.
+// MEJA CASA (S2 pregleda): glavni pool nima lock_timeout/statement_timeout, zato bi poznejsa migracija z zaklepom na clubs/club_follows zadrzala prvi klic do 120 s.
+// Zato lastna povezava + kratka transakcija (SET LOCAL lock_timeout 500 ms, statement_timeout 2 s): po najvec ~2 s gre prijava naprej brez sledenja (sledi rocno).
+// Drug `db` (testni odjemalec, ze zacet) ostane navadna poizvedba brez mej.
+const SLEDENJE_SQL = `INSERT INTO club_follows (club_id, user_id, samodejno)
        SELECT id, $1, TRUE FROM clubs WHERE is_official AND NOT hidden AND NOT is_demo
-       ON CONFLICT (club_id, user_id) DO NOTHING`,
-      [userId]
-    );
+       ON CONFLICT (club_id, user_id) DO NOTHING`;
+async function samodejnoSledenjeUradnim(db, userId) {
+  let c = null;
+  try {
+    if (!(db instanceof Pool)) { await db.query(SLEDENJE_SQL, [userId]); return; }
+    c = await db.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("SET LOCAL lock_timeout = '500ms'");
+      await c.query("SET LOCAL statement_timeout = '2s'");
+      await c.query(SLEDENJE_SQL, [userId]);
+      await c.query("COMMIT");
+    } catch (e) {
+      try { await c.query("ROLLBACK"); } catch (_) { /* povezava je padla: release spodaj */ }
+      throw e;
+    }
   } catch (e) {
     console.error("[sledenje] samodejno sledenje uradnemu profilu ni uspelo, user", userId, e && e.code);
+  } finally {
+    if (c) c.release();
   }
 }
 
@@ -11422,7 +11437,7 @@ app.get("/business/activity", requireAuth, requireClub("owner", "manager"), asyn
          FROM view_counts WHERE club_id = $1 AND event_id IS NOT NULL`, [klub]),
       pool.query(
         `SELECT COUNT(*)::int AS vsi,
-                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days')::int AS n7d
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND NOT samodejno)::int AS n7d
          FROM club_follows WHERE club_id = $1`, [klub]),
       pool.query(
         `WITH ekipa AS (
