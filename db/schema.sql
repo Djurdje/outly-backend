@@ -3,7 +3,7 @@
 -- =============================================================================
 -- Vir resnice so migracije v db/migracije/ (poganja jih db/migrate.js ob vsakem
 -- deployu). Ta datoteka je izvoz sheme (pg_dump --schema-only) iz baze, na
--- kateri so bile pognane vse migracije 000–076, in sluzi samo za branje:
+-- kateri so bile pognane vse migracije 000–078, in sluzi samo za branje:
 -- da je struktura vidna na enem mestu in da se baze ne da izgubiti.
 --
 -- Osvezi po vsaki novi migraciji:
@@ -446,8 +446,16 @@ ALTER SEQUENCE public.club_event_notifications_id_seq OWNED BY public.club_event
 CREATE TABLE public.club_follows (
     club_id integer NOT NULL,
     user_id integer NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    samodejno boolean DEFAULT false NOT NULL
 );
+
+
+--
+-- Name: COLUMN club_follows.samodejno; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.club_follows.samodejno IS 'TRUE = sledenje vstavil sistem (uradni profil Outly, 077/078), uporabnik ga ni izbral: zvonec da, push ne. PUT /clubs/:id/follow ga nastavi na FALSE.';
 
 
 --
