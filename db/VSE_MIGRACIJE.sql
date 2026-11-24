@@ -4108,12 +4108,14 @@ COMMENT ON COLUMN sken_opozorila_poslana.poslano_at IS 'Cas uspesno poslanega ma
 -- (narocilo OUT-RV66PT2C) gre kupcu ZNOVA v posiljanje. Ena vrstica, en stolpec.
 --
 -- Kaj se je zgodilo: 17. 11. 2026 ob 17:21:36 UTC je posiljanje maila z racunom A001-1-29 padlo z napako Resend SDK »Unable to fetch data. The request could
--- not be resolved.« (ime streznika ni bilo razreseno: zahtevek ni odsel). index.js (racunKupcuPosljiEno) take napake ne steje za dokazano zavrnitev, zato je
+-- not be resolved.« To je SPLOSEN catch okoli fetch + response.json() (node_modules/resend/dist/index.js): iz besedila NE sledi, ali je zahtevek odsel
+-- (tudi prekinjena povezava po poslanem zahtevku ali neberljiv odgovor 200 da isto sporocilo). index.js (racunKupcuPosljiEno) take napake ne steje za dokazano zavrnitev, zato je
 -- `mail_izid_neznan` ostal TRUE (mail se namenoma ne ponovi: dvojnik bi bil kopija brez oznake KOPIJA), od takrat vsako uro `[racun-kupcu] POZOR`.
 -- Rocni pregled (24. 11. 2026, menedzer): (1) Resend API dnevnik (list-logs) za 17. 11.: 9 zahtevkov POST /emails, vsak ima svoj mail; po 17:20:04 (mail z
 -- vstopnicami za OUT-RV66PT2C, dostavljen) je naslednji sele 19:17:21 (drug uporabnik) -> zahtevek za racun A001-1-29 NI prisel do Resenda. (2) Resend seznam
 -- poslanih (list-emails): maila »Vas racun / Your invoice: A001-1-29« ni, vsi ostali racuni A001-1-22 .. A001-1-60 so. (3) Render dnevnik: napaka ob 17:21:36.
--- Mail torej NI bil poslan; ponovno posiljanje je prva dostava, ne kopija.
+-- Mail torej NI bil poslan (dokaz sta Resend API dnevnik in seznam poslanih, NE besedilo napake); ponovno posiljanje je prva dostava, ne kopija.
+-- POZOR za podobne primere: pred vsako taksno migracijo preveri Resend (list-logs + list-emails); samo sporocilo napake ni dovolj.
 --
 -- Kaj naredi: vrstici racuna (vrsta racun, A001-1-29, narocilo OUT-RV66PT2C), ki je `potrjen`, ima PDF in je mail_poslano_at NULL ter mail_izid_neznan TRUE,
 -- postavi mail_izid_neznan = FALSE. Pospravljalec racunov kupcu (index.js, racunMailPogoj) jo nato prevzame in poslje mail s PDF-jem iz racuni_pdf natanko enkrat
@@ -4235,7 +4237,7 @@ INSERT INTO schema_migrations (datoteka, odtis) VALUES
     ('074_poster_card_url.sql', 'd7f03c804f5ee269'),
     ('075_sken_prenosi.sql', '5f099b7f1db5147f'),
     ('076_sken_opozorila_poslana.sql', '121d51c5813608f2'),
-    ('079_racun_a001_1_29_mail.sql', '080457bee233eaa9')
+    ('079_racun_a001_1_29_mail.sql', 'ccdf5141e39228f0')
 ON CONFLICT (datoteka) DO NOTHING;
 
 COMMIT;
