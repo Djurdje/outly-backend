@@ -2736,7 +2736,7 @@ const STOLPCI_DOGODKA = `
         -- odprt po stanju, pavzi, zacetku in oknu prodaje (isti pogoji kot napakaProdaje brez cene; zalogo pove availability, ceno ticket_price_cents).
         -- Ne zavisi od uporabnika: sme v javni predpomnilnik (I17), ki zaostane najvec 3 s.
         sales_paused,
-        (status = 'published' AND NOT sales_paused AND start_at > NOW()
+        (status = 'published' AND NOT sales_paused AND ${KONEC_DOGODKA} > NOW()
           AND NOT COALESCE((SELECT ch.hidden FROM clubs ch WHERE ch.id = events.club_id), FALSE)
           AND (sales_open_at IS NULL OR sales_open_at <= NOW()) AND (sales_close_at IS NULL OR sales_close_at >= NOW())) AS on_sale,
         -- Okno prodaje (#327 A, 23. 10.): kdaj se prodaja odpre/zapre (ISO ali null = brez omejitve). DODANI polji, da odjemalec pokaze datum odprtja
@@ -2881,8 +2881,9 @@ async function javniSeznamDogodkov(req, res) {
     // (Martin, 16. 9. 2026): stran kluba in "hit tedna" na domacem zaslonu kazeta samo
     // zadnji teden, starejsi izginejo. V bazi ostanejo (vstopnice, narocila, zgodovina
     // kluba v GET /business/events); GET /events/:id jih se vrne (povezava z vstopnice).
-    if (upcoming === "true") where.push(`start_at > NOW()`);
-    if (upcoming === "false") where.push(`start_at <= NOW() AND start_at > NOW() - INTERVAL '7 days'`);
+    // Od 28. 11. 2026 (DECISIONS 2026-11-28): dogodek je »prihajajoc«, dokler ne mine (KONEC_DOGODKA), ne samo do zacetka; koncan je v »popular« (7 dni po zacetku).
+    if (upcoming === "true") where.push(`${KONEC_DOGODKA} > NOW()`);
+    if (upcoming === "false") where.push(`${KONEC_DOGODKA} <= NOW() AND start_at > NOW() - INTERVAL '7 days'`);
 
     // Javno so vidni SAMO objavljeni dogodki. Osnutki in odpovedani so bili
     // doslej vidni vsakomur; lastnik jih vidi prek GET /business/events.
@@ -5732,7 +5733,11 @@ function napakaProdaje(e, { zahtevajCeno }) {
   if (e.sales_paused === true) return [409, NAPAKA_PAVZA_PRODAJE];
   if (zahtevajCeno && e.ticket_price_cents === null) return [409, "This event has no tickets on Outly."];
   const zdaj = Date.now();
-  if (new Date(e.start_at).getTime() < zdaj) return [409, "Event has already started."];
+  // Prodaja traja do KONCA dogodka, ne do zacetka (Martin 28. 11. 2026, DECISIONS 2026-11-28). Konec = isti izraz kot KONEC_DOGODKA v SQL:
+  // end_at, sicer start_at + 8 h. Klicatelj MORA brati e.end_at (manjkajoc stolpec = undefined = konec se racuna kot zacetek + 8 h).
+  // Besedilo vsebuje »already ended«: star iOS (APIErrorMessages) in splet (napake.js) ga prevedeta po nizu.
+  const konec = e.end_at ? new Date(e.end_at).getTime() : new Date(e.start_at).getTime() + 8 * 3600 * 1000;
+  if (konec <= zdaj) return [409, "Event has already ended."];
   if (e.sales_open_at && new Date(e.sales_open_at).getTime() > zdaj) return [409, "Ticket sales have not opened yet."];
   if (e.sales_close_at && new Date(e.sales_close_at).getTime() < zdaj) return [409, "Ticket sales are closed."];
   return null;
@@ -6081,7 +6086,7 @@ app.post("/events/:id/orders", requireAuth, idempotenca(vsebinaNakupaVstopnic), 
       if (obst) { await c.query("ROLLBACK"); return await idemOdgovori(res, c, obst, idemV); }
     }
     const er = await c.query(
-      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
+      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.end_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.sales_paused, e.vat_rate, c.hidden,
               c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
@@ -6528,7 +6533,7 @@ app.post("/guest/events/:id/orders", gostStikalo, gostTelo, idempotencaGost, pro
       if (obst) { await c.query("ROLLBACK"); return await gostIdemOdgovori(req, res, c, obst); }
     }
     const er = await c.query(
-      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.ticket_price_cents, e.currency,
+      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.end_at, e.min_age, e.ticket_price_cents, e.currency,
               e.capacity, e.sold_count, e.sales_open_at, e.sales_close_at, e.sales_paused, e.vat_rate, c.hidden,
               c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
@@ -10158,7 +10163,7 @@ app.get("/events/:id/vip", async (req, res) => {
     const id = vipId(req.params.id);
     if (!id) return res.status(400).send("Invalid event id.");
     const er = await pool.query(
-      `SELECT e.id, e.club_id, e.vip_enabled, e.vip_payment, e.currency, e.status, e.start_at, e.sales_open_at, e.sales_close_at, e.sales_paused, e.min_age,
+      `SELECT e.id, e.club_id, e.vip_enabled, e.vip_payment, e.currency, e.status, e.start_at, e.end_at, e.sales_open_at, e.sales_close_at, e.sales_paused, e.min_age,
               e.vip_layout_source, e.floor_plan, c.is_demo, ${sqlPlacilaPripravljena("c.")} AS club_stripe_ready,
               ${sqlProdajalecSurov("c")} AS seller_raw
          FROM events e JOIN clubs c ON c.id = e.club_id
@@ -10259,7 +10264,7 @@ app.post("/events/:id/tables/:tableId/orders", requireAuth, idempotenca(vsebinaN
       if (obst) { await c.query("ROLLBACK"); return await idemOdgovori(res, c, obst, idemV); }
     }
     const er = await c.query(
-      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.min_age, e.currency, e.vip_enabled, e.vip_payment, e.vip_layout_source, e.sales_paused,
+      `SELECT e.id, e.club_id, e.title, e.status, e.start_at, e.end_at, e.min_age, e.currency, e.vip_enabled, e.vip_payment, e.vip_layout_source, e.sales_paused,
               e.sales_open_at, e.sales_close_at, e.vat_rate, c.hidden, c.stripe_account_id, c.stripe_charges_enabled, c.stripe_account_livemode, c.commission_bps,
               c.legal_name, c.legal_address, c.registration_number, c.tax_number, c.vat_payer, c.contact_phone, c.contact_email, c.is_demo, c.is_official
          FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
@@ -10460,7 +10465,7 @@ app.post("/events/:id/tables/:tableId/reservations", requireAuth, zavrniRazproda
   try {
     await nakupZacni(c);
     const er = await c.query(
-      `SELECT e.id, e.club_id, e.status, e.start_at, e.min_age, e.vip_enabled, e.vip_payment, e.vip_layout_source, e.sales_paused, e.sales_open_at, e.sales_close_at,
+      `SELECT e.id, e.club_id, e.status, e.start_at, e.end_at, e.min_age, e.vip_enabled, e.vip_payment, e.vip_layout_source, e.sales_paused, e.sales_open_at, e.sales_close_at,
               c.hidden, c.is_demo
          FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = $1`, [id]);
     if (er.rows.length === 0) { await c.query("ROLLBACK"); return res.status(404).send("Event not found."); }

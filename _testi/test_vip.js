@@ -418,7 +418,14 @@ const brezTransakcije = (ime) => fs.readFileSync(path.join(__dirname, "..", "db"
   assert(r.status === 201, "po preklicu je miza spet prosta za nakup (I13 indeks sprosti mizo)", r.body);
 
   console.log("\n# Nakup: okno prodaje in starost (isto kot vstopnice)");
-  for (const [id, ime] of [[ESTART, "ze zacet"], [ECLOSED, "prodaja zaprta"], [EOPEN, "prodaja se ni odprta"]]) {
+  // Od 28. 11. 2026 (DECISIONS 2026-11-28, Martin: »mize tud lahko kupijo med eventom«) se prodaja mize NE zapre ob zacetku, ampak ob koncu dogodka (konec = end_at, sicer zacetek + 8 h).
+  r = await api("PUT", `/business/events/${ESTART}/vip`, T.lastnik, { enabled: true });
+  assert(r.status === 200, "VIP vklopljen (ze zacet, se tece)", r.status);
+  const jav0 = await api("GET", `/events/${ESTART}/vip`);
+  assert(jav0.status === 200 && jav0.body.on_sale === true && jav0.body.enabled === true, "javno: ze zacet dogodek, ki tece -> on_sale true", jav0.body.on_sale);
+  const med = await nakup(ESTART, M1, T.ana, { package_id: P1 });
+  assert(med.status === 201, "dogodek ze zacet, a se tece -> miza 201 (nakup med dogodkom)", med.body);
+  for (const [id, ime] of [[ECLOSED, "prodaja zaprta"], [EOPEN, "prodaja se ni odprta"]]) {
     r = await api("PUT", `/business/events/${id}/vip`, T.lastnik, { enabled: true });
     assert(r.status === 200, `VIP vklopljen (${ime})`, r.status);
     const kupec = await nakup(id, M1, T.ana, { package_id: P1 });
