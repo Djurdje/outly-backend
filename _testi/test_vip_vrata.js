@@ -320,9 +320,10 @@ const razvrsti = (o) => Object.keys(o).sort().join();
   await pool.query("UPDATE events SET sales_close_at = NULL, sales_open_at = NOW() + INTERVAL '1 hour' WHERE id=$1", [E3]);
   r = await rez(T.ana, E3, M1);
   assert(r.status === 409 && /not opened/i.test(r.body), "prodaja se ni odprta -> 409", r.body);
-  await pool.query("UPDATE events SET sales_open_at = NULL, start_at = NOW() - INTERVAL '1 hour', end_at = NOW() + INTERVAL '3 hours' WHERE id=$1", [E3]);
+  // Od 28. 11. 2026 (DECISIONS 2026-11-28) prodaja traja do KONCA dogodka: koncan dogodek -> 409 »already ended«.
+  await pool.query("UPDATE events SET sales_open_at = NULL, start_at = NOW() - INTERVAL '5 hours', end_at = NOW() - INTERVAL '1 hour' WHERE id=$1", [E3]);
   r = await rez(T.ana, E3, M1);
-  assert(r.status === 409 && /started/i.test(r.body), "dogodek se je zacel -> 409", r.body);
+  assert(r.status === 409 && /already ended/i.test(r.body), "dogodek se je koncal -> 409 already ended", r.body);
   await pool.query("UPDATE events SET start_at = NOW() + INTERVAL '3 days', end_at = NULL, status = 'draft' WHERE id=$1", [E3]);
   r = await rez(T.ana, E3, M1);
   assert(r.status === 409 && /not on sale/i.test(r.body), "osnutek -> 409 (ni v prodaji)", r.body);
@@ -454,7 +455,12 @@ const razvrsti = (o) => Object.keys(o).sort().join();
   assert(r.status === 409 && r.body.error === "event_started", "preklic po zacetku dogodka -> 409 event_started", r.body);
   assert(await rezervacij(ED) === 4, "rezervacija po zavrnjenem preklicu ostane (3 + T4)", await rezervacij(ED));
   r = await rez(T.dan, ED, M5, { package_id: P1 });
-  assert(r.status === 409, "nova rezervacija po zacetku -> 409", r.body);
+  assert(r.status === 201, "nova rezervacija med dogodkom (zacel, se ni koncan) -> 201 (28. 11. 2026)", r.body);
+  if (r.status === 201) await pool.query("DELETE FROM table_holds WHERE id = $1", [r.body.reservation.id]);
+  await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '5 hours', end_at = NOW() - INTERVAL '1 hour' WHERE id=$1", [ED]);
+  r = await rez(T.dan, ED, M5, { package_id: P1 });
+  assert(r.status === 409 && /already ended/i.test(r.body), "nova rezervacija po koncu dogodka -> 409 already ended", r.body);
+  await pool.query("UPDATE events SET start_at = NOW() - INTERVAL '30 minutes', end_at = NOW() + INTERVAL '5 hours' WHERE id=$1", [ED]);
   await pool.query("UPDATE events SET start_at = NOW() + INTERVAL '3 days', end_at = NULL WHERE id=$1", [ED]);
 
   console.log("\n# 11. GET /me/table-reservations");
