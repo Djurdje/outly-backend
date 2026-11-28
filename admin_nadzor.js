@@ -51,7 +51,9 @@ function prodajnoStanje(e, zdaj) {
   const samoVip = brezVstopnic && e.vip_from_cents !== null && e.vip_from_cents !== undefined;   // dogodek samo z VIP mizami (aktivna miza): prodaja miz, prostih miz ne stejemo
   if (brezVstopnic && !samoVip) return "zaprta";   // brez vstopnic in miz na Outlyju (zunanja prodaja ali nic)
   if (!brezVstopnic && e.capacity !== null && e.capacity !== undefined && e.sold_count >= e.capacity) return "razprodano";
-  if (new Date(e.start_at).getTime() <= zdaj) return "zaprta";
+  // Prodaja traja do konca dogodka (28. 11. 2026): konec = end_at, sicer start_at + 8 h (KONEC_DOGODKA v index.js).
+  const konec = e.end_at ? new Date(e.end_at).getTime() : new Date(e.start_at).getTime() + 8 * 3600 * 1000;
+  if (konec <= zdaj) return "zaprta";
   if (e.sales_open_at && new Date(e.sales_open_at).getTime() > zdaj) return "zaprta";
   if (e.sales_close_at && new Date(e.sales_close_at).getTime() < zdaj) return "zaprta";
   return "tece";

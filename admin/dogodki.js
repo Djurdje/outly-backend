@@ -51,7 +51,8 @@
     if (x.sales_paused) return h("span", { class: "dg-prodaja ustavljena" }, "ustavljena");
     if (x.ticket_price_cents === null || x.ticket_price_cents === undefined) return h("span", { class: "dg-prodaja ne" }, x.ticket_url ? "zunanja prodaja" : "brez vstopnic");
     if (x.capacity && cele(x.sold_count) >= cele(x.capacity)) return h("span", { class: "dg-prodaja ne" }, "razprodano");
-    if (new Date(x.start_at).getTime() < Date.now()) return h("span", { class: "dg-prodaja ne" }, "začel se je");
+    // Prodaja traja do konca dogodka (28. 11. 2026): konec = end_at, sicer začetek + 8 h (kot KONEC_DOGODKA na strežniku).
+    if ((x.end_at ? new Date(x.end_at).getTime() : new Date(x.start_at).getTime() + 8 * 3600 * 1000) <= Date.now()) return h("span", { class: "dg-prodaja ne" }, "končan");
     // Okno prodaje (#327): izven okna kupec dobi 409 (napakaProdaje); zaprtje ima prednost, ker velja tudi, ce je bilo odprtje v preteklosti.
     if (x.sales_close_at && new Date(x.sales_close_at).getTime() < Date.now()) return h("span", { class: "dg-prodaja ne" }, "zaprta");
     if (x.sales_open_at && new Date(x.sales_open_at).getTime() > Date.now()) return h("span", { class: "dg-prodaja ne" }, "se odpre " + datum(x.sales_open_at));

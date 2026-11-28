@@ -117,7 +117,7 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
         [klubId, naslov, e.status, e.start, e.end, e.price, e.capacity, e.paused, e.open, e.close])).rows[0].id;
     };
     const E = {};
-    E.tece = await dogodek(K1, "Tece zdaj");                                                   // v teku, prodaja nikoli ni bila ustavljena, a zacel se je -> zaprta
+    E.tece = await dogodek(K1, "Tece zdaj");                                                   // v teku, prodaja nikoli ni bila ustavljena; od 28. 11. 2026 prodaja traja do konca dogodka -> tece
     E.pozneje = await dogodek(K1, "Zacne se kasneje", { start: "3 hours", end: "9 hours" });   // prodaja tece
     E.ustavljena = await dogodek(K1, "Ustavljena", { start: "20 hours", end: "26 hours", paused: true });
     E.razprodano = await dogodek(K1, "Razprodano", { start: "5 hours", end: "11 hours", capacity: 2 });
@@ -183,7 +183,7 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
     // VIP miza danes: steje v narocila in bruto, ne v vstopnice
     const miza = (await pool.query("INSERT INTO club_tables (club_id, label, x, y, w, h, seats, price_cents) VALUES ($1, 'M1', 1, 1, 1, 1, 4, 2500) RETURNING id", [K1])).rows[0].id;
     await kupec({ qty: 1, price: 2500, created: cDanes, tableId: miza });
-    // dogodka samo z VIP mizami (brez vstopnice): prodaja miz tece, ko se zacet - zaprta (ne »zaprta« zaradi manjkajoce cene vstopnice)
+    // dogodka samo z VIP mizami (brez vstopnice): prodaja miz tece, ko se zacet - tece do konca (ne »zaprta« zaradi manjkajoce cene vstopnice)
     E.vip = await dogodek(K1, "Samo VIP", { start: "8 hours", end: "14 hours", price: null, capacity: null });
     E.vipZacet = await dogodek(K1, "Samo VIP zacet", { start: "-1 hour", end: "5 hours", price: null, capacity: null });
     await pool.query("UPDATE events SET vip_enabled = TRUE WHERE id = ANY($1)", [[E.vip, E.vipZacet]]);
@@ -236,13 +236,13 @@ const danMinus = (niz, n) => { const d = new Date(niz + "T12:00:00Z"); d.setUTCD
     assert(po(E.tece).naslov === "Tece zdaj" && po(E.tece).klub === "Klub Eden" && po(E.tece).prodano === 40 && po(E.tece).kapaciteta === 100, "dogodek tece: naslov, klub, prodano 40, kapaciteta 100", po(E.tece));
     assert(po(E.tece).vstopi === 5 && po(E.tece).vstopi_15min === 3, "vstopi: 5 skupaj (veljavna in void ne), 3 v zadnjih 15 min (3, 2 in 14 min)", [po(E.tece).vstopi, po(E.tece).vstopi_15min]);
     assert(po(E.pozneje).vstopi === 1 && po(E.pozneje).vstopi_15min === 1 && po(E.vTeku).vstopi === 0 && po(E.vTeku).vstopi_15min === 0, "vstopi drugih dogodkov: 1/1 in 0/0");
-    assert(po(E.tece).prodaja === "zaprta", "prodaja: zacet dogodek = zaprta", po(E.tece).prodaja);
+    assert(po(E.tece).prodaja === "tece", "prodaja: dogodek, ki tece (konec v prihodnosti) = tece (28. 11. 2026)", po(E.tece).prodaja);
     assert(po(E.pozneje).prodaja === "tece", "prodaja: prihajajoc dogodek s prodajo = tece", po(E.pozneje).prodaja);
     assert(po(E.ustavljena).prodaja === "ustavljena", "prodaja: sales_paused = ustavljena");
     assert(po(E.razprodano).prodaja === "razprodano", "prodaja: sold_count >= capacity = razprodano");
     assert(po(E.zunanja).prodaja === "zaprta" && po(E.zunanja).kapaciteta === null, "prodaja: brez cene (zunanja) = zaprta, kapaciteta null");
     assert(po(E.okno).prodaja === "zaprta", "prodaja: okno prodaje zaprto = zaprta");
-    assert(po(E.vip).prodaja === "tece" && po(E.vipZacet).prodaja === "zaprta", "prodaja: dogodek samo z VIP mizami: tece (ne zaprta zaradi manjkajoce cene vstopnice); ko se zacne: zaprta", [po(E.vip).prodaja, po(E.vipZacet).prodaja]);
+    assert(po(E.vip).prodaja === "tece" && po(E.vipZacet).prodaja === "tece", "prodaja: dogodek samo z VIP mizami: tece (ne zaprta zaradi manjkajoce cene vstopnice); tudi ko se je zacel in se ni koncan: tece", [po(E.vip).prodaja, po(E.vipZacet).prodaja]);
     assert(po(E.kmalu23).prodaja === "tece", "dogodek cez 23 h 50 min je se nocoj in tece");
     assert(po(E.tece).start_at === new Date(po(E.tece).start_at).toISOString(), "start_at je ISO");
 
