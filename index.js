@@ -2881,8 +2881,9 @@ async function javniSeznamDogodkov(req, res) {
     // (Martin, 16. 9. 2026): stran kluba in "hit tedna" na domacem zaslonu kazeta samo
     // zadnji teden, starejsi izginejo. V bazi ostanejo (vstopnice, narocila, zgodovina
     // kluba v GET /business/events); GET /events/:id jih se vrne (povezava z vstopnice).
-    if (upcoming === "true") where.push(`start_at > NOW()`);
-    if (upcoming === "false") where.push(`start_at <= NOW() AND start_at > NOW() - INTERVAL '7 days'`);
+    // Od 28. 11. 2026 (DECISIONS 2026-11-28): dogodek je »prihajajoc«, dokler ne mine (KONEC_DOGODKA), ne samo do zacetka; koncan je v »popular« (7 dni po zacetku).
+    if (upcoming === "true") where.push(`${KONEC_DOGODKA} > NOW()`);
+    if (upcoming === "false") where.push(`${KONEC_DOGODKA} <= NOW() AND start_at > NOW() - INTERVAL '7 days'`);
 
     // Javno so vidni SAMO objavljeni dogodki. Osnutki in odpovedani so bili
     // doslej vidni vsakomur; lastnik jih vidi prek GET /business/events.

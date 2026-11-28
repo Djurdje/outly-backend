@@ -770,6 +770,7 @@ Primer oblike (izmišljena odločitev, samo da se vidi postavitev):
   `GET /events/:id/vip`) je `true` tudi med dogodkom. Ostale omejitve ostanejo (objavljen, klub viden, pavza I53, `sales_open_at`, `sales_close_at`, razprodano, starost, demo):
   ce klub nastavi `sales_close_at` pred koncem, velja ta. NE spremenjeno: prenos vstopnice (samo pred zacetkom), odpoved/sprostitev rezervacije mize (do zacetka),
   `time_status` (»popular« = ze zacet), `lifecycle`, sken (okno I25). Panel: prodajno stanje »zaprta« ob zacetku je zdaj ob koncu (`admin_nadzor.js`, `admin/dogodki.js`).
+  **Seznam** (Martin isti dan: »seznam upcoming tud popravi da ne zgine po 6h«): `GET /events?upcoming=true` = `KONEC_DOGODKA > NOW()` (tekoc dogodek ostane v seznamu), `upcoming=false` = `KONEC_DOGODKA <= NOW() AND start_at > NOW() - 7 dni` (7-dnevno okno 16. 9. ostane; tekoc dogodek ni hkrati v »Popular«). NE spremenjeno: `time_status`, `transferable`, iskanje (`/search` razvrstitev), admin stevec `upcoming_events`.
   **Nadomesti** predpostavko (3) iz 2026-10-01 (okno prodaje mize) in vse trditve, da se prodaja zapre ob zacetku (ARCHITECTURE, STATE).
   *vir/dokaz*: Martin v seji Claude Code 28. 11. 2026: »treba je zrihtat da tud ko event traja da se da se zmeri karte kupt ne da konse event zacne se kart ne da vec kupt to je treba nujno zrihtat«;
-  za mize isti dan: »ja mize tud lahko kupijo med eventom« · test `_testi/test_prodaja_med_dogodkom.js` · *velja dokler*: Martin ne rece drugace.
+  za mize isti dan: »ja mize tud lahko kupijo med eventom« · za seznam: »seznam upcoming tud popravi da ne zgine po 6h« · test `_testi/test_prodaja_med_dogodkom.js` · *velja dokler*: Martin ne rece drugace.

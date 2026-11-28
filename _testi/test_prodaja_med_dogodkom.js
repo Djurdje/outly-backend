@@ -157,6 +157,14 @@ let srv = null, log = "";
     k = await kupiV(E4, T.cene);
     assert(k.status === 201, "po novem oknu nakup 201", k);
 
+    console.log("\n# M6: seznam upcoming (Martin: »seznam upcoming tud popravi da ne zgine po 6h«)");
+    const ids = async (q) => (await api("GET", `/events?${q}`)).body.map(x => x.id);
+    let up = await ids("upcoming=true"), po = await ids("upcoming=false");
+    assert(up.includes(E1) && !po.includes(E1), "tecoc dogodek (zacel pred 1 h): v upcoming=true, ni v upcoming=false", { up, po });
+    assert(up.includes(E3b) && !po.includes(E3b), "brez end_at, zacel pred 7 h: se v upcoming=true", { up, po });
+    assert(!up.includes(E2) && po.includes(E2), "koncan (start pred 6 h, end pred 1 h): ni v upcoming=true, je v upcoming=false", { up, po });
+    assert(!up.includes(E3) && po.includes(E3), "brez end_at, zacel pred 9 h: koncan -> upcoming=false", { up, po });
+
     console.log("\n# M5: prihodnji dogodek (pozitivna kontrola)");
     const E5 = await nov("Prihodnji", ure(24), null);
     k = await kupiV(E5, T.erik);
